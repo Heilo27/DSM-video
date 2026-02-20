@@ -1,0 +1,15 @@
+{
+  ".url": {
+    "com.dsvideo.app": {
+      "type": "url",
+      "title": "DS Video",
+      "desc": "Stream your personal video library",
+      "icon": "images/DSVideoServer_{0}.png",
+      "url": "/",
+      "port": 8080,
+      "protocol": "http",
+      "allUsers": true,
+      "grantPrivilege": "local"
+    }
+  }
+}

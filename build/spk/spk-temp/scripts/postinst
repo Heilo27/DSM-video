@@ -1,0 +1,5 @@
+#!/bin/sh
+# Post-installation script
+# nginx config is registered via web-config/nginx-static-config in conf/resource
+# DSM's privileged resource worker handles nginx injection automatically.
+exit 0

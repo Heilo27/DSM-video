@@ -1,0 +1,4 @@
+#!/bin/sh
+# Pre-uninstall script
+# nginx config removal is handled by web-config/nginx-static-config disable list in conf/resource.
+exit 0
