@@ -143,7 +143,43 @@ final class AppState {
     defer { isLoggingIn = false }
 
     do {
-      // Use custom REST API for login
+      // If the server field is a bare QuickConnect ID (no dots, no scheme),
+      // resolve it to candidate NAS URLs and try each until one works.
+      // LAN IPs are tried first to avoid NAT hairpinning and self-signed cert issues.
+      let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !raw.contains("://") && !raw.contains(".") && !raw.contains(":") && !raw.isEmpty {
+        let candidates = try await QuickConnectResolver.resolve(id: raw)
+        guard !candidates.isEmpty else {
+          loginError = "Couldn't find \"\(raw)\". Check the QuickConnect ID and try again."
+          return
+        }
+        var lastError: Error?
+        for candidateURL in candidates {
+          guard let url = URL(string: candidateURL) else { continue }
+          do {
+            let tempClient = APIClient(baseURL: url, token: nil)
+            let resp = try await tempClient.login(username: username, password: savedPassword)
+            // Success — persist resolved address and session
+            baseURL = candidateURL
+            sessionToken = resp.token
+            sessionID = nil; synoToken = nil; deviceID = nil
+            if rememberMe {
+              Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
+            } else {
+              Self.deleteFromKeychain(account: Keys.keychainAccount)
+              Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+              username = ""; savedPassword = ""
+            }
+            return
+          } catch {
+            lastError = error
+          }
+        }
+        loginError = (lastError as? APIError)?.userMessage ?? "Login failed."
+        return
+      }
+
+      // Direct IP / hostname login
       let resp = try await api.login(username: username, password: savedPassword)
 
       // Store session token (didSet persists to Keychain when rememberMe is on)
@@ -215,18 +251,17 @@ func normalizedBaseURL(_ input: String, forceHTTPS: Bool) -> URL {
   if forceHTTPS {
     s = s.replacingOccurrences(of: "http://", with: "https://")
   }
-  
+
   // Parse URL to check for port
   guard var url = URL(string: s) else {
     return URL(string: "http://localhost:8090")!
   }
-  
-  // If no port specified and it's a Video Station URL (likely), add default port
+
+  // If no port specified and it's a local NAS address, add default DSM port.
+  // Don't add ports to quickconnect.to — it handles routing itself.
   if url.port == nil {
     let host = url.host ?? url.host(percentEncoded: false) ?? ""
-    
-    // If it looks like a Synology NAS (IP address or .synology.me), add default port
-    if host.contains("192.168.") || host.contains("synology.me") || host.contains("quickconnect.to") {
+    if host.contains("192.168.") || host.contains("synology.me") {
       let defaultPort = forceHTTPS ? 5001 : 5000
       var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
       components?.port = defaultPort
@@ -235,7 +270,7 @@ func normalizedBaseURL(_ input: String, forceHTTPS: Bool) -> URL {
       }
     }
   }
-  
+
   return url
 }
 

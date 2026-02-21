@@ -286,43 +286,51 @@ private struct QuickConnectSheet: View {
 
 enum QuickConnectResolver {
   /// Resolves a QuickConnect ID against Synology's relay service.
-  /// Returns candidate base URLs ordered https-first.
+  /// Returns candidate base URLs: LAN IPs first (avoids NAT hairpin), then WAN IP.
+  /// Callers should try each candidate in order and use the first that succeeds.
   static func resolve(id: String) async throws -> [String] {
     let json = try await queryRelay(host: "global.quickconnect.to", id: id)
 
     // Check for not-found or error
     if let errno = json["errno"] as? Int, errno != 0 { return [] }
 
-    // Extract external IP
     guard let server = json["server"] as? [String: Any],
           let ext = server["external"] as? [String: Any],
-          let ip = ext["ip"] as? String, !ip.isEmpty
+          let wanIP = ext["ip"] as? String, !wanIP.isEmpty
     else { return [] }
 
-    var candidates: [String] = []
-
-    // Synology puts ports in top-level "service" object (not in external)
+    // Extract ports from the top-level "service" object
+    var httpsPort: Int?
+    var httpPort: Int?
     if let service = json["service"] as? [String: Any] {
-      let httpsPort = intValue(service["https_ext_port"]) ?? intValue(service["https_port"])
-      let httpPort  = intValue(service["ext_port"]) ?? intValue(service["port"])
-      if let p = httpsPort { candidates.append("https://\(ip):\(p)") }
-      if let p = httpPort  { candidates.append("http://\(ip):\(p)") }
+      httpsPort = intValue(service["https_ext_port"]) ?? intValue(service["https_port"])
+      httpPort  = intValue(service["ext_port"]) ?? intValue(service["port"])
     }
+    // Fallback: old relay format stored ports inside "external"
+    if httpsPort == nil, let portVal = ext["https"] { httpsPort = intArray(portVal).first }
+    if httpPort  == nil, let portVal = ext["http"]  { httpPort  = intArray(portVal).first }
+    // Last resort: standard Synology DSM ports
+    if httpsPort == nil { httpsPort = 5001 }
+    if httpPort  == nil { httpPort  = 5000 }
 
-    // Fallback: old format had ports directly in ext as arrays
-    if candidates.isEmpty {
-      for (scheme, key) in [("https", "https"), ("http", "http")] {
-        if let portVal = ext[key] {
-          let ports = intArray(portVal)
-          for p in ports { candidates.append("\(scheme)://\(ip):\(p)") }
-        }
+    // Collect LAN IPs from server.interface — these work from inside the network
+    // without NAT hairpinning and without a valid TLS cert on the external IP.
+    var lanIPs: [String] = []
+    if let interfaces = server["interface"] as? [[String: Any]] {
+      for iface in interfaces {
+        if let ip = iface["ip"] as? String, !ip.isEmpty { lanIPs.append(ip) }
       }
     }
 
-    // If still empty, try default Synology ports
-    if candidates.isEmpty {
-      candidates = ["https://\(ip):5001", "http://\(ip):5000"]
+    var candidates: [String] = []
+    // LAN addresses first: HTTP (ATS allows direct-IP HTTP; avoids self-signed cert issue)
+    for ip in lanIPs {
+      if let p = httpPort  { candidates.append("http://\(ip):\(p)") }
+      if let p = httpsPort { candidates.append("https://\(ip):\(p)") }
     }
+    // WAN fallback (for remote access)
+    if let p = httpPort  { candidates.append("http://\(wanIP):\(p)") }
+    if let p = httpsPort { candidates.append("https://\(wanIP):\(p)") }
 
     return candidates
   }
