@@ -523,6 +523,14 @@ struct SettingsView: View {
         Text("DSVideoServer listens on port 8090 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
       }
 
+      Section("Help") {
+        NavigationLink {
+          HowToView()
+        } label: {
+          Label("How To Use DSM Video", systemImage: "book")
+        }
+      }
+
       Section("Support") {
         Button {
           if let url = URL(string: "mailto:heiloprojects@icloud.com") {
@@ -552,3 +560,138 @@ struct SettingsView: View {
   }
 }
 
+// MARK: - How To View
+
+struct HowToView: View {
+  var body: some View {
+    List {
+
+      // MARK: Server Setup
+      Section {
+        HowToStep(
+          number: "1",
+          title: "Download DSVideoServer",
+          detail: "Download the latest DSVideoServer .spk package from github.com/Heilo27/DS-Reel/releases onto your Mac or PC."
+        )
+        HowToStep(
+          number: "2",
+          title: "Install on Your Synology NAS",
+          detail: "Open DSM in a browser. Go to Package Center → Manual Install, select the .spk file, and follow the prompts. You may need to allow third-party packages in Package Center settings."
+        )
+        HowToStep(
+          number: "3",
+          title: "Configure Your Video Folders",
+          detail: "After installation, open DSVideoServer from the DSM desktop. Enter the paths to your Movies and TV Shows folders on the NAS, then click Save."
+        )
+        HowToStep(
+          number: "4",
+          title: "Note Your NAS Address",
+          detail: "You'll need your NAS's local IP address (e.g. 192.168.1.100) or your Synology QuickConnect ID. Both are found in DSM → Control Panel → Network or QuickConnect."
+        )
+      } header: {
+        Label("Server Setup", systemImage: "server.rack")
+          .textCase(nil)
+          .font(.headline)
+      }
+
+      // MARK: Logging In
+      Section {
+        HowToStep(
+          number: "1",
+          title: "Enter Your Server Address",
+          detail: "On the login screen, type your NAS's local IP address (e.g. 192.168.1.100) or your Synology QuickConnect ID. No need to include a port — the app uses 8090 automatically."
+        )
+        HowToStep(
+          number: "2",
+          title: "Or Use the QuickConnect Lookup",
+          detail: "Tap the arrow button next to the server field to look up your QuickConnect ID. The app will find your NAS on your home network or remotely."
+        )
+        HowToStep(
+          number: "3",
+          title: "Enter Your DSM Credentials",
+          detail: "Use the same username and password you use to log in to your Synology DSM. These are your NAS account credentials."
+        )
+        HowToStep(
+          number: "4",
+          title: "Tap Login",
+          detail: "The app connects to DSVideoServer and loads your library. Your session is saved so you won't need to log in again unless you log out manually."
+        )
+      } header: {
+        Label("Logging In", systemImage: "person.badge.key")
+          .textCase(nil)
+          .font(.headline)
+      }
+
+      // MARK: Remote Access
+      Section {
+        HowToStep(
+          number: nil,
+          title: "QuickConnect ID (Recommended)",
+          detail: "Log in with your QuickConnect ID and DSM Video can reach your NAS from anywhere — no static IP or port forwarding needed. Synology handles the routing."
+        )
+        HowToStep(
+          number: nil,
+          title: "Static IP or Domain",
+          detail: "If you have a static external IP or a domain pointed at your NAS, enter it in the server field. Make sure port 8090 is forwarded through your router to the NAS."
+        )
+      } header: {
+        Label("Remote Access", systemImage: "network")
+          .textCase(nil)
+          .font(.headline)
+      }
+
+      // MARK: Using the App
+      Section {
+        HowToStep(
+          number: nil,
+          title: "Gesture Controls",
+          detail: "Swipe left or right anywhere on the video to scrub — a full swipe covers 30 minutes. Swipe up or down to adjust volume. Pinch or double-tap to toggle fill and fit."
+        )
+        HowToStep(
+          number: nil,
+          title: "Offline Downloads",
+          detail: "Tap the download button on any video's detail page to save it for offline playback. Downloads are stored on your device and work without a connection."
+        )
+        HowToStep(
+          number: nil,
+          title: "Changing the Default Port",
+          detail: "If you've reconfigured DSVideoServer to run on a different port, go to Settings → Default Port and update it. The new port applies to all future connections."
+        )
+      } header: {
+        Label("Using the App", systemImage: "play.rectangle")
+          .textCase(nil)
+          .font(.headline)
+      }
+    }
+    .navigationTitle("How To")
+    #if !os(tvOS)
+    .navigationBarTitleDisplayMode(.large)
+    #endif
+  }
+}
+
+private struct HowToStep: View {
+  let number: String?
+  let title: String
+  let detail: String
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(alignment: .firstTextBaseline, spacing: 6) {
+        if let number {
+          Text(number + ".")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Color.dsAccent)
+            .monospacedDigit()
+        }
+        Text(title)
+          .font(.subheadline.weight(.semibold))
+      }
+      Text(detail)
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .padding(.vertical, 4)
+  }
+}
