@@ -58,6 +58,7 @@ type HLSSession struct {
 	Error        error
 	cmd          *exec.Cmd
 	cancel       context.CancelFunc
+	stopped      bool // true when StopSession has already decremented g.active
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -122,7 +123,10 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 	}
 
 	// Create session
-	ctx, cancel := context.WithCancel(ctx)
+	// Use context.Background() as parent so ffmpeg runs independently of the
+	// HTTP request lifecycle. The session's own cancel function (assigned to
+	// session.cancel below) provides explicit cleanup via StopSession.
+	ctx, cancel := context.WithCancel(context.Background())
 	session := &HLSSession{
 		SessionID:  sessionID,
 		VideoPath:  videoPath,
@@ -145,7 +149,10 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		session.Error = err
 		now := time.Now()
 		session.CompletedAt = &now
-		g.active--
+		// Only decrement if StopSession hasn't already done so.
+		if !session.stopped {
+			g.active--
+		}
 		g.mu.Unlock()
 	}()
 
@@ -176,6 +183,14 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 	// Cancel the transcode
 	if session.cancel != nil {
 		session.cancel()
+	}
+
+	// If the goroutine hasn't finished yet (CompletedAt is nil), decrement
+	// active now and set stopped so the goroutine callback knows not to
+	// double-decrement when it eventually exits.
+	if session.CompletedAt == nil {
+		session.stopped = true
+		g.active--
 	}
 
 	delete(g.sessions, sessionID)

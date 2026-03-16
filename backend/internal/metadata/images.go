@@ -145,11 +145,14 @@ func (c *ImageCache) CacheImage(ctx context.Context, imageID, sourceURL string) 
 	if err != nil {
 		return "", fmt.Errorf("create cache file: %w", err)
 	}
-	defer f.Close()
-
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
 		os.Remove(cachePath) // Clean up on error
 		return "", fmt.Errorf("write cache file: %w", err)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		os.Remove(cachePath) // Clean up partial file on flush/close failure
+		return "", closeErr
 	}
 
 	return cachePath, nil

@@ -2,7 +2,7 @@
 # CGI proxy for DS Video - handles poster image requests (binary responses)
 # The official DS Video app calls /webapi/VideoStation/poster.cgi directly
 
-BACKEND="http://127.0.0.1:8080/webapi/VideoStation/poster.cgi"
+BACKEND="http://127.0.0.1:8090/webapi/VideoStation/poster.cgi"
 
 if [ -n "$QUERY_STRING" ]; then
     URL="${BACKEND}?${QUERY_STRING}"

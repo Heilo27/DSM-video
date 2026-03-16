@@ -26,30 +26,49 @@ TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
 cd "$TEMP_DIR"
-tar -xzf "$SPK_FILE" 2>&1 || {
-    echo "❌ Failed to extract SPK file (corrupted?)"
+SPK_FORMAT="unknown"
+if tar -tf "$SPK_FILE" >/dev/null 2>&1; then
+    tar -xf "$SPK_FILE"
+    SPK_FORMAT="tar"
+    echo "✅ SPK file is valid plain tar"
+elif tar -tzf "$SPK_FILE" >/dev/null 2>&1; then
+    tar -xzf "$SPK_FILE"
+    SPK_FORMAT="tar.gz"
+    echo "⚠️  SPK file is a tar.gz (outer archive should be plain tar for DSM)"
+else
+    echo "❌ Failed to extract SPK file (corrupted or wrong format?)"
     exit 1
-}
+fi
 
-echo "✅ SPK file is valid tar.gz"
+# Determine package root (some broken archives include an extra DSVideoServer/ prefix).
+ROOT="."
+if [ ! -f "INFO" ] && [ -f "DSVideoServer/INFO" ]; then
+    ROOT="DSVideoServer"
+fi
+if [ ! -f "${ROOT}/INFO" ]; then
+    FOUND_INFO="$(find . -maxdepth 2 -name INFO -print -quit 2>/dev/null || true)"
+    if [ -n "${FOUND_INFO}" ]; then
+        ROOT="$(dirname "${FOUND_INFO}")"
+    fi
+fi
 echo ""
 
 # Check structure
 echo "📋 SPK Structure:"
-ls -la
+ls -la "${ROOT}"
 echo ""
 
 # Check INFO file
-if [ -f "INFO" ]; then
+if [ -f "${ROOT}/INFO" ]; then
     echo "📄 INFO File:"
-    cat INFO
+    cat "${ROOT}/INFO"
     echo ""
     
     # Extract key fields
-    PACKAGE=$(grep '^package=' INFO | cut -d'"' -f2)
-    VERSION=$(grep '^version=' INFO | cut -d'"' -f2)
-    ARCH=$(grep '^arch=' INFO | cut -d'"' -f2)
-    DSM_VER=$(grep '^os_min_ver=' INFO | cut -d'"' -f2)
+    PACKAGE=$(grep '^package=' "${ROOT}/INFO" | cut -d'"' -f2 || true)
+    VERSION=$(grep '^version=' "${ROOT}/INFO" | cut -d'"' -f2 || true)
+    ARCH=$(grep '^arch=' "${ROOT}/INFO" | cut -d'"' -f2 || true)
+    DSM_VER=$(grep '^os_min_ver=' "${ROOT}/INFO" | cut -d'"' -f2 || true)
     
     echo "   Package: $PACKAGE"
     echo "   Version: $VERSION"
@@ -61,13 +80,13 @@ else
 fi
 
 # Check scripts
-if [ -d "scripts" ]; then
+if [ -d "${ROOT}/scripts" ]; then
     echo "📜 Scripts Directory:"
-    ls -la scripts/
+    ls -la "${ROOT}/scripts/"
     echo ""
     
-    if [ -f "scripts/start-stop-status" ]; then
-        if [ -x "scripts/start-stop-status" ]; then
+    if [ -f "${ROOT}/scripts/start-stop-status" ]; then
+        if [ -x "${ROOT}/scripts/start-stop-status" ]; then
             echo "   ✅ start-stop-status is executable"
         else
             echo "   ⚠️  start-stop-status is NOT executable"
@@ -78,20 +97,20 @@ else
 fi
 
 # Check package.tgz
-if [ -f "package.tgz" ]; then
+if [ -f "${ROOT}/package.tgz" ]; then
     echo "📦 package.tgz Contents:"
-    tar -tzf package.tgz | head -10
+    tar -tzf "${ROOT}/package.tgz" | head -15
     echo ""
     
     # Check for binary
-    if tar -tzf package.tgz | grep -q "dsvideo-backend"; then
+    if tar -tzf "${ROOT}/package.tgz" | grep -q "backend/dsvideo-backend"; then
         echo "   ✅ Go binary found in package"
         
         # Extract and check binary
-        tar -xzf package.tgz target/backend/dsvideo-backend 2>/dev/null || true
-        if [ -f "target/backend/dsvideo-backend" ]; then
-            echo "   Binary size: $(ls -lh target/backend/dsvideo-backend | awk '{print $5}')"
-            echo "   Binary type: $(file target/backend/dsvideo-backend | cut -d: -f2)"
+        tar -xzf "${ROOT}/package.tgz" backend/dsvideo-backend 2>/dev/null || true
+        if [ -f "backend/dsvideo-backend" ]; then
+            echo "   Binary size: $(ls -lh backend/dsvideo-backend | awk '{print $5}')"
+            echo "   Binary type: $(file backend/dsvideo-backend | cut -d: -f2)"
         fi
     else
         echo "   ❌ Go binary NOT found in package"
@@ -112,7 +131,7 @@ echo "   - x86_64/amd64 → Use: ./build-spk-macos.sh amd64"
 echo ""
 echo "2. Check DSM Version:"
 echo "   DSM → Control Panel → Info Center"
-echo "   Requires: DSM 7.2 or higher"
+echo "   Requires: DSM >= ${DSM_VER:-<see INFO os_min_ver>}"
 echo ""
 echo "3. Enable Unsigned Packages:"
 echo "   Package Center → Settings → General"
@@ -121,3 +140,9 @@ echo ""
 echo "4. If architecture mismatch, rebuild:"
 echo "   ./spk/build-spk-macos.sh <correct-arch>"
 echo ""
+
+if [ "$SPK_FORMAT" = "tar.gz" ]; then
+    echo "5. If Repair fails, rebuild as plain tar:"
+    echo "   DSM expects the outer .spk archive to be an uncompressed tar (see spk/SPK-PACKAGING.md)."
+    echo ""
+fi

@@ -93,7 +93,7 @@ export CGO_ENABLED=0
 export GOOS=$GOOS
 export GOARCH=$GOARCH
 
-go build -ldflags="-s -w" -o "$PACKAGE_DIR/backend/dsvideo-backend" ./cmd/dsvideo-backend
+go build -ldflags="-s -w -X main.BuildVersion=${PACKAGE_VERSION}" -o "$PACKAGE_DIR/backend/dsvideo-backend" ./cmd/dsvideo-backend
 
 # Verify it's a Linux binary
 if file "$PACKAGE_DIR/backend/dsvideo-backend" | grep -q "Mach-O"; then

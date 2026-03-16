@@ -1,0 +1,481 @@
+import AVKit
+import SwiftUI
+
+struct ItemDetailView: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  @State private var downloadManager = DownloadManager.shared
+  let itemID: String
+  let fallbackTitle: String
+
+  @State private var detail: ItemDetail?
+  @State private var isLoading: Bool = false
+  @State private var error: String?
+
+  @State private var showPlayer: Bool = false
+  @State private var isStartingDownload: Bool = false
+
+  private var isDownloaded: Bool {
+    downloadManager.isDownloaded(itemId: itemID)
+  }
+
+  private var isDownloading: Bool {
+    downloadManager.isDownloading(itemId: itemID)
+  }
+
+  private var downloadProgress: Double {
+    downloadManager.downloadProgress[itemID] ?? 0
+  }
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 0) {
+        header
+
+        VStack(alignment: .leading, spacing: 14) {
+          // Metadata pills
+          if detail != nil {
+            metadataPills
+          }
+
+          // Action row: Play + compact icon buttons
+          HStack(spacing: 12) {
+            Button {
+              showPlayer = true
+            } label: {
+              Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
+                .font(.headline.weight(.semibold))
+                #if os(tvOS)
+                .frame(maxWidth: .infinity, minHeight: 80)
+                #else
+                .frame(maxWidth: .infinity, minHeight: 52)
+                #endif
+            }
+            .background(DSReelBrandColor.background)
+            .foregroundStyle(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(color: DSReelBrandColor.background.opacity(0.45), radius: 8, x: 0, y: 4)
+            .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
+
+            // Download icon button (iOS only)
+            #if !os(tvOS)
+            downloadIconButton
+            #endif
+          }
+
+          if let summary = detail?.summary, !summary.isEmpty {
+            Text(summary)
+              .font(.body)
+              .foregroundStyle(.white.opacity(0.88))
+              .fixedSize(horizontal: false, vertical: true)
+          }
+
+          if let cast = detail?.cast, !cast.isEmpty {
+            castSection(cast: cast)
+          }
+
+          Spacer(minLength: 32)
+        }
+        #if os(tvOS)
+        .padding(.horizontal, 48)
+        #else
+        .padding(.horizontal, 16)
+        .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
+        .frame(maxWidth: .infinity)
+        #endif
+        .padding(.top, 16)
+      }
+    }
+    .background(Color.black.ignoresSafeArea())
+    .navigationTitle(detail?.title ?? fallbackTitle)
+    #if !os(tvOS)
+    .navigationBarTitleDisplayMode(.inline)
+    #endif
+    .task { await load() }
+    .fullScreenCover(isPresented: $showPlayer) {
+      PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
+        .environment(appState)
+    }
+  }
+
+  // MARK: - Header
+
+  private var backdropHeight: CGFloat {
+    #if os(tvOS)
+    return 450
+    #else
+    return horizontalSizeClass == .regular ? 420 : 300
+    #endif
+  }
+
+  @ViewBuilder
+  private var header: some View {
+    if isLoading && detail == nil {
+      Color.black
+        .frame(maxWidth: .infinity, minHeight: backdropHeight)
+        .overlay(ProgressView().tint(.white))
+    } else if let error {
+      Color.black
+        .frame(maxWidth: .infinity, minHeight: backdropHeight)
+        .overlay(
+          ContentUnavailableView(
+            "Couldn't load details",
+            systemImage: "exclamationmark.triangle",
+            description: Text(error)
+          )
+        )
+    } else {
+      ZStack(alignment: .bottomLeading) {
+        backdropImage
+          .frame(maxWidth: .infinity, minHeight: backdropHeight)
+          .frame(height: backdropHeight, alignment: .top)
+          .clipped()
+
+        // Gradient fade to black at bottom
+        LinearGradient(
+          stops: [
+            .init(color: .clear, location: 0.0),
+            .init(color: .black.opacity(0.6), location: 0.55),
+            .init(color: .black, location: 1.0)
+          ],
+          startPoint: .top,
+          endPoint: .bottom
+        )
+        .frame(maxWidth: .infinity)
+        .frame(height: backdropHeight)
+
+        // Floating title/year on gradient
+        VStack(alignment: .leading, spacing: 4) {
+          Text(detail?.title ?? fallbackTitle)
+            .font(.title2.weight(.bold))
+            .foregroundStyle(.white)
+            .lineLimit(2)
+            .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 1)
+
+          if let year = detail?.year {
+            Text(String(year))
+              .font(.subheadline)
+              .foregroundStyle(.white.opacity(0.75))
+          }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 14)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var backdropImage: some View {
+    if let backdropId = detail?.images.backdrop.id ?? detail?.images.backdrop.mapperId {
+      AuthenticatedImage(
+        url: appState.api.imageURL(id: backdropId, width: 1200),
+        token: appState.sessionToken
+      )
+      .scaledToFill()
+    } else {
+      // No backdrop — gradient placeholder with title overlay
+      LinearGradient(
+        colors: [Color(white: 0.15), Color.black],
+        startPoint: .top,
+        endPoint: .bottom
+      )
+      .overlay(alignment: .bottomLeading) {
+        Text(detail?.title ?? fallbackTitle)
+          .font(.title2.bold())
+          .foregroundStyle(.white.opacity(0.4))
+          .padding(24)
+      }
+    }
+  }
+
+  // MARK: - Metadata Pills
+
+  @ViewBuilder
+  private var metadataPills: some View {
+    let year = detail?.year
+    let rating = detail?.contentRating
+    let genres = detail?.genres ?? []
+    let durationSeconds = detail?.durationSeconds
+
+    if year != nil || rating != nil || !genres.isEmpty || durationSeconds != nil {
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(spacing: 8) {
+          if let year {
+            MetadataPill(text: String(year))
+          }
+          if let secs = durationSeconds, secs > 0 {
+            MetadataPill(text: formatDuration(secs))
+          }
+          if let rating, !rating.isEmpty {
+            MetadataPill(text: rating)
+          }
+          ForEach(genres, id: \.self) { genre in
+            MetadataPill(text: genre)
+          }
+        }
+        .padding(.vertical, 2)
+      }
+    }
+  }
+
+  private func formatDuration(_ seconds: Int) -> String {
+    let hours = seconds / 3600
+    let minutes = (seconds % 3600) / 60
+    if hours > 0 {
+      return "\(hours)h \(minutes)m"
+    } else {
+      return "\(minutes)m"
+    }
+  }
+
+  // MARK: - Download Icon Button
+
+  @ViewBuilder
+  private var downloadIconButton: some View {
+    Button {
+      if isDownloading {
+        downloadManager.cancelDownload(itemId: itemID)
+      } else if isDownloaded {
+        downloadManager.deleteDownload(itemId: itemID)
+      } else {
+        Task { await startDownload() }
+      }
+    } label: {
+      ZStack {
+        if isDownloading {
+          ZStack {
+            Circle()
+              .stroke(Color(white: 0.3), lineWidth: 2)
+            Circle()
+              .trim(from: 0, to: downloadProgress)
+              .stroke(DSReelBrandColor.background, lineWidth: 2)
+              .rotationEffect(.degrees(-90))
+          }
+          .frame(width: 22, height: 22)
+        } else if isStartingDownload {
+          ProgressView().tint(.white).frame(width: 22, height: 22)
+        } else {
+          Image(systemName: isDownloaded ? "checkmark" : "arrow.down")
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(isDownloaded ? DSReelBrandColor.background : .white)
+        }
+      }
+      .frame(width: 52, height: 52)
+    }
+    .background(Color(white: 0.12))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .disabled(isStartingDownload && !isDownloading)
+    .accessibilityLabel(isDownloaded ? "Remove download" : isDownloading ? "Cancel download" : "Download")
+  }
+
+  // MARK: - Cast Section
+
+  @ViewBuilder
+  private func castSection(cast: [ItemDetail.Person]) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Cast")
+        .font(.headline)
+        .foregroundStyle(.white)
+      ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
+        HStack {
+          Text(person.name)
+            .foregroundStyle(.white)
+          Spacer()
+          if let role = person.role, !role.isEmpty {
+            Text(role)
+              .foregroundStyle(.white.opacity(0.7))
+          }
+        }
+        .font(.footnote)
+      }
+    }
+  }
+
+  // MARK: - Data
+
+  private func load() async {
+    guard !isLoading else { return }
+    error = nil
+    isLoading = true
+    defer { isLoading = false }
+
+    do {
+      detail = try await appState.api.itemDetail(id: itemID)
+    } catch {
+      self.error = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
+    }
+  }
+
+  private func startDownload() async {
+    guard !isStartingDownload else { return }
+    isStartingDownload = true
+    defer { isStartingDownload = false }
+
+    do {
+      // Get playback info to get the video URL
+      let info = try await appState.api.playback(id: itemID)
+      guard let videoURL = info.streamUrl ?? info.hlsMasterUrl else {
+        return
+      }
+
+      // Get poster URL if available
+      var posterURL: URL? = nil
+      if let posterId = detail?.images.poster.id {
+        posterURL = appState.api.imageURL(id: posterId, width: 400)
+      }
+
+      downloadManager.startDownload(
+        itemId: itemID,
+        title: detail?.title ?? fallbackTitle,
+        year: detail?.year,
+        videoURL: videoURL,
+        posterURL: posterURL,
+        token: appState.sessionToken,
+        durationSeconds: detail?.durationSeconds ?? 0
+      )
+    } catch {
+      let message = (error as? APIError)?.userMessage
+        ?? (error as? WebAPIError)?.userMessage
+        ?? error.localizedDescription
+      self.error = message
+    }
+  }
+}
+
+// MARK: - Metadata Pill
+
+private struct MetadataPill: View {
+  let text: String
+
+  var body: some View {
+    Text(text)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(.white.opacity(0.85))
+      .padding(.horizontal, 10)
+      .padding(.vertical, 5)
+      .background(Color(white: 0.16))
+      .clipShape(Capsule())
+  }
+}
+
+// MARK: - Player Sheet
+
+private struct PlayerSheet: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
+  let itemID: String
+  let title: String
+
+  @State private var playbackURL: URL?
+  @State private var error: String?
+  @State private var resumePosition: Double = 0
+  @State private var isOffline: Bool = false
+
+  // Progress sync debouncing
+  @State private var lastSyncTime: Date = .distantPast
+  @State private var lastSyncedPosition: Int = 0
+  @State private var lastKnownDuration: Int = 0
+  private let syncInterval: TimeInterval = 10  // Sync at most every 10 seconds
+  private let seekThreshold: Int = 15  // Or if position changes by 15+ seconds (seek)
+
+  var body: some View {
+    ZStack {
+      Color.black.ignoresSafeArea()
+
+      if let url = playbackURL {
+        GestureVideoPlayer(
+          url: url,
+          title: title,
+          resumePosition: resumePosition,
+          onDismiss: {
+            if isOffline {
+              // Persist final position locally for offline items
+              DownloadManager.shared.updateResumePosition(
+                itemId: itemID,
+                positionSeconds: lastSyncedPosition
+              )
+            } else {
+              // Save final position to the server for online items
+              Task {
+                try? await appState.api.setProgress(
+                  id: itemID,
+                  positionSeconds: lastSyncedPosition,
+                  durationSeconds: lastKnownDuration
+                )
+              }
+            }
+            dismiss()
+          },
+          onProgressUpdate: { position, duration in
+            let positionInt = Int(position)
+            let durationInt = Int(duration)
+            lastKnownDuration = durationInt
+
+            let now = Date()
+            let timeSinceLastSync = now.timeIntervalSince(lastSyncTime)
+            let positionDelta = abs(positionInt - lastSyncedPosition)
+
+            // Only sync if: enough time has passed OR user seeked significantly
+            guard timeSinceLastSync >= syncInterval || positionDelta >= seekThreshold else {
+              return
+            }
+
+            lastSyncTime = now
+            lastSyncedPosition = positionInt
+
+            if isOffline {
+              // Persist position locally (debounced, same cadence as online sync)
+              DownloadManager.shared.updateResumePosition(
+                itemId: itemID,
+                positionSeconds: positionInt
+              )
+            } else {
+              Task {
+                try? await appState.api.setProgress(
+                  id: itemID,
+                  positionSeconds: positionInt,
+                  durationSeconds: durationInt
+                )
+              }
+            }
+          }
+        )
+        .ignoresSafeArea()
+      } else if let error {
+        ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(error))
+          .foregroundStyle(.white)
+      } else {
+        ProgressView()
+          .tint(.white)
+      }
+    }
+    .task { await start() }
+  }
+
+  private func start() async {
+    // Check if we have a downloaded version first
+    if let downloaded = DownloadManager.shared.getDownloadedItem(itemId: itemID) {
+      let localURL = URL(fileURLWithPath: downloaded.videoPath)
+      if FileManager.default.fileExists(atPath: downloaded.videoPath) {
+        isOffline = true
+        resumePosition = Double(downloaded.resumePositionSeconds)
+        playbackURL = localURL
+        return
+      }
+    }
+
+    // Fall back to streaming
+    do {
+      let info = try await appState.api.playback(id: itemID)
+      let url = info.streamUrl ?? info.hlsMasterUrl
+      guard let url else {
+        error = "No playable URL."
+        return
+      }
+      resumePosition = Double(info.resumePositionSeconds)
+      playbackURL = url
+    } catch {
+      self.error = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
+    }
+  }
+}

@@ -2,7 +2,7 @@
 # CGI proxy for DS Video - handles video streaming requests
 # The official DS Video app calls /webapi/VideoStation/vtestreaming.cgi/DTV.mov
 
-BACKEND="http://127.0.0.1:8080/webapi/VideoStation/vtestreaming.cgi"
+BACKEND="http://127.0.0.1:8090/webapi/VideoStation/vtestreaming.cgi"
 
 # Append PATH_INFO (e.g., /DTV.mov)
 TARGET_PATH="$BACKEND"

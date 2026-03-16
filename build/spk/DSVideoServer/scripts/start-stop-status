@@ -27,7 +27,7 @@ start() {
   fi
 
   # Default configuration (can be overridden by DSM package env/config files)
-  export DSVIDEO_PORT="${DSVIDEO_PORT:-8080}"
+  export DSVIDEO_PORT="${DSVIDEO_PORT:-8090}"
   export DSVIDEO_BASE_URL="${DSVIDEO_BASE_URL:-http://127.0.0.1:${DSVIDEO_PORT}}"
   export DSVIDEO_DB_PATH="${DSVIDEO_DB_PATH:-${VAR}/dsvideo.db}"
 
@@ -106,6 +106,19 @@ stop() {
   PID="$(cat "${PIDFILE}")" || true
   if [ -n "${PID}" ] && kill -0 "${PID}" 2>/dev/null; then
     kill "${PID}" || true
+    # Wait up to 10 seconds for process to actually terminate before returning.
+    # Without this wait, rapid package upgrades fail with "address already in use"
+    # because the new binary tries to bind the port while the old one is still dying.
+    i=0
+    while [ $i -lt 10 ] && kill -0 "${PID}" 2>/dev/null; do
+      sleep 1
+      i=$((i + 1))
+    done
+    # Force-kill if still alive after grace period
+    if kill -0 "${PID}" 2>/dev/null; then
+      kill -9 "${PID}" 2>/dev/null || true
+      sleep 1
+    fi
   fi
   rm -f "${PIDFILE}"
   echo "[${PACKAGE}] stopped" >> "${LOG}"
@@ -124,4 +137,3 @@ case "${1:-}" in
   status) status ;;
   *) echo "usage: $0 {start|stop|status}" ; exit 2 ;;
 esac
-

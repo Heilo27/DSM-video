@@ -2,7 +2,7 @@
 # CGI proxy for DS Video - handles entry.cgi API calls (JSON responses)
 # Invoked by DSM when SYNO.VideoStation2.* APIs are called via /webapi/entry.cgi
 
-BACKEND="http://127.0.0.1:8080/webapi/entry.cgi"
+BACKEND="http://127.0.0.1:8090/webapi/entry.cgi"
 
 # Build URL with query string
 if [ -n "$QUERY_STRING" ]; then
