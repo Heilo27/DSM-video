@@ -42,6 +42,8 @@ final class AppState {
     }
   }
 
+  var isDemoMode: Bool = false
+
   var sessionToken: String? {
     didSet {
       if rememberMe {
@@ -176,6 +178,14 @@ final class AppState {
     isLoggingIn = true
     defer { isLoggingIn = false }
 
+    // Demo mode — App Review credentials. No network required.
+    if username.trimmingCharacters(in: .whitespaces) == "appledemo" &&
+       savedPassword == "DSVideo2024" {
+      isDemoMode = true
+      sessionToken = "demo"
+      return
+    }
+
     do {
       // If the server field is a bare QuickConnect ID (no dots, no scheme),
       // resolve it to candidate NAS URLs and try each until one works.
@@ -260,6 +270,7 @@ final class AppState {
     synoToken = nil
     deviceID = nil
     pairingCode = nil
+    isDemoMode = false
   }
 
   func generatePairingCode() async {

@@ -47,6 +47,10 @@ struct LibrariesView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      libraries = DemoData.libraries
+      return
+    }
     error = nil
     isLoading = true
     defer { isLoading = false }

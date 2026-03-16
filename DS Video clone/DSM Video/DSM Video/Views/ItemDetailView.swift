@@ -13,6 +13,7 @@ struct ItemDetailView: View {
   @State private var error: String?
 
   @State private var showPlayer: Bool = false
+  @State private var showDemoAlert: Bool = false
   @State private var isStartingDownload: Bool = false
 
   private var isDownloaded: Bool {
@@ -41,7 +42,11 @@ struct ItemDetailView: View {
           // Action row: Play + compact icon buttons
           HStack(spacing: 12) {
             Button {
-              showPlayer = true
+              if appState.isDemoMode {
+                showDemoAlert = true
+              } else {
+                showPlayer = true
+              }
             } label: {
               Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
                 .font(.headline.weight(.semibold))
@@ -95,6 +100,11 @@ struct ItemDetailView: View {
     .fullScreenCover(isPresented: $showPlayer) {
       PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
         .environment(appState)
+    }
+    .alert("Demo Mode", isPresented: $showDemoAlert) {
+      Button("OK", role: .cancel) { }
+    } message: {
+      Text("Video playback is not available in the demo. In the real app, this button streams directly from your Synology NAS.")
     }
   }
 
@@ -295,6 +305,10 @@ struct ItemDetailView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      detail = DemoData.detail(for: itemID)
+      return
+    }
     error = nil
     isLoading = true
     defer { isLoading = false }

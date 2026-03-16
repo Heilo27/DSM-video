@@ -119,6 +119,10 @@ struct ItemsGridView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      items = DemoData.items(for: library)
+      return
+    }
     isLoading = true
     defer { isLoading = false }
 
