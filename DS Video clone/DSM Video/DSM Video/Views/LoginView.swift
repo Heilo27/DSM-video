@@ -204,7 +204,14 @@ struct LoginView: View {
       #endif
       .sheet(isPresented: $showQuickConnect) {
         QuickConnectSheet { selectedURL in
-          appState.baseURL = selectedURL
+          // Strip the Synology DSM port from the resolved URL.
+          // normalizedBaseURL will apply the user's configured port (default 8090).
+          if let url = URL(string: selectedURL), let host = url.host {
+            let scheme = selectedURL.hasPrefix("https") ? "https" : "http"
+            appState.baseURL = "\(scheme)://\(host)"
+          } else {
+            appState.baseURL = selectedURL
+          }
           appState.useHTTPS = selectedURL.hasPrefix("https")
         }
       }

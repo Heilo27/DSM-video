@@ -3,7 +3,6 @@ import Foundation
 struct APIClient {
   let baseURL: URL
   let token: String?
-  var tmdbAPIKey: String? = nil
 
   func login(username: String, password: String) async throws -> LoginResponse {
     let req = LoginRequest(username: username, password: password, otp: nil)
@@ -147,9 +146,6 @@ struct APIClient {
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if authorized, let token {
       req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    }
-    if let tmdbAPIKey {
-      req.setValue(tmdbAPIKey, forHTTPHeaderField: "X-TMDb-API-Key")
     }
     if let body {
       req.httpBody = try JSONEncoder().encode(body)

@@ -11,7 +11,7 @@ final class AppState {
     static let username = "dsReel.username"
     static let rememberMe = "dsReel.rememberMe"
     static let useHTTPS = "dsReel.useHTTPS"
-    static let tmdbAPIKey = "dsReel.tmdbAPIKey"
+    static let defaultPort = "dsReel.defaultPort"
     static let keychainService = "com.heiloprojects.dsreel"
     static let keychainAccount = "savedPassword"
     static let keychainAccountToken = "sessionToken"
@@ -35,9 +35,9 @@ final class AppState {
       updateAPI()
     }
   }
-  var tmdbAPIKey: String {
+  var defaultPort: Int {
     didSet {
-      UserDefaults.standard.set(tmdbAPIKey, forKey: Keys.tmdbAPIKey)
+      UserDefaults.standard.set(defaultPort, forKey: Keys.defaultPort)
       updateAPI()
     }
   }
@@ -71,20 +71,19 @@ final class AppState {
   private(set) var api: APIClient
 
   private func updateAPI() {
-    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS) else {
+    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
       // Invalid URL — leave api as-is; login() will catch this before any request is made.
       return
     }
     api = APIClient(
       baseURL: url,
-      token: sessionToken,
-      tmdbAPIKey: tmdbAPIKey.isEmpty ? nil : tmdbAPIKey
+      token: sessionToken
     )
   }
 
   // Legacy Video Station WebAPI client (for reference/debugging)
   var videoStationAPI: VideoStationWebAPIClient? {
-    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS) else { return nil }
+    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else { return nil }
     return VideoStationWebAPIClient(
       baseURL: url,
       sessionID: sessionID,
@@ -97,14 +96,14 @@ final class AppState {
     let d = UserDefaults.standard
     let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:8090"
     let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
-    let storedTmdbAPIKey = d.string(forKey: Keys.tmdbAPIKey) ?? ""
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
+    let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 8090
 
     baseURL = storedBaseURL
     username = d.string(forKey: Keys.username) ?? ""
     rememberMe = storedRememberMe
     useHTTPS = storedUseHTTPS
-    tmdbAPIKey = storedTmdbAPIKey
+    defaultPort = storedDefaultPort
 
     // Load saved credentials from Keychain if remember me is enabled
     var storedToken: String? = nil
@@ -117,12 +116,11 @@ final class AppState {
     // Initialize stored api client once with all resolved values.
     // normalizedBaseURL returns nil for invalid URLs (empty, malformed). In that case we
     // use a non-routable placeholder; login() validates the URL before any request fires.
-    let resolvedInitURL = normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS)
+    let resolvedInitURL = normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS, defaultPort: storedDefaultPort)
       ?? URL(string: "http://0.0.0.0")!
     api = APIClient(
       baseURL: resolvedInitURL,
-      token: storedToken,
-      tmdbAPIKey: storedTmdbAPIKey.isEmpty ? nil : storedTmdbAPIKey
+      token: storedToken
     )
   }
 
@@ -184,19 +182,31 @@ final class AppState {
       // LAN IPs are tried first to avoid NAT hairpinning and self-signed cert issues.
       let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
       if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-        let candidates = try await QuickConnectResolver.resolve(id: qcID)
-        guard !candidates.isEmpty else {
+        let resolved = try await QuickConnectResolver.resolve(id: qcID)
+        guard !resolved.isEmpty else {
           loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
           return
         }
+        // QuickConnect returns NAS IPs with Synology DSM ports (5000/5001).
+        // DSVideoServer runs on defaultPort (8090). Extract unique hosts in
+        // discovery order (LAN first, WAN last) and try each with our port.
+        let scheme = useHTTPS ? "https" : "http"
+        var seen = Set<String>()
+        var portedCandidates: [(urlStr: String, url: URL)] = []
+        for candidateURL in resolved {
+          guard let cURL = URL(string: candidateURL), let host = cURL.host else { continue }
+          guard seen.insert(host).inserted else { continue }
+          let urlStr = "\(scheme)://\(host):\(defaultPort)"
+          guard let url = URL(string: urlStr) else { continue }
+          portedCandidates.append((urlStr, url))
+        }
         var lastError: Error?
-        for candidateURL in candidates {
-          guard let url = URL(string: candidateURL) else { continue }
+        for (urlStr, url) in portedCandidates {
           do {
             let tempClient = APIClient(baseURL: url, token: nil)
             let resp = try await tempClient.login(username: username, password: savedPassword)
             // Success — persist resolved address and session
-            baseURL = candidateURL
+            baseURL = urlStr
             sessionToken = resp.token
             sessionID = nil; synoToken = nil; deviceID = nil
             if rememberMe {
@@ -211,12 +221,12 @@ final class AppState {
             lastError = error
           }
         }
-        loginError = (lastError as? APIError)?.userMessage ?? "Login failed."
+        loginError = (lastError as? APIError)?.userMessage ?? "Login failed. Check that DSVideoServer is running on your NAS."
         return
       }
 
       // Validate server address before attempting login
-      guard normalizedBaseURL(baseURL, forceHTTPS: useHTTPS) != nil else {
+      guard normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) != nil else {
         loginError = "Invalid server address. Please check the URL."
         return
       }
@@ -276,7 +286,7 @@ final class AppState {
     isLoggingIn = true
     defer { isLoggingIn = false }
 
-    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS) else {
+    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
       loginError = "Invalid server address. Please check the URL."
       return
     }
@@ -291,7 +301,7 @@ final class AppState {
   }
 }
 
-func normalizedBaseURL(_ input: String, forceHTTPS: Bool) -> URL? {
+func normalizedBaseURL(_ input: String, forceHTTPS: Bool, defaultPort: Int = 8090) -> URL? {
   var s = input.trimmingCharacters(in: .whitespacesAndNewlines)
   guard !s.isEmpty else { return nil }
   if !s.contains("://") {
@@ -301,23 +311,15 @@ func normalizedBaseURL(_ input: String, forceHTTPS: Bool) -> URL? {
     s = s.replacingOccurrences(of: "http://", with: "https://")
   }
 
-  // Parse URL to check for port
-  guard var url = URL(string: s), url.host != nil else {
-    return nil
-  }
+  guard var url = URL(string: s), url.host != nil else { return nil }
 
-  // If no port specified and it's a local NAS address, add default DSM port.
-  // Don't add ports to quickconnect.to — it handles routing itself.
-  if url.port == nil {
-    let host = url.host ?? url.host(percentEncoded: false) ?? ""
-    if host.contains("192.168.") || host.contains("10.") || host.contains("172.") || host.contains("synology.me") {
-      let defaultPort = forceHTTPS ? 5001 : 5000
-      var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-      components?.port = defaultPort
-      if let newURL = components?.url {
-        url = newURL
-      }
-    }
+  // Add default port if none specified.
+  // Skip quickconnect.to — it's a relay host, not a DSVideoServer endpoint.
+  let host = url.host ?? ""
+  if url.port == nil && !host.hasSuffix("quickconnect.to") {
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    components?.port = defaultPort
+    if let newURL = components?.url { url = newURL }
   }
 
   return url

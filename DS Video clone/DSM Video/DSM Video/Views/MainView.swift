@@ -506,52 +506,30 @@ struct SettingsView: View {
     @Bindable var appState = appState
 
     Form {
-      Section("Server") {
-        Text(appState.baseURL)
-        Toggle("HTTPS", isOn: $appState.useHTTPS)
-      }
-
       Section {
-        SecureField("API Key", text: $appState.tmdbAPIKey)
-          .textContentType(.password)
-          .autocorrectionDisabled()
-          #if os(iOS)
-          .textInputAutocapitalization(.never)
-          #endif
-
-        if appState.tmdbAPIKey.isEmpty {
-          Label("Movie details and posters require a TMDb API key", systemImage: "info.circle")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        } else {
-          Label("API key configured", systemImage: "checkmark.circle.fill")
-            .font(.caption)
-            .foregroundStyle(.green)
+        HStack {
+          Text("Default Port")
+          Spacer()
+          TextField("8090", value: $appState.defaultPort, format: .number)
+            #if os(iOS)
+            .keyboardType(.numberPad)
+            #endif
+            .multilineTextAlignment(.trailing)
+            .frame(width: 70)
         }
       } header: {
-        Text("TMDb Metadata")
+        Text("Server")
       } footer: {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Get movie details, posters, and cast information from The Movie Database (TMDb).")
+        Text("DSVideoServer listens on port 8090 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
+      }
 
-          Text("The TMDb API is free for non-commercial, personal use. To get your API key:")
-            .fontWeight(.medium)
-
-          VStack(alignment: .leading, spacing: 4) {
-            Text("1. Create an account at themoviedb.org")
-            Text("2. Go to Settings > API")
-            Text("3. Request an API key (Developer)")
-            Text("4. Copy the \"API Read Access Token\"")
+      Section("Support") {
+        Button {
+          if let url = URL(string: "mailto:heiloprojects@icloud.com") {
+            openURL(url)
           }
-          .font(.caption2)
-
-          Button("Open TMDb Website") {
-            if let url = URL(string: "https://www.themoviedb.org/settings/api") {
-              openURL(url)
-            }
-          }
-          .font(.caption)
-          .padding(.top, 4)
+        } label: {
+          Label("Contact Support", systemImage: "envelope")
         }
       }
 
