@@ -21,6 +21,10 @@ struct TVShowDetailView: View {
   // Shared load used only by iOS path (tvOS loads internally)
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      seasons = DemoData.seasons(for: show.id)
+      return
+    }
     isLoading = true
     defer { isLoading = false }
     do {
@@ -185,6 +189,10 @@ private struct TVShowDetailSplitView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      seasons = DemoData.seasons(for: show.id)
+      return
+    }
     isLoading = true
     defer { isLoading = false }
     do {
@@ -284,6 +292,10 @@ private struct TVSeasonSection: View {
 
   private func load() async {
     guard !isLoading, episodes.isEmpty else { return }
+    if appState.isDemoMode {
+      episodes = DemoData.episodes(for: show.id, season: season.seasonNumber)
+      return
+    }
     error = nil
     isLoading = true
     defer { isLoading = false }
@@ -557,6 +569,10 @@ private struct iOSSeasonSection: View {
 
   private func load() async {
     guard !isLoading, episodes.isEmpty else { return }
+    if appState.isDemoMode {
+      episodes = DemoData.episodes(for: show.id, season: season.seasonNumber)
+      return
+    }
     error = nil
     isLoading = true
     defer { isLoading = false }

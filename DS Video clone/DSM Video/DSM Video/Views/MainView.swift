@@ -110,6 +110,10 @@ private struct SidebarView: View {
 
   private func loadLibraries() async {
     guard libraries.isEmpty && !isLoading else { return }
+    if appState.isDemoMode {
+      libraries = DemoData.libraries
+      return
+    }
     isLoading = true
     defer { isLoading = false }
     if let response = try? await appState.api.libraries() {
@@ -164,6 +168,12 @@ private struct DefaultLibraryDetailView: View {
   }
 
   private func loadDefault() async {
+    if appState.isDemoMode {
+      let libs = DemoData.libraries
+      let savedID = UserDefaults.standard.string(forKey: "dsReel.lastLibraryID")
+      library = libs.first(where: { $0.id == savedID }) ?? libs.first
+      return
+    }
     isLoading = true
     defer { isLoading = false }
     guard let response = try? await appState.api.libraries() else { return }

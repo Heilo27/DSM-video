@@ -7,17 +7,35 @@ VAR="${BASE}/var"
 LOG="${VAR}/${PACKAGE}.log"
 PIDFILE="${VAR}/server.pid"
 
-# Go binary path - DSM 7 creates symlink: target/ -> /volume1/@appstore/PKG
-# Our package.tgz contains backend/dsvideo-backend, so full path is target/backend/dsvideo-backend
-GO_BINARY="${BASE}/target/backend/dsvideo-backend"
+find_go_binary() {
+  # DSM 7 creates symlink: target/ -> /volume1/@appstore/PKG
+  # Correct packaging: package.tgz contains backend/dsvideo-backend
+  # Some broken builds have bin/dsvideo-backend or an extra DSVideoServer/ prefix.
+  for p in \
+    "${BASE}/target/backend/dsvideo-backend" \
+    "${BASE}/target/bin/dsvideo-backend" \
+    "${BASE}/target/DSVideoServer/backend/dsvideo-backend" \
+    "${BASE}/target/DSVideoServer/bin/dsvideo-backend" \
+    "${BASE}/target/dsvideo-backend"
+  do
+    if [ -x "${p}" ]; then
+      echo "${p}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 start() {
   mkdir -p "${VAR}"
 
-  # Check for Go binary (preferred)
-  if [ ! -x "${GO_BINARY}" ]; then
-    echo "[${PACKAGE}] Go binary not found at ${GO_BINARY}" >> "${LOG}"
-    echo "[${PACKAGE}] Expected: target/backend/dsvideo-backend (architecture-specific)" >> "${LOG}"
+  GO_BINARY="$(find_go_binary || true)"
+
+  # Check for Go binary
+  if [ -z "${GO_BINARY}" ]; then
+    echo "[${PACKAGE}] Go binary not found." >> "${LOG}"
+    echo "[${PACKAGE}] Expected (primary): ${BASE}/target/backend/dsvideo-backend" >> "${LOG}"
+    echo "[${PACKAGE}] If you installed a gzipped/nested SPK, rebuild with spk/build-spk-macos.sh and reinstall." >> "${LOG}"
     exit 1
   fi
 
@@ -80,7 +98,7 @@ start() {
   export DSVIDEO_IMAGE_CACHE_DIR="${DSVIDEO_IMAGE_CACHE_DIR:-${VAR}/images}"
   mkdir -p "${DSVIDEO_IMAGE_CACHE_DIR}"
 
-  echo "[${PACKAGE}] Starting with port=${DSVIDEO_PORT} db=${DSVIDEO_DB_PATH}" >> "${LOG}"
+  echo "[${PACKAGE}] Starting ${GO_BINARY} with port=${DSVIDEO_PORT} db=${DSVIDEO_DB_PATH}" >> "${LOG}"
   echo "[${PACKAGE}] Movies=${DSVIDEO_MOVIES_PATH} TV=${DSVIDEO_TV_PATH}" >> "${LOG}"
 
   nohup "${GO_BINARY}" >> "${LOG}" 2>&1 &

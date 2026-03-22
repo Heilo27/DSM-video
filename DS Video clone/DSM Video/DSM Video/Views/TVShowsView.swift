@@ -92,6 +92,10 @@ struct TVShowsView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      shows = DemoData.tvShows
+      return
+    }
     isLoading = true
     defer { isLoading = false }
     do {

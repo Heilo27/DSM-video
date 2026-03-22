@@ -57,6 +57,25 @@ enum DemoData {
                 progress: nil, seasonNumber: nil, episodeNumber: nil),
   ]
 
+  // MARK: - TV Shows
+
+  static let tvShows: [TVShow] = [
+    TVShow(id: "ds-1", title: "The Signal", year: 2022,
+           seasonCount: 1, episodeCount: 3, posterImageId: nil),
+  ]
+
+  static let tvSeasons: [String: [TVSeason]] = [
+    "ds-1": [TVSeason(seasonNumber: 1, episodeCount: 3)],
+  ]
+
+  static func seasons(for showId: String) -> [TVSeason] {
+    tvSeasons[showId] ?? []
+  }
+
+  static func episodes(for showId: String, season: Int) -> [ItemSummary] {
+    tvItems.filter { $0.seasonNumber == season }
+  }
+
   // MARK: - TV Episode Items (flattened, as returned by the episodes API)
 
   static let tvItems: [ItemSummary] = [

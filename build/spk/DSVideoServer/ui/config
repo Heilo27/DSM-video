@@ -2,8 +2,8 @@
   ".url": {
     "com.dsvideo.app": {
       "type": "url",
-      "title": "DS Video",
-      "desc": "Stream your personal video library",
+      "title": "DSVideoServer",
+      "desc": "Self-hosted video server for DSM Video",
       "icon": "images/DSVideoServer_{0}.png",
       "url": "/",
       "port": 8090,

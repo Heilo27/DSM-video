@@ -2,16 +2,16 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>DS Video</title>
+<title>DSVideoServer</title>
 <script>
-// Redirect to the DS Video web player on port 8090
+// Redirect to the DSVideoServer web player on port 8090
 // Uses the same hostname as the current page
 var host = window.location.hostname;
 window.location.replace('http://' + host + ':8090/');
 </script>
 </head>
 <body>
-<p>Redirecting to DS Video...</p>
+<p>Redirecting to DSVideoServer...</p>
 <p>If not redirected, <a id="link">click here</a>.</p>
 <script>
 document.getElementById('link').href = 'http://' + window.location.hostname + ':8090/';

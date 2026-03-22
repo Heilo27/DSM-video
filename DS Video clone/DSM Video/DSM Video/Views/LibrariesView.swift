@@ -103,10 +103,14 @@ struct LibraryHomeView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      defaultLibrary = DemoData.libraries.first
+      return
+    }
     isLoading = true
     error = nil
     defer { isLoading = false }
-    
+
     do {
       let libs = try await appState.api.libraries().libraries
       defaultLibrary = libs.first
