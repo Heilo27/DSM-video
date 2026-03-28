@@ -6,6 +6,11 @@
 //
 
 import SwiftUI
+import os.log
+
+// Debug logger — filter by subsystem "com.dsm.launch" or "com.dsm.orientation" in Console.app
+private let launchLog = Logger(subsystem: "com.dsm.launch", category: "animation")
+private let orientLog = Logger(subsystem: "com.dsm.orientation", category: "lock")
 
 // MARK: - Root
 
@@ -114,60 +119,60 @@ private struct LaunchAnimationView: View {
                     .allowsHitTesting(false)
             }
         }
-        .onAppear { startSequence() }
+        .onAppear {
+            launchLog.info("LaunchAnimationView appeared — starting sequence")
+            Task { await runSequence() }
+        }
     }
 
-    private func startSequence() {
-        // Phase 1: All three rings spin continuously for ~1.2s
-        // Ring 1 (inner): clockwise, fast
-        // Ring 2 (middle): counter-clockwise, medium
-        // Ring 3 (outer): clockwise, slow
-
+    /// Animation sequence using structured concurrency so sleep intervals are
+    /// relative to the *previous step finishing*, not wall-clock launch time.
+    /// DispatchQueue.asyncAfter was unreliable — when the main thread was busy
+    /// at launch (keychain reads, URL init, etc.) all deadlines fired at once,
+    /// compressing or skipping the entire sequence.
+    @MainActor
+    private func runSequence() async {
+        launchLog.info("Phase 1: rings spinning")
         withAnimation(.linear(duration: 1.2)) {
-            ring1Rotation = 360 * 2.5    // clockwise, faster
-            ring2Rotation = -(360 * 1.8) // counter-clockwise
-            ring3Rotation = 360 * 1.3    // clockwise, slower
+            ring1Rotation = 360 * 2.5    // inner: clockwise fast
+            ring2Rotation = -(360 * 1.8) // middle: counter-clockwise
+            ring3Rotation = 360 * 1.3    // outer: clockwise slow
         }
 
-        // Phase 2–4: Snap each ring so its gap aligns to the right (0° = 3 o'clock in SwiftUI).
-        // RingArc is drawn with the gap at the right at rest, so target = 0 (mod 360).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.25) {
-            withAnimation(.easeOut(duration: 0.18)) {
-                ring1Rotation = snapToGapAngle(current: ring1Rotation, target: 0)
-                ring1Aligned = true
-            }
+        try? await Task.sleep(for: .milliseconds(1250))
+        launchLog.info("Phase 2: snapping ring 1 (inner)")
+        withAnimation(.easeOut(duration: 0.18)) {
+            ring1Rotation = snapToGapAngle(current: ring1Rotation, target: 0)
+            ring1Aligned = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.48) {
-            withAnimation(.easeOut(duration: 0.15)) {
-                ring2Rotation = snapToGapAngle(current: ring2Rotation, target: 0)
-                ring2Aligned = true
-            }
+        try? await Task.sleep(for: .milliseconds(230))
+        launchLog.info("Phase 3: snapping ring 2 (middle)")
+        withAnimation(.easeOut(duration: 0.15)) {
+            ring2Rotation = snapToGapAngle(current: ring2Rotation, target: 0)
+            ring2Aligned = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.65) {
-            withAnimation(.easeOut(duration: 0.15)) {
-                ring3Rotation = snapToGapAngle(current: ring3Rotation, target: 0)
-                ring3Aligned = true
-            }
+        try? await Task.sleep(for: .milliseconds(170))
+        launchLog.info("Phase 4: snapping ring 3 (outer)")
+        withAnimation(.easeOut(duration: 0.15)) {
+            ring3Rotation = snapToGapAngle(current: ring3Rotation, target: 0)
+            ring3Aligned = true
         }
 
-        // Phase 5: Laser fires — no withAnimation wrapper; LaserView drives its own beam animation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.85) {
-            laserVisible = true
+        try? await Task.sleep(for: .milliseconds(200))
+        launchLog.info("Phase 5: laser firing")
+        laserVisible = true
+
+        try? await Task.sleep(for: .milliseconds(200))
+        launchLog.info("Phase 6: white flash")
+        withAnimation(.easeIn(duration: 0.08)) {
+            flashIntensity = 1.0
         }
 
-        // Phase 6: Flash
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.05) {
-            withAnimation(.easeIn(duration: 0.08)) {
-                flashIntensity = 1.0
-            }
-        }
-
-        // Phase 7: Complete
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.18) {
-            onComplete()
-        }
+        try? await Task.sleep(for: .milliseconds(130))
+        launchLog.info("Phase 7: sequence complete — handing off to app")
+        onComplete()
     }
 
     /// Returns a rotation angle that puts the gap at `target` degrees,

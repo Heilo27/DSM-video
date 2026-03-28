@@ -1,10 +1,13 @@
 import AVKit
 import Combine
 import SwiftUI
+import os.log
 
 #if os(iOS) || os(tvOS)
 import MediaPlayer
 #endif
+
+private let orientLog = Logger(subsystem: "com.dsm.orientation", category: "player")
 
 /// A custom video player with gesture-based controls:
 /// - Horizontal swipe/pan to scrub through video
@@ -920,16 +923,20 @@ private extension GestureVideoPlayer {
     // MARK: - Helpers
 
     #if os(iOS)
-    /// Locks orientation to landscape. Uses setNeedsUpdateOfSupportedInterfaceOrientations
-    /// so UIKit rotates on its own next layout pass rather than competing with the
-    /// fullScreenCover presentation animation. requestGeometryUpdate was the root cause
-    /// of the gesture-gate timeouts and touch freezes.
+    /// Locks orientation to landscape when the player appears.
+    /// Uses setNeedsUpdateOfSupportedInterfaceOrientations (declarative) so UIKit
+    /// rotates on its own next layout pass without competing with the fullScreenCover
+    /// presentation animation. requestGeometryUpdate (imperative) was the root cause
+    /// of gesture-gate timeouts and multi-minute touch freezes.
     private func lockLandscape() {
+        orientLog.info("GestureVideoPlayer: locking landscape (onAppear)")
         AppDelegate.setOrientation(.landscape)
     }
 
     /// Restores portrait lock when the player dismisses.
+    /// Called from: dismiss button tap, onDisappear safety catch.
     private func unlockOrientation() {
+        orientLog.info("GestureVideoPlayer: restoring portrait (dismiss)")
         AppDelegate.setOrientation(.portrait)
     }
 
