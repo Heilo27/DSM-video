@@ -9,6 +9,7 @@ struct TVPairingView: View {
   @State private var error: String?
   @State private var countdown: Int = 0
   @State private var countdownTask: Task<Void, Never>?
+  @State private var showManualLogin: Bool = false
 
   var body: some View {
     ZStack {
@@ -125,8 +126,21 @@ struct TVPairingView: View {
           .buttonStyle(.borderedProminent)
           .tint(Color.dsAccent)
         }
+
+
+        // Manual login fallback
+        Button("Sign in manually") {
+          showManualLogin = true
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 19))
+        .foregroundStyle(Color.dsTextSecondary)
+        .padding(.top, 40)
       }
       .padding(60)
+    }
+    .fullScreenCover(isPresented: $showManualLogin) {
+      TVLoginView()
     }
     .onAppear {
       if pairingCode == nil && !isGenerating {
@@ -145,6 +159,12 @@ struct TVPairingView: View {
 
     countdownTask?.cancel()
     countdownTask = nil
+
+    if appState.isDemoMode {
+      pairingCode = "DEMO-1234"
+      countdown = 600
+      return
+    }
 
     await appState.generatePairingCode()
 

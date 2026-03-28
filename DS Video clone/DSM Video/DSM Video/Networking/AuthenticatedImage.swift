@@ -1,6 +1,8 @@
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
 #endif
 
 // MARK: - Image Cache (UIKit platforms only)
@@ -63,7 +65,7 @@ struct AuthenticatedImage: View {
   let url: URL?
   let token: String?
 
-  #if canImport(UIKit)
+  #if canImport(UIKit) || canImport(AppKit)
   @State private var image: Image?
   @State private var isLoading: Bool = false
   @State private var didFail: Bool = false
@@ -72,7 +74,7 @@ struct AuthenticatedImage: View {
   var body: some View {
     #if canImport(UIKit)
     uiKitBody
-    #else
+    #elseif canImport(AppKit)
     macOSBody
     #endif
   }
@@ -172,51 +174,63 @@ struct AuthenticatedImage: View {
   }
   #endif
 
-  // MARK: - macOS fallback (no UIKit, no cache)
+  // MARK: - macOS (AppKit-backed, authenticated fetch)
 
-  #if !canImport(UIKit)
-  /// On macOS, fall back to AsyncImage which handles auth headers via URLSession.
-  /// No in-memory cache — macOS usage is secondary and URL-session-level caching applies.
+  #if canImport(AppKit)
+  /// On macOS, manually fetch with auth headers — AsyncImage(url:) cannot pass custom headers
+  /// and will receive HTTP 401 from Video Station / REST endpoints that require auth.
   private var macOSBody: some View {
     Group {
-      if let url {
-        AsyncImage(url: url) { phase in
-          switch phase {
-          case .empty:
-            Rectangle()
-              .fill(.white.opacity(0.12))
-              .overlay {
-                ProgressView()
-                  .tint(.white)
-              }
-          case .success(let loadedImage):
-            loadedImage
-              .resizable()
-          case .failure:
-            Rectangle()
-              .fill(.white.opacity(0.12))
-              .overlay {
-                Image(systemName: "photo")
-                  .font(.title)
-                  .foregroundStyle(.white.opacity(0.3))
-                  .accessibilityLabel("Image unavailable")
-              }
-          @unknown default:
-            Rectangle()
-              .fill(.white.opacity(0.12))
-          }
-        }
+      if let image {
+        image
+          .resizable()
       } else {
         Rectangle()
           .fill(.white.opacity(0.12))
           .overlay {
-            Image(systemName: "photo")
-              .font(.title)
-              .foregroundStyle(.white.opacity(0.3))
-              .accessibilityLabel("Image unavailable")
+            if isLoading {
+              ProgressView()
+                .tint(.white)
+            } else if didFail || url == nil {
+              Image(systemName: "photo")
+                .font(.title)
+                .foregroundStyle(.white.opacity(0.3))
+                .accessibilityLabel("Image unavailable")
+            }
           }
+          .task { await loadIfNeeded() }
       }
     }
+  }
+
+  private func loadIfNeeded() async {
+    guard let url, !isLoading, image == nil else { return }
+    isLoading = true
+
+    var req = URLRequest(url: url)
+    if url.absoluteString.contains("_sid=") {
+      // Video Station: session ID already in URL, no header needed
+    } else if let token {
+      req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+
+    do {
+      let (data, response) = try await URLSession.shared.data(for: req)
+      if let httpResponse = response as? HTTPURLResponse,
+         httpResponse.statusCode != 200 {
+        didFail = true
+        isLoading = false
+        return
+      }
+      if let nsImage = NSImage(data: data) {
+        image = Image(nsImage: nsImage)
+      } else {
+        didFail = true
+      }
+    } catch {
+      didFail = true
+    }
+    isLoading = false
   }
   #endif
 }

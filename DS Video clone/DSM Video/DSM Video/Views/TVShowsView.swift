@@ -1,5 +1,31 @@
 import SwiftUI
 
+// MARK: - Sort Option
+
+enum TVShowSortOption: String, CaseIterable {
+  case recentlyWatched = "Recently Watched"
+  case addedNewest     = "Recently Added"
+  case addedOldest     = "Oldest Added"
+  case nameAsc         = "Name A–Z"
+  case nameDesc        = "Name Z–A"
+  case releaseNewest   = "Release Year ↓"
+  case releaseOldest   = "Release Year ↑"
+
+  var chipLabel: String {
+    switch self {
+    case .recentlyWatched: return "Watched"
+    case .addedNewest:     return "Added ↓"
+    case .addedOldest:     return "Added ↑"
+    case .nameAsc:         return "A → Z"
+    case .nameDesc:        return "Z → A"
+    case .releaseNewest:   return "Year ↓"
+    case .releaseOldest:   return "Year ↑"
+    }
+  }
+}
+
+// MARK: - TVShowsView
+
 struct TVShowsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -8,6 +34,10 @@ struct TVShowsView: View {
   @State private var shows: [TVShow] = []
   @State private var isLoading = false
   @State private var error: String?
+  @State private var sortOption: TVShowSortOption = {
+    let raw = UserDefaults.standard.string(forKey: "dsReel.tvSortOption") ?? ""
+    return TVShowSortOption(rawValue: raw) ?? .recentlyWatched
+  }()
 
   #if os(tvOS)
   private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 28)] }
@@ -17,6 +47,34 @@ struct TVShowsView: View {
     return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
   }
   #endif
+
+  private var sortedShows: [TVShow] {
+    switch sortOption {
+    case .recentlyWatched:
+      return shows.sorted { a, b in
+        let aDate = a.lastWatchedAt ?? ""
+        let bDate = b.lastWatchedAt ?? ""
+        if aDate.isEmpty && bDate.isEmpty {
+          return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
+        }
+        if aDate.isEmpty { return false }
+        if bDate.isEmpty { return true }
+        return aDate > bDate
+      }
+    case .addedNewest:
+      return shows
+    case .addedOldest:
+      return shows.reversed()
+    case .nameAsc:
+      return shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    case .nameDesc:
+      return shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
+    case .releaseNewest:
+      return shows.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+    case .releaseOldest:
+      return shows.sorted { ($0.year ?? Int.max) < ($1.year ?? Int.max) }
+    }
+  }
 
   var body: some View {
     ScrollView {
@@ -52,7 +110,7 @@ struct TVShowsView: View {
       } else {
         #if os(tvOS)
         LazyVGrid(columns: columns, spacing: 44) {
-          ForEach(shows) { show in
+          ForEach(sortedShows) { show in
             NavigationLink {
               TVShowDetailView(show: show, library: library)
             } label: {
@@ -67,7 +125,7 @@ struct TVShowsView: View {
         .padding(.vertical, 48)
         #else
         LazyVGrid(columns: columns, spacing: 12) {
-          ForEach(shows) { show in
+          ForEach(sortedShows) { show in
             NavigationLink {
               TVShowDetailView(show: show, library: library)
             } label: {
@@ -85,8 +143,34 @@ struct TVShowsView: View {
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(library.title)
     .task { await load() }
+    .onAppear {
+      if !shows.isEmpty { Task { await load() } }
+    }
     #if !os(tvOS)
     .refreshable { await load() }
+    .safeAreaInset(edge: .top, spacing: 0) {
+      TVShowSortChipBar(selection: $sortOption)
+    }
+    .onChange(of: sortOption) { _, new in
+      UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
+    }
+    #else
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+          Picker("Sort", selection: $sortOption) {
+            ForEach(TVShowSortOption.allCases, id: \.self) { option in
+              Text(option.rawValue).tag(option)
+            }
+          }
+        } label: {
+          Label("Sort", systemImage: "arrow.up.arrow.down.circle")
+        }
+      }
+    }
+    .onChange(of: sortOption) { _, new in
+      UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
+    }
     #endif
   }
 
@@ -109,6 +193,42 @@ struct TVShowsView: View {
   }
 }
 
+// MARK: - Sort Chip Bar (iOS/macOS only)
+
+#if !os(tvOS)
+private struct TVShowSortChipBar: View {
+  @Binding var selection: TVShowSortOption
+
+  var body: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        ForEach(TVShowSortOption.allCases, id: \.self) { option in
+          Button {
+            selection = option
+          } label: {
+            Text(option.chipLabel)
+              .font(.subheadline.weight(.medium))
+              .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
+              .padding(.horizontal, 12)
+              .padding(.vertical, 6)
+              .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                  .fill(selection == option ? Color.dsAccent : Color.dsSurface)
+              )
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Sort by \(option.chipLabel)")
+          .accessibilityAddTraits(selection == option ? .isSelected : [])
+        }
+      }
+      .padding(.horizontal, 16)
+      .padding(.vertical, 8)
+    }
+    .background(Color.black.opacity(0.95))
+  }
+}
+#endif
+
 // MARK: - Poster Cell
 
 private struct TVShowPosterCell: View {
@@ -122,7 +242,13 @@ private struct TVShowPosterCell: View {
 
       ZStack(alignment: .bottom) {
         // Poster image
-        if let id = show.posterImageId {
+        if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
+          Image(assetName)
+            .resizable()
+            .scaledToFill()
+            .frame(width: width, height: height)
+            .clipped()
+        } else if let id = show.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: id, width: 400),
             token: appState.sessionToken

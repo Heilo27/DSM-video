@@ -7,6 +7,8 @@ struct ItemDetailView: View {
   @State private var downloadManager = DownloadManager.shared
   let itemID: String
   let fallbackTitle: String
+  var nextEpisode: ItemSummary? = nil
+  var onNextEpisode: (() -> Void)? = nil
 
   @State private var detail: ItemDetail?
   @State private var isLoading: Bool = false
@@ -14,7 +16,9 @@ struct ItemDetailView: View {
 
   @State private var showPlayer: Bool = false
   @State private var showDemoAlert: Bool = false
+  @State private var showNoTrailerAlert: Bool = false
   @State private var isStartingDownload: Bool = false
+  @State private var showMetadataFixer: Bool = false
 
   private var isDownloaded: Bool {
     downloadManager.isDownloaded(itemId: itemID)
@@ -65,14 +69,73 @@ struct ItemDetailView: View {
             // Download icon button (iOS only)
             #if !os(tvOS)
             downloadIconButton
+
+            // Trailer icon button (iOS only)
+            Button {
+              showNoTrailerAlert = true
+            } label: {
+              Image(systemName: "film")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 52, height: 52)
+            }
+            .background(Color(white: 0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityLabel("Trailer")
+            // TODO: Replace alert with actual trailer playback when TMDB integration is added
             #endif
           }
+
+          // Next Episode button (TV show context only)
+          #if !os(tvOS)
+          if let next = nextEpisode, let action = onNextEpisode {
+            Button {
+              action()
+            } label: {
+              HStack(spacing: 10) {
+                Image(systemName: "forward.end.fill")
+                  .font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                  Text("Next Episode")
+                    .font(.subheadline.weight(.semibold))
+                  Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(.white.opacity(0.5))
+              }
+              .foregroundStyle(.white)
+              .padding(.horizontal, 14)
+              .padding(.vertical, 10)
+              .frame(maxWidth: .infinity, minHeight: 52)
+              .background(Color(white: 0.12))
+              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
+            .accessibilityHint("Opens episode detail")
+          }
+          #endif
 
           if let summary = detail?.summary, !summary.isEmpty {
             Text(summary)
               .font(.body)
               .foregroundStyle(.white.opacity(0.88))
               .fixedSize(horizontal: false, vertical: true)
+          }
+
+          if let director = detail?.cast.first(where: { $0.role == "Director" }) {
+            HStack(spacing: 4) {
+              Text("Dir.")
+                .foregroundStyle(Color.dsTextSecondary)
+              Text(director.name)
+                .foregroundStyle(Color.dsTextSecondary)
+            }
+            .font(.subheadline)
           }
 
           if let cast = detail?.cast, !cast.isEmpty {
@@ -96,7 +159,7 @@ struct ItemDetailView: View {
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
     #endif
-    .task { await load() }
+    .task(id: itemID) { await load() }
     .fullScreenCover(isPresented: $showPlayer) {
       PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
         .environment(appState)
@@ -106,6 +169,32 @@ struct ItemDetailView: View {
     } message: {
       Text("Video playback is not available in the demo. In the real app, this button streams directly from your Synology NAS.")
     }
+    .alert("No Trailer Available", isPresented: $showNoTrailerAlert) {
+      Button("OK", role: .cancel) { }
+    } message: {
+      Text("Trailer support coming soon.")
+    }
+    #if !os(tvOS)
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+          Button("Fix Metadata", systemImage: "magnifyingglass") {
+            showMetadataFixer = true
+          }
+        } label: {
+          Image(systemName: "ellipsis.circle")
+        }
+      }
+    }
+    .sheet(isPresented: $showMetadataFixer) {
+      MetadataFixerSheet(itemID: itemID, initialQuery: detail?.title ?? fallbackTitle) {
+        // Reload detail after fix applied
+        detail = nil
+        Task { await load() }
+      }
+      .environment(appState)
+    }
+    #endif
   }
 
   // MARK: - Header
@@ -140,6 +229,26 @@ struct ItemDetailView: View {
           .frame(maxWidth: .infinity, minHeight: backdropHeight)
           .frame(height: backdropHeight, alignment: .top)
           .clipped()
+          #if !os(tvOS)
+          .overlay(alignment: .topTrailing) {
+            if !appState.isDemoMode,
+               (detail?.summary == nil || detail?.summary?.isEmpty == true),
+               detail?.images.backdrop.id == nil {
+              Button {
+                showMetadataFixer = true
+              } label: {
+                Text("No metadata · Fix")
+                  .font(.caption2.weight(.semibold))
+                  .foregroundStyle(.white)
+                  .padding(.horizontal, 8)
+                  .padding(.vertical, 4)
+                  .background(Color.black.opacity(0.7))
+                  .clipShape(Capsule())
+              }
+              .padding(10)
+            }
+          }
+          #endif
 
         // Gradient fade to black at bottom
         LinearGradient(
@@ -203,11 +312,12 @@ struct ItemDetailView: View {
   @ViewBuilder
   private var metadataPills: some View {
     let year = detail?.year
-    let rating = detail?.contentRating
+    let contentRating = detail?.contentRating
+    let starRating = detail?.rating
     let genres = detail?.genres ?? []
     let durationSeconds = detail?.durationSeconds
 
-    if year != nil || rating != nil || !genres.isEmpty || durationSeconds != nil {
+    if year != nil || contentRating != nil || starRating != nil || !genres.isEmpty || durationSeconds != nil {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 8) {
           if let year {
@@ -216,8 +326,22 @@ struct ItemDetailView: View {
           if let secs = durationSeconds, secs > 0 {
             MetadataPill(text: formatDuration(secs))
           }
-          if let rating, !rating.isEmpty {
-            MetadataPill(text: rating)
+          if let contentRating, !contentRating.isEmpty {
+            MetadataPill(text: contentRating)
+          }
+          if let starRating {
+            HStack(spacing: 3) {
+              Image(systemName: "star.fill")
+                .foregroundStyle(Color.dsWarning)
+                .font(.caption.weight(.medium))
+              Text(String(format: "%.1f", starRating))
+                .foregroundStyle(.white.opacity(0.85))
+                .font(.caption.weight(.medium))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color(white: 0.16))
+            .clipShape(Capsule())
           }
           ForEach(genres, id: \.self) { genre in
             MetadataPill(text: genre)
@@ -276,6 +400,7 @@ struct ItemDetailView: View {
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     .disabled(isStartingDownload && !isDownloading)
     .accessibilityLabel(isDownloaded ? "Remove download" : isDownloading ? "Cancel download" : "Download")
+    .accessibilityValue(isDownloading && downloadProgress > 0 && downloadProgress < 1 ? "\(Int(downloadProgress * 100)) percent downloaded" : "")
   }
 
   // MARK: - Cast Section
@@ -286,7 +411,7 @@ struct ItemDetailView: View {
       Text("Cast")
         .font(.headline)
         .foregroundStyle(.white)
-      ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
+      ForEach(Array(cast.enumerated()), id: \.element.name) { _, person in
         HStack {
           Text(person.name)
             .foregroundStyle(.white)
@@ -304,6 +429,7 @@ struct ItemDetailView: View {
   // MARK: - Data
 
   private func load() async {
+    detail = nil
     guard !isLoading else { return }
     if appState.isDemoMode {
       detail = DemoData.detail(for: itemID)
@@ -329,6 +455,7 @@ struct ItemDetailView: View {
       // Get playback info to get the video URL
       let info = try await appState.api.playback(id: itemID)
       guard let videoURL = info.streamUrl ?? info.hlsMasterUrl else {
+        self.error = "No playable URL available for download."
         return
       }
 
@@ -355,6 +482,144 @@ struct ItemDetailView: View {
     }
   }
 }
+
+// MARK: - Metadata Fixer Sheet
+
+#if !os(tvOS)
+private struct MetadataFixerSheet: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
+
+  let itemID: String
+  let initialQuery: String
+  let onApplied: () -> Void
+
+  @State private var searchQuery: String
+  @State private var results: [TMDbCandidate] = []
+  @State private var isSearching = false
+  @State private var isApplying = false
+  @State private var error: String?
+  @State private var applied = false
+
+  init(itemID: String, initialQuery: String, onApplied: @escaping () -> Void) {
+    self.itemID = itemID
+    self.initialQuery = initialQuery
+    self.onApplied = onApplied
+    _searchQuery = State(initialValue: initialQuery)
+  }
+
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          TextField("Search TMDb...", text: $searchQuery)
+            .onSubmit { Task { await search() } }
+            .foregroundStyle(.white)
+        }
+        .listRowBackground(Color(white: 0.12))
+
+        if isSearching {
+          HStack {
+            Spacer()
+            ProgressView().tint(.white)
+            Spacer()
+          }
+          .listRowBackground(Color(white: 0.08))
+        } else {
+          ForEach(results) { candidate in
+            Button {
+              Task { await apply(candidate) }
+            } label: {
+              HStack(spacing: 12) {
+                AsyncImage(url: candidate.posterURL) { img in
+                  img.resizable().scaledToFill()
+                } placeholder: {
+                  Color(white: 0.15)
+                }
+                .frame(width: 50, height: 75)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 4) {
+                  Text(candidate.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                  if let year = candidate.year {
+                    Text(String(year))
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                  }
+                  if let overview = candidate.overview, !overview.isEmpty {
+                    Text(overview)
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                      .lineLimit(3)
+                  }
+                }
+              }
+            }
+            .buttonStyle(.plain)
+            .disabled(isApplying)
+            .listRowBackground(Color(white: 0.1))
+          }
+        }
+
+        if let error {
+          Text(error)
+            .foregroundStyle(.red)
+            .font(.caption)
+            .listRowBackground(Color(white: 0.08))
+        }
+        if applied {
+          Text("Metadata updated! Pull to refresh.")
+            .foregroundStyle(.green)
+            .font(.caption)
+            .listRowBackground(Color(white: 0.08))
+        }
+      }
+      .navigationTitle("Fix Metadata")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .topBarLeading) {
+          Button("Cancel") { dismiss() }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+          Button("Search") { Task { await search() } }
+            .disabled(isSearching)
+        }
+      }
+      .task { await search() }
+      .scrollContentBackground(.hidden)
+      .background(Color.black)
+    }
+  }
+
+  private func search() async {
+    guard !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+    isSearching = true
+    error = nil
+    defer { isSearching = false }
+    do {
+      let resp = try await appState.api.tmdbSearch(itemId: itemID, query: searchQuery)
+      results = resp.results
+    } catch {
+      self.error = (error as? APIError)?.userMessage ?? "Search failed."
+    }
+  }
+
+  private func apply(_ candidate: TMDbCandidate) async {
+    isApplying = true
+    defer { isApplying = false }
+    do {
+      try await appState.api.tmdbFix(itemId: itemID, tmdbId: candidate.tmdbId, type: candidate.type)
+      applied = true
+      onApplied()
+      dismiss()
+    } catch {
+      self.error = (error as? APIError)?.userMessage ?? "Failed to apply."
+    }
+  }
+}
+#endif
 
 // MARK: - Metadata Pill
 
@@ -409,13 +674,22 @@ private struct PlayerSheet: View {
                 positionSeconds: lastSyncedPosition
               )
             } else {
-              // Save final position to the server for online items
+              // Save final position to the server for online items.
+              // Task is unavoidable here since onDismiss is a sync closure.
+              // dismiss() has already been called by GestureVideoPlayer before this fires,
+              // so we do NOT call dismiss() inside the Task.
+              let positionAtDismiss = lastSyncedPosition
+              let durationAtDismiss = lastKnownDuration
               Task {
-                try? await appState.api.setProgress(
-                  id: itemID,
-                  positionSeconds: lastSyncedPosition,
-                  durationSeconds: lastKnownDuration
-                )
+                do {
+                  try await appState.api.setProgress(
+                    id: itemID,
+                    positionSeconds: positionAtDismiss,
+                    durationSeconds: durationAtDismiss
+                  )
+                } catch {
+                  print("[PlayerSheet] Failed to save final progress: \(error)")
+                }
               }
             }
             dismiss()

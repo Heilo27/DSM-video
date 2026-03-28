@@ -7,6 +7,17 @@ enum SortOption: String, CaseIterable {
   case nameDesc     = "Name Z–A"
   case releaseNewest = "Release Year ↓"
   case releaseOldest = "Release Year ↑"
+
+  var chipLabel: String {
+    switch self {
+    case .addedNewest:  return "Added ↓"
+    case .addedOldest:  return "Added ↑"
+    case .nameAsc:      return "A → Z"
+    case .nameDesc:     return "Z → A"
+    case .releaseNewest: return "Year ↓"
+    case .releaseOldest: return "Year ↑"
+    }
+  }
 }
 
 struct ItemsGridView: View {
@@ -84,8 +95,18 @@ struct ItemsGridView: View {
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(library.title)
     .task { await load() }
+    .onAppear {
+      if !items.isEmpty { Task { await load() } }
+    }
     #if !os(tvOS)
     .refreshable { await load() }
+    .safeAreaInset(edge: .top, spacing: 0) {
+      SortChipBar(selection: $sortOption)
+    }
+    .onChange(of: sortOption) { _, new in
+      UserDefaults.standard.set(new.rawValue, forKey: "dsReel.sortOption")
+    }
+    #else
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
         Menu {
@@ -153,6 +174,42 @@ struct ItemsGridView: View {
   }
 }
 
+// MARK: - Sort Chip Bar (iOS/macOS only)
+
+#if !os(tvOS)
+private struct SortChipBar: View {
+  @Binding var selection: SortOption
+
+  var body: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        ForEach(SortOption.allCases, id: \.self) { option in
+          Button {
+            selection = option
+          } label: {
+            Text(option.chipLabel)
+              .font(.subheadline.weight(.medium))
+              .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
+              .padding(.horizontal, 12)
+              .padding(.vertical, 6)
+              .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                  .fill(selection == option ? Color.dsAccent : Color.dsSurface)
+              )
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Sort by \(option.chipLabel)")
+          .accessibilityAddTraits(selection == option ? .isSelected : [])
+        }
+      }
+      .padding(.horizontal, 16)
+      .padding(.vertical, 8)
+    }
+    .background(Color.black.opacity(0.95))
+  }
+}
+#endif
+
 struct ItemPosterCell: View {
   @Environment(AppState.self) private var appState
   let item: ItemSummary
@@ -210,7 +267,13 @@ struct ItemPosterCell: View {
 
   @ViewBuilder
   private func posterImage(width: CGFloat, height: CGFloat) -> some View {
-    if item.posterImageId != nil {
+    if appState.isDemoMode, let assetName = DemoData.posterAssetNames[item.id] {
+      Image(assetName)
+        .resizable()
+        .scaledToFill()
+        .frame(width: width, height: height)
+        .clipped()
+    } else if item.posterImageId != nil {
       AuthenticatedImage(
         url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400),
         token: appState.sessionToken

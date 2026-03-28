@@ -68,6 +68,7 @@ struct TVShow: Decodable, Identifiable, Hashable {
   let seasonCount: Int
   let episodeCount: Int
   let posterImageId: String?
+  let lastWatchedAt: String?
 }
 
 struct TVShowsResponse: Decodable {
@@ -108,6 +109,7 @@ struct ItemDetail: Decodable, Identifiable {
   let year: Int?
   let durationSeconds: Int?
   let contentRating: String?
+  let rating: Double?
   let summary: String?
   let genres: [String]
   let cast: [Person]
@@ -133,6 +135,28 @@ struct ProgressRequest: Encodable {
 
 struct ProgressResponse: Decodable {
   let ok: Bool
+}
+
+// MARK: - TMDb Manual Fix
+
+struct TMDbCandidate: Decodable, Identifiable {
+  let tmdbId: Int
+  let title: String
+  let year: Int?
+  let overview: String?
+  let posterPath: String?
+  let type: String
+
+  var id: Int { tmdbId }
+
+  var posterURL: URL? {
+    guard let path = posterPath, !path.isEmpty else { return nil }
+    return URL(string: "https://image.tmdb.org/t/p/w342\(path)")
+  }
+}
+
+struct TMDbSearchResponse: Decodable {
+  let results: [TMDbCandidate]
 }
 
 // MARK: - Pairing

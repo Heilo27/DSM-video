@@ -357,7 +357,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
     } catch {
       return // Nothing we can do — temp file couldn't be preserved
     }
-    MainActor.assumeIsolated {
+    Task { @MainActor in
       guard let itemId = downloadTasks[downloadTask] else {
         try? FileManager.default.removeItem(at: stableCopy)
         return
@@ -368,7 +368,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
   }
 
   nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-    MainActor.assumeIsolated {
+    Task { @MainActor in
       guard let itemId = downloadTasks[downloadTask] else { return }
       let progress = totalBytesExpectedToWrite > 0
         ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
@@ -379,7 +379,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
   nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard let downloadTask = task as? URLSessionDownloadTask else { return }
-    MainActor.assumeIsolated {
+    Task { @MainActor in
       guard let itemId = downloadTasks[downloadTask] else { return }
       if error != nil {
         activeDownloads.removeValue(forKey: itemId)

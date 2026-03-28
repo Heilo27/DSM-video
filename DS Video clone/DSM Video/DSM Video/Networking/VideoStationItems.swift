@@ -189,6 +189,7 @@ extension VideoStationWebAPIClient {
             year: vsItem.year,
             durationSeconds: vsItem.duration,
             contentRating: vsItem.rating,
+            rating: nil,
             summary: vsItem.summary,
             genres: vsItem.genres ?? [],
             cast: (vsItem.actors ?? []).map { actor in

@@ -23,6 +23,7 @@ struct GestureVideoPlayer: View {
     @State private var player: AVPlayer?
     @State private var isPlaying: Bool = false
     @State private var showControls: Bool = true
+    @State private var controlsInteractive: Bool = true
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
     @State private var playbackRate: Float = 1.0
@@ -64,93 +65,58 @@ struct GestureVideoPlayer: View {
     @State private var timeObserver: Any?
     @State private var cancellables = Set<AnyCancellable>()
     @State private var hasResumedPosition: Bool = false
+    @State private var showCaptionsPicker: Bool = false
 
-    private let skipSeconds: Double = 15
+    private let skipSeconds: Double = 30
 
     enum SkipDirection {
         case backward, forward
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                Color.black.ignoresSafeArea()
-
-                // Video layer
-                if let player {
-                    if videoFillMode == .fill {
-                        VideoPlayerLayer(player: player, gravity: .resizeAspectFill)
-                            .ignoresSafeArea()
-                    } else {
-                        VideoPlayerLayer(player: player, gravity: .resizeAspect)
-                    }
-                }
-
-                // Gesture overlay
-                gestureOverlay(geometry: geometry)
-
-                // Controls overlay
-                controlsOverlay(geometry: geometry)
-                    .opacity(showControls ? 1 : 0)
-                    .allowsHitTesting(showControls)
-
-                // Scrub preview
-                if showScrubPreview {
-                    scrubPreviewOverlay
-                }
-
-                // Volume indicator
-                if showVolumeIndicator {
-                    volumeIndicatorOverlay
-                }
-
+        playerContent
+            .onAppear {
+                setupPlayer()
+                setupVolumeObserver()
                 #if os(iOS)
-                // Brightness indicator
-                if showBrightnessIndicator {
-                    brightnessIndicatorOverlay
-                }
+                lockLandscape()
                 #endif
+            }
+            .onDisappear {
+                cleanup()
+                #if os(iOS)
+                unlockOrientation()
+                #endif
+            }
+            #if os(iOS)
+            .statusBarHidden(true)
+            .persistentSystemOverlays(.hidden)
+            .onKeyPress(.space) {
+                togglePlayPause()
+                return .handled
+            }
+            #endif
+    }
 
-                // Skip indicator
-                if let direction = showSkipIndicator {
-                    skipIndicatorOverlay(direction: direction)
-                }
-
-                // Buffering indicator
-                if isBuffering && !showScrubPreview && playerError == nil {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                        .tint(.white)
-                }
-
-                // Player error overlay
-                if let err = playerError {
-                    VStack(spacing: 16) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 44))
-                            .foregroundStyle(.white.opacity(0.8))
-                        Text("Playback Failed")
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                        Text(err)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.7))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 32)
-                        Button("Dismiss") { onDismiss?() }
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 10)
-                            .background(Color.white.opacity(0.2), in: Capsule())
-                    }
+    private var playerContent: some View {
+        let base = GeometryReader { geometry in
+            playerZStack(geometry: geometry)
+        }
+        .onChange(of: showControls) { _, newValue in
+            if newValue {
+                controlsInteractive = true
+            } else {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    controlsInteractive = false
                 }
             }
-            // Accessibility actions for gesture-based controls
-            .accessibilityElement(children: .contain)
-            .accessibilityAction(named: "Skip forward 15 seconds") { skipForward() }
-            .accessibilityAction(named: "Skip backward 15 seconds") { skipBackward() }
-            #if os(iOS)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Skip forward 30 seconds") { skipForward() }
+        .accessibilityAction(named: "Skip backward 30 seconds") { skipBackward() }
+        #if os(iOS)
+        return base
             .accessibilityAction(named: "Increase volume") {
                 volumeLevel = min(1, volumeLevel + 0.1)
                 setSystemVolume(volumeLevel)
@@ -169,30 +135,112 @@ struct GestureVideoPlayer: View {
                     screen.brightness = max(0, screen.brightness - 0.1)
                 }
             }
-            #endif
-        }
-        .onAppear {
-            setupPlayer()
-            setupVolumeObserver()
-            #if os(iOS)
-            lockLandscape()
-            #endif
-        }
-        .onDisappear {
-            cleanup()
-            #if os(iOS)
-            unlockOrientation()
-            #endif
-        }
-        #if os(iOS)
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
-        // Spacebar = play/pause for iPad with hardware keyboard
-        .onKeyPress(.space) {
-            togglePlayPause()
-            return .handled
-        }
+            .sheet(isPresented: $showCaptionsPicker) {
+                if let player {
+                    SubtitleAudioPickerView(player: player)
+                }
+            }
+        #elseif os(macOS)
+        return base
+            .sheet(isPresented: $showCaptionsPicker) {
+                if let player {
+                    SubtitleAudioPickerView(player: player)
+                }
+            }
+        #else
+        return base
         #endif
+    }
+
+    // MARK: - Player ZStack
+
+    @ViewBuilder
+    private func playerZStack(geometry: GeometryProxy) -> some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            // Video layer
+            if let player {
+                if videoFillMode == .fill {
+                    VideoPlayerLayer(player: player, gravity: .resizeAspectFill)
+                        .ignoresSafeArea()
+                } else {
+                    VideoPlayerLayer(player: player, gravity: .resizeAspect)
+                }
+            }
+
+            // Gesture overlay
+            gestureOverlay(geometry: geometry)
+
+            // Controls overlay
+            controlsOverlay(geometry: geometry)
+                .opacity(showControls ? 1 : 0)
+                .allowsHitTesting(controlsInteractive)
+
+            // Center play/pause button — positioned midway between screen top and progress bar
+            #if os(iOS)
+            centerPlayPauseButton(geometry: geometry)
+                .opacity(showControls ? 1 : 0)
+                .allowsHitTesting(controlsInteractive)
+            #endif
+
+            // Scrub preview
+            if showScrubPreview {
+                scrubPreviewOverlay
+            }
+
+            // Volume indicator
+            if showVolumeIndicator {
+                volumeIndicatorOverlay
+            }
+
+            #if os(iOS)
+            // Brightness indicator
+            if showBrightnessIndicator {
+                brightnessIndicatorOverlay
+            }
+            #endif
+
+            // Skip indicator
+            if let direction = showSkipIndicator {
+                skipIndicatorOverlay(direction: direction)
+            }
+
+            // Buffering indicator
+            if isBuffering && !showScrubPreview && playerError == nil {
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .tint(.white)
+            }
+
+            // Player error overlay
+            if let err = playerError {
+                errorOverlay(err: err)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func errorOverlay(err: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(.white.opacity(0.8))
+            Text("Playback Failed")
+                .font(.headline)
+                .foregroundStyle(.white)
+            Text(err)
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+            Button("Dismiss") { onDismiss?() }
+                .font(.headline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.2), in: Capsule())
+        }
     }
 
     // MARK: - Gesture Overlay
@@ -221,27 +269,101 @@ struct GestureVideoPlayer: View {
             .gesture(
                 SpatialTapGesture(count: 2)
                     .exclusively(before: SpatialTapGesture(count: 1))
-                    .onEnded { value in
-                        switch value {
-                        case .first(let tap):
-                            let x = tap.location.x
-                            if x < width * 0.3 {
-                                skipBackward()
-                            } else if x > width * 0.7 {
-                                skipForward()
-                            }
-                        case .second:
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                showControls.toggle()
-                            }
-                            if showControls {
-                                scheduleHideControls()
-                            }
-                        }
-                    }
+                    .onEnded { value in handleTap(value: value, width: width) }
             )
             #endif
     }
+
+    #if !os(tvOS)
+    private func handleTap(value: ExclusiveGesture<SpatialTapGesture, SpatialTapGesture>.Value, width: CGFloat) {
+        switch value {
+        case .first(let tap):
+            let x = tap.location.x
+            if x < width * 0.3 {
+                skipBackward()
+            } else if x > width * 0.7 {
+                skipForward()
+            } else {
+                togglePlayPause()
+                scheduleHideControls()
+            }
+        case .second:
+            if showControls {
+                // Tap on empty space — dismiss HUD
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    showControls = false
+                }
+                hideControlsTask?.cancel()
+            } else {
+                // HUD hidden — show it
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    showControls = true
+                }
+                scheduleHideControls()
+            }
+        }
+    }
+    #endif
+
+
+    // MARK: - Center Play/Pause Button
+
+    #if os(iOS)
+    @ViewBuilder
+    private func centerPlayPauseButton(geometry: GeometryProxy) -> some View {
+        // Bottom controls height: 40pt bottom pad + ~20pt progress bar = ~60pt
+        // Top bar height: ~80pt
+        // Center of the open space between them:
+        let bottomControlsHeight: CGFloat = 60
+        let topBarHeight: CGFloat = 80
+        let openSpaceCenter = topBarHeight + (geometry.size.height - topBarHeight - bottomControlsHeight) / 2
+
+        HStack(spacing: 48) {
+            // Skip backward
+            Button {
+                skipBackward()
+                scheduleHideControls()
+            } label: {
+                Image(systemName: "gobackward.30")
+                    .font(.system(size: 32, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 56, height: 56)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Skip backward 30 seconds")
+
+            // Play/pause
+            Button {
+                togglePlayPause()
+                scheduleHideControls()
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 64, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 88, height: 88)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isPlaying ? "Pause" : "Play")
+
+            // Skip forward
+            Button {
+                skipForward()
+                scheduleHideControls()
+            } label: {
+                Image(systemName: "goforward.30")
+                    .font(.system(size: 32, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 56, height: 56)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Skip forward 30 seconds")
+        }
+        .position(x: geometry.size.width / 2, y: openSpaceCenter)
+    }
+    #endif
 
     // MARK: - Controls Overlay
 
@@ -251,6 +373,7 @@ struct GestureVideoPlayer: View {
             // Top bar with gradient background
             HStack {
                 Button {
+                    onProgressUpdate?(currentTime, duration)
                     onDismiss?()
                 } label: {
                     Image(systemName: "chevron.down")
@@ -277,6 +400,20 @@ struct GestureVideoPlayer: View {
                     #if os(iOS)
                     AirPlayButton()
                         .frame(width: 28, height: 28)
+                    #endif
+
+                    // Captions / subtitle picker (iOS/macOS only)
+                    #if !os(tvOS)
+                    Button {
+                        showCaptionsPicker = true
+                        hideControlsTask?.cancel()
+                    } label: {
+                        Image(systemName: "captions.bubble")
+                            .font(.title3)
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                    }
+                    .accessibilityLabel("Subtitles and Audio")
                     #endif
 
                     // Fill mode toggle (iOS only — Dynamic Island concern)
@@ -334,92 +471,56 @@ struct GestureVideoPlayer: View {
 
             Spacer()
 
-            // Bottom controls
-            VStack(spacing: 12) {
-                // Progress bar
-                HStack(spacing: 12) {
-                    Text(formatTime(isScrubbing ? scrubTime : currentTime))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .frame(width: 50, alignment: .leading)
+            // Bottom controls — progress bar only
+            HStack(spacing: 12) {
+                Text(formatTime(isScrubbing ? scrubTime : currentTime))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 50, alignment: .leading)
 
-                    #if os(iOS)
-                    Slider(
-                        value: Binding(
-                            get: { isScrubbing ? scrubTime : currentTime },
-                            set: { newValue in
-                                scrubTime = newValue
-                                if !isScrubbing {
-                                    seek(to: newValue)
-                                }
+                #if os(iOS)
+                Slider(
+                    value: Binding(
+                        get: { isScrubbing ? scrubTime : currentTime },
+                        set: { newValue in
+                            scrubTime = newValue
+                            if !isScrubbing {
+                                seek(to: newValue)
                             }
-                        ),
-                        in: 0...max(duration, 1)
-                    ) { editing in
-                        isScrubbing = editing
-                        if !editing {
-                            seek(to: scrubTime)
                         }
+                    ),
+                    in: 0...max(duration, 1)
+                ) { editing in
+                    isScrubbing = editing
+                    if !editing {
+                        seek(to: scrubTime)
                     }
-                    .tint(.white)
-                    .scaleEffect(y: 1.3)
-                    .accessibilityLabel("Playback position")
-                    .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
-                    #else
-                    // tvOS: progress bar only (no interactive Slider)
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.3)).frame(height: 4)
-                            Capsule().fill(Color.white)
-                                .frame(width: geo.size.width * (duration > 0 ? (isScrubbing ? scrubTime : currentTime) / max(duration, 1) : 0), height: 4)
-                        }
-                    }
-                    .frame(height: 4)
-                    .accessibilityLabel("Playback position")
-                    .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
-                    #endif
-
-                    Text("-\(formatTime(duration - (isScrubbing ? scrubTime : currentTime)))")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .frame(width: 50, alignment: .trailing)
                 }
-
-                // Transport controls
-                HStack(spacing: 40) {
-                    Button {
-                        skipBackward()
-                    } label: {
-                        Image(systemName: "gobackward.15")
-                            .font(.title2)
-                            .foregroundStyle(.white)
+                .tint(.white)
+                .scaleEffect(y: 1.3)
+                .accessibilityLabel("Playback position")
+                .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
+                #else
+                // tvOS: progress bar only (no interactive Slider)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.3)).frame(height: 4)
+                        Capsule().fill(Color.white)
+                            .frame(width: geo.size.width * (duration > 0 ? (isScrubbing ? scrubTime : currentTime) / max(duration, 1) : 0), height: 4)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Skip backward 15 seconds")
-
-                    Button {
-                        togglePlayPause()
-                    } label: {
-                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                            .font(.title)
-                            .foregroundStyle(.white)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
-
-                    Button {
-                        skipForward()
-                    } label: {
-                        Image(systemName: "goforward.15")
-                            .font(.title2)
-                            .foregroundStyle(.white)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Skip forward 15 seconds")
                 }
+                .frame(height: 4)
+                .accessibilityLabel("Playback position")
+                .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
+                #endif
+
+                Text("-\(formatTime(duration - (isScrubbing ? scrubTime : currentTime)))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 30)
+            .padding(.bottom, 40)
             .background(
                 LinearGradient(
                     colors: [.clear, .black.opacity(0.7)],
@@ -435,7 +536,7 @@ struct GestureVideoPlayer: View {
     private var scrubPreviewOverlay: some View {
         VStack(spacing: 8) {
             Text(formatTime(scrubTime))
-                .font(.system(size: 48, weight: .bold).monospacedDigit())
+                .font(.largeTitle.weight(.bold).monospacedDigit())
                 .foregroundStyle(.white)
 
             let delta = scrubTime - scrubStartTime
@@ -495,7 +596,7 @@ struct GestureVideoPlayer: View {
 
     private func skipBubble(direction: SkipDirection) -> some View {
         VStack(spacing: 4) {
-            Image(systemName: direction == .backward ? "gobackward.15" : "goforward.15")
+            Image(systemName: direction == .backward ? "gobackward.30" : "goforward.30")
                 .font(.title)
                 .accessibilityLabel(direction == .backward ? "Skip backward" : "Skip forward")
             Text("\(Int(skipSeconds)) sec")
@@ -599,9 +700,9 @@ struct GestureVideoPlayer: View {
         // unsupported codec, network failure)
         playerItem.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
-            .sink { status in
+            .sink { [weak playerItem] status in
                 if status == .failed {
-                    let msg = playerItem.error?.localizedDescription ?? "Unable to play this video."
+                    let msg = playerItem?.error?.localizedDescription ?? "Unable to play this video."
                     playerError = msg
                     isBuffering = false
                 }
@@ -611,7 +712,7 @@ struct GestureVideoPlayer: View {
         // Observe duration and seek to resume position when ready
         playerItem.publisher(for: \.duration)
             .receive(on: DispatchQueue.main)
-            .sink { dur in
+            .sink { [weak playerItem] dur in
                 if dur.isNumeric {
                     duration = CMTimeGetSeconds(dur)
 
@@ -648,6 +749,9 @@ struct GestureVideoPlayer: View {
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
         }
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
         player?.pause()
         player = nil
         cancellables.removeAll()
@@ -673,7 +777,7 @@ struct GestureVideoPlayer: View {
         seek(to: newTime)
         currentTime = newTime
         showSkipAnimation(direction: .forward)
-        scheduleHideControls()
+        if isPlaying { scheduleHideControls() }
     }
 
     private func skipBackward() {
@@ -681,7 +785,7 @@ struct GestureVideoPlayer: View {
         seek(to: newTime)
         currentTime = newTime
         showSkipAnimation(direction: .backward)
-        scheduleHideControls()
+        if isPlaying { scheduleHideControls() }
     }
 
     private func showSkipAnimation(direction: SkipDirection) {
@@ -719,7 +823,7 @@ struct GestureVideoPlayer: View {
 
     private func scheduleHideVolumeIndicator() {
         hideVolumeIndicatorTask?.cancel()
-        hideVolumeIndicatorTask = Task {
+        hideVolumeIndicatorTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
             if !Task.isCancelled {
                 withAnimation(.easeOut(duration: 0.2)) {
@@ -732,7 +836,7 @@ struct GestureVideoPlayer: View {
     #if os(iOS)
     private func scheduleHideBrightnessIndicator() {
         hideBrightnessIndicatorTask?.cancel()
-        hideBrightnessIndicatorTask = Task {
+        hideBrightnessIndicatorTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
             if !Task.isCancelled {
                 withAnimation(.easeOut(duration: 0.2)) {
@@ -931,6 +1035,124 @@ struct AirPlayButton: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+#endif
+
+// MARK: - Subtitle & Audio Picker
+
+#if !os(tvOS)
+/// Half-sheet picker for subtitle and audio track selection.
+private struct SubtitleAudioPickerView: View {
+    let player: AVPlayer
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var subtitleGroup: AVMediaSelectionGroup? = nil
+    @State private var audioGroup: AVMediaSelectionGroup? = nil
+    @State private var isLoading: Bool = true
+    @State private var currentSelection: AVMediaSelection? = nil
+
+    var body: some View {
+        NavigationStack {
+            contentView
+                .navigationTitle("Subtitles & Audio")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+        }
+        .presentationDetents([.medium])
+        .task {
+            // Use async loading — sync mediaSelectionGroup may return nil for HLS
+            // until the asset's tracks are fully loaded.
+            async let subtitle = player.currentItem?.asset.loadMediaSelectionGroup(for: .legible)
+            async let audio = player.currentItem?.asset.loadMediaSelectionGroup(for: .audible)
+            subtitleGroup = try? await subtitle
+            audioGroup = try? await audio
+            currentSelection = player.currentItem?.currentMediaSelection
+            isLoading = false
+        }
+    }
+
+    // MARK: - Content View
+
+    @ViewBuilder
+    private var contentView: some View {
+        if isLoading {
+            ProgressView("Loading tracks…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List {
+                Section("Subtitles") {
+                    subtitleSection
+                }
+                Section("Audio") {
+                    audioSection
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleSection: some View {
+        if let group = subtitleGroup {
+            let noneSelected = currentSelection?.selectedMediaOption(in: group) == nil
+            Button {
+                player.currentItem?.select(nil, in: group)
+                currentSelection = player.currentItem?.currentMediaSelection
+            } label: {
+                trackRow(name: "None", isSelected: noneSelected)
+            }
+            .buttonStyle(.plain)
+
+            ForEach(group.options, id: \.self) { option in
+                let isSelected = currentSelection?.selectedMediaOption(in: group) == option
+                Button {
+                    player.currentItem?.select(option, in: group)
+                    currentSelection = player.currentItem?.currentMediaSelection
+                } label: {
+                    trackRow(name: option.displayName, isSelected: isSelected)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            Text("No subtitle tracks available")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var audioSection: some View {
+        if let group = audioGroup {
+            ForEach(group.options, id: \.self) { option in
+                let isSelected = currentSelection?.selectedMediaOption(in: group) == option
+                Button {
+                    player.currentItem?.select(option, in: group)
+                    currentSelection = player.currentItem?.currentMediaSelection
+                } label: {
+                    trackRow(name: option.displayName, isSelected: isSelected)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            Text("No audio tracks available")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func trackRow(name: String, isSelected: Bool) -> some View {
+        HStack {
+            Text(name)
+                .foregroundStyle(.primary)
+            Spacer()
+            Image(systemName: "checkmark")
+                .foregroundStyle(Color.accentColor)
+                .opacity(isSelected ? 1 : 0)
+                .accessibilityLabel(isSelected ? "Selected" : "")
+        }
+        .contentShape(Rectangle())
+    }
 }
 #endif
 

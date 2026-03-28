@@ -40,7 +40,7 @@ struct LoginView: View {
 
         VStack(spacing: 6) {
           Text("DSM Video")
-            .font(.system(size: 40, weight: .semibold, design: .default))
+            .font(.largeTitle.weight(.semibold))
             .foregroundStyle(.white)
 
           Text("Your NAS, beautifully.")
@@ -129,7 +129,7 @@ struct LoginView: View {
               .frame(maxWidth: .infinity, minHeight: 52)
           } else {
             Text("Login")
-              .font(.system(size: 20, weight: .semibold))
+              .font(.headline)
               .frame(maxWidth: .infinity, minHeight: 52)
           }
         }

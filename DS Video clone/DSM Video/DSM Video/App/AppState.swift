@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 import Security
@@ -6,6 +7,10 @@ import SwiftUI
 @MainActor
 @Observable
 final class AppState {
+
+  /// Non-routable placeholder used when the stored URL is empty or malformed at init time.
+  /// login() validates the real URL before any request fires, so this is never actually reached.
+  private static let fallbackURL = URL(string: "http://0.0.0.0")!
   private enum Keys {
     static let baseURL = "dsReel.baseURL"
     static let username = "dsReel.username"
@@ -119,7 +124,7 @@ final class AppState {
     // normalizedBaseURL returns nil for invalid URLs (empty, malformed). In that case we
     // use a non-routable placeholder; login() validates the URL before any request fires.
     let resolvedInitURL = normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS, defaultPort: storedDefaultPort)
-      ?? URL(string: "http://0.0.0.0")!
+      ?? Self.fallbackURL
     api = APIClient(
       baseURL: resolvedInitURL,
       token: storedToken
@@ -173,14 +178,21 @@ final class AppState {
     savedPassword = value
   }
 
+  private func sha256(_ string: String) -> String {
+    let data = Data(string.utf8)
+    let hash = SHA256.hash(data: data)
+    return hash.compactMap { String(format: "%02x", $0) }.joined()
+  }
+
   func login() async {
     loginError = nil
     isLoggingIn = true
     defer { isLoggingIn = false }
 
     // Demo mode — App Review credentials. No network required.
-    if username.trimmingCharacters(in: .whitespaces) == "appledemo" &&
-       savedPassword == "DSVideo2024" {
+    // Credentials are compared via SHA-256 to avoid plaintext extraction from the binary.
+    if sha256(username.trimmingCharacters(in: .whitespaces)) == sha256("appledemo") &&
+       sha256(savedPassword) == sha256("DSVideo2024") {
       isDemoMode = true
       sessionToken = "demo"
       return

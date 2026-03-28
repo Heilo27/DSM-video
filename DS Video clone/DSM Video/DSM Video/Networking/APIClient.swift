@@ -96,6 +96,58 @@ struct APIClient {
     )
   }
 
+  // MARK: - TMDb Manual Fix
+
+  func tmdbSearch(itemId: String, query: String? = nil, year: Int? = nil, type: String? = nil) async throws -> TMDbSearchResponse {
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items/\(itemId)/tmdb-search"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    var queryItems: [URLQueryItem] = []
+    if let q = query, !q.isEmpty { queryItems.append(URLQueryItem(name: "q", value: q)) }
+    if let y = year { queryItems.append(URLQueryItem(name: "year", value: String(y))) }
+    if let t = type { queryItems.append(URLQueryItem(name: "type", value: t)) }
+    comps.queryItems = queryItems.isEmpty ? nil : queryItems
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TMDbSearchResponse.self)
+  }
+
+  func tmdbFix(itemId: String, tmdbId: Int, type: String) async throws {
+    struct Body: Encodable { let tmdbId: Int; let type: String }
+    _ = try await request(
+      path: "/api/v1/items/\(itemId)/tmdb-fix",
+      method: "POST",
+      body: Body(tmdbId: tmdbId, type: type),
+      response: EmptyDecodable.self
+    )
+  }
+
+  func tvShowTMDbSearch(showId: String, query: String? = nil) async throws -> TMDbSearchResponse {
+    guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+      throw APIError.invalidURL
+    }
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(encodedId)/tmdb-search"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    if let q = query, !q.isEmpty {
+      comps.queryItems = [URLQueryItem(name: "q", value: q)]
+    }
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TMDbSearchResponse.self)
+  }
+
+  func tvShowTMDbFix(showId: String, tmdbId: Int) async throws {
+    struct Body: Encodable { let tmdbId: Int }
+    guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+      throw APIError.invalidURL
+    }
+    _ = try await request(
+      path: "/api/v1/tv/shows/\(encodedId)/tmdb-fix",
+      method: "POST",
+      body: Body(tmdbId: tmdbId),
+      response: EmptyDecodable.self
+    )
+  }
+
   func imageURL(id: String, width: Int? = nil) -> URL? {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/images/\(id)"), resolvingAgainstBaseURL: false) else {
       return nil
@@ -184,4 +236,7 @@ enum APIError: Error {
 struct APIErrorResponse: Decodable {
   let error: String
 }
+
+/// Used as a placeholder response type for endpoints that return any JSON but whose value we discard.
+struct EmptyDecodable: Decodable {}
 

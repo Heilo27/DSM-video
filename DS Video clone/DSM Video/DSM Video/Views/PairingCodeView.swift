@@ -28,7 +28,7 @@ struct PairingCodeView: View {
         TextField("000000", text: $code)
           .textContentType(.oneTimeCode)
           .keyboardType(.numberPad)
-          .font(.system(size: 32, weight: .semibold, design: .monospaced))
+          .font(.system(.largeTitle, design: .monospaced, weight: .semibold))
           .multilineTextAlignment(.center)
           .padding()
           .background(.quaternary)

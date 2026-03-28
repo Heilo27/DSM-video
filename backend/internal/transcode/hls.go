@@ -20,19 +20,19 @@ type HLSConfig struct {
 	VideoCRF       int           // x264 CRF quality (default: 23)
 	AudioBitrate   string        // Audio bitrate (default: "192k")
 	Threads        int           // Number of threads (default: 2)
-	NicePriority   int           // Nice priority (default: 19 = lowest)
+	NicePriority   int           // Nice priority (default: 10 = medium-low; 19 = lowest possible)
 	MaxConcurrent  int           // Max concurrent transcodes (default: 1)
 }
 
 // DefaultHLSConfig returns sensible defaults for NAS transcoding.
 func DefaultHLSConfig() HLSConfig {
 	return HLSConfig{
-		SegmentSeconds: 4,
+		SegmentSeconds: 6,
 		VideoPreset:    "faster",
 		VideoCRF:       23,
 		AudioBitrate:   "192k",
 		Threads:        2,
-		NicePriority:   19,
+		NicePriority:   10,
 		MaxConcurrent:  1,
 	}
 }
@@ -295,11 +295,11 @@ func (g *HLSGenerator) buildFFmpegArgs(session *HLSSession) []string {
 	args = append(args,
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", segmentDuration),
-		"-hls_list_size", "0",           // Include all segments in playlist
-		"-hls_segment_type", "fmp4",     // Use fragmented MP4 (better for Apple)
+		"-hls_list_size", "0",                    // Keep all segments in playlist
+		"-hls_segment_type", "fmp4",              // Fragmented MP4 (better compatibility)
 		"-hls_fmp4_init_filename", filepath.Base(initPath),
 		"-hls_segment_filename", segmentPath,
-		"-hls_playlist_type", "vod",     // VOD playlist (complete)
+		"-hls_playlist_type", "event",            // Event: playlist updates as segments are produced
 		outputPath,
 	)
 

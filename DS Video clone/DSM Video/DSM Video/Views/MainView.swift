@@ -128,7 +128,7 @@ private struct SidebarSectionHeader: View {
 
   var body: some View {
     Text(title)
-      .font(.system(size: 18, weight: .bold, design: .rounded))
+      .font(.system(.title3, design: .rounded, weight: .semibold))
       .foregroundStyle(.primary)
       .textCase(nil)
       .padding(.top, 6)
@@ -192,6 +192,11 @@ private struct SearchView: View {
   @State private var hasSearched: Bool = false
   @State private var searchError: String?
   @State private var debounceTask: Task<Void, Never>?
+  @AppStorage("dsReel.recentSearches") private var recentSearchesRaw: String = ""
+
+  private var recentSearches: [String] {
+    recentSearchesRaw.isEmpty ? [] : recentSearchesRaw.components(separatedBy: "\u{001F}").filter { !$0.isEmpty }
+  }
 
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
@@ -201,19 +206,32 @@ private struct SearchView: View {
   var body: some View {
     NavigationStack {
       ScrollView {
-        if !hasSearched {
-          ContentUnavailableView("Search Videos", systemImage: "magnifyingglass", description: Text("Enter a title to search your library"))
-            .padding(.top, 60)
+        if searchText.isEmpty && !hasSearched {
+          if recentSearches.isEmpty {
+            ContentUnavailableView("Search Videos", systemImage: "magnifyingglass", description: Text("Enter a title to search your library"))
+              .padding(.top, 60)
+          } else {
+            RecentSearchesView(
+              searches: recentSearches,
+              onSelect: { query in
+                searchText = query
+                Task { await search() }
+              },
+              onRemove: { query in removeRecentSearch(query) },
+              onClearAll: { recentSearchesRaw = "" }
+            )
+            .padding(.top, 16)
+          }
         } else if isSearching {
           ProgressView()
             .padding(.top, 60)
         } else if let searchError {
           ContentUnavailableView("Search Failed", systemImage: "wifi.slash", description: Text(searchError))
             .padding(.top, 60)
-        } else if results.isEmpty {
+        } else if hasSearched && results.isEmpty {
           ContentUnavailableView("No Results", systemImage: "magnifyingglass", description: Text("No videos match \"\(searchText)\""))
             .padding(.top, 60)
-        } else {
+        } else if !results.isEmpty {
           LazyVGrid(columns: columns, spacing: 12) {
             ForEach(results) { item in
               NavigationLink {
@@ -248,25 +266,116 @@ private struct SearchView: View {
           }
         }
       }
+      .onAppear {
+        // Seed demo recent searches once if list is empty
+        if appState.isDemoMode && recentSearchesRaw.isEmpty {
+          recentSearchesRaw = ["Action movies", "The Signal", "2024"].joined(separator: "\u{001F}")
+        }
+      }
     }
   }
 
   private func search() async {
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !query.isEmpty else { return }
+    guard query.count >= 2 else { return }
 
     isSearching = true
     hasSearched = true
     defer { isSearching = false }
 
+    // In demo mode, filter local demo items instead of hitting the network.
+    guard !appState.isDemoMode else {
+      let allDemoItems = DemoData.movieItems + DemoData.tvItems
+      results = allDemoItems.filter {
+        $0.title.localizedCaseInsensitiveContains(query)
+      }
+      searchError = nil
+      saveRecentSearch(query)
+      return
+    }
+
     do {
       let response = try await appState.api.search(query: query, limit: 100)
       results = response.items
       searchError = nil
+      saveRecentSearch(query)
     } catch {
       results = []
       let msg = (error as? APIError)?.userMessage ?? error.localizedDescription
       searchError = msg
+    }
+  }
+
+  private func saveRecentSearch(_ query: String) {
+    var current = recentSearches
+    current.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
+    current.insert(query, at: 0)
+    if current.count > 10 { current = Array(current.prefix(10)) }
+    recentSearchesRaw = current.joined(separator: "\u{001F}")
+  }
+
+  private func removeRecentSearch(_ query: String) {
+    var current = recentSearches
+    current.removeAll { $0 == query }
+    recentSearchesRaw = current.joined(separator: "\u{001F}")
+  }
+}
+
+// MARK: - Recent Searches View
+
+private struct RecentSearchesView: View {
+  let searches: [String]
+  let onSelect: (String) -> Void
+  let onRemove: (String) -> Void
+  let onClearAll: () -> Void
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        Text("Recent Searches")
+          .font(.headline)
+          .foregroundStyle(Color.dsTextPrimary)
+        Spacer()
+        Button("Clear All", action: onClearAll)
+          .font(.subheadline)
+          .foregroundStyle(Color.dsAccent)
+      }
+      .padding(.horizontal, 16)
+
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(spacing: 8) {
+          ForEach(searches, id: \.self) { query in
+            HStack(spacing: 4) {
+              Button {
+                onSelect(query)
+              } label: {
+                Text(query)
+                  .font(.subheadline)
+                  .foregroundStyle(Color.dsTextPrimary)
+              }
+              .buttonStyle(.plain)
+
+              Button {
+                onRemove(query)
+              } label: {
+                Image(systemName: "xmark")
+                  .font(.caption2)
+                  .foregroundStyle(Color.dsTextSecondary)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Remove \(query) from recent searches")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+              RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.dsSurface)
+            )
+            .accessibilityElement(children: .combine)
+          }
+        }
+        .padding(.horizontal, 16)
+      }
     }
   }
 }
@@ -313,11 +422,18 @@ private struct SearchResultCell: View {
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
+    .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? ""), \(item.type)")
   }
 
   @ViewBuilder
   private func posterImage(width: CGFloat, height: CGFloat) -> some View {
-    if item.posterImageId != nil {
+    if appState.isDemoMode, let assetName = DemoData.posterAssetNames[item.id] {
+      Image(assetName)
+        .resizable()
+        .scaledToFill()
+        .frame(width: width, height: height)
+        .clipped()
+    } else if item.posterImageId != nil {
       AuthenticatedImage(
         url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400),
         token: appState.sessionToken
@@ -343,51 +459,161 @@ struct DownloadsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   @State private var downloads: [DownloadedItem] = []
+  @State private var totalBytes: Int64 = 0
+  @State private var availableBytes: Int64 = 0
+  @State private var usedByAppBytes: Int64 = 0
+
+  private let downloadManager = DownloadManager.shared
 
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
     return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
   }
 
+  private var activeDownloadIDs: [String] {
+    Array(downloadManager.activeDownloads.keys).sorted()
+  }
+
   var body: some View {
     NavigationStack {
       Group {
-        if downloads.isEmpty {
+        if downloads.isEmpty && activeDownloadIDs.isEmpty {
           ContentUnavailableView("No Downloads", systemImage: "arrow.down.circle", description: Text("Downloaded videos will appear here for offline viewing"))
         } else {
           ScrollView {
-            LazyVGrid(columns: columns, spacing: 12) {
-              ForEach(downloads) { item in
-                NavigationLink {
-                  GestureVideoPlayer(
-                    url: URL(fileURLWithPath: item.videoPath),
-                    title: item.title,
-                    resumePosition: Double(item.resumePositionSeconds),
-                    onProgressUpdate: { currentTime, _ in
-                      DownloadManager.shared.updateResumePosition(
-                        itemId: item.id,
-                        positionSeconds: Int(currentTime)
+            VStack(spacing: 16) {
+              // Storage indicator
+              storageSection
+
+              // Active downloads
+              if !activeDownloadIDs.isEmpty {
+                activeDownloadsSection
+              }
+
+              // Completed downloads grid
+              if !downloads.isEmpty {
+                LazyVGrid(columns: columns, spacing: 12) {
+                  ForEach(downloads) { item in
+                    NavigationLink {
+                      GestureVideoPlayer(
+                        url: URL(fileURLWithPath: item.videoPath),
+                        title: item.title,
+                        resumePosition: Double(item.resumePositionSeconds),
+                        onProgressUpdate: { currentTime, _ in
+                          DownloadManager.shared.updateResumePosition(
+                            itemId: item.id,
+                            positionSeconds: Int(currentTime)
+                          )
+                        }
                       )
+                      .navigationBarHidden(true)
+                    } label: {
+                      DownloadedItemCell(item: item) {
+                        deleteDownload(item)
+                      }
                     }
-                  )
-                  .navigationBarHidden(true)
-                } label: {
-                  DownloadedItemCell(item: item) {
-                    deleteDownload(item)
+                    .buttonStyle(.plain)
                   }
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, horizontalSizeClass == .regular ? 20 : 12)
+                .padding(.bottom, horizontalSizeClass == .regular ? 20 : 12)
               }
             }
-            .padding(horizontalSizeClass == .regular ? 20 : 12)
           }
         }
       }
       .background(Color.black.ignoresSafeArea())
       .navigationTitle("Downloads")
-      .onAppear { loadDownloads() }
+      .onAppear {
+        loadDownloads()
+        loadStorageInfo()
+      }
+      .onChange(of: downloadManager.activeDownloads.count) { _, _ in
+        loadDownloads()
+        loadStorageInfo()
+      }
     }
   }
+
+  // MARK: - Storage Section
+
+  @ViewBuilder
+  private var storageSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Text("Storage")
+          .font(.headline)
+          .foregroundStyle(Color.dsTextPrimary)
+        Spacer()
+        Text("\(formatBytes(usedByAppBytes)) used")
+          .font(.caption)
+          .foregroundStyle(Color.dsTextSecondary)
+      }
+      GeometryReader { geo in
+        ZStack(alignment: .leading) {
+          RoundedRectangle(cornerRadius: 4)
+            .fill(Color.dsSurface)
+            .frame(height: 8)
+          RoundedRectangle(cornerRadius: 4)
+            .fill(Color.dsAccent)
+            .frame(
+              width: totalBytes > 0
+                ? geo.size.width * CGFloat(Double(usedByAppBytes) / Double(totalBytes))
+                : 0,
+              height: 8
+            )
+        }
+      }
+      .frame(height: 8)
+      Text("\(formatBytes(availableBytes)) available")
+        .font(.caption2)
+        .foregroundStyle(Color.dsTextSecondary)
+    }
+    .padding()
+    .background(Color.dsSurface.opacity(0.5))
+    .clipShape(RoundedRectangle(cornerRadius: 12))
+    .padding(.horizontal)
+    .padding(.top, 8)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("Storage: \(formatBytes(usedByAppBytes)) used by downloads, \(formatBytes(availableBytes)) available")
+  }
+
+  // MARK: - Active Downloads Section
+
+  @ViewBuilder
+  private var activeDownloadsSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Downloading")
+        .font(.headline)
+        .foregroundStyle(Color.dsTextPrimary)
+        .padding(.horizontal)
+
+      VStack(spacing: 0) {
+        ForEach(activeDownloadIDs, id: \.self) { itemID in
+          let download = downloadManager.activeDownloads[itemID]
+          let progress = downloadManager.downloadProgress[itemID] ?? 0
+          ActiveDownloadCell(
+            title: download?.title ?? "Downloading\u{2026}",
+            progress: progress,
+            onCancel: { downloadManager.cancelDownload(itemId: itemID) }
+          )
+          .padding(.horizontal)
+          .padding(.vertical, 8)
+
+          if itemID != activeDownloadIDs.last {
+            Divider()
+              .background(Color.dsSurface)
+              .padding(.horizontal)
+          }
+        }
+      }
+      .background(Color.dsSurface.opacity(0.5))
+      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .padding(.horizontal)
+    }
+  }
+
+  // MARK: - Helpers
 
   private func loadDownloads() {
     downloads = DownloadManager.shared.getDownloadedItems()
@@ -396,6 +622,66 @@ struct DownloadsView: View {
   private func deleteDownload(_ item: DownloadedItem) {
     DownloadManager.shared.deleteDownload(itemId: item.id)
     loadDownloads()
+    loadStorageInfo()
+  }
+
+  private func loadStorageInfo() {
+    let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    let values = try? docURL.resourceValues(forKeys: [
+      .volumeAvailableCapacityForImportantUsageKey,
+      .volumeTotalCapacityKey
+    ])
+    totalBytes = Int64(values?.volumeTotalCapacity ?? 0)
+    availableBytes = values?.volumeAvailableCapacityForImportantUsage ?? 0
+
+    usedByAppBytes = downloads.reduce(Int64(0)) { sum, item in
+      let size = Int64((try? URL(fileURLWithPath: item.videoPath)
+        .resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+      return sum + size
+    }
+  }
+
+  private func formatBytes(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: bytes)
+  }
+}
+
+// MARK: - Active Download Cell
+
+private struct ActiveDownloadCell: View {
+  let title: String
+  let progress: Double
+  let onCancel: () -> Void
+
+  var body: some View {
+    HStack(spacing: 12) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(title)
+          .font(.subheadline)
+          .foregroundStyle(Color.dsTextPrimary)
+          .lineLimit(1)
+        ProgressView(value: progress)
+          .tint(Color.dsAccent)
+        Text("\(Int(progress * 100))%")
+          .font(.caption)
+          .foregroundStyle(Color.dsTextSecondary)
+          .monospacedDigit()
+      }
+
+      Spacer()
+
+      Button(action: onCancel) {
+        Image(systemName: "xmark.circle.fill")
+          .font(.title3)
+          .foregroundStyle(Color.dsTextSecondary)
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Cancel download")
+    }
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("\(title), downloading, \(Int(progress * 100)) percent complete")
   }
 }
 
@@ -465,8 +751,10 @@ private struct DownloadedItemCell: View {
           Label("Delete Download", systemImage: "trash")
         }
       }
+      .accessibilityAction(named: "Delete") { onDelete() }
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
+    .accessibilityLabel("\(item.title), downloaded")
   }
 
   private func posterImage(width: CGFloat, height: CGFloat) -> some View {

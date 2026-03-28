@@ -1,40 +1,15 @@
 import SwiftUI
 
 struct TVShowDetailView: View {
-  @Environment(AppState.self) private var appState
   let show: TVShow
   let library: Library
-
-  @State private var seasons: [TVSeason] = []
-  @State private var isLoading = false
-  @State private var error: String?
 
   var body: some View {
     #if os(tvOS)
     TVShowDetailSplitView(show: show, library: library)
     #else
-    TVShowDetailScrollView(show: show, library: library, seasons: seasons, isLoading: isLoading, error: error)
-      .task { await load() }
+    TVShowDetailScrollView(show: show, library: library)
     #endif
-  }
-
-  // Shared load used only by iOS path (tvOS loads internally)
-  private func load() async {
-    guard !isLoading else { return }
-    if appState.isDemoMode {
-      seasons = DemoData.seasons(for: show.id)
-      return
-    }
-    isLoading = true
-    defer { isLoading = false }
-    do {
-      let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
-      seasons = resp.seasons
-      error = nil
-    } catch {
-      let msg = (error as? APIError)?.userMessage ?? "Unknown error."
-      if seasons.isEmpty { self.error = msg }
-    }
   }
 }
 
@@ -76,7 +51,13 @@ private struct TVShowDetailSplitView: View {
   private var backdropPanel: some View {
     ZStack(alignment: .bottomLeading) {
       // Background image
-      if let posterId = show.posterImageId {
+      if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
+        Image(assetName)
+          .resizable()
+          .scaledToFill()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .clipped()
+      } else if let posterId = show.posterImageId {
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1400),
           token: appState.sessionToken
@@ -137,9 +118,11 @@ private struct TVShowDetailSplitView: View {
               .font(.system(size: 20))
               .foregroundStyle(Color.dsTextSecondary)
           }
-          Circle()
-            .fill(Color.dsTextMuted)
-            .frame(width: 4, height: 4)
+          if show.year != nil {
+            Circle()
+              .fill(Color.dsTextMuted)
+              .frame(width: 4, height: 4)
+          }
           Text("\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
             .font(.system(size: 20))
             .foregroundStyle(Color.dsTextSecondary)
@@ -175,7 +158,7 @@ private struct TVShowDetailSplitView: View {
           .foregroundStyle(.white)
           .padding(.top, 60)
         } else {
-          ForEach(seasons, id: \.seasonNumber) { season in
+          ForEach(Array(seasons.enumerated()), id: \.offset) { _, season in
             TVSeasonSection(show: show, season: season, library: library)
           }
         }
@@ -329,7 +312,13 @@ private struct TVEpisodeRow: View {
           .fill(Color(white: 0.1))
           .frame(width: 120, height: 68)
 
-        if let posterID = ep.posterImageId {
+        if appState.isDemoMode, let assetName = DemoData.posterAssetNames[ep.id] {
+          Image(assetName)
+            .resizable()
+            .scaledToFill()
+            .frame(width: 120, height: 68)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        } else if let posterID = ep.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: posterID, width: 240),
             token: appState.sessionToken
@@ -372,6 +361,7 @@ private struct TVEpisodeRow: View {
                 .font(.system(size: 14, weight: .bold))
                 .foregroundStyle(.black)
             )
+            .accessibilityLabel("Watched")
         } else {
           ZStack {
             Circle()
@@ -382,6 +372,7 @@ private struct TVEpisodeRow: View {
               .rotationEffect(.degrees(-90))
           }
           .frame(width: 32, height: 32)
+          .accessibilityLabel("Episode \(ep.episodeNumber ?? 0) progress, \(Int(frac * 100)) percent watched")
         }
       }
     }
@@ -405,9 +396,11 @@ private struct TVShowDetailScrollView: View {
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   let show: TVShow
   let library: Library
-  let seasons: [TVSeason]
-  let isLoading: Bool
-  let error: String?
+
+  @State private var seasons: [TVSeason] = []
+  @State private var isLoading = false
+  @State private var error: String?
+  @State private var showMetadataFixer = false
 
   private var headerHeight: CGFloat {
     horizontalSizeClass == .regular ? 320 : 220
@@ -428,7 +421,7 @@ private struct TVShowDetailScrollView: View {
           )
           .padding(.top, 32)
         } else {
-          ForEach(seasons, id: \.seasonNumber) { season in
+          ForEach(Array(seasons.enumerated()), id: \.offset) { _, season in
             iOSSeasonSection(show: show, season: season, library: library)
           }
         }
@@ -436,15 +429,37 @@ private struct TVShowDetailScrollView: View {
     }
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(show.title)
+    .task { await load() }
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+          Button("Fix Metadata", systemImage: "magnifyingglass") {
+            showMetadataFixer = true
+          }
+        } label: {
+          Image(systemName: "ellipsis.circle")
+        }
+      }
+    }
+    .sheet(isPresented: $showMetadataFixer) {
+      TVShowMetadataFixerSheet(showId: show.id, initialQuery: show.title)
+        .environment(appState)
+    }
     #endif
   }
 
   @ViewBuilder
   private var showHeader: some View {
     ZStack(alignment: .bottomLeading) {
-      if let posterId = show.posterImageId {
+      if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
+        Image(assetName)
+          .resizable()
+          .scaledToFill()
+          .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
+          .clipped()
+      } else if let posterId = show.posterImageId {
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1200),
           token: appState.sessionToken
@@ -483,13 +498,31 @@ private struct TVShowDetailScrollView: View {
           if let year = show.year {
             Text(String(year)).font(.subheadline).foregroundStyle(.white.opacity(0.75))
           }
-          Text("·").foregroundStyle(.white.opacity(0.5))
+          if show.year != nil { Text("·").foregroundStyle(.white.opacity(0.5)) }
           Text("\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
             .font(.subheadline).foregroundStyle(.white.opacity(0.75))
         }
       }
       .padding(.horizontal, 16)
       .padding(.bottom, 14)
+    }
+  }
+
+  private func load() async {
+    guard !isLoading else { return }
+    if appState.isDemoMode {
+      seasons = DemoData.seasons(for: show.id)
+      return
+    }
+    isLoading = true
+    defer { isLoading = false }
+    do {
+      let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
+      seasons = resp.seasons
+      error = nil
+    } catch {
+      let msg = (error as? APIError)?.userMessage ?? "Unknown error."
+      if seasons.isEmpty { self.error = msg }
     }
   }
 }
@@ -519,10 +552,10 @@ private struct iOSSeasonSection: View {
           Spacer()
           Text("\(season.episodeCount) ep\(season.episodeCount == 1 ? "" : "s")")
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(.white.opacity(0.75))
           Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(.white.opacity(0.75))
             .accessibilityLabel(isExpanded ? "Collapse season" : "Expand season")
         }
         .padding(.horizontal, 16)
@@ -551,11 +584,17 @@ private struct iOSSeasonSection: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
           }
-          ForEach(episodes) { ep in
+          ForEach(Array(episodes.enumerated()), id: \.element.id) { index, ep in
             NavigationLink {
-              ItemDetailView(itemID: ep.id, fallbackTitle: ep.title)
+              EpisodeDetailView(
+                episodes: episodes,
+                initialIndex: index,
+                show: show,
+                library: library
+              )
             } label: {
               iOSEpisodeRow(ep: ep)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -593,7 +632,7 @@ private struct iOSEpisodeRow: View {
     HStack(spacing: 12) {
       Text(ep.episodeNumber.map { "E\($0)" } ?? "–")
         .font(.caption.weight(.semibold).monospacedDigit())
-        .foregroundStyle(.white.opacity(0.55))
+        .foregroundStyle(.white.opacity(0.75))
         .frame(width: 32, alignment: .center)
 
       VStack(alignment: .leading, spacing: 3) {
@@ -605,22 +644,31 @@ private struct iOSEpisodeRow: View {
         if let dur = ep.durationSeconds, dur > 0 {
           Text(formatDuration(dur))
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(.white.opacity(0.75))
         }
       }
 
       Spacer()
 
       if let prog = ep.progress, prog.durationSeconds > 0 {
-        let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-        iOSCircularProgress(fraction: frac)
-          .frame(width: 20, height: 20)
+        let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
+        if frac >= 0.95 {
+          Image(systemName: "checkmark.circle.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Color.dsSuccess)
+            .frame(width: 20, height: 20)
+            .accessibilityLabel("Watched")
+        } else {
+          iOSCircularProgress(fraction: frac)
+            .frame(width: 20, height: 20)
+            .accessibilityLabel("Episode \(ep.episodeNumber ?? 0) progress, \(Int(frac * 100)) percent watched")
+        }
       }
 
       Image(systemName: "chevron.right")
         .font(.caption)
         .foregroundStyle(.white.opacity(0.3))
-        .accessibilityLabel("View episode")
+        .accessibilityHidden(true)
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
@@ -633,6 +681,38 @@ private struct iOSEpisodeRow: View {
     return "\(m)m"
   }
 }
+
+// MARK: - Episode Detail View (iOS/macOS — with Next Episode nav)
+
+#if !os(tvOS)
+private struct EpisodeDetailView: View {
+  let episodes: [ItemSummary]
+  @State private var currentIndex: Int
+  let show: TVShow
+  let library: Library
+
+  init(episodes: [ItemSummary], initialIndex: Int, show: TVShow, library: Library) {
+    self.episodes = episodes
+    self._currentIndex = State(initialValue: initialIndex)
+    self.show = show
+    self.library = library
+  }
+
+  private var current: ItemSummary { episodes[currentIndex] }
+  private var hasNext: Bool { currentIndex + 1 < episodes.count }
+
+  var body: some View {
+    ItemDetailView(
+      itemID: current.id,
+      fallbackTitle: current.title,
+      nextEpisode: hasNext ? episodes[currentIndex + 1] : nil,
+      onNextEpisode: hasNext ? {
+        currentIndex += 1
+      } : nil
+    )
+  }
+}
+#endif
 
 private struct iOSCircularProgress: View {
   let fraction: Double
@@ -647,3 +727,138 @@ private struct iOSCircularProgress: View {
     }
   }
 }
+
+// MARK: - TV Show Metadata Fixer Sheet
+
+#if !os(tvOS)
+private struct TVShowMetadataFixerSheet: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
+
+  let showId: String
+  let initialQuery: String
+
+  @State private var searchQuery: String
+  @State private var results: [TMDbCandidate] = []
+  @State private var isSearching = false
+  @State private var isApplying = false
+  @State private var error: String?
+  @State private var applied = false
+
+  init(showId: String, initialQuery: String) {
+    self.showId = showId
+    self.initialQuery = initialQuery
+    _searchQuery = State(initialValue: initialQuery)
+  }
+
+  var body: some View {
+    NavigationStack {
+      List {
+        Section {
+          TextField("Search TMDb...", text: $searchQuery)
+            .onSubmit { Task { await search() } }
+            .foregroundStyle(.white)
+        }
+        .listRowBackground(Color(white: 0.12))
+
+        if isSearching {
+          HStack {
+            Spacer()
+            ProgressView().tint(.white)
+            Spacer()
+          }
+          .listRowBackground(Color(white: 0.08))
+        } else {
+          ForEach(results) { candidate in
+            Button {
+              Task { await apply(candidate) }
+            } label: {
+              HStack(spacing: 12) {
+                AsyncImage(url: candidate.posterURL) { img in
+                  img.resizable().scaledToFill()
+                } placeholder: {
+                  Color(white: 0.15)
+                }
+                .frame(width: 50, height: 75)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 4) {
+                  Text(candidate.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                  if let year = candidate.year {
+                    Text(String(year))
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                  }
+                  if let overview = candidate.overview, !overview.isEmpty {
+                    Text(overview)
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                      .lineLimit(3)
+                  }
+                }
+              }
+            }
+            .buttonStyle(.plain)
+            .disabled(isApplying)
+            .listRowBackground(Color(white: 0.1))
+          }
+        }
+
+        if let error {
+          Text(error)
+            .foregroundStyle(.red)
+            .font(.caption)
+            .listRowBackground(Color(white: 0.08))
+        }
+        if applied {
+          Text("Metadata updated! Pull to refresh.")
+            .foregroundStyle(.green)
+            .font(.caption)
+            .listRowBackground(Color(white: 0.08))
+        }
+      }
+      .navigationTitle("Fix Show Metadata")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .topBarLeading) {
+          Button("Cancel") { dismiss() }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+          Button("Search") { Task { await search() } }
+            .disabled(isSearching)
+        }
+      }
+      .task { await search() }
+      .scrollContentBackground(.hidden)
+      .background(Color.black)
+    }
+  }
+
+  private func search() async {
+    guard !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+    isSearching = true
+    error = nil
+    defer { isSearching = false }
+    do {
+      let resp = try await appState.api.tvShowTMDbSearch(showId: showId, query: searchQuery)
+      results = resp.results
+    } catch {
+      self.error = (error as? APIError)?.userMessage ?? "Search failed."
+    }
+  }
+
+  private func apply(_ candidate: TMDbCandidate) async {
+    isApplying = true
+    defer { isApplying = false }
+    do {
+      try await appState.api.tvShowTMDbFix(showId: showId, tmdbId: candidate.tmdbId)
+      applied = true
+      dismiss()
+    } catch {
+      self.error = (error as? APIError)?.userMessage ?? "Failed to apply."
+    }
+  }
+}
+#endif

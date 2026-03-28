@@ -10,7 +10,7 @@ struct TVMainView: View {
   var body: some View {
     Group {
       if appState.sessionToken == nil {
-        TVLoginView()
+        TVPairingView()
       } else {
         TVHomeView()
       }
@@ -20,8 +20,9 @@ struct TVMainView: View {
 
 // MARK: - Login
 
-private struct TVLoginView: View {
+struct TVLoginView: View {
   @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
 
   // Local state avoids @Bindable-in-body instability on tvOS focus engine
   @State private var server: String = ""
@@ -132,6 +133,11 @@ private struct TVLoginView: View {
         password = appState.savedPassword
         useHTTPS = appState.useHTTPS
       }
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Back") { dismiss() }
+        }
+      }
     }
   }
 }
@@ -235,7 +241,7 @@ private struct TVHomeView: View {
       let api = appState.api
       var allItems: [ItemSummary] = []
       await withTaskGroup(of: [ItemSummary].self) { group in
-        for lib in libraries.prefix(5) {
+        for lib in libraries {
           group.addTask {
             (try? await api.items(libraryId: lib.id, limit: 20, offset: 0).items) ?? []
           }
