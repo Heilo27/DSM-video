@@ -108,7 +108,6 @@ private struct LaunchAnimationView: View {
                 // Laser beam: fires right from center once rings align
                 if laserVisible {
                     LaserView(screenWidth: geo.size.width, screenHeight: geo.size.height)
-                        .transition(.opacity)
                 }
 
                 // White flash overlay
@@ -156,11 +155,9 @@ private struct LaunchAnimationView: View {
             }
         }
 
-        // Phase 5: Laser fires
+        // Phase 5: Laser fires — no withAnimation wrapper; LaserView drives its own beam animation
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.85) {
-            withAnimation(.easeOut(duration: 0.12)) {
-                laserVisible = true
-            }
+            laserVisible = true
         }
 
         // Phase 6: Flash
@@ -235,7 +232,6 @@ private struct LaserView: View {
                         )
                     )
                     .frame(width: beamWidth, height: 3)
-                    .blur(radius: 1.5)
             }
             .frame(maxHeight: .infinity)
 
