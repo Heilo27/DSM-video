@@ -80,13 +80,15 @@ struct LibrariesView: View {
 /// Persists home screen data (libraries + items) to disk so the UI renders
 /// instantly on next launch without waiting for network fetches.
 /// Keyed by server URL — automatically stale when the user switches servers.
-// nonisolated + Sendable: all members are value types (String, [Library], [ItemSummary], Date)
-// so this struct is safe to encode on a background Task.detached without main actor isolation.
+// nonisolated + Sendable: all members are value types, safe to use across actor boundaries.
 private struct HomeCacheEntry: Codable, Sendable {
   let serverURL: String
   let libraries: [Library]
   let items: [ItemSummary]
   let savedAt: Date
+  /// Per-library item counts at time of last full fetch — used to detect additions/removals
+  /// without re-downloading every item on every background refresh.
+  let libraryCounts: [String: Int]   // [libraryId: total]
 }
 
 private enum HomeCache {
@@ -114,15 +116,22 @@ private enum HomeCache {
     return Date().timeIntervalSince(entry.savedAt) > backgroundRefreshAgeSeconds
   }
 
-  /// Encodes on the main actor (fast — pure CPU, no I/O), then writes the resulting
-  /// Data to UserDefaults on a background thread. This avoids the main-actor isolation
-  /// warning from encoding a main-actor-isolated type in a detached task, while still
-  /// keeping the synchronous UserDefaults write (disk I/O) off the main thread.
   @MainActor
-  static func saveAsync(serverURL: String, libraries: [Library], items: [ItemSummary]) {
-    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date())
+  static func saveAsync(serverURL: String, libraries: [Library], items: [ItemSummary], counts: [String: Int]) {
+    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date(), libraryCounts: counts)
     guard let data = try? JSONEncoder().encode(entry) else { return }
-    // Only the UserDefaults write goes to background — Data is Sendable.
+    Task.detached(priority: .utility) {
+      UserDefaults.standard.set(data, forKey: key)
+    }
+  }
+
+  /// Bumps savedAt without re-encoding items — used when a refresh check finds nothing changed.
+  @MainActor
+  static func touch(serverURL: String) {
+    guard let existing = load(serverURL: serverURL) else { return }
+    let updated = HomeCacheEntry(serverURL: existing.serverURL, libraries: existing.libraries,
+                                 items: existing.items, savedAt: Date(), libraryCounts: existing.libraryCounts)
+    guard let data = try? JSONEncoder().encode(updated) else { return }
     Task.detached(priority: .utility) {
       UserDefaults.standard.set(data, forKey: key)
     }
@@ -312,34 +321,74 @@ struct LibraryHomeView: View {
     do {
       let loadedLibs = try await appState.api.libraries().libraries
 
-      var merged: [ItemSummary] = []
-      try await withThrowingTaskGroup(of: [ItemSummary].self) { group in
+      // Incremental refresh: for each library, fetch limit=1 to get the current total.
+      // Only re-download the full item list for libraries where the count has changed.
+      // This avoids re-fetching hundreds of items when nothing has been added or removed.
+      let cachedCounts = HomeCache.load(serverURL: serverURL)?.libraryCounts ?? [:]
+      var currentCounts: [String: Int] = [:]
+      var libsNeedingRefresh: [Library] = []
+
+      try await withThrowingTaskGroup(of: (String, Int).self) { group in
         for lib in loadedLibs {
+          group.addTask {
+            let probe = try await appState.api.items(libraryId: lib.id, limit: 1, offset: 0)
+            return (lib.id, probe.total)
+          }
+        }
+        for try await (libId, total) in group {
+          currentCounts[libId] = total
+          let cached = cachedCounts[libId]
+          if cached == nil || cached != total {
+            // Count changed or not cached — mark for full re-fetch
+            if let lib = loadedLibs.first(where: { $0.id == libId }) {
+              libsNeedingRefresh.append(lib)
+            }
+          }
+        }
+      }
+
+      if libsNeedingRefresh.isEmpty && !allItems.isEmpty {
+        // Nothing changed — bump the cache timestamp so the 5-min timer resets
+        HomeCache.touch(serverURL: serverURL)
+        libraries = loadedLibs
+        return
+      }
+
+      // Fetch fresh items for changed libraries, then merge with cached items.
+      // Fresh results win (overwrite) — deduplicate by item id so unchanged libraries
+      // don't get double-counted.
+      var freshItems: [ItemSummary] = []
+      try await withThrowingTaskGroup(of: [ItemSummary].self) { group in
+        for lib in libsNeedingRefresh {
           group.addTask {
             var libItems: [ItemSummary] = []
             var offset = 0
             let pageSize = 200
+            let total = currentCounts[lib.id] ?? Int.max
             while true {
               let response = try await appState.api.items(
                 libraryId: lib.id, limit: pageSize, offset: offset
               )
               libItems.append(contentsOf: response.items)
-              if response.items.isEmpty || response.items.count < pageSize || libItems.count >= response.total || offset >= 5000 { break }
+              if response.items.isEmpty || response.items.count < pageSize || libItems.count >= total || offset >= 5000 { break }
               offset += pageSize
             }
             return libItems
           }
         }
         for try await libItems in group {
-          merged.append(contentsOf: libItems)
+          freshItems.append(contentsOf: libItems)
         }
       }
 
+      // Merge: fresh items replace stale ones; unchanged cached items are kept.
+      let freshIDs = Set(freshItems.map(\.id))
+      let retained = allItems.filter { !freshIDs.contains($0.id) }
+      let merged = retained + freshItems
+
       libraries = loadedLibs
       allItems = merged
-      // Write cache off the main thread — encoding hundreds of items synchronously
-      // was blocking the main thread and causing the post-load UI freeze.
-      HomeCache.saveAsync(serverURL: serverURL, libraries: loadedLibs, items: merged)
+      HomeCache.saveAsync(serverURL: serverURL, libraries: loadedLibs, items: merged, counts: currentCounts)
     } catch {
       appState.handleConnectionFailure(error)
       // Only show error if we have nothing to display
