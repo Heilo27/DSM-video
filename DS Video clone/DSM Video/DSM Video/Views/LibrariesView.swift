@@ -75,11 +75,50 @@ struct LibrariesView: View {
   }
 }
 
+// MARK: - Home Cache
+
+/// Persists home screen data (libraries + items) to disk so the UI renders
+/// instantly on next launch without waiting for network fetches.
+/// Keyed by server URL — automatically stale when the user switches servers.
+private struct HomeCacheEntry: Codable {
+  let serverURL: String
+  let libraries: [Library]
+  let items: [ItemSummary]
+  let savedAt: Date
+}
+
+private enum HomeCache {
+  private static let key = "dsReel.homeCache"
+  private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600 // 1 week
+
+  static func load(serverURL: String) -> HomeCacheEntry? {
+    guard let data = UserDefaults.standard.data(forKey: key),
+          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
+          entry.serverURL == serverURL,
+          Date().timeIntervalSince(entry.savedAt) < maxAgeSeconds
+    else { return nil }
+    return entry
+  }
+
+  static func save(serverURL: String, libraries: [Library], items: [ItemSummary]) {
+    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date())
+    guard let data = try? JSONEncoder().encode(entry) else { return }
+    UserDefaults.standard.set(data, forKey: key)
+  }
+
+  static func invalidate() {
+    UserDefaults.standard.removeObject(forKey: key)
+  }
+}
+
+// MARK: - LibraryHomeView
+
 struct LibraryHomeView: View {
   @Environment(AppState.self) private var appState
   @State private var allItems: [ItemSummary] = []
   @State private var libraries: [Library] = []
   @State private var isLoading: Bool = false
+  @State private var isBackgroundRefreshing: Bool = false
   @State private var error: String?
 
   // MARK: - Rail Filters
@@ -209,20 +248,42 @@ struct LibraryHomeView: View {
 
   private func load() async {
     guard !isLoading else { return }
+
     if appState.isDemoMode {
       libraries = DemoData.libraries
       allItems = DemoData.movieItems + DemoData.tvItems
       return
     }
-    error = nil
-    isLoading = true
-    defer { isLoading = false }
+
+    let serverURL = appState.api.baseURL.absoluteString
+
+    // Show cached data instantly — user sees content with no wait
+    if allItems.isEmpty, let cached = HomeCache.load(serverURL: serverURL) {
+      libraries = cached.libraries
+      allItems = cached.items
+      // Refresh in background without showing the full loading spinner
+      Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
+      return
+    }
+
+    // No cache — show spinner and load
+    await fetchFromNetwork(serverURL: serverURL, background: false)
+  }
+
+  private func fetchFromNetwork(serverURL: String, background: Bool) async {
+    if background {
+      guard !isBackgroundRefreshing else { return }
+      isBackgroundRefreshing = true
+      defer { isBackgroundRefreshing = false }
+    } else {
+      isLoading = true
+      error = nil
+      defer { isLoading = false }
+    }
 
     do {
       let loadedLibs = try await appState.api.libraries().libraries
-      libraries = loadedLibs
 
-      // Fetch all items from all libraries and merge into one flat array
       var merged: [ItemSummary] = []
       try await withThrowingTaskGroup(of: [ItemSummary].self) { group in
         for lib in loadedLibs {
@@ -245,13 +306,17 @@ struct LibraryHomeView: View {
           merged.append(contentsOf: libItems)
         }
       }
+
+      libraries = loadedLibs
       allItems = merged
+      HomeCache.save(serverURL: serverURL, libraries: loadedLibs, items: merged)
     } catch {
       appState.handleConnectionFailure(error)
-      let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
+      // Only show error if we have nothing to display
       if allItems.isEmpty {
-        self.error = errorMsg
+        self.error = (error as? APIError)?.userMessage ?? "Unknown error."
       }
+      // Silently ignore background refresh failures — stale cache is fine
     }
   }
 }
