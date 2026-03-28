@@ -16,8 +16,9 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            // Main app content — hidden until launch completes
-            Group {
+            // Main app content — only inserted into the tree after launch completes,
+            // so its .task{} calls don't fire and compete with the animation.
+            if launchDone {
                 #if os(tvOS)
                 TVMainView()
                 #else
@@ -28,17 +29,13 @@ struct RootView: View {
                 }
                 #endif
             }
-            .opacity(launchDone ? 1 : 0)
 
             // Launch screen — sits on top, removes itself after animation
             if !launchDone {
                 LaunchAnimationView {
-                    withAnimation(.easeIn(duration: 0.25)) {
-                        launchDone = true
-                    }
+                    launchDone = true
                 }
                 .ignoresSafeArea()
-                .transition(.opacity)
             }
         }
     }
