@@ -89,9 +89,13 @@ private struct HomeCacheEntry: Codable {
 
 private enum HomeCache {
   private static let key = "dsReel.homeCache"
-  private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600 // 1 week
+  // Background refresh only if cache is older than 5 minutes — prevents hammering
+  // the NAS on every app open when the library hasn't changed.
+  private static let backgroundRefreshAgeSeconds: TimeInterval = 5 * 60
+  private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600 // 1 week hard expiry
 
   static func load(serverURL: String) -> HomeCacheEntry? {
+    // Decoded off the main thread by callers using Task.detached — read is fast (memory-mapped)
     guard let data = UserDefaults.standard.data(forKey: key),
           let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
           entry.serverURL == serverURL,
@@ -100,10 +104,25 @@ private enum HomeCache {
     return entry
   }
 
-  static func save(serverURL: String, libraries: [Library], items: [ItemSummary]) {
-    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date())
-    guard let data = try? JSONEncoder().encode(entry) else { return }
-    UserDefaults.standard.set(data, forKey: key)
+  /// Returns true if the cache exists but is stale enough to warrant a background refresh.
+  static func needsRefresh(serverURL: String) -> Bool {
+    guard let data = UserDefaults.standard.data(forKey: key),
+          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
+          entry.serverURL == serverURL
+    else { return true }
+    return Date().timeIntervalSince(entry.savedAt) > backgroundRefreshAgeSeconds
+  }
+
+  /// Writes cache on a background thread to avoid blocking the main thread.
+  /// Encoding hundreds of items synchronously on main was causing the UI freeze.
+  static func saveAsync(serverURL: String, libraries: [Library], items: [ItemSummary]) {
+    Task.detached(priority: .utility) {
+      let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date())
+      guard let data = try? JSONEncoder().encode(entry) else { return }
+      await MainActor.run {
+        UserDefaults.standard.set(data, forKey: key)
+      }
+    }
   }
 
   static func invalidate() {
@@ -261,8 +280,12 @@ struct LibraryHomeView: View {
     if allItems.isEmpty, let cached = HomeCache.load(serverURL: serverURL) {
       libraries = cached.libraries
       allItems = cached.items
-      // Refresh in background without showing the full loading spinner
-      Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
+      // Only background-refresh if cache is older than 5 minutes.
+      // Previously refreshed on every launch, which hammered the NAS and
+      // competed for the URLSession pool with item detail / image requests.
+      if HomeCache.needsRefresh(serverURL: serverURL) {
+        await fetchFromNetwork(serverURL: serverURL, background: true)
+      }
       return
     }
 
@@ -311,7 +334,9 @@ struct LibraryHomeView: View {
 
       libraries = loadedLibs
       allItems = merged
-      HomeCache.save(serverURL: serverURL, libraries: loadedLibs, items: merged)
+      // Write cache off the main thread — encoding hundreds of items synchronously
+      // was blocking the main thread and causing the post-load UI freeze.
+      HomeCache.saveAsync(serverURL: serverURL, libraries: loadedLibs, items: merged)
     } catch {
       appState.handleConnectionFailure(error)
       // Only show error if we have nothing to display
