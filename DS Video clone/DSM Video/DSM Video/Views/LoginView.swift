@@ -11,7 +11,7 @@ struct LoginView: View {
   #endif
   @State private var showQuickConnect: Bool = false
   @State private var showOfflineDownloads: Bool = false
-  private var hasDownloads: Bool { !DownloadManager.shared.getDownloadedItems().isEmpty }
+  @State private var hasDownloads: Bool = false
 
   var body: some View {
     @Bindable var appState = appState
@@ -242,6 +242,9 @@ struct LoginView: View {
           appState.baseURL = quickConnectID
         }
       }
+    }
+    .onAppear {
+      hasDownloads = !DownloadManager.shared.getDownloadedItems().isEmpty
     }
   }
 }

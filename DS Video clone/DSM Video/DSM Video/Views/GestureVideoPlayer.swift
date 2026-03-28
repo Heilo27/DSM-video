@@ -730,7 +730,11 @@ struct GestureVideoPlayer: View {
             player?.removeTimeObserver(observer)
         }
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("[GestureVideoPlayer] Failed to deactivate audio session: \(error)")
+        }
         #endif
         player?.pause()
         player = nil

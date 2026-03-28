@@ -416,7 +416,7 @@ struct ItemDetailView: View {
       Text("Cast")
         .font(.headline)
         .foregroundStyle(.white)
-      ForEach(Array(cast.enumerated()), id: \.element.name) { _, person in
+      ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
         HStack {
           Text(person.name)
             .foregroundStyle(.white)

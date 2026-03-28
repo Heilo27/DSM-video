@@ -217,11 +217,14 @@ final class DownloadManager: NSObject {
   /// Called periodically during playback (same debounce cadence as the online API sync)
   /// and once more on player dismiss.
   func updateResumePosition(itemId: String, positionSeconds: Int) {
-    var items = getDownloadedItems()
-    guard let index = items.firstIndex(where: { $0.id == itemId }) else { return }
-    items[index].resumePositionSeconds = positionSeconds
-    saveDownloadedItems(items)
-    cachedDownloadedItems = items
+    // Read raw items directly from UserDefaults to preserve the filename-only storage invariant.
+    // Using getDownloadedItems() would resolve absolute paths and write them back, undoing the fix.
+    guard let rawData = UserDefaults.standard.data(forKey: storageKey),
+          var rawItems = try? JSONDecoder().decode([DownloadedItem].self, from: rawData),
+          let index = rawItems.firstIndex(where: { $0.id == itemId }) else { return }
+    rawItems[index].resumePositionSeconds = positionSeconds
+    saveDownloadedItems(rawItems)
+    cachedDownloadedItems = nil
   }
 
   // MARK: - Private

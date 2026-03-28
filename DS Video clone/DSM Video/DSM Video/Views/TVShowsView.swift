@@ -32,7 +32,6 @@ struct TVShowsView: View {
   let library: Library
 
   @State private var shows: [TVShow] = []
-  @State private var sortedShows: [TVShow] = []
   @State private var isLoading = false
   @State private var error: String?
   @State private var sortOption: TVShowSortOption = {
@@ -49,10 +48,10 @@ struct TVShowsView: View {
   }
   #endif
 
-  private func computeSortedShows() -> [TVShow] {
+  private var sortedShows: [TVShow] {
     switch sortOption {
     case .recentlyWatched:
-      return shows.sorted { a, b in
+      shows.sorted { a, b in
         let aDate = a.lastWatchedAt ?? ""
         let bDate = b.lastWatchedAt ?? ""
         if aDate.isEmpty && bDate.isEmpty {
@@ -63,17 +62,17 @@ struct TVShowsView: View {
         return aDate > bDate
       }
     case .addedNewest:
-      return shows
+      shows
     case .addedOldest:
-      return shows.reversed()
+      shows.reversed()
     case .nameAsc:
-      return shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+      shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     case .nameDesc:
-      return shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
+      shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
     case .releaseNewest:
-      return shows.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+      shows.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
     case .releaseOldest:
-      return shows.sorted { ($0.year ?? Int.max) < ($1.year ?? Int.max) }
+      shows.sorted { ($0.year ?? Int.max) < ($1.year ?? Int.max) }
     }
   }
 
@@ -145,19 +144,16 @@ struct TVShowsView: View {
     .navigationTitle(library.title)
     .task {
       await load()
-      sortedShows = computeSortedShows()
     }
     #if !os(tvOS)
     .refreshable {
       await load()
-      sortedShows = computeSortedShows()
     }
     .safeAreaInset(edge: .top, spacing: 0) {
       TVShowSortChipBar(selection: $sortOption)
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
-      sortedShows = computeSortedShows()
     }
     #else
     .toolbar {
@@ -175,7 +171,6 @@ struct TVShowsView: View {
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
-      sortedShows = computeSortedShows()
     }
     #endif
   }
