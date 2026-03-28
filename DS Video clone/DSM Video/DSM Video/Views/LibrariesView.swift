@@ -274,11 +274,13 @@ struct LibraryHomeView: View {
     if background {
       guard !isBackgroundRefreshing else { return }
       isBackgroundRefreshing = true
-      defer { isBackgroundRefreshing = false }
     } else {
       isLoading = true
       error = nil
-      defer { isLoading = false }
+    }
+    defer {
+      if background { isBackgroundRefreshing = false }
+      else { isLoading = false }
     }
 
     do {

@@ -920,19 +920,15 @@ private extension GestureVideoPlayer {
     // MARK: - Helpers
 
     #if os(iOS)
-    /// Locks orientation to landscape and rotates the device immediately.
+    /// Locks orientation to landscape. Uses setNeedsUpdateOfSupportedInterfaceOrientations
+    /// so UIKit rotates on its own next layout pass rather than competing with the
+    /// fullScreenCover presentation animation. requestGeometryUpdate was the root cause
+    /// of the gesture-gate timeouts and touch freezes.
     private func lockLandscape() {
-        AppDelegate.orientationLock = .landscape
-        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape)) { _ in }
-        }
+        AppDelegate.setOrientation(.landscape)
     }
 
     /// Restores portrait lock when the player dismisses.
-    /// Uses setNeedsUpdateOfSupportedInterfaceOrientations rather than
-    /// requestGeometryUpdate — UIKit rotates on its own next layout pass
-    /// instead of competing with the sheet dismiss animation, which was
-    /// causing gesture-recognizer deadlocks and touch freezes.
     private func unlockOrientation() {
         AppDelegate.setOrientation(.portrait)
     }
