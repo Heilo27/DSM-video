@@ -10,6 +10,8 @@ struct LoginView: View {
   @State private var showAbout: Bool = false
   #endif
   @State private var showQuickConnect: Bool = false
+  @State private var showOfflineDownloads: Bool = false
+  private var hasDownloads: Bool { !DownloadManager.shared.getDownloadedItems().isEmpty }
 
   var body: some View {
     @Bindable var appState = appState
@@ -165,6 +167,19 @@ struct LoginView: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 8)
+
+        if hasDownloads {
+          Button {
+            showOfflineDownloads = true
+          } label: {
+            Label("Watch Downloaded Videos", systemImage: "arrow.down.circle.fill")
+              .font(.subheadline)
+              .foregroundStyle(.white.opacity(0.75))
+          }
+          .buttonStyle(.plain)
+          .padding(.top, 4)
+          .accessibilityHint("Access videos saved to this device for offline viewing")
+        }
         #endif
 
         Spacer(minLength: 24)
@@ -202,16 +217,21 @@ struct LoginView: View {
         AboutView()
       }
       #endif
+      .fullScreenCover(isPresented: $showOfflineDownloads) {
+        NavigationStack {
+          DownloadsView()
+            .environment(appState)
+            .toolbar {
+              ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { showOfflineDownloads = false }
+              }
+            }
+        }
+      }
       .sheet(isPresented: $showQuickConnect) {
-        QuickConnectSheet(useHTTPS: appState.useHTTPS) { selectedURL in
-          // Strip the Synology DSM port — normalizedBaseURL applies our configured port.
-          if let url = URL(string: selectedURL), let host = url.host {
-            let scheme = selectedURL.hasPrefix("https") ? "https" : "http"
-            appState.baseURL = "\(scheme)://\(host)"
-          } else {
-            appState.baseURL = selectedURL
-          }
-          appState.useHTTPS = selectedURL.hasPrefix("https")
+        QuickConnectSheet(useHTTPS: appState.useHTTPS) { quickConnectID in
+          // Keep the bare QuickConnect ID in the address field — login() resolves it.
+          appState.baseURL = quickConnectID
         }
       }
     }
@@ -331,11 +351,14 @@ private struct QuickConnectSheet: View {
     defer { isResolving = false }
 
     do {
-      guard let url = try await QuickConnectResolver.resolveWAN(id: id, useHTTPS: useHTTPS) else {
+      // Verify the ID resolves before accepting it — but pass back the bare ID,
+      // not the resolved URL. The address field shows the QuickConnect name and
+      // login() resolves it again at login time.
+      guard let _ = try await QuickConnectResolver.resolveWAN(id: id, useHTTPS: useHTTPS) else {
         error = "Couldn't find \"\(id)\". Check the ID and try again."
         return
       }
-      onSelect(url)
+      onSelect(id)
       dismiss()
     } catch {
       self.error = "Network error. Check your connection and try again."
