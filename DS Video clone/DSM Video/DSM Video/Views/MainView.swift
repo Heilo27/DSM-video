@@ -462,6 +462,8 @@ struct DownloadsView: View {
   @State private var totalBytes: Int64 = 0
   @State private var availableBytes: Int64 = 0
   @State private var usedByAppBytes: Int64 = 0
+  @State private var showPlayer = false
+  @State private var playerItem: DownloadedItem?
 
   private let downloadManager = DownloadManager.shared
 
@@ -494,19 +496,9 @@ struct DownloadsView: View {
               if !downloads.isEmpty {
                 LazyVGrid(columns: columns, spacing: 12) {
                   ForEach(downloads) { item in
-                    NavigationLink {
-                      GestureVideoPlayer(
-                        url: URL(fileURLWithPath: item.videoPath),
-                        title: item.title,
-                        resumePosition: Double(item.resumePositionSeconds),
-                        onProgressUpdate: { currentTime, _ in
-                          DownloadManager.shared.updateResumePosition(
-                            itemId: item.id,
-                            positionSeconds: Int(currentTime)
-                          )
-                        }
-                      )
-                      .navigationBarHidden(true)
+                    Button {
+                      playerItem = item
+                      showPlayer = true
                     } label: {
                       DownloadedItemCell(item: item) {
                         deleteDownload(item)
@@ -531,6 +523,25 @@ struct DownloadsView: View {
       .onChange(of: downloadManager.activeDownloads.count) { _, _ in
         loadDownloads()
         loadStorageInfo()
+      }
+      .fullScreenCover(isPresented: $showPlayer, onDismiss: { showPlayer = false }) {
+        if let item = playerItem {
+          GestureVideoPlayer(
+            url: URL(fileURLWithPath: item.videoPath),
+            title: item.title,
+            resumePosition: Double(item.resumePositionSeconds),
+            onDismiss: { showPlayer = false },
+            onProgressUpdate: { currentTime, _ in
+              DownloadManager.shared.updateResumePosition(
+                itemId: item.id,
+                positionSeconds: Int(currentTime)
+              )
+            }
+          )
+          #if !os(tvOS)
+          .toolbarVisibility(.hidden, for: .tabBar)
+          #endif
+        }
       }
     }
   }
@@ -626,19 +637,38 @@ struct DownloadsView: View {
   }
 
   private func loadStorageInfo() {
+    let currentDownloads = downloads
+    Task {
+      let (total, available, used) = await computeStorageInfo(downloads: currentDownloads)
+      totalBytes = total
+      availableBytes = available
+      usedByAppBytes = used
+    }
+  }
+
+  private nonisolated func computeStorageInfo(downloads: [DownloadedItem]) async -> (Int64, Int64, Int64) {
     let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    let total: Int64
+    let available: Int64
+    #if !os(tvOS)
     let values = try? docURL.resourceValues(forKeys: [
       .volumeAvailableCapacityForImportantUsageKey,
       .volumeTotalCapacityKey
     ])
-    totalBytes = Int64(values?.volumeTotalCapacity ?? 0)
-    availableBytes = values?.volumeAvailableCapacityForImportantUsage ?? 0
+    total = Int64(values?.volumeTotalCapacity ?? 0)
+    available = values?.volumeAvailableCapacityForImportantUsage ?? 0
+    #else
+    let values = try? docURL.resourceValues(forKeys: [.volumeTotalCapacityKey])
+    total = Int64(values?.volumeTotalCapacity ?? 0)
+    available = 0
+    #endif
 
-    usedByAppBytes = downloads.reduce(Int64(0)) { sum, item in
+    let used = downloads.reduce(Int64(0)) { sum, item in
       let size = Int64((try? URL(fileURLWithPath: item.videoPath)
         .resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
       return sum + size
     }
+    return (total, available, used)
   }
 
   private func formatBytes(_ bytes: Int64) -> String {

@@ -81,6 +81,7 @@ struct LoginView: View {
           TextField("Username", text: $appState.username)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+            .textContentType(.username)
             .padding(.horizontal, 12)
             #if os(tvOS)
             .frame(height: 66)
@@ -91,6 +92,7 @@ struct LoginView: View {
           Divider()
 
           SecureField("Password", text: passwordBinding)
+            .textContentType(.password)
             .padding(.horizontal, 12)
             #if os(tvOS)
             .frame(height: 66)
@@ -186,15 +188,21 @@ struct LoginView: View {
 
         #if !os(tvOS)
         HStack {
-          Button { showSettings = true } label: { Image(systemName: "gearshape") }
-            .accessibilityLabel("Settings")
+          Button { showSettings = true } label: {
+            Image(systemName: "gearshape")
+              .frame(width: 44, height: 44)
+          }
+          .accessibilityLabel("Settings")
           Spacer()
           Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
             .font(.footnote)
             .foregroundStyle(.white.opacity(0.5))
           Spacer()
-          Button { showAbout = true } label: { Image(systemName: "info.circle") }
-            .accessibilityLabel("About DSM Video")
+          Button { showAbout = true } label: {
+            Image(systemName: "info.circle")
+              .frame(width: 44, height: 44)
+          }
+          .accessibilityLabel("About DSM Video")
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 24)

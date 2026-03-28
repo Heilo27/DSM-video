@@ -83,6 +83,7 @@ extension VideoStationWebAPIClient {
                         updatedAt: status.updated_at ?? ""
                     )
                 },
+                showName: nil,
                 seasonNumber: nil,
                 episodeNumber: nil
             )

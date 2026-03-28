@@ -34,6 +34,8 @@ struct PairingCodeView: View {
           .background(.quaternary)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
           .padding(.horizontal)
+          .accessibilityLabel("Pairing code field")
+          .accessibilityHint("Enter the 6-digit code shown on your Apple TV")
 
         if let error {
           Text(error)
@@ -89,6 +91,7 @@ struct PairingCodeView: View {
             error = "Invalid code format. Please enter a 6-digit number."
           }
         }
+        .accessibilityLabel("Camera viewfinder. Point at QR code to scan.")
       }
     }
   }

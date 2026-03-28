@@ -144,6 +144,23 @@ struct TVLoginView: View {
 
 // MARK: - Home
 
+private let _tvHomeDateFormatterFractional: ISO8601DateFormatter = {
+  let f = ISO8601DateFormatter()
+  f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return f
+}()
+
+private let _tvHomeDateFormatter: ISO8601DateFormatter = {
+  let f = ISO8601DateFormatter()
+  f.formatOptions = [.withInternetDateTime]
+  return f
+}()
+
+private func parseTVHomeDate(_ iso: String) -> Date {
+  if let d = _tvHomeDateFormatterFractional.date(from: iso) { return d }
+  return _tvHomeDateFormatter.date(from: iso) ?? Date.distantPast
+}
+
 private struct TVHomeView: View {
   @Environment(AppState.self) private var appState
   @State private var libraries: [Library] = []
@@ -222,9 +239,11 @@ private struct TVHomeView: View {
     }
     .sheet(isPresented: $showSettings) {
       TVSettingsView()
+        .environment(appState)
     }
     .sheet(isPresented: $showPairing) {
       TVPairingView()
+        .environment(appState)
     }
     .task { await load() }
   }
@@ -262,9 +281,9 @@ private struct TVHomeView: View {
       justAdded = Array(
         allItems
           .sorted { lhs, rhs in
-            let l = Int(lhs.addedAt) ?? 0
-            let r = Int(rhs.addedAt) ?? 0
-            if l != 0 || r != 0 { return l > r }
+            let l = parseTVHomeDate(lhs.addedAt)
+            let r = parseTVHomeDate(rhs.addedAt)
+            if l != Date.distantPast || r != Date.distantPast { return l > r }
             return lhs.addedAt > rhs.addedAt
           }
           .prefix(20)

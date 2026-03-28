@@ -32,6 +32,7 @@ struct TVShowsView: View {
   let library: Library
 
   @State private var shows: [TVShow] = []
+  @State private var sortedShows: [TVShow] = []
   @State private var isLoading = false
   @State private var error: String?
   @State private var sortOption: TVShowSortOption = {
@@ -48,7 +49,7 @@ struct TVShowsView: View {
   }
   #endif
 
-  private var sortedShows: [TVShow] {
+  private func computeSortedShows() -> [TVShow] {
     switch sortOption {
     case .recentlyWatched:
       return shows.sorted { a, b in
@@ -79,7 +80,7 @@ struct TVShowsView: View {
   var body: some View {
     ScrollView {
       if isLoading && shows.isEmpty {
-        ProgressView()
+        ProgressView("Loading")
           #if os(tvOS)
           .padding(.top, 60)
           #else
@@ -142,17 +143,21 @@ struct TVShowsView: View {
     }
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(library.title)
-    .task { await load() }
-    .onAppear {
-      if !shows.isEmpty { Task { await load() } }
+    .task {
+      await load()
+      sortedShows = computeSortedShows()
     }
     #if !os(tvOS)
-    .refreshable { await load() }
+    .refreshable {
+      await load()
+      sortedShows = computeSortedShows()
+    }
     .safeAreaInset(edge: .top, spacing: 0) {
       TVShowSortChipBar(selection: $sortOption)
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
+      sortedShows = computeSortedShows()
     }
     #else
     .toolbar {
@@ -170,6 +175,7 @@ struct TVShowsView: View {
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
+      sortedShows = computeSortedShows()
     }
     #endif
   }
@@ -210,7 +216,7 @@ private struct TVShowSortChipBar: View {
               .font(.subheadline.weight(.medium))
               .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
               .padding(.horizontal, 12)
-              .padding(.vertical, 6)
+              .padding(.vertical, 12)
               .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                   .fill(selection == option ? Color.dsAccent : Color.dsSurface)

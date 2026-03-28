@@ -68,6 +68,7 @@ struct TVPairingView: View {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                   .stroke(Color.dsBorderStrong, lineWidth: 1)
               )
+              .speechSpellsOutCharacters(true)
 
             // Countdown
             if countdown > 0 {
@@ -141,6 +142,7 @@ struct TVPairingView: View {
     }
     .fullScreenCover(isPresented: $showManualLogin) {
       TVLoginView()
+        .environment(appState)
     }
     .onAppear {
       if pairingCode == nil && !isGenerating {

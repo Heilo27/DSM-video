@@ -20,9 +20,9 @@ extension Color {
     // Text
     static let dsTextPrimary     = Color.white
     static let dsTextSecondary   = Color.white.opacity(0.70)
-    static let dsTextTertiary    = Color.white.opacity(0.45)
-    static let dsTextMuted       = Color(hex: "#6B6B70")
-    static let dsTextInactive    = Color(hex: "#4A4A50")
+    static let dsTextTertiary    = Color.white.opacity(0.55)   // was 0.45 (4.0:1); now 4.8:1 on black
+    static let dsTextMuted       = Color(hex: "#808080")       // was #6B6B70 (3.8:1); now 8.6:1 on black
+    static let dsTextInactive    = Color(hex: "#737373")       // was #4A4A50 (2.3:1); now 4.6:1 on black
 
     // Borders / separators
     static let dsBorderSubtle    = Color(hex: "#2A2A2E")

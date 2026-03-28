@@ -56,7 +56,7 @@ struct ItemsGridView: View {
   var body: some View {
     ScrollView {
       if isLoading && items.isEmpty {
-        ProgressView()
+        ProgressView("Loading videos")
           .padding(.top, 24)
       } else if let error {
         ContentUnavailableView("Couldn't load items", systemImage: "exclamationmark.triangle", description: Text(error))
@@ -95,9 +95,6 @@ struct ItemsGridView: View {
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(library.title)
     .task { await load() }
-    .onAppear {
-      if !items.isEmpty { Task { await load() } }
-    }
     #if !os(tvOS)
     .refreshable { await load() }
     .safeAreaInset(edge: .top, spacing: 0) {
@@ -191,7 +188,7 @@ private struct SortChipBar: View {
               .font(.subheadline.weight(.medium))
               .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
               .padding(.horizontal, 12)
-              .padding(.vertical, 6)
+              .padding(.vertical, 12)
               .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                   .fill(selection == option ? Color.dsAccent : Color.dsSurface)

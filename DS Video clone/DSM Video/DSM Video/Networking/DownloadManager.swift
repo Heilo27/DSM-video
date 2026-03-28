@@ -81,7 +81,7 @@ final class DownloadManager: NSObject {
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
     config.isDiscretionary = false
     config.sessionSendsLaunchEvents = true
-    backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+    backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
   }
 
   // MARK: - Public API

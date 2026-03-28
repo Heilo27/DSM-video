@@ -5,6 +5,7 @@ import os.log
 
 #if os(iOS) || os(tvOS)
 import MediaPlayer
+import UIKit
 #endif
 
 private let orientLog = Logger(subsystem: "com.dsm.orientation", category: "player")
@@ -44,12 +45,6 @@ struct GestureVideoPlayer: View {
     @State private var volumeStartLevel: Float = 0.5
     @State private var showVolumeIndicator: Bool = false
 
-    #if os(iOS)
-    @State private var isAdjustingBrightness: Bool = false
-    @State private var brightnessLevel: CGFloat = 0.5
-    @State private var brightnessStartLevel: CGFloat = 0.5
-    @State private var showBrightnessIndicator: Bool = false
-    #endif
 
     @State private var showSkipIndicator: SkipDirection? = nil
 
@@ -62,9 +57,6 @@ struct GestureVideoPlayer: View {
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var hideVolumeIndicatorTask: Task<Void, Never>?
     @State private var skipHideTask: Task<Void, Never>?
-    #if os(iOS)
-    @State private var hideBrightnessIndicatorTask: Task<Void, Never>?
-    #endif
     @State private var timeObserver: Any?
     @State private var cancellables = Set<AnyCancellable>()
     @State private var hasResumedPosition: Bool = false
@@ -121,6 +113,12 @@ struct GestureVideoPlayer: View {
             }
         }
         .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Play/Pause") { togglePlayPause() }
+        .accessibilityAction(named: "Skip forward 10 seconds") {
+            let newTime = min(duration, currentTime + 10)
+            seek(to: newTime)
+            currentTime = newTime
+        }
         .accessibilityAction(named: "Skip forward 30 seconds") { skipForward() }
         .accessibilityAction(named: "Skip backward 30 seconds") { skipBackward() }
         #if os(iOS)
@@ -201,13 +199,6 @@ struct GestureVideoPlayer: View {
             if showVolumeIndicator {
                 volumeIndicatorOverlay
             }
-
-            #if os(iOS)
-            // Brightness indicator
-            if showBrightnessIndicator {
-                brightnessIndicatorOverlay
-            }
-            #endif
 
             // Skip indicator
             if let direction = showSkipIndicator {
@@ -418,7 +409,7 @@ struct GestureVideoPlayer: View {
                     // AirPlay button (iOS only)
                     #if os(iOS)
                     AirPlayButton()
-                        .frame(width: 28, height: 28)
+                        .frame(width: 44, height: 44)
                     #endif
 
                     // Captions / subtitle picker (iOS/macOS only)
@@ -430,7 +421,7 @@ struct GestureVideoPlayer: View {
                         Image(systemName: "captions.bubble")
                             .font(.title3)
                             .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Subtitles and Audio")
                     #endif
@@ -448,7 +439,7 @@ struct GestureVideoPlayer: View {
                               : "rectangle.arrowtriangle.2.outward")
                             .font(.title3.weight(.medium))
                             .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel(videoFillMode == .fill ? "Switch to fit mode" : "Switch to full screen")
                     #endif
@@ -472,7 +463,7 @@ struct GestureVideoPlayer: View {
                         Image(systemName: "gear")
                             .font(.title3.weight(.medium))
                             .foregroundStyle(.white)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Playback speed, \(playbackRate == 1.0 ? "normal" : "\(playbackRate, specifier: "%.2g") times")")
                 }
@@ -512,7 +503,7 @@ struct GestureVideoPlayer: View {
                 ) { editing in
                     isScrubbing = editing
                     if !editing {
-                        seek(to: scrubTime)
+                        seek(to: scrubTime, tight: true)
                     }
                 }
                 .tint(.white)
@@ -561,7 +552,7 @@ struct GestureVideoPlayer: View {
             let delta = scrubTime - scrubStartTime
             Text(delta >= 0 ? "+\(formatTime(delta))" : "-\(formatTime(abs(delta)))")
                 .font(.title3.monospacedDigit())
-                .foregroundStyle(delta >= 0 ? .green : .red)
+                .foregroundStyle(delta >= 0 ? Color.dsSuccess : Color.dsError)
         }
         .padding(24)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -582,22 +573,6 @@ struct GestureVideoPlayer: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    #if os(iOS)
-    private var brightnessIndicatorOverlay: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "sun.max.fill")
-                .font(.title2)
-                .accessibilityLabel("Brightness")
-
-            ProgressView(value: brightnessLevel)
-                .tint(.white)
-                .frame(width: 100)
-        }
-        .foregroundStyle(.white)
-        .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-    }
-    #endif
 
     @ViewBuilder
     private func skipIndicatorOverlay(direction: SkipDirection) -> some View {
@@ -654,7 +629,6 @@ struct GestureVideoPlayer: View {
 
             hideControlsTask?.cancel()
         } else {
-            #if os(iOS)
             // Vertical gesture — full screen controls volume; full height swipe = 0–100%
             if !isAdjustingVolume {
                 isAdjustingVolume = true
@@ -666,7 +640,6 @@ struct GestureVideoPlayer: View {
             let delta = Float(-translation.height / height)
             volumeLevel = max(0, min(1, volumeStartLevel + delta))
             setSystemVolume(volumeLevel)
-            #endif
 
             hideControlsTask?.cancel()
         }
@@ -674,7 +647,7 @@ struct GestureVideoPlayer: View {
 
     private func handleDragEnd(value: DragGesture.Value, geometry: GeometryProxy) {
         if isScrubbing {
-            seek(to: scrubTime)
+            seek(to: scrubTime, tight: true)
             isScrubbing = false
             showScrubPreview = false
         }
@@ -686,15 +659,6 @@ struct GestureVideoPlayer: View {
         }
         // Schedule hide with short delay for smooth UX (indicator stays briefly after release)
         scheduleHideVolumeIndicator()
-
-        #if os(iOS)
-        // Always reset brightness adjustment state and schedule hide
-        if isAdjustingBrightness {
-            isAdjustingBrightness = false
-        }
-        // Schedule hide with short delay for smooth UX
-        scheduleHideBrightnessIndicator()
-        #endif
 
         scheduleHideControls()
     }
@@ -719,9 +683,9 @@ struct GestureVideoPlayer: View {
         // unsupported codec, network failure)
         playerItem.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
-            .sink { [weak playerItem] status in
+            .sink { status in
                 if status == .failed {
-                    let msg = playerItem?.error?.localizedDescription ?? "Unable to play this video."
+                    let msg = playerItem.error?.localizedDescription ?? "Unable to play this video."
                     playerError = msg
                     isBuffering = false
                 }
@@ -762,9 +726,6 @@ struct GestureVideoPlayer: View {
         hideControlsTask?.cancel()
         hideVolumeIndicatorTask?.cancel()
         skipHideTask?.cancel()
-        #if os(iOS)
-        hideBrightnessIndicatorTask?.cancel()
-        #endif
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
         }
@@ -786,9 +747,14 @@ struct GestureVideoPlayer: View {
         }
     }
 
-    private func seek(to time: Double) {
+    private func seek(to time: Double, tight: Bool = false) {
         let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        if tight {
+            player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        } else {
+            let tolerance = CMTime(seconds: 0.5, preferredTimescale: 600)
+            player?.seek(to: cmTime, toleranceBefore: tolerance, toleranceAfter: tolerance)
+        }
     }
 
     private func skipForward() {
@@ -830,6 +796,10 @@ struct GestureVideoPlayer: View {
     }
 
     private func scheduleHideControls() {
+        // TASK-211: Keep controls always visible when VoiceOver is running to prevent dead zones
+        #if os(iOS)
+        guard !UIAccessibility.isVoiceOverRunning else { return }
+        #endif
         hideControlsTask?.cancel()
         hideControlsTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_500_000_000) // 2.5 seconds
@@ -852,19 +822,6 @@ struct GestureVideoPlayer: View {
         }
     }
 
-    #if os(iOS)
-    private func scheduleHideBrightnessIndicator() {
-        hideBrightnessIndicatorTask?.cancel()
-        hideBrightnessIndicatorTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
-            if !Task.isCancelled {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    showBrightnessIndicator = false
-                }
-            }
-        }
-    }
-    #endif
 
     // MARK: - Volume Control
 

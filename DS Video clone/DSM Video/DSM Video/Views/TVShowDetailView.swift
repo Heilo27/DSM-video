@@ -389,8 +389,9 @@ private struct TVEpisodeRow: View {
 
 #endif  // os(tvOS)
 
-// MARK: - iOS/macOS Scroll View (unchanged logic, minor polish)
+// MARK: - iOS/macOS Scroll View (non-tvOS)
 
+#if !os(tvOS)
 private struct TVShowDetailScrollView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -412,7 +413,7 @@ private struct TVShowDetailScrollView: View {
         showHeader
 
         if isLoading && seasons.isEmpty {
-          ProgressView().padding(.top, 32).frame(maxWidth: .infinity)
+          ProgressView("Loading").padding(.top, 32).frame(maxWidth: .infinity)
         } else if let error {
           ContentUnavailableView(
             "Couldn't load seasons",
@@ -498,7 +499,7 @@ private struct TVShowDetailScrollView: View {
           if let year = show.year {
             Text(String(year)).font(.subheadline).foregroundStyle(.white.opacity(0.75))
           }
-          if show.year != nil { Text("·").foregroundStyle(.white.opacity(0.5)) }
+          if show.year != nil { Text("·").foregroundStyle(.white.opacity(0.5)).accessibilityHidden(true) }
           Text("\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
             .font(.subheadline).foregroundStyle(.white.opacity(0.75))
         }
@@ -526,9 +527,11 @@ private struct TVShowDetailScrollView: View {
     }
   }
 }
+#endif  // !os(tvOS)
 
 // MARK: - iOS Season + Episode (non-tvOS)
 
+#if !os(tvOS)
 private struct iOSSeasonSection: View {
   @Environment(AppState.self) private var appState
   let show: TVShow
@@ -556,18 +559,19 @@ private struct iOSSeasonSection: View {
           Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
             .font(.caption)
             .foregroundStyle(.white.opacity(0.75))
-            .accessibilityLabel(isExpanded ? "Collapse season" : "Expand season")
+            .accessibilityHidden(true)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
       }
       .buttonStyle(.plain)
+      .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
 
       Divider().background(Color.white.opacity(0.1))
 
       if isExpanded {
         if isLoading && episodes.isEmpty {
-          ProgressView().padding(.vertical, 16).frame(maxWidth: .infinity)
+          ProgressView("Loading").padding(.vertical, 16).frame(maxWidth: .infinity)
         } else {
           if let error, episodes.isEmpty {
             HStack {
@@ -624,7 +628,9 @@ private struct iOSSeasonSection: View {
     }
   }
 }
+#endif  // !os(tvOS)
 
+#if !os(tvOS)
 private struct iOSEpisodeRow: View {
   let ep: ItemSummary
 
@@ -670,6 +676,7 @@ private struct iOSEpisodeRow: View {
         .foregroundStyle(.white.opacity(0.3))
         .accessibilityHidden(true)
     }
+    .accessibilityElement(children: .combine)
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
   }
@@ -681,6 +688,7 @@ private struct iOSEpisodeRow: View {
     return "\(m)m"
   }
 }
+#endif  // !os(tvOS)
 
 // MARK: - Episode Detail View (iOS/macOS — with Next Episode nav)
 

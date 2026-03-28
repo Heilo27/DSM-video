@@ -19,6 +19,12 @@ struct APIClient {
     try await request(path: "/api/v1/libraries", method: "GET", body: Optional<Int>.none, response: LibrariesResponse.self)
   }
 
+  /// One-request change detection: returns count + lastUpdatedAt per library.
+  /// The client compares these against its cache to decide which libraries need re-fetching.
+  func librariesSummary() async throws -> LibrarySummariesResponse {
+    try await request(path: "/api/v1/libraries/summary", method: "GET", body: Optional<Int>.none, response: LibrarySummariesResponse.self)
+  }
+
   func items(libraryId: String, limit: Int = 50, offset: Int = 0) async throws -> ItemsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
@@ -186,6 +192,9 @@ struct APIClient {
     return try await request(url: url, method: method, body: body, response: response, authorized: authorized)
   }
 
+  private static let decoder = JSONDecoder()
+  private static let encoder = JSONEncoder()
+
   private func request<T: Decodable, B: Encodable>(
     url: URL,
     method: String,
@@ -200,7 +209,7 @@ struct APIClient {
       req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
     if let body {
-      req.httpBody = try JSONEncoder().encode(body)
+      req.httpBody = try Self.encoder.encode(body)
     }
 
     let (data, httpResp) = try await URLSession.shared.data(for: req)
@@ -208,12 +217,12 @@ struct APIClient {
       throw APIError.network
     }
     if !(200...299).contains(httpResp.statusCode) {
-      if let apiErr = try? JSONDecoder().decode(APIErrorResponse.self, from: data) {
+      if let apiErr = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
         throw APIError.server(apiErr.error)
       }
       throw APIError.http(httpResp.statusCode)
     }
-    return try JSONDecoder().decode(T.self, from: data)
+    return try Self.decoder.decode(T.self, from: data)
   }
 }
 

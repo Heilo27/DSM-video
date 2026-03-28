@@ -1,4 +1,7 @@
 import SwiftUI
+import os.log
+
+private let loadLog = Logger(subsystem: "com.dsm.dsvideo", category: "LibraryLoad")
 
 struct LibrariesView: View {
   @Environment(AppState.self) private var appState
@@ -15,7 +18,7 @@ struct LibrariesView: View {
   var body: some View {
     let content = Group {
       if isLoading && libraries.isEmpty {
-        ProgressView()
+        ProgressView("Loading libraries")
       } else if let error {
         ContentUnavailableView("Couldn't load libraries", systemImage: "exclamationmark.triangle", description: Text(error))
       } else if libraries.isEmpty {
@@ -75,73 +78,6 @@ struct LibrariesView: View {
   }
 }
 
-// MARK: - Home Cache
-
-/// Persists home screen data (libraries + items) to disk so the UI renders
-/// instantly on next launch without waiting for network fetches.
-/// Keyed by server URL — automatically stale when the user switches servers.
-// nonisolated + Sendable: all members are value types, safe to use across actor boundaries.
-private struct HomeCacheEntry: Codable, Sendable {
-  let serverURL: String
-  let libraries: [Library]
-  let items: [ItemSummary]
-  let savedAt: Date
-  /// Per-library item counts at time of last full fetch — used to detect additions/removals
-  /// without re-downloading every item on every background refresh.
-  let libraryCounts: [String: Int]   // [libraryId: total]
-}
-
-private enum HomeCache {
-  // nonisolated so these constants are accessible from detached Tasks without main-actor hop
-  nonisolated(unsafe) private static let key = "dsReel.homeCache"
-  nonisolated(unsafe) private static let backgroundRefreshAgeSeconds: TimeInterval = 5 * 60
-  nonisolated(unsafe) private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600
-
-  static func load(serverURL: String) -> HomeCacheEntry? {
-    // Decoded off the main thread by callers using Task.detached — read is fast (memory-mapped)
-    guard let data = UserDefaults.standard.data(forKey: key),
-          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
-          entry.serverURL == serverURL,
-          Date().timeIntervalSince(entry.savedAt) < maxAgeSeconds
-    else { return nil }
-    return entry
-  }
-
-  /// Returns true if the cache exists but is stale enough to warrant a background refresh.
-  static func needsRefresh(serverURL: String) -> Bool {
-    guard let data = UserDefaults.standard.data(forKey: key),
-          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
-          entry.serverURL == serverURL
-    else { return true }
-    return Date().timeIntervalSince(entry.savedAt) > backgroundRefreshAgeSeconds
-  }
-
-  @MainActor
-  static func saveAsync(serverURL: String, libraries: [Library], items: [ItemSummary], counts: [String: Int]) {
-    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date(), libraryCounts: counts)
-    guard let data = try? JSONEncoder().encode(entry) else { return }
-    Task.detached(priority: .utility) {
-      UserDefaults.standard.set(data, forKey: key)
-    }
-  }
-
-  /// Bumps savedAt without re-encoding items — used when a refresh check finds nothing changed.
-  @MainActor
-  static func touch(serverURL: String) {
-    guard let existing = load(serverURL: serverURL) else { return }
-    let updated = HomeCacheEntry(serverURL: existing.serverURL, libraries: existing.libraries,
-                                 items: existing.items, savedAt: Date(), libraryCounts: existing.libraryCounts)
-    guard let data = try? JSONEncoder().encode(updated) else { return }
-    Task.detached(priority: .utility) {
-      UserDefaults.standard.set(data, forKey: key)
-    }
-  }
-
-  static func invalidate() {
-    UserDefaults.standard.removeObject(forKey: key)
-  }
-}
-
 // MARK: - LibraryHomeView
 
 struct LibraryHomeView: View {
@@ -171,8 +107,11 @@ struct LibraryHomeView: View {
   }
 
   private var justAddedItems: [ItemSummary] {
+    // Sort newest first, then deduplicate so each show/movie appears once.
+    // For TV episodes, group by title prefix up to the episode marker so all
+    // episodes of the same show collapse to the most-recently-added one.
     let sorted = allItems.sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    return deduplicated(sorted)
+    return deduplicatedByShow(sorted)
   }
 
   private var recentlyWatchedItems: [ItemSummary] {
@@ -188,20 +127,54 @@ struct LibraryHomeView: View {
     return deduplicated(sorted)
   }
 
-  private func parseDate(_ iso: String) -> Date {
+  private static let _dateFormatterFractional: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: iso) { return d }
+    return f
+  }()
+
+  private static let _dateFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime]
-    return f.date(from: iso) ?? Date.distantPast
+    return f
+  }()
+
+  private func parseDate(_ iso: String) -> Date {
+    if let d = Self._dateFormatterFractional.date(from: iso) { return d }
+    return Self._dateFormatter.date(from: iso) ?? Date.distantPast
   }
 
-  /// Removes duplicate entries for the same title, keeping the first (highest-priority) occurrence.
-  /// This ensures a TV show with many episodes only appears once per rail.
+  /// Deduplicates by exact title+type — used for Continue Watching and Recently Watched
+  /// where items already have show-level titles from the server.
   private func deduplicated(_ items: [ItemSummary]) -> [ItemSummary] {
     var seen = Set<String>()
     return items.filter { item in
       let key = item.title.lowercased() + "|\(item.type)"
+      guard !seen.contains(key) else { return false }
+      seen.insert(key)
+      return true
+    }
+  }
+
+  /// Deduplicates by show — TV episodes are grouped by `showName` (from server) so
+  /// all episodes of the same show collapse to one entry. Movies pass through unchanged.
+  private func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
+    var seen = Set<String>()
+    return items.filter { item in
+      let key: String
+      if let showName = item.showName, !showName.isEmpty {
+        // Use the server-supplied show name — most reliable grouping
+        key = "tv|\(showName.lowercased())"
+      } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
+        // Fallback: strip season/episode markers from title
+        let base = item.title
+          .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
+          .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
+          .lowercased()
+        key = "tv|\(base)"
+      } else {
+        key = item.title.lowercased() + "|\(item.type)"
+      }
       guard !seen.contains(key) else { return false }
       seen.insert(key)
       return true
@@ -222,7 +195,7 @@ struct LibraryHomeView: View {
     NavigationStack {
       Group {
         if isLoading && allItems.isEmpty {
-          ProgressView()
+          ProgressView("Loading libraries")
         } else if let error {
           VStack(spacing: 16) {
             ContentUnavailableView(
@@ -278,124 +251,203 @@ struct LibraryHomeView: View {
   // MARK: - Load
 
   private func load() async {
-    guard !isLoading else { return }
+    loadLog.info("load: called — isLoading=\(isLoading) allItems=\(allItems.count)")
+    guard !isLoading else {
+      loadLog.warning("load: already loading, bailing out (guard against double-call)")
+      return
+    }
 
     if appState.isDemoMode {
+      loadLog.info("load: demo mode — injecting DemoData")
       libraries = DemoData.libraries
       allItems = DemoData.movieItems + DemoData.tvItems
       return
     }
 
     let serverURL = appState.api.baseURL.absoluteString
+    loadLog.info("load: serverURL=\(serverURL)")
 
-    // Show cached data instantly — user sees content with no wait
-    if allItems.isEmpty, let cached = HomeCache.load(serverURL: serverURL) {
-      libraries = cached.libraries
-      allItems = cached.items
-      // Only background-refresh if cache is older than 5 minutes.
-      // Previously refreshed on every launch, which hammered the NAS and
-      // competed for the URLSession pool with item detail / image requests.
+    // If items are already in memory (re-entering tab, pull-to-refresh), always
+    // run as a background check — never block the UI with a foreground fetch.
+    if !allItems.isEmpty {
+      loadLog.info("load: items already loaded — running background check only")
       if HomeCache.needsRefresh(serverURL: serverURL) {
-        await fetchFromNetwork(serverURL: serverURL, background: true)
+        Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
+      } else {
+        loadLog.info("load: cache fresh — nothing to do")
       }
       return
     }
 
-    // No cache — show spinner and load
+    // Cold start: try cache first for instant render
+    if let cached = HomeCache.load(serverURL: serverURL) {
+      loadLog.info("load: cache HIT — rendering \(cached.items.count) items immediately (no spinner)")
+      libraries = cached.libraries
+      allItems = cached.items
+      if HomeCache.needsRefresh(serverURL: serverURL) {
+        loadLog.info("load: cache stale — scheduling background refresh")
+        Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
+      } else {
+        loadLog.info("load: cache fresh — done")
+      }
+      return
+    }
+
+    // No cache at all — show spinner and fetch
+    loadLog.info("load: no cache — fetching from network")
     await fetchFromNetwork(serverURL: serverURL, background: false)
   }
 
   private func fetchFromNetwork(serverURL: String, background: Bool) async {
+    loadLog.info("fetchFromNetwork: background=\(background)")
     if background {
-      guard !isBackgroundRefreshing else { return }
+      guard !isBackgroundRefreshing else {
+        loadLog.warning("fetchFromNetwork: background refresh already in flight — skipping")
+        return
+      }
       isBackgroundRefreshing = true
     } else {
       isLoading = true
       error = nil
     }
-    defer {
-      if background { isBackgroundRefreshing = false }
-      else { isLoading = false }
+
+    // Snapshot values needed by the detached task — capture before leaving @MainActor
+    let api = appState.api
+    let cachedItems = allItems
+    let cachedLibraries = libraries
+
+    // All network I/O runs on the cooperative thread pool, NOT the main actor.
+    // This keeps the main thread free for UI (tab switches, navigation, rendering)
+    // even during the 40s+ library fetch the NAS currently takes.
+    let result = await Task.detached(priority: .userInitiated) {
+      await Self.doFetch(api: api, serverURL: serverURL,
+                         cachedItems: cachedItems, cachedLibraries: cachedLibraries)
+    }.value
+
+    // Back on @MainActor — apply result to state
+    switch result {
+    case .noChange(let libs):
+      loadLog.info("fetchFromNetwork: no change — updating libs, touching cache")
+      HomeCache.touch(serverURL: serverURL)
+      libraries = libs
+
+    case .updated(let libs, let merged, let counts, let updatedAt):
+      loadLog.info("fetchFromNetwork: update complete — \(merged.count) items")
+      libraries = libs
+      allItems = merged
+      HomeCache.save(serverURL: serverURL, libraries: libs, items: merged,
+                     counts: counts, updatedAt: updatedAt)
+
+    case .failure(let err):
+      loadLog.error("fetchFromNetwork: ERROR — \(err.localizedDescription)")
+      appState.handleConnectionFailure(err)
+      if allItems.isEmpty {
+        self.error = (err as? APIError)?.userMessage ?? "Unknown error."
+      }
     }
 
-    do {
-      let loadedLibs = try await appState.api.libraries().libraries
+    if background { isBackgroundRefreshing = false } else { isLoading = false }
+    loadLog.info("fetchFromNetwork: done (background=\(background))")
+  }
 
-      // Incremental refresh: for each library, fetch limit=1 to get the current total.
-      // Only re-download the full item list for libraries where the count has changed.
-      // This avoids re-fetching hundreds of items when nothing has been added or removed.
-      let cachedCounts = HomeCache.load(serverURL: serverURL)?.libraryCounts ?? [:]
+  // Result type — all value types, safe to return from detached task
+  private enum FetchResult: Sendable {
+    case noChange([Library])
+    case updated([Library], [ItemSummary], [String: Int], [String: String])
+    case failure(Error)
+  }
+
+  // nonisolated: runs entirely off the main actor on the cooperative thread pool
+  private nonisolated static func doFetch(api: APIClient, serverURL: String,
+                                          cachedItems: [ItemSummary],
+                                          cachedLibraries: [Library]) async -> FetchResult {
+    // Local logger — avoids @MainActor isolation issue with file-scope let in a View file
+    let log = Logger(subsystem: "com.dsm.dsvideo", category: "LibraryLoad")
+    do {
+      let cachedEntry = HomeCache.load(serverURL: serverURL)
+      let cachedCounts = cachedEntry?.libraryCounts ?? [:]
+
       var currentCounts: [String: Int] = [:]
+      var currentUpdatedAt: [String: String] = [:]
       var libsNeedingRefresh: [Library] = []
 
-      try await withThrowingTaskGroup(of: (String, Int).self) { group in
-        for lib in loadedLibs {
-          group.addTask {
-            let probe = try await appState.api.items(libraryId: lib.id, limit: 1, offset: 0)
-            return (lib.id, probe.total)
-          }
-        }
-        for try await (libId, total) in group {
-          currentCounts[libId] = total
-          let cached = cachedCounts[libId]
-          if cached == nil || cached != total {
-            // Count changed or not cached — mark for full re-fetch
-            if let lib = loadedLibs.first(where: { $0.id == libId }) {
+      // Step 1: Check for changes via lightweight summary endpoint (fast, ~0.07s).
+      // Only fall back to fetching the full library list if summary is unavailable
+      // or if we have no cached library list to work from.
+      log.info("doFetch: calling /api/v1/libraries/summary for change detection")
+      let t1 = Date()
+      if let summaries = try? await api.librariesSummary(), !cachedLibraries.isEmpty {
+        log.info("doFetch: summary in \(String(format: "%.2f", Date().timeIntervalSince(t1)))s — \(summaries.libraries.count) entries")
+        for s in summaries.libraries {
+          currentCounts[s.libraryId] = s.count
+          currentUpdatedAt[s.libraryId] = s.lastUpdatedAt
+          let countChanged = cachedCounts[s.libraryId] != s.count
+          let isNew = cachedCounts[s.libraryId] == nil
+          log.info("  lib=\(s.libraryId) count=\(s.count) cached=\(cachedCounts[s.libraryId].map(String.init) ?? "nil") countChanged=\(countChanged) isNew=\(isNew)")
+          if countChanged || isNew {
+            // Use cached library list — avoids the slow /api/v1/libraries call
+            if let lib = cachedLibraries.first(where: { $0.id == s.libraryId }) {
+              log.info("  → queuing '\(lib.title)' for item fetch")
               libsNeedingRefresh.append(lib)
             }
           }
         }
+
+        // Nothing changed — no network fetch needed
+        if libsNeedingRefresh.isEmpty && !cachedItems.isEmpty {
+          log.info("doFetch: no changes detected — cache is current, skipping all item fetches")
+          return .noChange(cachedLibraries)
+        }
+      } else {
+        // No summary endpoint or no cached libs — must fetch full library list
+        log.info("doFetch: no cached libs or summary unavailable — fetching /api/v1/libraries")
+        let t0 = Date()
+        let loadedLibs = try await api.libraries().libraries
+        log.info("doFetch: got \(loadedLibs.count) libs in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
+        libsNeedingRefresh = loadedLibs
+        for lib in loadedLibs { currentCounts[lib.id] = 0 }
       }
 
-      if libsNeedingRefresh.isEmpty && !allItems.isEmpty {
-        // Nothing changed — bump the cache timestamp so the 5-min timer resets
-        HomeCache.touch(serverURL: serverURL)
-        libraries = loadedLibs
-        return
-      }
-
-      // Fetch fresh items for changed libraries, then merge with cached items.
-      // Fresh results win (overwrite) — deduplicate by item id so unchanged libraries
-      // don't get double-counted.
+      // Step 2: Fetch items only for libraries that changed
+      log.info("doFetch: \(libsNeedingRefresh.count) lib(s) need item refresh")
       var freshItems: [ItemSummary] = []
+      let t2 = Date()
       try await withThrowingTaskGroup(of: [ItemSummary].self) { group in
         for lib in libsNeedingRefresh {
           group.addTask {
+            let log = Logger(subsystem: "com.dsm.dsvideo", category: "LibraryLoad")
+            log.info("  itemFetch[\(lib.id)]: starting (expected≈\(currentCounts[lib.id].map(String.init) ?? "?"))")
             var libItems: [ItemSummary] = []
             var offset = 0
             let pageSize = 200
             let total = currentCounts[lib.id] ?? Int.max
+            var page = 0
             while true {
-              let response = try await appState.api.items(
-                libraryId: lib.id, limit: pageSize, offset: offset
-              )
+              let pageStart = Date()
+              let response = try await api.items(libraryId: lib.id, limit: pageSize, offset: offset)
+              log.info("  itemFetch[\(lib.id)]: page \(page) got=\(response.items.count) in \(String(format: "%.2f", Date().timeIntervalSince(pageStart)))s")
               libItems.append(contentsOf: response.items)
+              page += 1
               if response.items.isEmpty || response.items.count < pageSize || libItems.count >= total || offset >= 5000 { break }
               offset += pageSize
             }
+            log.info("  itemFetch[\(lib.id)]: done — \(libItems.count) items")
             return libItems
           }
         }
-        for try await libItems in group {
-          freshItems.append(contentsOf: libItems)
-        }
+        for try await libItems in group { freshItems.append(contentsOf: libItems) }
       }
+      log.info("doFetch: item fetches done in \(String(format: "%.2f", Date().timeIntervalSince(t2)))s — \(freshItems.count) fresh items")
 
-      // Merge: fresh items replace stale ones; unchanged cached items are kept.
+      // Merge: fresh items replace stale by id; unchanged library items kept from cache
       let freshIDs = Set(freshItems.map(\.id))
-      let retained = allItems.filter { !freshIDs.contains($0.id) }
+      let retained = cachedItems.filter { !freshIDs.contains($0.id) }
       let merged = retained + freshItems
+      log.info("doFetch: merge — retained=\(retained.count) fresh=\(freshItems.count) merged=\(merged.count)")
 
-      libraries = loadedLibs
-      allItems = merged
-      HomeCache.saveAsync(serverURL: serverURL, libraries: loadedLibs, items: merged, counts: currentCounts)
+      return .updated(cachedLibraries, merged, currentCounts, currentUpdatedAt)
     } catch {
-      appState.handleConnectionFailure(error)
-      // Only show error if we have nothing to display
-      if allItems.isEmpty {
-        self.error = (error as? APIError)?.userMessage ?? "Unknown error."
-      }
-      // Silently ignore background refresh failures — stale cache is fine
+      return .failure(error)
     }
   }
 }
@@ -421,6 +473,7 @@ private struct HomeRail: View {
           }
           .font(.subheadline)
           .foregroundStyle(DSReelBrandColor.background)
+          .padding(.vertical, 12)
         }
       }
       .padding(.horizontal, 16)

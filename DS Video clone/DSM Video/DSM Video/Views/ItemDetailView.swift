@@ -163,6 +163,9 @@ struct ItemDetailView: View {
     .fullScreenCover(isPresented: $showPlayer) {
       PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
         .environment(appState)
+        #if !os(tvOS)
+        .toolbarVisibility(.hidden, for: .tabBar)
+        #endif
     }
     .alert("Demo Mode", isPresented: $showDemoAlert) {
       Button("OK", role: .cancel) { }
@@ -212,7 +215,7 @@ struct ItemDetailView: View {
     if isLoading && detail == nil {
       Color.black
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
-        .overlay(ProgressView().tint(.white))
+        .overlay(ProgressView("Loading").tint(.white))
     } else if let error {
       Color.black
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
@@ -301,7 +304,7 @@ struct ItemDetailView: View {
       .overlay(alignment: .bottomLeading) {
         Text(detail?.title ?? fallbackTitle)
           .font(.title2.bold())
-          .foregroundStyle(.white.opacity(0.4))
+          .foregroundStyle(.white.opacity(0.7))
           .padding(24)
       }
     }
@@ -334,9 +337,11 @@ struct ItemDetailView: View {
               Image(systemName: "star.fill")
                 .foregroundStyle(Color.dsWarning)
                 .font(.caption.weight(.medium))
+                .accessibilityHidden(true)
               Text(String(format: "%.1f", starRating))
                 .foregroundStyle(.white.opacity(0.85))
                 .font(.caption.weight(.medium))
+                .accessibilityLabel("Rating: \(String(format: "%.1f", starRating)) out of 10")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -687,9 +692,7 @@ private struct PlayerSheet: View {
                     positionSeconds: positionAtDismiss,
                     durationSeconds: durationAtDismiss
                   )
-                } catch {
-                  print("[PlayerSheet] Failed to save final progress: \(error)")
-                }
+                } catch { }
               }
             }
             dismiss()
