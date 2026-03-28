@@ -89,3 +89,76 @@ BUILD SUCCEEDED (tvOS Simulator — Apple TV)
 - Web UI buffering root cause: `-hls_playlist_type vod` caused ffmpeg to hold the playlist until full transcode completion. Switched to `event` for incremental delivery. hls.js buffer config also hardened.
 - Home rail TV show duplicates: API returns individual episodes; `deduplicated()` helper added with composite `title+type` key.
 - Next Episode navigation: required both `.task(id: itemID)` on ItemDetailView and `detail = nil` reset to clear stale content on prop change.
+
+---
+
+# MaxReview Session 2 — 2026-03-28 (3 cycles)
+
+**Verdict:** PASS — Zero open issues after 3 cycles
+
+## Cycle Summary
+
+| Cycle | Issues Found | Fixed | Commit |
+|-------|-------------|-------|--------|
+| 1 | 55 (P0×4, P1×25, P2×17, P3×9) | 55 | `3c441c9` |
+| 2 | 7 (P1×1, P2×4, P3×2) | 5 | `2b1eb75` |
+| 3 | 1 (P2×1) | 1 | `6f35e1d` |
+| **Total** | **63** | **61** | |
+
+2 P3s accepted (no fix): `playerItem` strong capture in Combine sink (no current repro), `hasDownloads` stale while login view live (login only shows without session).
+
+## Cycle 1 — Major Fixes
+
+**P0 — Build fixes:**
+- `ItemSummary`: added `showName: String?`; fixed all 22 call sites
+- `TVShowDetailView`: `#if !os(tvOS)` guards for iOS-only structs
+- `ItemDetailView` / `MainView`: tvOS platform guards for `.toolbarVisibility` and storage API
+
+**P1 — Notable:**
+- `DownloadManager`: `delegateQueue: .main` → background `OperationQueue` (main-thread I/O)
+- `GestureVideoPlayer`: wrong `[weak playerItem]` on local let; toolbar 28pt → 44pt
+- `DSReelDesignTokens`: `dsTextTertiary`/`dsTextMuted`/`dsTextInactive` all ≥4.5:1 WCAG AA
+- `HomeCache`: UserDefaults → file-based JSON in `cachesDirectory`
+- `LibrariesView`: `ISO8601DateFormatter` → `static let`; "See All" 44pt tap target
+- `TVShowsView`: `sortedShows` moved to `@State`; sort chips 44pt
+- `MainView`: `DownloadsView` `NavigationLink` → `fullScreenCover`
+
+**P2 — Notable:**
+- `GestureVideoPlayer`: VoiceOver controls persist; play/skip `accessibilityAction`
+- `ItemDetailView`: backdrop fallback contrast 2.2:1 → 7.4:1
+- `TVPairingView`: pairing code `.speechSpellsOutCharacters(true)`
+- `LoginView`: `.textContentType(.username/.password)` for autofill
+
+## Cycle 2 — Fixes
+
+- `DownloadManager.updateResumePosition`: raw UserDefaults read/write preserves filename-only invariant (P1)
+- `ItemDetailView`: `castSection` ForEach `id: \.element.name` → `\.offset` (P2)
+- `LoginView`: `hasDownloads` `@State` + `onAppear` instead of computed var with file I/O (P2)
+- `TVShowsView`: `sortedShows` `@State` → pure computed var (P2)
+- `GestureVideoPlayer`: `AVAudioSession` deactivation error logged not swallowed (P2)
+
+## Cycle 3 — Fix
+
+- `GestureVideoPlayer`: removed duplicate VoiceOver "Skip forward 10 seconds" action (skipped 10s, UI skips 30s) (P2)
+
+## Open Feature Gaps (Require Product Decision)
+
+| Issue | Severity |
+|-------|----------|
+| iOS/macOS Home content rails (Continue Watching, Just Added) | P1 |
+| Captions/subtitle button in player | P1 |
+| tvOS pairing as primary login flow | P1 |
+| Sort/filter chip bar in ItemsGridView | P1 |
+| Recent searches chips in SearchView | P1 |
+| macOS AuthenticatedImage missing auth headers | P1 |
+| Credentials in GET query params | P1 |
+| MPVolumeView not in view hierarchy | P1 |
+| iOS circular progress fraction unclamped | P1 |
+| Director field in ItemDetailView | P2 |
+| Trailer button in ItemDetailView | P2 |
+| Downloads storage indicator | P2 |
+| Download queue/pause states | P2 |
+| "Login" → "Connect" button copy | P2 |
+| Error banner style per spec | P2 |
+| Custom DSTabBar component | P2 |
+| Dual networking layer ambiguity | P2 |
