@@ -25,7 +25,7 @@ struct LibrariesResponse: Decodable {
   let libraries: [Library]
 }
 
-struct Library: Codable, Identifiable, Hashable {
+struct Library: Codable, Identifiable, Hashable, Sendable {
   let id: String
   let title: String
   let kind: String
@@ -38,13 +38,13 @@ struct ItemsResponse: Decodable {
   let items: [ItemSummary]
 }
 
-struct ItemProgress: Codable, Hashable {
+struct ItemProgress: Codable, Hashable, Sendable {
   let positionSeconds: Int
   let durationSeconds: Int
   let updatedAt: String
 }
 
-struct ItemSummary: Codable, Identifiable, Hashable {
+struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
   let id: String
   let type: String
   let title: String

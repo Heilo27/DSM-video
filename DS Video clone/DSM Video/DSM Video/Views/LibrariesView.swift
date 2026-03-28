@@ -80,7 +80,9 @@ struct LibrariesView: View {
 /// Persists home screen data (libraries + items) to disk so the UI renders
 /// instantly on next launch without waiting for network fetches.
 /// Keyed by server URL — automatically stale when the user switches servers.
-private struct HomeCacheEntry: Codable {
+// nonisolated + Sendable: all members are value types (String, [Library], [ItemSummary], Date)
+// so this struct is safe to encode on a background Task.detached without main actor isolation.
+private struct HomeCacheEntry: Codable, Sendable {
   let serverURL: String
   let libraries: [Library]
   let items: [ItemSummary]
@@ -88,11 +90,10 @@ private struct HomeCacheEntry: Codable {
 }
 
 private enum HomeCache {
-  private static let key = "dsReel.homeCache"
-  // Background refresh only if cache is older than 5 minutes — prevents hammering
-  // the NAS on every app open when the library hasn't changed.
-  private static let backgroundRefreshAgeSeconds: TimeInterval = 5 * 60
-  private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600 // 1 week hard expiry
+  // nonisolated so these constants are accessible from detached Tasks without main-actor hop
+  nonisolated(unsafe) private static let key = "dsReel.homeCache"
+  nonisolated(unsafe) private static let backgroundRefreshAgeSeconds: TimeInterval = 5 * 60
+  nonisolated(unsafe) private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600
 
   static func load(serverURL: String) -> HomeCacheEntry? {
     // Decoded off the main thread by callers using Task.detached — read is fast (memory-mapped)
@@ -113,15 +114,17 @@ private enum HomeCache {
     return Date().timeIntervalSince(entry.savedAt) > backgroundRefreshAgeSeconds
   }
 
-  /// Writes cache on a background thread to avoid blocking the main thread.
-  /// Encoding hundreds of items synchronously on main was causing the UI freeze.
+  /// Encodes on the main actor (fast — pure CPU, no I/O), then writes the resulting
+  /// Data to UserDefaults on a background thread. This avoids the main-actor isolation
+  /// warning from encoding a main-actor-isolated type in a detached task, while still
+  /// keeping the synchronous UserDefaults write (disk I/O) off the main thread.
+  @MainActor
   static func saveAsync(serverURL: String, libraries: [Library], items: [ItemSummary]) {
+    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date())
+    guard let data = try? JSONEncoder().encode(entry) else { return }
+    // Only the UserDefaults write goes to background — Data is Sendable.
     Task.detached(priority: .utility) {
-      let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items, savedAt: Date())
-      guard let data = try? JSONEncoder().encode(entry) else { return }
-      await MainActor.run {
-        UserDefaults.standard.set(data, forKey: key)
-      }
+      UserDefaults.standard.set(data, forKey: key)
     }
   }
 
