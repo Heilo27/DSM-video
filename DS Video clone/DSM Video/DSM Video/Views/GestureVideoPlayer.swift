@@ -84,8 +84,13 @@ struct GestureVideoPlayer: View {
             }
             .onDisappear {
                 cleanup()
+                // Ensure portrait is restored if the player was dismissed via
+                // any path other than the explicit back button (e.g. system back
+                // gesture, app backgrounded mid-play).
                 #if os(iOS)
-                unlockOrientation()
+                if AppDelegate.orientationLock != .portrait {
+                    unlockOrientation()
+                }
                 #endif
             }
             #if os(iOS)
@@ -234,7 +239,12 @@ struct GestureVideoPlayer: View {
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
-            Button("Dismiss") { onDismiss?() }
+            Button("Dismiss") {
+                #if os(iOS)
+                unlockOrientation()
+                #endif
+                onDismiss?()
+            }
                 .font(.headline)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 24)
@@ -374,6 +384,12 @@ struct GestureVideoPlayer: View {
             HStack {
                 Button {
                     onProgressUpdate?(currentTime, duration)
+                    // Set the orientation lock flag first (synchronous, no UIKit work),
+                    // then dismiss — the deferred requestGeometryUpdate inside
+                    // unlockOrientation fires after the sheet animation completes.
+                    #if os(iOS)
+                    unlockOrientation()
+                    #endif
                     onDismiss?()
                 } label: {
                     Image(systemName: "chevron.down")
@@ -712,7 +728,7 @@ struct GestureVideoPlayer: View {
         // Observe duration and seek to resume position when ready
         playerItem.publisher(for: \.duration)
             .receive(on: DispatchQueue.main)
-            .sink { [weak playerItem] dur in
+            .sink { dur in
                 if dur.isNumeric {
                     duration = CMTimeGetSeconds(dur)
 
@@ -912,12 +928,13 @@ private extension GestureVideoPlayer {
         }
     }
 
-    /// Restores all-but-upside-down orientation support and snaps back to portrait.
+    /// Restores portrait lock when the player dismisses.
+    /// Uses setNeedsUpdateOfSupportedInterfaceOrientations rather than
+    /// requestGeometryUpdate — UIKit rotates on its own next layout pass
+    /// instead of competing with the sheet dismiss animation, which was
+    /// causing gesture-recognizer deadlocks and touch freezes.
     private func unlockOrientation() {
-        AppDelegate.orientationLock = .allButUpsideDown
-        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
-        }
+        AppDelegate.setOrientation(.portrait)
     }
 
     /// Returns the screen for the active window scene, avoiding the deprecated UIScreen.main.

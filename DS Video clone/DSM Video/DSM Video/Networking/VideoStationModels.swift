@@ -242,7 +242,18 @@ struct VideoStationItem: Decodable {
         }
 
         mapper_id = try? container.decode(Int.self, forKey: .mapper_id)
-        watch_status = try? container.decode(VideoStationWatchStatus.self, forKey: .watch_status)
+
+        // Watch status may arrive in two ways:
+        // 1. Directly as "watch_status" (legacy / some VS versions)
+        // 2. Nested inside "additional.watched_ratio" (VS2 with additional=["watched_ratio"])
+        if let direct = try? container.decode(VideoStationWatchStatus.self, forKey: .watch_status) {
+            watch_status = direct
+        } else if let additional = try? container.decode(VideoStationAdditional.self, forKey: .additional),
+                  let ratio = additional.watched_ratio {
+            watch_status = ratio
+        } else {
+            watch_status = nil
+        }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -259,13 +270,44 @@ struct VideoStationItem: Decodable {
         case backdrop
         case mapper_id
         case watch_status
+        case additional
     }
+}
+
+struct VideoStationAdditional: Decodable {
+    let watched_ratio: VideoStationWatchStatus?
 }
 
 struct VideoStationWatchStatus: Decodable {
     let time: Int?
     let total_time: Int?
     let updated_at: String?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        time = try? container.decode(Int.self, forKey: .time)
+        total_time = try? container.decode(Int.self, forKey: .total_time)
+
+        // updated_at may be an ISO string or a Unix timestamp integer (last_modify_time)
+        if let iso = try? container.decode(String.self, forKey: .updated_at) {
+            updated_at = iso
+        } else if let ts = try? container.decode(Int.self, forKey: .last_modify_time) {
+            // Convert Unix timestamp to ISO 8601 string
+            updated_at = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Double(ts)))
+        } else if let ts = try? container.decode(Int.self, forKey: .updated_at_ts) {
+            updated_at = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Double(ts)))
+        } else {
+            updated_at = nil
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case time
+        case total_time
+        case updated_at
+        case updated_at_ts
+        case last_modify_time
+    }
 }
 
 // Video Station returns detail as array: {"data":{"movie":[{...}]}}

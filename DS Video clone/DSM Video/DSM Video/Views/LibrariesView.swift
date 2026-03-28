@@ -59,6 +59,7 @@ struct LibrariesView: View {
       let response = try await appState.api.libraries()
       libraries = response.libraries
     } catch {
+      appState.handleConnectionFailure(error)
       let errorMsg = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
       self.error = errorMsg
     }
@@ -84,16 +85,19 @@ struct LibraryHomeView: View {
   // MARK: - Rail Filters
 
   private var continueWatchingItems: [ItemSummary] {
+    // Items the user has actually started (positionSeconds > 0) and not yet finished.
     let sorted = allItems
       .filter { item in
-        guard let p = item.progress, p.durationSeconds > 0 else { return false }
+        guard let p = item.progress,
+              p.durationSeconds > 0,
+              p.positionSeconds > 0 else { return false }
         let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
         return frac >= 0.05 && frac < 0.95
       }
       .sorted { a, b in
         parseDate(a.progress?.updatedAt ?? a.addedAt) > parseDate(b.progress?.updatedAt ?? b.addedAt)
       }
-    return deduplicated(sorted)
+    return Array(deduplicated(sorted).prefix(10))
   }
 
   private var justAddedItems: [ItemSummary] {
@@ -243,6 +247,7 @@ struct LibraryHomeView: View {
       }
       allItems = merged
     } catch {
+      appState.handleConnectionFailure(error)
       let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
       if allItems.isEmpty {
         self.error = errorMsg

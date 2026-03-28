@@ -285,6 +285,49 @@ final class AppState {
     isDemoMode = false
   }
 
+  /// Called when a network operation fails. If the error indicates the server
+  /// is unreachable (left home network, server offline) or the session expired,
+  /// clears the session and returns to the login screen.
+  /// Does nothing for transient errors (e.g. a single page load failure).
+  func handleConnectionFailure(_ error: Error) {
+    let isUnreachable: Bool
+    if let apiErr = error as? APIError {
+      switch apiErr {
+      case .network:       isUnreachable = true   // Can't reach server at all
+      case .http(401):     isUnreachable = true   // Session expired / token invalid
+      case .http(403):     isUnreachable = true   // Auth rejected
+      default:             isUnreachable = false
+      }
+    } else if let webErr = error as? WebAPIError {
+      switch webErr {
+      case .network:       isUnreachable = true
+      default:             isUnreachable = false
+      }
+    } else {
+      // URLError — connection refused, timed out, no route to host, etc.
+      let urlErr = error as? URLError
+      switch urlErr?.code {
+      case .notConnectedToInternet, .networkConnectionLost,
+           .cannotConnectToHost, .cannotFindHost, .timedOut,
+           .dnsLookupFailed, .secureConnectionFailed:
+        isUnreachable = true
+      default:
+        isUnreachable = false
+      }
+    }
+
+    guard isUnreachable else { return }
+    // Preserve credentials so the user can log back in without re-typing them.
+    // Only clear the session token — baseURL, username, password stay.
+    Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+    sessionToken = nil
+    sessionID = nil
+    synoToken = nil
+    deviceID = nil
+    isDemoMode = false
+    loginError = "Connection lost. You may be away from your home network — try QuickConnect."
+  }
+
   func generatePairingCode() async {
     pairingError = nil
     isGeneratingPairingCode = true

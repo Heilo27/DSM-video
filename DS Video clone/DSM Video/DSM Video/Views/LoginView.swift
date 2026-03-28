@@ -203,9 +203,8 @@ struct LoginView: View {
       }
       #endif
       .sheet(isPresented: $showQuickConnect) {
-        QuickConnectSheet { selectedURL in
-          // Strip the Synology DSM port from the resolved URL.
-          // normalizedBaseURL will apply the user's configured port (default 8090).
+        QuickConnectSheet(useHTTPS: appState.useHTTPS) { selectedURL in
+          // Strip the Synology DSM port — normalizedBaseURL applies our configured port.
           if let url = URL(string: selectedURL), let host = url.host {
             let scheme = selectedURL.hasPrefix("https") ? "https" : "http"
             appState.baseURL = "\(scheme)://\(host)"
@@ -265,12 +264,12 @@ private struct AboutView: View {
 // MARK: - QuickConnect Sheet
 
 private struct QuickConnectSheet: View {
+  let useHTTPS: Bool
   let onSelect: (String) -> Void
 
   @Environment(\.dismiss) private var dismiss
   @State private var quickConnectID: String = ""
   @State private var isResolving: Bool = false
-  @State private var candidates: [String] = []
   @State private var error: String?
 
   var body: some View {
@@ -284,34 +283,7 @@ private struct QuickConnectSheet: View {
         } header: {
           Text("QuickConnect ID")
         } footer: {
-          Text("Enter the QuickConnect ID configured in your Synology DSM control panel.")
-        }
-
-        if !candidates.isEmpty {
-          Section("Select Server") {
-            ForEach(candidates, id: \.self) { url in
-              Button {
-                onSelect(url)
-                dismiss()
-              } label: {
-                HStack {
-                  VStack(alignment: .leading, spacing: 2) {
-                    Text(url)
-                      .font(.subheadline)
-                      .foregroundStyle(.primary)
-                    Text(url.hasPrefix("https") ? "Encrypted" : "Unencrypted")
-                      .font(.caption)
-                      .foregroundStyle(.secondary)
-                  }
-                  Spacer()
-                  Image(systemName: url.hasPrefix("https") ? "lock.fill" : "lock.open")
-                    .font(.caption)
-                    .foregroundStyle(url.hasPrefix("https") ? .green : .orange)
-                    .accessibilityLabel(url.hasPrefix("https") ? "Encrypted connection" : "Unencrypted connection")
-                }
-              }
-            }
-          }
+          Text("Enter the QuickConnect ID from your Synology DSM control panel. The \(useHTTPS ? "secure (HTTPS)" : "standard (HTTP)") remote address will be used based on your HTTPS setting.")
         }
 
         if let error {
@@ -356,19 +328,15 @@ private struct QuickConnectSheet: View {
 
     isResolving = true
     error = nil
-    candidates = []
     defer { isResolving = false }
 
     do {
-      let found = try await QuickConnectResolver.resolve(id: id)
-      if found.isEmpty {
+      guard let url = try await QuickConnectResolver.resolveWAN(id: id, useHTTPS: useHTTPS) else {
         error = "Couldn't find \"\(id)\". Check the ID and try again."
-      } else if found.count == 1 {
-        onSelect(found[0])
-        dismiss()
-      } else {
-        candidates = found
+        return
       }
+      onSelect(url)
+      dismiss()
     } catch {
       self.error = "Network error. Check your connection and try again."
     }
@@ -400,15 +368,12 @@ enum QuickConnectResolver {
     return nil
   }
 
-  /// Resolves a QuickConnect ID against Synology's relay service.
-  /// Returns candidate base URLs: LAN IPs first (avoids NAT hairpin), then WAN IP.
-  /// Callers should try each candidate in order and use the first that succeeds.
+  /// Resolves a QuickConnect ID and returns all candidate base URLs ordered for login attempts.
+  /// LAN IPs first (faster on home network), WAN IP last. Each IP appears once per scheme.
   static func resolve(id: String) async throws -> [String] {
-    // Normalize — strip .quickconnect.to if the caller passed the full domain form
     guard let bareID = extractBareID(from: id) else { return [] }
     let json = try await queryRelay(host: "global.quickconnect.to", id: bareID)
 
-    // Check for not-found or error
     if let errno = json["errno"] as? Int, errno != 0 { return [] }
 
     guard let server = json["server"] as? [String: Any],
@@ -416,22 +381,17 @@ enum QuickConnectResolver {
           let wanIP = ext["ip"] as? String, !wanIP.isEmpty
     else { return [] }
 
-    // Extract ports from the top-level "service" object
     var httpsPort: Int?
     var httpPort: Int?
     if let service = json["service"] as? [String: Any] {
       httpsPort = intValue(service["https_ext_port"]) ?? intValue(service["https_port"])
       httpPort  = intValue(service["ext_port"]) ?? intValue(service["port"])
     }
-    // Fallback: old relay format stored ports inside "external"
     if httpsPort == nil, let portVal = ext["https"] { httpsPort = intArray(portVal).first }
     if httpPort  == nil, let portVal = ext["http"]  { httpPort  = intArray(portVal).first }
-    // Last resort: standard Synology DSM ports
     if httpsPort == nil { httpsPort = 5001 }
     if httpPort  == nil { httpPort  = 5000 }
 
-    // Collect LAN IPs from server.interface — these work from inside the network
-    // without NAT hairpinning and without a valid TLS cert on the external IP.
     var lanIPs: [String] = []
     if let interfaces = server["interface"] as? [[String: Any]] {
       for iface in interfaces {
@@ -440,16 +400,27 @@ enum QuickConnectResolver {
     }
 
     var candidates: [String] = []
-    // LAN addresses first: HTTPS before HTTP to avoid sending credentials over unencrypted connections
     for ip in lanIPs {
       if let p = httpsPort { candidates.append("https://\(ip):\(p)") }
       if let p = httpPort  { candidates.append("http://\(ip):\(p)") }
     }
-    // WAN fallback (for remote access): HTTPS first
     if let p = httpsPort { candidates.append("https://\(wanIP):\(p)") }
     if let p = httpPort  { candidates.append("http://\(wanIP):\(p)") }
 
     return candidates
+  }
+
+  /// Returns a single WAN address for the QuickConnect sheet — one result, no picker.
+  /// Picks the WAN (non-LAN) IP with the requested scheme. Falls back to any matching scheme.
+  static func resolveWAN(id: String, useHTTPS: Bool) async throws -> String? {
+    let all = try await resolve(id: id)
+    let scheme = useHTTPS ? "https" : "http"
+    let wan = all.first { url in
+      guard url.hasPrefix(scheme), let host = URL(string: url)?.host else { return false }
+      return !host.hasPrefix("192.168.") && !host.hasPrefix("10.") &&
+             !host.hasPrefix("172.") && host != "localhost" && host != "127.0.0.1"
+    }
+    return wan ?? all.first(where: { $0.hasPrefix(scheme) })
   }
 
   // MARK: Private

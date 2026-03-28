@@ -42,6 +42,9 @@ extension VideoStationWebAPIClient {
             URLQueryItem(name: "library_id", value: libraryId),
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "offset", value: String(offset)),
+            // Request watch status so progress is available for Continue Watching rail.
+            // VideoStation2 requires explicit opt-in via the additional parameter.
+            URLQueryItem(name: "additional", value: "[\"watched_ratio\"]"),
         ]
 
         guard let url = components.url else {
