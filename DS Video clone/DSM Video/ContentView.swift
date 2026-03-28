@@ -17,12 +17,17 @@ private let orientLog = Logger(subsystem: "com.dsm.orientation", category: "lock
 struct RootView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    // launchDone gates app content insertion (prevents .task{} network calls during animation).
+    // launchVisible controls whether the launch overlay is in the view tree.
+    // They're set separately so the app content is inserted first, then the overlay fades out.
     @State private var launchDone = false
+    @State private var launchVisible = true
 
     var body: some View {
         ZStack {
-            // Main app content — only inserted into the tree after launch completes,
-            // so its .task{} calls don't fire and compete with the animation.
+            // App content — inserted only after animation finishes so network tasks
+            // don't run concurrently with the launch animation sequence.
             if launchDone {
                 #if os(tvOS)
                 TVMainView()
@@ -35,10 +40,16 @@ struct RootView: View {
                 #endif
             }
 
-            // Launch screen — sits on top, removes itself after animation
-            if !launchDone {
+            // Launch overlay — kept in tree until fade-out completes so the
+            // animation Task owns its @State for its full lifetime.
+            if launchVisible {
                 LaunchAnimationView {
+                    // Step 1: Insert app content (still hidden under overlay)
                     launchDone = true
+                    // Step 2: Fade out overlay, then remove from tree
+                    withAnimation(.easeIn(duration: 0.25)) {
+                        launchVisible = false
+                    }
                 }
                 .ignoresSafeArea()
             }
@@ -63,7 +74,7 @@ private struct LaunchAnimationView: View {
     @State private var laserVisible = false
     @State private var flashIntensity: Double = 0
 
-    // Each ring gap size (degrees) and start angle
+    // Each ring gap size (degrees)
     private let gapDegrees: Double = 14
 
     var body: some View {
@@ -119,9 +130,12 @@ private struct LaunchAnimationView: View {
                     .allowsHitTesting(false)
             }
         }
-        .onAppear {
+        // .task is used instead of onAppear + Task{} because SwiftUI ties .task
+        // lifetime to the view — it cancels automatically if the view is removed,
+        // preventing state mutations on a deallocated view node.
+        .task {
             launchLog.info("LaunchAnimationView appeared — starting sequence")
-            Task { await runSequence() }
+            await runSequence()
         }
     }
 
