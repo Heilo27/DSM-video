@@ -106,10 +106,6 @@ struct LibraryHomeView: View {
     libraries.first(where: { $0.kind == "movie" || $0.kind == "movies" }) ?? libraries.first
   }
 
-  private var allRailsEmpty: Bool {
-    continueWatchingItems.isEmpty && justAddedItems.isEmpty && recentlyWatchedItems.isEmpty
-  }
-
   // MARK: - Rail Computation (off main thread)
 
   /// Recomputes all three rail arrays from `items` on a background thread, then
@@ -197,11 +193,13 @@ struct LibraryHomeView: View {
 
   // MARK: - Body
 
+  // A rail is still loading if allItems haven't arrived yet (either in-flight or not yet populated)
+  private var railsLoading: Bool { isLoading || allItems.isEmpty }
+
   var body: some View {
     let content = Group {
-      if isLoading && allItems.isEmpty {
-        ProgressView("Loading libraries")
-      } else if let error {
+      if let error, allItems.isEmpty {
+        // Only show the full error state when we have nothing to display at all
         VStack(spacing: 16) {
           ContentUnavailableView(
             "Couldn't load content",
@@ -211,34 +209,35 @@ struct LibraryHomeView: View {
           Button("Retry") { Task { await load() } }
             .buttonStyle(.bordered)
         }
-      } else if allRailsEmpty && !isLoading && allItems.isEmpty {
-        ContentUnavailableView(
-          "Nothing here yet",
-          systemImage: "play.rectangle",
-          description: Text("Add videos to your NAS to get started.")
-        )
       } else {
+        // Always render all three rails in fixed order.
+        // While loading, each rail shows skeleton placeholder cards so the
+        // layout is stable and nothing jumps around as content arrives.
+        // A rail is only hidden once loading is done AND it's genuinely empty.
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
-            if !continueWatchingItems.isEmpty {
+            if railsLoading || !continueWatchingItems.isEmpty {
               HomeRail(
                 title: "Continue Watching",
                 items: continueWatchingItems,
-                seeAllLibrary: firstMovieLibrary
+                seeAllLibrary: firstMovieLibrary,
+                isLoading: railsLoading
               )
             }
-            if !justAddedItems.isEmpty {
+            if railsLoading || !justAddedItems.isEmpty {
               HomeRail(
                 title: "Just Added",
                 items: justAddedItems,
-                seeAllLibrary: firstMovieLibrary
+                seeAllLibrary: firstMovieLibrary,
+                isLoading: railsLoading
               )
             }
-            if !recentlyWatchedItems.isEmpty {
+            if railsLoading || !recentlyWatchedItems.isEmpty {
               HomeRail(
                 title: "Recently Watched",
                 items: recentlyWatchedItems,
-                seeAllLibrary: firstMovieLibrary
+                seeAllLibrary: firstMovieLibrary,
+                isLoading: railsLoading
               )
             }
           }
@@ -595,17 +594,22 @@ private struct HomeRail: View {
   let title: String
   let items: [ItemSummary]
   let seeAllLibrary: Library?
+  var isLoading: Bool = false
+
+  // Poster card: 120pt wide, 2:3 aspect → 180pt tall
+  private let cardWidth: CGFloat = 120
+  private let skeletonCount = 5
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      // Header row
+      // Header row — always shown, "See All" hidden while loading
       HStack {
         Text(title)
           .font(.title3.weight(.semibold))
           .foregroundStyle(.white)
           .accessibilityAddTraits(.isHeader)
         Spacer()
-        if let lib = seeAllLibrary {
+        if !isLoading, let lib = seeAllLibrary {
           NavigationLink("See All") {
             ItemsGridView(library: lib)
           }
@@ -617,24 +621,70 @@ private struct HomeRail: View {
       }
       .padding(.horizontal, 16)
 
-      // Horizontal scroll of poster cards
+      // Horizontal scroll — real cards or skeleton placeholders
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(spacing: 10) {
-          ForEach(items) { item in
-            NavigationLink {
-              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-            } label: {
-              ItemPosterCell(item: item)
-                .frame(width: 120)
+          if isLoading {
+            ForEach(0..<skeletonCount, id: \.self) { _ in
+              SkeletonPosterCard(width: cardWidth)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
-            .accessibilityHint("Opens video details")
+          } else {
+            ForEach(items) { item in
+              NavigationLink {
+                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+              } label: {
+                ItemPosterCell(item: item)
+                  .frame(width: cardWidth)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+              .accessibilityHint("Opens video details")
+            }
           }
         }
         .padding(.horizontal, 16)
       }
+      .accessibilityLabel(isLoading ? "\(title), loading" : title)
     }
+  }
+}
+
+// MARK: - SkeletonPosterCard
+
+private struct SkeletonPosterCard: View {
+  let width: CGFloat
+  @State private var shimmerPhase: CGFloat = 0
+
+  private var height: CGFloat { width * 1.5 }
+
+  var body: some View {
+    RoundedRectangle(cornerRadius: 8, style: .continuous)
+      .fill(Color.white.opacity(0.08))
+      .frame(width: width, height: height)
+      .overlay(
+        // Shimmer sweep
+        GeometryReader { geo in
+          LinearGradient(
+            gradient: Gradient(colors: [
+              .clear,
+              Color.white.opacity(0.12),
+              .clear,
+            ]),
+            startPoint: .leading,
+            endPoint: .trailing
+          )
+          .frame(width: geo.size.width * 2)
+          .offset(x: shimmerPhase * (geo.size.width * 3) - geo.size.width)
+          .clipped()
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      )
+      .accessibilityHidden(true)
+      .onAppear {
+        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+          shimmerPhase = 1
+        }
+      }
   }
 }
 
