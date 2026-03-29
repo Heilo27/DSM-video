@@ -210,8 +210,9 @@ private struct TVShowSortChipBar: View {
             Text(option.chipLabel)
               .font(.subheadline.weight(.medium))
               .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
+              .frame(minHeight: 44)
               .padding(.horizontal, 12)
-              .padding(.vertical, 12)
+              .padding(.vertical, 14)
               .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                   .fill(selection == option ? Color.dsAccent : Color.dsSurface)
@@ -282,13 +283,13 @@ private struct TVShowPosterCell: View {
         // Title + season label
         VStack(alignment: .leading, spacing: 4) {
           Text(show.title)
-            .font(.system(size: 17, weight: .medium))
+            .font(.subheadline.weight(.medium))
             .foregroundStyle(.white)
             .lineLimit(2)
             .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
 
           Text(seasonLabel(show))
-            .font(.system(size: 15))
+            .font(.footnote)
             .foregroundStyle(Color.dsTextSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

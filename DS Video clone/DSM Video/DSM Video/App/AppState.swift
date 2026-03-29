@@ -262,6 +262,7 @@ final class AppState {
     sessionToken = nil
     pairingCode = nil
     isDemoMode = false
+    loginError = nil
   }
 
   /// Called when a network operation fails. If the error indicates the server

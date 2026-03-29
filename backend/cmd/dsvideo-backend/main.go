@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -245,8 +246,12 @@ func main() {
 		log.Fatalf("failed to create web filesystem: %v", err)
 	}
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
+		data, err := fs.ReadFile(webFS, "index.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		data, _ := fs.ReadFile(webFS, "index.html")
 		w.Write(data)
 	}
 	r.Get("/", serveIndex)
@@ -1235,12 +1240,18 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// JOIN progress in the main query to avoid N+1 SELECT calls.
+	joinArgs := append([]any{u.ID}, args...)
+	joinArgs = append(joinArgs, limit, offset)
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		        i.poster_path, i.backdrop_path, i.overview,
-		        i.show_name, i.season_number, i.episode_number
-		 FROM items i `+where+` `+orderBy+` LIMIT ? OFFSET ?`,
-		append(args, limit, offset)...,
+		        i.show_name, i.season_number, i.episode_number,
+		        p.position_seconds, p.duration_seconds, p.updated_at
+		 FROM items i
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		 `+where+` `+orderBy+` LIMIT ? OFFSET ?`,
+		joinArgs...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -1254,15 +1265,25 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		var year, duration, seasonNumber, episodeNumber sql.NullInt64
 		var rating sql.NullFloat64
 		var posterPath, backdropPath, overview, showName sql.NullString
+		var progPos, progDur sql.NullInt64
+		var progUpdatedAt sql.NullString
 
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath, &overview,
-			&showName, &seasonNumber, &episodeNumber); err != nil {
+			&showName, &seasonNumber, &episodeNumber,
+			&progPos, &progDur, &progUpdatedAt); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
 
-		p, _ := s.getProgress(u.ID, id)
+		var p map[string]any
+		if progPos.Valid {
+			p = map[string]any{
+				"positionSeconds": progPos.Int64,
+				"durationSeconds": progDur.Int64,
+				"updatedAt":       progUpdatedAt.String,
+			}
+		}
 
 		item := map[string]any{
 			"id":              id,
@@ -1296,6 +1317,10 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
 }
 
@@ -1321,13 +1346,17 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// JOIN progress to avoid N+1 SELECT calls per result row.
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
+		        i.poster_path, i.backdrop_path,
+		        p.position_seconds, p.duration_seconds, p.updated_at
 		 FROM items i
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		 WHERE LOWER(i.title) LIKE LOWER(?)
 		 ORDER BY i.title ASC
 		 LIMIT ? OFFSET ?`,
-		pattern, limit, offset,
+		u.ID, pattern, limit, offset,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -1341,13 +1370,24 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		var year, duration sql.NullInt64
 		var rating sql.NullFloat64
 		var posterPath, backdropPath sql.NullString
+		var progPos, progDur sql.NullInt64
+		var progUpdatedAt sql.NullString
 
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath); err != nil {
+		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
+			&posterPath, &backdropPath,
+			&progPos, &progDur, &progUpdatedAt); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
 
-		p, _ := s.getProgress(u.ID, id)
+		var p map[string]any
+		if progPos.Valid {
+			p = map[string]any{
+				"positionSeconds": progPos.Int64,
+				"durationSeconds": progDur.Int64,
+				"updatedAt":       progUpdatedAt.String,
+			}
+		}
 
 		item := map[string]any{
 			"id":              id,
@@ -1372,6 +1412,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			item["progress"] = p
 		}
 		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
 }
@@ -1682,15 +1726,9 @@ func (s *Server) handleShowsList(w http.ResponseWriter, r *http.Request) {
 	// Sort alphabetically by display name
 	sortedKeys := make([]string, len(showOrder))
 	copy(sortedKeys, showOrder)
-	for i := 0; i < len(sortedKeys); i++ {
-		for j := i + 1; j < len(sortedKeys); j++ {
-			nameI := strings.ToLower(showMap[sortedKeys[i]].displayName)
-			nameJ := strings.ToLower(showMap[sortedKeys[j]].displayName)
-			if nameI > nameJ {
-				sortedKeys[i], sortedKeys[j] = sortedKeys[j], sortedKeys[i]
-			}
-		}
-	}
+	sort.Slice(sortedKeys, func(i, j int) bool {
+		return strings.ToLower(showMap[sortedKeys[i]].displayName) < strings.ToLower(showMap[sortedKeys[j]].displayName)
+	})
 
 	shows := make([]map[string]any, 0, len(sortedKeys))
 	for _, key := range sortedKeys {
@@ -1830,11 +1868,22 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Sort seasons by number
+	// Sort seasons by number — use a safe type switch to avoid panics if DB
+	// returns int64 (SQLite scanner default) instead of int.
+	toSeasonInt := func(v any) int {
+		switch x := v.(type) {
+		case int:
+			return x
+		case int64:
+			return int(x)
+		default:
+			return 0
+		}
+	}
 	for i := 0; i < len(seasons); i++ {
 		for j := i + 1; j < len(seasons); j++ {
-			si := seasons[i]["seasonNumber"].(int)
-			sj := seasons[j]["seasonNumber"].(int)
+			si := toSeasonInt(seasons[i]["seasonNumber"])
+			sj := toSeasonInt(seasons[j]["seasonNumber"])
 			if si > sj {
 				seasons[i], seasons[j] = seasons[j], seasons[i]
 			}
@@ -2414,7 +2463,12 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
-	http.ServeFile(w, r, filepath.Join(ps.HLSDir, name))
+	fullPath := filepath.Join(ps.HLSDir, name)
+	if !strings.HasPrefix(filepath.Clean(fullPath)+"/", filepath.Clean(ps.HLSDir)+"/") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	http.ServeFile(w, r, fullPath)
 }
 
 func (s *Server) getSession(sessionID string) (PlaySession, bool) {
@@ -2489,9 +2543,6 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 		if p = strings.TrimSpace(p); p != "" {
 			ids = append(ids, p)
 		}
-	}
-	if len(ids) > 500 {
-		ids = ids[:500]
 	}
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"progress": map[string]any{}})
@@ -3144,7 +3195,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		}
 
 		id := itemIDFromPath(path)
-		addedAt := info.ModTime().UTC().Format(time.RFC3339)
+		addedAt := info.ModTime().UTC().Format(time.RFC3339) // used only on first insert; preserved on rescan
 
 		typ := "video"
 		switch kind {
@@ -4128,7 +4179,7 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow("SELECT COUNT(*) FROM items WHERE "+where, args...).Scan(&total)
 
 	rows, err := s.db.Query(`
-		SELECT id, type, title, year, duration_seconds, added_at, rating,
+		SELECT id, type, title, episode_title, year, duration_seconds, added_at, rating,
 		       poster_path, backdrop_path, season_number, episode_number
 		FROM items WHERE `+where+`
 		ORDER BY COALESCE(season_number, 1), COALESCE(episode_number, 0)`,
@@ -4144,18 +4195,24 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		var id, typ, title, addedAt string
 		var year, duration, seasonNum, episodeNum sql.NullInt64
 		var rating sql.NullFloat64
-		var posterPath, backdropPath sql.NullString
+		var posterPath, backdropPath, episodeTitle sql.NullString
 
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
+		if err := rows.Scan(&id, &typ, &title, &episodeTitle, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath, &seasonNum, &episodeNum); err != nil {
 			continue
+		}
+
+		// Use episode_title (from TMDb) when available; fall back to filename-parsed title
+		displayTitle := title
+		if episodeTitle.Valid && episodeTitle.String != "" {
+			displayTitle = episodeTitle.String
 		}
 
 		p, _ := s.getProgress(u.ID, id)
 		item := map[string]any{
 			"id":              id,
 			"type":            typ,
-			"title":           title,
+			"title":           displayTitle,
 			"year":            nullIntToAny(year),
 			"durationSeconds": nullIntToAny(duration),
 			"addedAt":         addedAt,

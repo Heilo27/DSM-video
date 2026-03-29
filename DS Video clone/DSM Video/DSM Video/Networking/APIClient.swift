@@ -65,7 +65,10 @@ struct APIClient {
   }
 
   func tvShowSeasons(showId: String, libraryId: String = "lib_tv") async throws -> TVSeasonsResponse {
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(showId)/seasons"), resolvingAgainstBaseURL: false) else {
+    guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+      throw APIError.invalidURL
+    }
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(encodedId)/seasons"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
     }
     comps.queryItems = [URLQueryItem(name: "libraryId", value: libraryId)]
@@ -74,7 +77,10 @@ struct APIClient {
   }
 
   func tvShowEpisodes(showId: String, season: Int, libraryId: String = "lib_tv") async throws -> ItemsResponse {
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(showId)/episodes"), resolvingAgainstBaseURL: false) else {
+    guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+      throw APIError.invalidURL
+    }
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(encodedId)/episodes"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
     }
     comps.queryItems = [

@@ -29,10 +29,51 @@ struct MainView: View {
           .tabItem { Label("Settings", systemImage: "gearshape") }
       }
     case .split:
-      NavigationSplitView {
-        SidebarView()
-      } detail: {
-        DefaultLibraryDetailView()
+      SplitView()
+    }
+  }
+}
+
+// MARK: - iPad Split View
+
+private enum SidebarSelection: Hashable {
+  case home
+  case search
+  case downloads
+  case settings
+  case library(Library)
+}
+
+private struct SplitView: View {
+  @State private var selection: SidebarSelection? = .home
+  @State private var libraries: [Library] = []
+
+  var body: some View {
+    NavigationSplitView {
+      SidebarView(selection: $selection, libraries: $libraries)
+    } detail: {
+      NavigationStack {
+        detailContent
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var detailContent: some View {
+    switch selection {
+    case .home, .none:
+      LibraryHomeView(isEmbedded: true)
+    case .search:
+      SearchView()
+    case .downloads:
+      DownloadsView()
+    case .settings:
+      SettingsView()
+    case .library(let lib):
+      if lib.kind == "tv" {
+        TVShowsView(library: lib)
+      } else {
+        ItemsGridView(library: lib)
       }
     }
   }
@@ -40,7 +81,10 @@ struct MainView: View {
 
 private struct SidebarView: View {
   @Environment(AppState.self) private var appState
-  @State private var libraries: [Library] = []
+  @Binding var selection: SidebarSelection?
+  /// Libraries provided by the parent SplitView; this view populates them on first load
+  /// so the parent can share the same list without a duplicate API call.
+  @Binding var libraries: [Library]
   @State private var isLoading = false
 
   private var movieLibraries: [Library] {
@@ -51,17 +95,14 @@ private struct SidebarView: View {
   }
 
   var body: some View {
-    List {
+    List(selection: $selection) {
       Section {
-        NavigationLink { LibraryHomeView() } label: {
-          Label("Home", systemImage: "play.rectangle")
-        }
-        NavigationLink { SearchView() } label: {
-          Label("Search", systemImage: "magnifyingglass")
-        }
-        NavigationLink { DownloadsView() } label: {
-          Label("Downloads", systemImage: "arrow.down.circle")
-        }
+        Label("Home", systemImage: "play.rectangle")
+          .tag(SidebarSelection.home)
+        Label("Search", systemImage: "magnifyingglass")
+          .tag(SidebarSelection.search)
+        Label("Downloads", systemImage: "arrow.down.circle")
+          .tag(SidebarSelection.downloads)
       } header: {
         SidebarSectionHeader("Browse")
       }
@@ -72,20 +113,12 @@ private struct SidebarView: View {
             .foregroundStyle(.secondary)
         } else {
           ForEach(movieLibraries) { lib in
-            NavigationLink {
-              ItemsGridView(library: lib)
-                .onAppear { UserDefaults.standard.set(lib.id, forKey: "dsReel.lastLibraryID") }
-            } label: {
-              Label(lib.title, systemImage: "film")
-            }
+            Label(lib.title, systemImage: "film")
+              .tag(SidebarSelection.library(lib))
           }
           ForEach(tvLibraries) { lib in
-            NavigationLink {
-              TVShowsView(library: lib)
-                .onAppear { UserDefaults.standard.set(lib.id, forKey: "dsReel.lastLibraryID") }
-            } label: {
-              Label(lib.title, systemImage: "tv")
-            }
+            Label(lib.title, systemImage: "tv")
+              .tag(SidebarSelection.library(lib))
           }
           if !isLoading && movieLibraries.isEmpty && tvLibraries.isEmpty {
             Label("No libraries", systemImage: "exclamationmark.triangle")
@@ -97,9 +130,8 @@ private struct SidebarView: View {
       }
 
       Section {
-        NavigationLink { SettingsView() } label: {
-          Label("Settings", systemImage: "gearshape")
-        }
+        Label("Settings", systemImage: "gearshape")
+          .tag(SidebarSelection.settings)
       } header: {
         SidebarSectionHeader("Settings")
       }
@@ -135,53 +167,6 @@ private struct SidebarSectionHeader: View {
   }
 }
 
-// MARK: - Default Detail (iPad split view)
-
-private struct DefaultLibraryDetailView: View {
-  @Environment(AppState.self) private var appState
-  @State private var library: Library?
-  @State private var isLoading = false
-
-  var body: some View {
-    Group {
-      if isLoading {
-        ProgressView()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .background(Color.black.ignoresSafeArea())
-      } else if let lib = library {
-        if lib.kind == "tv" {
-          TVShowsView(library: lib)
-        } else {
-          ItemsGridView(library: lib)
-        }
-      } else {
-        ContentUnavailableView(
-          "Select a Library",
-          systemImage: "sidebar.left",
-          description: Text("Choose Movies or TV Shows from the sidebar")
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.ignoresSafeArea())
-      }
-    }
-    .task { await loadDefault() }
-  }
-
-  private func loadDefault() async {
-    if appState.isDemoMode {
-      let libs = DemoData.libraries
-      let savedID = UserDefaults.standard.string(forKey: "dsReel.lastLibraryID")
-      library = libs.first(where: { $0.id == savedID }) ?? libs.first
-      return
-    }
-    isLoading = true
-    defer { isLoading = false }
-    guard let response = try? await appState.api.libraries() else { return }
-    let libs = response.libraries
-    let savedID = UserDefaults.standard.string(forKey: "dsReel.lastLibraryID")
-    library = libs.first(where: { $0.id == savedID }) ?? libs.first
-  }
-}
 
 private struct SearchView: View {
   @Environment(AppState.self) private var appState
@@ -223,7 +208,7 @@ private struct SearchView: View {
             .padding(.top, 16)
           }
         } else if isSearching {
-          ProgressView()
+          ProgressView("Searching for videos")
             .padding(.top, 60)
         } else if let searchError {
           ContentUnavailableView("Search Failed", systemImage: "wifi.slash", description: Text(searchError))
@@ -300,6 +285,7 @@ private struct SearchView: View {
       searchError = nil
       saveRecentSearch(query)
     } catch {
+      appState.handleConnectionFailure(error)
       results = []
       let msg = (error as? APIError)?.userMessage ?? error.localizedDescription
       searchError = msg
@@ -371,7 +357,9 @@ private struct RecentSearchesView: View {
               RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color.dsSurface)
             )
-            .accessibilityElement(children: .combine)
+            .accessibilityLabel(query)
+            .accessibilityHint("Double-tap to search, swipe up for more actions")
+            .accessibilityAction(named: "Remove") { onRemove(query) }
           }
         }
         .padding(.horizontal, 16)
@@ -411,7 +399,7 @@ private struct SearchResultCell: View {
           if let year = item.year {
             Text(String(year))
               .font(.caption2)
-              .foregroundStyle(.white.opacity(0.65))
+              .foregroundStyle(.white.opacity(0.75))
           }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -633,7 +621,7 @@ struct DownloadsView: View {
             progress: progress,
             isActive: isActive,
             isPaused: isPaused,
-            onPause: { downloadManager.pauseDownload(itemId: itemID) },
+            onPause: { Task { await downloadManager.pauseDownload(itemId: itemID) } },
             onResume: { downloadManager.resumeDownload(itemId: itemID) },
             onCancel: { downloadManager.cancelDownload(itemId: itemID) }
           )
@@ -815,7 +803,7 @@ private struct DownloadedItemCell: View {
 
           Text(formatFileSize(item.fileSize))
             .font(.caption2)
-            .foregroundStyle(.white.opacity(0.65))
+            .foregroundStyle(.white.opacity(0.75))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)

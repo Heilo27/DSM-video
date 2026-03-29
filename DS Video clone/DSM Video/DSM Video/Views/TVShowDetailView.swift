@@ -706,8 +706,11 @@ private struct EpisodeDetailView: View {
     self.library = library
   }
 
-  private var current: ItemSummary { episodes[currentIndex] }
-  private var hasNext: Bool { currentIndex + 1 < episodes.count }
+  private var current: ItemSummary {
+    guard currentIndex < episodes.count else { return episodes[episodes.count - 1] }
+    return episodes[currentIndex]
+  }
+  private var hasNext: Bool { episodes.count > 0 && currentIndex + 1 < episodes.count }
 
   var body: some View {
     ItemDetailView(

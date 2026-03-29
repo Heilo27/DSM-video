@@ -19,9 +19,9 @@ extension Color {
 
     // Text
     static let dsTextPrimary     = Color.white
-    static let dsTextSecondary   = Color.white.opacity(0.70)
+    static let dsTextSecondary   = Color.white.opacity(0.75)
     static let dsTextTertiary    = Color.white.opacity(0.55)   // was 0.45 (4.0:1); now 4.8:1 on black
-    static let dsTextMuted       = Color(hex: "#808080")       // was #6B6B70 (3.8:1); now 8.6:1 on black
+    static let dsTextMuted       = Color(hex: "#8A8A8A")       // raised from #808080 for WCAG AA on small text
     static let dsTextInactive    = Color(hex: "#737373")       // was #4A4A50 (2.3:1); now 4.6:1 on black
 
     // Borders / separators

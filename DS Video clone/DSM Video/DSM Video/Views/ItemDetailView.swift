@@ -224,10 +224,12 @@ struct ItemDetailView: View {
                   .font(.caption2.weight(.semibold))
                   .foregroundStyle(.white)
                   .padding(.horizontal, 8)
-                  .padding(.vertical, 4)
+                  .padding(.vertical, 16)
                   .background(Color.black.opacity(0.7))
                   .clipShape(Capsule())
               }
+              .accessibilityLabel("No metadata. Fix metadata")
+              .accessibilityHint("Opens metadata search to correct this item")
               .padding(10)
             }
           }
@@ -286,6 +288,7 @@ struct ItemDetailView: View {
           .font(.title2.bold())
           .foregroundStyle(.white.opacity(0.7))
           .padding(24)
+          .accessibilityHidden(true)
       }
     }
   }
@@ -352,6 +355,7 @@ struct ItemDetailView: View {
   @ViewBuilder
   private var downloadIconButton: some View {
     Button {
+      guard !appState.isDemoMode else { return }
       if isDownloading {
         downloadManager.cancelDownload(itemId: itemID)
       } else if isDownloaded {
@@ -396,6 +400,7 @@ struct ItemDetailView: View {
       Text("Cast")
         .font(.headline)
         .foregroundStyle(.white)
+        .accessibilityAddTraits(.isHeader)
       ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
         HStack {
           Text(person.name)
@@ -522,6 +527,7 @@ private struct MetadataFixerSheet: View {
                 }
                 .frame(width: 50, height: 75)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+                .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {
                   Text(candidate.title)
@@ -689,6 +695,7 @@ private struct PlayerSheet: View {
           onProgressUpdate: { position, duration in
             let positionInt = Int(position)
             let durationInt = Int(duration)
+            guard durationInt > 0 else { return }
             lastKnownDuration = durationInt
 
             let now = Date()
@@ -755,6 +762,7 @@ private struct PlayerSheet: View {
       resumePosition = Double(info.resumePositionSeconds)
       playbackURL = url
     } catch {
+      appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Unknown error."
     }
   }

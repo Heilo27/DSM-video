@@ -160,7 +160,24 @@ struct ItemsGridView: View {
         offset += pageSize
       }
 
-      items = allItems
+      // Deduplicate: prefer items with a poster; break ties by keeping earliest addedAt.
+      // The NAS can index the same movie from multiple paths (e.g. extras folder + main),
+      // producing entries with different IDs but identical title+year.
+      var deduped: [String: ItemSummary] = [:]  // key: "title|year"
+      for item in allItems {
+        let key = "\(item.title)|\(item.year ?? -1)"
+        if let existing = deduped[key] {
+          // Prefer the entry that has a poster image
+          let keepNew = item.posterImageId != nil && existing.posterImageId == nil
+          if keepNew { deduped[key] = item }
+        } else {
+          deduped[key] = item
+        }
+      }
+      items = allItems.filter {
+        let key = "\($0.title)|\($0.year ?? -1)"
+        return deduped[key]?.id == $0.id
+      }
       error = nil
     } catch {
       let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
@@ -187,15 +204,16 @@ private struct SortChipBar: View {
             Text(option.chipLabel)
               .font(.subheadline.weight(.medium))
               .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
+              .frame(minHeight: 44)
               .padding(.horizontal, 12)
-              .padding(.vertical, 12)
+              .padding(.vertical, 14)
               .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                   .fill(selection == option ? Color.dsAccent : Color.dsSurface)
               )
           }
           .buttonStyle(.plain)
-          .accessibilityLabel("Sort by \(option.chipLabel)")
+          .accessibilityLabel("Sort by \(option.rawValue)")
           .accessibilityAddTraits(selection == option ? .isSelected : [])
         }
       }
@@ -228,14 +246,15 @@ struct ItemPosterCell: View {
             GeometryReader { barGeo in
               ZStack(alignment: .leading) {
                 Rectangle()
-                  .fill(Color(white: 0.3))
+                  .fill(Color.dsBorderStrong)
                   .frame(height: 3)
                 Rectangle()
-                  .fill(DSReelBrandColor.background)
+                  .fill(Color.dsAccent)
                   .frame(width: barGeo.size.width * frac, height: 3)
               }
             }
             .frame(height: 3)
+            .accessibilityHidden(true)
           }
         }
       }
@@ -255,6 +274,7 @@ struct ItemPosterCell: View {
                   .foregroundStyle(.black)
               )
               .padding(6)
+              .accessibilityHidden(true)
           }
         }
       }
@@ -286,7 +306,7 @@ struct ItemPosterCell: View {
           Image(systemName: "film.fill")
             .font(.system(size: 36))
             .foregroundStyle(.white.opacity(0.25))
-            .accessibilityLabel("No poster available")
+            .accessibilityHidden(true)
         )
     }
   }
@@ -315,7 +335,7 @@ struct ItemPosterCell: View {
       if let year = item.year {
         Text(String(year))
           .font(.caption2)
-          .foregroundStyle(.white.opacity(0.65))
+          .foregroundStyle(.white.opacity(0.75))
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)

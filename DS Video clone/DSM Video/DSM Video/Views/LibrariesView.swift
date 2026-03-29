@@ -82,10 +82,19 @@ struct LibrariesView: View {
 
 struct LibraryHomeView: View {
   @Environment(AppState.self) private var appState
-  @State private var allItems: [ItemSummary] = []
-  @State private var libraries: [Library] = []
+
+  /// Pass `true` when this view is embedded inside an existing NavigationStack
+  /// (e.g. the iPad split-view detail column) to avoid nesting stacks.
+  var isEmbedded: Bool = false
+
+  // Seed from cache synchronously so the very first render already has data — no empty flash.
+  // Call loadForPrerender() once so the two @State defaults share the same cache read.
+  private static let _prerender = HomeCache.loadForPrerender()
+  @State private var allItems: [ItemSummary] = LibraryHomeView._prerender?.items ?? []
+  @State private var libraries: [Library] = LibraryHomeView._prerender?.libraries ?? []
   @State private var isLoading: Bool = false
   @State private var isBackgroundRefreshing: Bool = false
+  @State private var backgroundFetchTask: Task<Void, Never>?
   @State private var error: String?
 
   // MARK: - Rail Filters
@@ -113,7 +122,8 @@ struct LibraryHomeView: View {
     let sorted = allItems
       .filter { !watchedIDs.contains($0.id) }
       .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    return Array(deduplicatedByShow(sorted).prefix(10))
+    let deduped = deduplicatedByShow(sorted)
+    return Array(deduped.prefix(10))
   }
 
   private var recentlyWatchedItems: [ItemSummary] {
@@ -194,63 +204,68 @@ struct LibraryHomeView: View {
   // MARK: - Body
 
   var body: some View {
-    NavigationStack {
-      Group {
-        if isLoading && allItems.isEmpty {
-          ProgressView("Loading libraries")
-        } else if let error {
-          VStack(spacing: 16) {
-            ContentUnavailableView(
-              "Couldn't load content",
-              systemImage: "exclamationmark.triangle",
-              description: Text(error)
-            )
-            Button("Retry") { Task { await load() } }
-              .buttonStyle(.bordered)
-          }
-        } else if allRailsEmpty && !isLoading {
+    let content = Group {
+      if isLoading && allItems.isEmpty {
+        ProgressView("Loading libraries")
+      } else if let error {
+        VStack(spacing: 16) {
           ContentUnavailableView(
-            "Nothing here yet",
-            systemImage: "play.rectangle",
-            description: Text("Add videos to your NAS to get started.")
+            "Couldn't load content",
+            systemImage: "exclamationmark.triangle",
+            description: Text(error)
           )
-        } else {
-          ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-              if !continueWatchingItems.isEmpty {
-                HomeRail(
-                  title: "Continue Watching",
-                  items: continueWatchingItems,
-                  seeAllLibrary: firstMovieLibrary
-                )
-              }
-              if !justAddedItems.isEmpty {
-                HomeRail(
-                  title: "Just Added",
-                  items: justAddedItems,
-                  seeAllLibrary: firstMovieLibrary
-                )
-              }
-              if !recentlyWatchedItems.isEmpty {
-                HomeRail(
-                  title: "Recently Watched",
-                  items: recentlyWatchedItems,
-                  seeAllLibrary: firstMovieLibrary
-                )
-              }
+          Button("Retry") { Task { await load() } }
+            .buttonStyle(.bordered)
+        }
+      } else if allRailsEmpty && !isLoading {
+        ContentUnavailableView(
+          "Nothing here yet",
+          systemImage: "play.rectangle",
+          description: Text("Add videos to your NAS to get started.")
+        )
+      } else {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 28) {
+            if !continueWatchingItems.isEmpty {
+              HomeRail(
+                title: "Continue Watching",
+                items: continueWatchingItems,
+                seeAllLibrary: firstMovieLibrary
+              )
             }
-            .padding(.vertical, 16)
+            if !justAddedItems.isEmpty {
+              HomeRail(
+                title: "Just Added",
+                items: justAddedItems,
+                seeAllLibrary: firstMovieLibrary
+              )
+            }
+            if !recentlyWatchedItems.isEmpty {
+              HomeRail(
+                title: "Recently Watched",
+                items: recentlyWatchedItems,
+                seeAllLibrary: firstMovieLibrary
+              )
+            }
           }
+          .padding(.vertical, 16)
         }
       }
-      .navigationTitle("Home")
-      .task { await load() }
-      .refreshable { await load() }
-      .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
-        guard !allItems.isEmpty else { return }
-        Task { await refreshProgress() }
-      }
-      .background(Color.black.ignoresSafeArea())
+    }
+    .navigationTitle("Home")
+    .task { await load() }
+    .refreshable { await forceRefresh() }
+    .onDisappear { backgroundFetchTask?.cancel() }
+    .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
+      guard !allItems.isEmpty else { return }
+      Task { await refreshProgress() }
+    }
+    .background(Color.black.ignoresSafeArea())
+
+    if isEmbedded {
+      content
+    } else {
+      NavigationStack { content }
     }
   }
 
@@ -304,38 +319,46 @@ struct LibraryHomeView: View {
     let serverURL = appState.api.baseURL.absoluteString
     loadLog.info("load: serverURL=\(serverURL)")
 
-    // If items are already in memory (re-entering tab, pull-to-refresh), always
-    // run as a background check — never block the UI with a foreground fetch.
+    // Items already in memory — re-entering tab or returning from player.
+    // Fire-and-forget: progress refresh and optional content re-fetch both run in background.
     if !allItems.isEmpty {
-      loadLog.info("load: items already loaded — running background check only")
-      // Always refresh progress so Continue Watching / Recently Watched are current.
       Task { await refreshProgress() }
-      if HomeCache.needsRefresh(serverURL: serverURL) {
-        Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
-      } else {
-        loadLog.info("load: cache fresh — nothing to do")
+      if HomeCache.isStale(serverURL: serverURL) {
+        loadLog.info("load: in-memory items, cache stale — background content refresh")
+        backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
       }
       return
     }
 
-    // Cold start: try cache first for instant render
+    // Cold start: populate from cache immediately so the UI renders on this frame,
+    // then kick off progress + optional content refresh entirely in the background.
     if let cached = HomeCache.load(serverURL: serverURL) {
-      loadLog.info("load: cache HIT — rendering \(cached.items.count) items immediately (no spinner)")
+      loadLog.info("load: cache HIT — rendering \(cached.items.count) items immediately")
       libraries = cached.libraries
       allItems = cached.items
-      // Immediately refresh progress so rails reflect current watch state.
-      await refreshProgress()
-      if HomeCache.needsRefresh(serverURL: serverURL) {
-        loadLog.info("load: cache stale — scheduling background refresh")
-        Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
-      } else {
-        loadLog.info("load: cache fresh — done")
+      // Both tasks are fire-and-forget — UI is already showing cached items.
+      Task { await refreshProgress() }
+      if HomeCache.isStale(serverURL: serverURL) {
+        loadLog.info("load: cache stale — background content refresh")
+        backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
       }
       return
     }
 
-    // No cache at all — show spinner and fetch
+    // No cache — show spinner and fetch
     loadLog.info("load: no cache — fetching from network")
+    await fetchFromNetwork(serverURL: serverURL, background: false)
+  }
+
+  /// Pull-to-refresh: cancel any in-flight background fetch, wipe the cache, and re-fetch everything.
+  private func forceRefresh() async {
+    guard !appState.isDemoMode else { return }
+    let serverURL = appState.api.baseURL.absoluteString
+    loadLog.info("forceRefresh: cancelling background task and invalidating cache")
+    backgroundFetchTask?.cancel()
+    backgroundFetchTask = nil
+    isBackgroundRefreshing = false
+    HomeCache.invalidate()
     await fetchFromNetwork(serverURL: serverURL, background: false)
   }
 
@@ -409,34 +432,38 @@ struct LibraryHomeView: View {
     do {
       let cachedEntry = HomeCache.load(serverURL: serverURL)
       let cachedCounts = cachedEntry?.libraryCounts ?? [:]
+      let cacheIsStale = HomeCache.isStale(serverURL: serverURL)
 
       var currentCounts: [String: Int] = [:]
       var currentUpdatedAt: [String: String] = [:]
       var libsNeedingRefresh: [Library] = []
+      var resolvedLibraries: [Library] = cachedLibraries  // will be updated if we fetch the lib list
 
       // Step 1: Check for changes via lightweight summary endpoint (fast, ~0.07s).
       // Only fall back to fetching the full library list if summary is unavailable
       // or if we have no cached library list to work from.
-      log.info("doFetch: calling /api/v1/libraries/summary for change detection")
+      log.info("doFetch: calling /api/v1/libraries/summary for change detection (cacheStale=\(cacheIsStale))")
       let t1 = Date()
       if let summaries = try? await api.librariesSummary(), !cachedLibraries.isEmpty {
+        let cachedUpdatedAt = cachedEntry?.libraryUpdatedAt ?? [:]
         log.info("doFetch: summary in \(String(format: "%.2f", Date().timeIntervalSince(t1)))s — \(summaries.libraries.count) entries")
         for s in summaries.libraries {
           currentCounts[s.libraryId] = s.count
           currentUpdatedAt[s.libraryId] = s.lastUpdatedAt
           let countChanged = cachedCounts[s.libraryId] != s.count
+          let updatedAtChanged = cachedUpdatedAt[s.libraryId] != s.lastUpdatedAt
           let isNew = cachedCounts[s.libraryId] == nil
-          log.info("  lib=\(s.libraryId) count=\(s.count) cached=\(cachedCounts[s.libraryId].map(String.init) ?? "nil") countChanged=\(countChanged) isNew=\(isNew)")
-          if countChanged || isNew {
-            // Use cached library list — avoids the slow /api/v1/libraries call
+          log.info("  lib=\(s.libraryId) count=\(s.count) cached=\(cachedCounts[s.libraryId].map(String.init) ?? "nil") countChanged=\(countChanged) updatedAtChanged=\(updatedAtChanged) isNew=\(isNew)")
+          if cacheIsStale || countChanged || updatedAtChanged || isNew {
             if let lib = cachedLibraries.first(where: { $0.id == s.libraryId }) {
-              log.info("  → queuing '\(lib.title)' for item fetch")
+              let reason = cacheIsStale ? "stale" : "count=\(countChanged) updatedAt=\(updatedAtChanged) new=\(isNew)"
+              log.info("  → queuing '\(lib.title)' for item fetch (\(reason))")
               libsNeedingRefresh.append(lib)
             }
           }
         }
 
-        // Nothing changed — no network fetch needed
+        // Nothing changed and cache is fresh — no network fetch needed
         if libsNeedingRefresh.isEmpty && !cachedItems.isEmpty {
           log.info("doFetch: no changes detected — cache is current, skipping all item fetches")
           return .noChange(cachedLibraries)
@@ -448,7 +475,8 @@ struct LibraryHomeView: View {
         let loadedLibs = try await api.libraries().libraries
         log.info("doFetch: got \(loadedLibs.count) libs in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
         libsNeedingRefresh = loadedLibs
-        for lib in loadedLibs { currentCounts[lib.id] = 0 }
+        resolvedLibraries = loadedLibs
+        // currentCounts left empty — total unknown, pagination runs until server returns < pageSize
       }
 
       // Step 2: Fetch items only for libraries that changed
@@ -462,8 +490,7 @@ struct LibraryHomeView: View {
             log.info("  itemFetch[\(lib.id)]: starting (expected≈\(currentCounts[lib.id].map(String.init) ?? "?"))")
             var libItems: [ItemSummary] = []
             var offset = 0
-            let pageSize = 200
-            let total = currentCounts[lib.id] ?? Int.max
+            let pageSize = 10_000
             var page = 0
             while true {
               let pageStart = Date()
@@ -471,7 +498,8 @@ struct LibraryHomeView: View {
               log.info("  itemFetch[\(lib.id)]: page \(page) got=\(response.items.count) in \(String(format: "%.2f", Date().timeIntervalSince(pageStart)))s")
               libItems.append(contentsOf: response.items)
               page += 1
-              if response.items.isEmpty || response.items.count < pageSize || libItems.count >= total || offset >= 5000 { break }
+              if response.items.isEmpty || response.items.count < pageSize { break }
+              if libItems.count >= response.total { break }
               offset += pageSize
             }
             log.info("  itemFetch[\(lib.id)]: done — \(libItems.count) items")
@@ -488,7 +516,7 @@ struct LibraryHomeView: View {
       let merged = retained + freshItems
       log.info("doFetch: merge — retained=\(retained.count) fresh=\(freshItems.count) merged=\(merged.count)")
 
-      return .updated(cachedLibraries, merged, currentCounts, currentUpdatedAt)
+      return .updated(resolvedLibraries, merged, currentCounts, currentUpdatedAt)
     } catch {
       return .failure(error)
     }
@@ -509,14 +537,16 @@ private struct HomeRail: View {
         Text(title)
           .font(.title3.weight(.semibold))
           .foregroundStyle(.white)
+          .accessibilityAddTraits(.isHeader)
         Spacer()
         if let lib = seeAllLibrary {
           NavigationLink("See All") {
             ItemsGridView(library: lib)
           }
           .font(.subheadline)
-          .foregroundStyle(DSReelBrandColor.background)
+          .foregroundStyle(Color.dsAccent)
           .padding(.vertical, 12)
+          .accessibilityLabel("See all in \(title)")
         }
       }
       .padding(.horizontal, 16)
@@ -532,6 +562,8 @@ private struct HomeRail: View {
                 .frame(width: 120)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+            .accessibilityHint("Opens video details")
           }
         }
         .padding(.horizontal, 16)

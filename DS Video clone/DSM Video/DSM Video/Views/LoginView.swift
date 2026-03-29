@@ -47,7 +47,7 @@ struct LoginView: View {
 
           Text("Your NAS, beautifully.")
             .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.6))
+            .foregroundStyle(.white.opacity(0.9))
         }
 
         VStack(spacing: 0) {
@@ -151,6 +151,7 @@ struct LoginView: View {
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
         #endif
         .disabled(appState.isLoggingIn)
+        .accessibilityLabel(appState.isLoggingIn ? "Connecting, please wait" : "Connect")
 
         if let err = appState.loginError {
           Text(err)
@@ -196,7 +197,7 @@ struct LoginView: View {
           Spacer()
           Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
             .font(.footnote)
-            .foregroundStyle(.white.opacity(0.5))
+            .foregroundStyle(.white.opacity(0.75))
           Spacer()
           Button { showAbout = true } label: {
             Image(systemName: "info.circle")

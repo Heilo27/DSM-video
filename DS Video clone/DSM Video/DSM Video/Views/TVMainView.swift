@@ -69,6 +69,7 @@ struct TVLoginView: View {
           }
           .frame(maxWidth: .infinity)
           .padding(.leading, 120)
+          .accessibilityHidden(true)
 
           // Right: Sign-in form
           VStack(spacing: 0) {
@@ -250,6 +251,17 @@ private struct TVHomeView: View {
 
   private func load() async {
     guard !isLoading else { return }
+    if appState.isDemoMode {
+      libraries = DemoData.libraries
+      let allItems = DemoData.movieItems + DemoData.tvItems
+      continueWatching = allItems.filter { item in
+        guard let progress = item.progress, progress.durationSeconds > 0 else { return false }
+        let frac = Double(progress.positionSeconds) / Double(progress.durationSeconds)
+        return frac > 0 && frac < 0.95
+      }
+      justAdded = Array(allItems.prefix(20))
+      return
+    }
     loadError = nil
     isLoading = true
     defer { isLoading = false }
@@ -262,7 +274,7 @@ private struct TVHomeView: View {
       await withTaskGroup(of: [ItemSummary].self) { group in
         for lib in libraries {
           group.addTask {
-            (try? await api.items(libraryId: lib.id, limit: 20, offset: 0).items) ?? []
+            (try? await api.items(libraryId: lib.id, limit: 200, offset: 0).items) ?? []
           }
         }
         for await items in group {
@@ -289,6 +301,7 @@ private struct TVHomeView: View {
           .prefix(20)
       )
     } catch {
+      appState.handleConnectionFailure(error)
       loadError =
         (error as? APIError)?.userMessage
         ?? "Failed to load content. Check your connection and try again."
@@ -318,6 +331,8 @@ private struct TVLandscapeRail: View {
               TVLandscapeCard(item: item)
             }
             .buttonStyle(.card)
+            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+            .accessibilityHint("Opens video details")
           }
         }
         .padding(.horizontal, 60)
@@ -354,6 +369,7 @@ private struct TVLibraryRail: View {
           Image(systemName: "chevron.right")
             .font(.system(size: 20, weight: .semibold))
             .foregroundStyle(Color.dsTextSecondary)
+            .accessibilityHidden(true)
         }
         .padding(.horizontal, 60)
       }
@@ -376,6 +392,8 @@ private struct TVLibraryRail: View {
               TVPortraitCard(item: item)
             }
             .buttonStyle(.card)
+            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+            .accessibilityHint("Opens video details")
           }
         }
         .padding(.horizontal, 60)
@@ -468,6 +486,7 @@ private struct TVLandscapeCard: View {
             }
             .frame(width: cardWidth, height: cardHeight)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityHidden(true)
           }
         }
       }
@@ -579,6 +598,7 @@ private struct TVPortraitCard: View {
               Spacer()
             }
             .frame(width: cardWidth, height: cardHeight)
+            .accessibilityHidden(true)
           }
         }
       }

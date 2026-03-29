@@ -209,6 +209,7 @@ struct GestureVideoPlayer: View {
                 ProgressView()
                     .scaleEffect(1.5)
                     .tint(.white)
+                    .accessibilityLabel("Buffering")
             }
 
             // Player error overlay
@@ -388,7 +389,8 @@ struct GestureVideoPlayer: View {
                     Image(systemName: "chevron.down")
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
-                        .padding(10)
+                        .frame(width: 44, height: 44)
+                        .padding(12)
                         .background(Color.white.opacity(0.12), in: Circle())
                 }
                 .accessibilityLabel("Close")
@@ -486,6 +488,7 @@ struct GestureVideoPlayer: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white)
                     .frame(width: 50, alignment: .leading)
+                    .accessibilityHidden(true)
 
                 #if os(iOS)
                 Slider(
@@ -527,6 +530,7 @@ struct GestureVideoPlayer: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white)
                     .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 40)
@@ -566,6 +570,8 @@ struct GestureVideoPlayer: View {
             ProgressView(value: Double(volumeLevel))
                 .tint(.white)
                 .frame(width: 100)
+                .accessibilityLabel("Volume level")
+                .accessibilityValue("\(Int(volumeLevel * 100)) percent")
         }
         .foregroundStyle(.white)
         .padding(16)
@@ -598,6 +604,7 @@ struct GestureVideoPlayer: View {
         .foregroundStyle(.white)
         .padding(20)
         .background(.ultraThinMaterial, in: Circle())
+        .accessibilityHidden(true)
     }
 
     // MARK: - Gesture Handlers

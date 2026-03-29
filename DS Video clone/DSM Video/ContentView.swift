@@ -54,6 +54,7 @@ struct RootView: View {
                 .ignoresSafeArea()
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -137,6 +138,7 @@ private struct LaunchAnimationView: View {
             launchLog.info("LaunchAnimationView appeared — starting sequence")
             await runSequence()
         }
+        .accessibilityHidden(true)
     }
 
     /// Animation sequence using structured concurrency so sleep intervals are
