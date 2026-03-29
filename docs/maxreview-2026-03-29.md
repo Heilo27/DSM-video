@@ -167,3 +167,50 @@ Remaining P2/P3 notes (accepted):
 **Test suite:** 38/38 passing
 
 **Final verdict: PASS** — Zero P0/P1 issues remaining.
+
+---
+
+## Cycle 3 — Session Changes Review (2026-03-29 evening)
+
+Post-cycle-2 session made significant changes to fix launch animation, home view cache delay, iPad back button visibility, and double NavigationStack on iPad. New full review cycle ran on changed files.
+
+### Changed Files
+- `App/AppState.swift`
+- `Networking/HomeCache.swift`
+- `Views/LibrariesView.swift`
+- `Views/ItemDetailView.swift`
+- `Views/MainView.swift`
+- `Views/PairingCodeView.swift`
+- `Views/TVShowDetailView.swift`
+
+### Phase 2 Findings
+**Code (Scotty):** 0 P0 · 3 P1 · 4 P2 · 4 P3
+**Layout/A11y (Vernier):** 0 P0 · 4 P1 · 5 P2 · 3 P3
+**Total:** 0 P0 · 7 P1 · 9 P2 · 7 P3
+
+### Phase 5A Fixes Applied
+| Fix | Severity | Description |
+|-----|----------|-------------|
+| QuickConnect token ordering | P1 | sessionToken set before baseURL → no brief nil-token client |
+| isBackgroundRefreshing on cancel | P1 | Cleared immediately in onDisappear |
+| HomeCache I/O serialization | P1 | ioQueue serializes all file ops → touch/save race eliminated |
+| iOSSeasonSection tap target | P1 | minHeight:44 + contentShape on season button |
+| RecentSearchesView xmark | P1 | 44×44pt frame + contentShape |
+| downloadIconButton label | P1 | isStartingDownload state covered |
+| iOSEpisodeRow nil episode | P1 | Hidden from VoiceOver when no number |
+| Double file decode | P2 | loadWithStaleness() reads once |
+| Progress batch partial failure | P2 | Result type absorbs per-task failures |
+| setProgress 0/0 on dismiss | P2 | Guard lastSyncedPosition/Duration > 0 |
+| ForEach seasons id | P2 | seasonNumber not offset |
+| Toolbar back button contrast | P2 | 0.6 → 0.85 opacity |
+| Header gradient contrast | P2 | mid-stop 0.6 → 0.8 in both detail views |
+| ProgressView loading label | P2 | accessibilityLabel + updatesFrequently |
+| TVSeasonSection a11y | P3 | Label on button not chevron |
+
+### Phase 5B Re-Review — PASS
+
+All 11 fixes verified correct. No regressions. Build clean.
+
+**Commit:** `fd0b4f2` — MaxReview session: fix 11 issues (P1×7, P2×4) + iPad/animation fixes
+
+**Final verdict: PASS** — Zero P0/P1 issues across all cycles.
