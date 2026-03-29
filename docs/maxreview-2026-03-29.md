@@ -132,3 +132,38 @@
 **Scotty handles:** TASK-235, 236, 237, 238, 239, 240, 252, 253, 254, 255, 258
 **Vernier handles:** TASK-241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251
 **Arch deferred to Cycle 2:** TASK-256, 257 (larger refactors)
+
+---
+
+## Cycle 2 Additions (post-review user requests)
+
+Implemented after cycle 1 completion per user request:
+
+| Ticket | Description | Status |
+|--------|-------------|--------|
+| TASK-291 | Network offline graceful degradation — NWPathMonitor, OfflineBanner, revised handleConnectionFailure, auto-retry on reconnect, LoginView offline state | ✓ Done |
+| TASK-254 | Memoize sortedItems in ItemsGridView via @State + onChange | ✓ Done |
+| TASK-257 | macOS AuthenticatedImage shared MacImageCache actor | ✓ Done |
+| TASK-267 | tvOS Search button + TVSearchView sheet | ✓ Done |
+| TASK-270 | GestureVideoPlayer scenePhase .background flushes progress + pauses | ✓ Done |
+
+## Phase 5B Re-Review (Cycle 2) — PASS
+
+7 P2 / 4 P3 issues found — no P0/P1. Fixed 2 P2s in same pass:
+- AppState.clearNetworkError now also clears isOffline (was leaving it stuck true)
+- MacImageCache.setImage now passes byte cost so totalCostLimit is enforced
+
+Remaining P2/P3 notes (accepted):
+- NWPathMonitor queue has no QoS annotation (benign, .default is fine)
+- GestureVideoPlayer scenePhase handler — false alarm, both paths run on main queue
+- macOS Catalyst: UIKit branch wins, MacImageCache is dead code (benign)
+- TVSearchView: no debounce spinner (cosmetic)
+- OfflineBanner: flag swap animation edge case (cosmetic)
+
+**Commits:**
+- `505694c` — Handle remaining MaxReview tasks (offline, macOS cache, tvOS search, background flush)
+- `9858d8a` — MaxReview cycle 2 cleanup: fix 2 P2 issues
+
+**Test suite:** 38/38 passing
+
+**Final verdict: PASS** — Zero P0/P1 issues remaining.
