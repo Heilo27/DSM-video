@@ -575,6 +575,7 @@ private struct TVPortraitCard: View {
             }
             .frame(width: cardWidth, height: cardHeight)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityHidden(true)
           }
         }
 

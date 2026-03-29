@@ -219,7 +219,7 @@ private struct TVShowSortChipBar: View {
               )
           }
           .buttonStyle(.plain)
-          .accessibilityLabel("Sort by \(option.chipLabel)")
+          .accessibilityLabel("Sort by \(option.rawValue)")
           .accessibilityAddTraits(selection == option ? .isSelected : [])
         }
       }
