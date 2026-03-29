@@ -899,6 +899,7 @@ struct SettingsView: View {
   var body: some View {
     @Bindable var appState = appState
 
+    NavigationStack {
     Form {
       Section {
         HStack {
@@ -951,6 +952,7 @@ struct SettingsView: View {
       }
     }
     .navigationTitle("Settings")
+    } // NavigationStack
   }
 }
 
