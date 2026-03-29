@@ -112,8 +112,8 @@ struct LibraryHomeView: View {
   // MARK: - Rail Computation (off main thread)
 
   /// Recomputes all three rail arrays from `items` on a background thread, then
-  /// applies the results back on @MainActor in a single write — including setting
-  /// railsReady=true so skeletons are replaced atomically, never mid-update.
+  /// applies the results back on @MainActor in a single atomic write.
+  /// Always sets railsReady=true — call this only when items+progress are both final.
   private func recomputeRails(from items: [ItemSummary]) {
     Task.detached(priority: .userInitiated) {
       let (cont, added, watched) = Self.computeRails(items)
@@ -255,7 +255,6 @@ struct LibraryHomeView: View {
     .navigationTitle("Home")
     .task { await load() }
     .refreshable { await forceRefresh() }
-    .onChange(of: allItems) { _, new in recomputeRails(from: new) }
     .onDisappear {
       backgroundFetchTask?.cancel()
       isBackgroundRefreshing = false
@@ -344,8 +343,12 @@ struct LibraryHomeView: View {
       loadLog.info("refreshProgress: merged progress for \(progressMap.count) of \(ids.count) items (\(chunks.count) chunks)")
     } catch {
       loadLog.warning("refreshProgress: failed — \(error.localizedDescription)")
-      // Non-fatal: rails will just show stale or nil progress
+      // Non-fatal: rails will show without progress data
     }
+    // Recompute rails now that items+progress are both final.
+    // This is the only place recomputeRails is called — items alone (without progress)
+    // would give wrong results (empty Continue Watching / Recently Watched).
+    recomputeRails(from: allItems)
   }
 
   // MARK: - Load
