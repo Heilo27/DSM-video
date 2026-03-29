@@ -388,28 +388,21 @@ struct LibraryHomeView: View {
     }
 
     // Cold start: read cache off the main actor so we don't block the animation.
-    // The detached task decodes on a background thread; results are applied back on @MainActor.
+    // Rails are NOT computed here — cached items have no progress, so continueWatching
+    // and recentlyWatched would be empty. Skeletons stay until refreshProgress()
+    // finishes and recomputeRails() fires with items+progress both ready.
     isLoading = true
-    // Read cache + compute rails on a background thread so the main thread stays free.
-    // Everything is ready to apply in one atomic render pass when we return.
-    // Uses loadWithStaleness to decode the file only once (P2-1: no double decode).
-    typealias CacheResult = (entry: HomeCacheEntry, rails: (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary]), stale: Bool)?
+    typealias CacheResult = (entry: HomeCacheEntry, stale: Bool)?
     let result: CacheResult = await Task.detached(priority: .userInitiated) {
-      guard let (entry, stale) = HomeCache.loadWithStaleness(serverURL: serverURL) else { return nil }
-      let rails = Self.computeRails(entry.items)
-      return (entry, rails, stale)
+      HomeCache.loadWithStaleness(serverURL: serverURL)
     }.value
 
-    // Back on @MainActor — single render pass, everything ready
     isLoading = false
     if let result {
-      loadLog.info("load: cache HIT — rendering \(result.entry.items.count) items immediately")
+      loadLog.info("load: cache HIT — \(result.entry.items.count) items, stale=\(result.stale)")
       libraries = result.entry.libraries
       allItems = result.entry.items
-      continueWatchingItems = result.rails.continueWatching
-      justAddedItems = result.rails.justAdded
-      recentlyWatchedItems = result.rails.recentlyWatched
-      railsReady = true
+      // railsReady stays false — skeletons shown until refreshProgress() → recomputeRails()
       Task { await refreshProgress() }
       if result.stale {
         loadLog.info("load: cache stale — background content refresh")
