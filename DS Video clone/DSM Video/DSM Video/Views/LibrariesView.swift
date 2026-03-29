@@ -107,11 +107,13 @@ struct LibraryHomeView: View {
   }
 
   private var justAddedItems: [ItemSummary] {
-    // Sort newest first, then deduplicate so each show/movie appears once.
-    // For TV episodes, group by title prefix up to the episode marker so all
-    // episodes of the same show collapse to the most-recently-added one.
-    let sorted = allItems.sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    return deduplicatedByShow(sorted)
+    // Exclude items already in Continue Watching or Recently Watched —
+    // a movie you've started shouldn't appear here too.
+    let watchedIDs = Set((continueWatchingItems + recentlyWatchedItems).map(\.id))
+    let sorted = allItems
+      .filter { !watchedIDs.contains($0.id) }
+      .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
+    return Array(deduplicatedByShow(sorted).prefix(10))
   }
 
   private var recentlyWatchedItems: [ItemSummary] {
