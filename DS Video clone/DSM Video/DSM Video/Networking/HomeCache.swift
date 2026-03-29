@@ -23,7 +23,7 @@ nonisolated enum HomeCache {
   private static let backgroundRefreshAgeSeconds: TimeInterval = 30 * 60
   private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600
 
-  private nonisolated(unsafe) static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
+  private static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
 
   private static var cacheFileURL: URL {
     let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
