@@ -71,7 +71,7 @@ struct PairingCodeView: View {
       }
       .padding()
       .frame(maxWidth: 480)
-      .frame(maxWidth: .infinity)
+      .frame(maxWidth: .infinity, alignment: .center)
       .navigationTitle("Pair Device")
       #if !os(tvOS)
       .navigationBarTitleDisplayMode(.inline)

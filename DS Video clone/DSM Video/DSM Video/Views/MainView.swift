@@ -72,11 +72,11 @@ private struct SplitView: View {
     case .home, .none:
       LibraryHomeView(isEmbedded: true)
     case .search:
-      SearchView()
+      SearchView(isEmbedded: true)
     case .downloads:
-      DownloadsView()
+      DownloadsView(isEmbedded: true)
     case .settings:
-      SettingsView()
+      SettingsView(isEmbedded: true)
     case .library(let lib):
       if lib.kind == "tv" {
         TVShowsView(library: lib)
@@ -179,6 +179,7 @@ private struct SidebarSectionHeader: View {
 private struct SearchView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  var isEmbedded: Bool = false
   @State private var searchText: String = ""
   @State private var results: [ItemSummary] = []
   @State private var isSearching: Bool = false
@@ -197,74 +198,78 @@ private struct SearchView: View {
   }
 
   var body: some View {
-    NavigationStack {
-      ScrollView {
-        if searchText.isEmpty && !hasSearched {
-          if recentSearches.isEmpty {
-            ContentUnavailableView("Search Videos", systemImage: "magnifyingglass", description: Text("Enter a title to search your library"))
-              .padding(.top, 60)
-          } else {
-            RecentSearchesView(
-              searches: recentSearches,
-              onSelect: { query in
-                searchText = query
-                Task { await search() }
-              },
-              onRemove: { query in removeRecentSearch(query) },
-              onClearAll: { recentSearchesRaw = "" }
-            )
-            .padding(.top, 16)
-          }
-        } else if isSearching {
-          ProgressView("Searching for videos")
+    let content = ScrollView {
+      if searchText.isEmpty && !hasSearched {
+        if recentSearches.isEmpty {
+          ContentUnavailableView("Search Videos", systemImage: "magnifyingglass", description: Text("Enter a title to search your library"))
             .padding(.top, 60)
-        } else if let searchError {
-          ContentUnavailableView("Search Failed", systemImage: "wifi.slash", description: Text(searchError))
-            .padding(.top, 60)
-        } else if hasSearched && results.isEmpty {
-          ContentUnavailableView("No Results", systemImage: "magnifyingglass", description: Text("No videos match \"\(searchText)\""))
-            .padding(.top, 60)
-        } else if !results.isEmpty {
-          LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(results) { item in
-              NavigationLink {
-                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-              } label: {
-                SearchResultCell(item: item)
-              }
-              .buttonStyle(.plain)
+        } else {
+          RecentSearchesView(
+            searches: recentSearches,
+            onSelect: { query in
+              searchText = query
+              Task { await search() }
+            },
+            onRemove: { query in removeRecentSearch(query) },
+            onClearAll: { recentSearchesRaw = "" }
+          )
+          .padding(.top, 16)
+        }
+      } else if isSearching {
+        ProgressView("Searching for videos")
+          .padding(.top, 60)
+      } else if let searchError {
+        ContentUnavailableView("Search Failed", systemImage: "wifi.slash", description: Text(searchError))
+          .padding(.top, 60)
+      } else if hasSearched && results.isEmpty {
+        ContentUnavailableView("No Results", systemImage: "magnifyingglass", description: Text("No videos match \"\(searchText)\""))
+          .padding(.top, 60)
+      } else if !results.isEmpty {
+        LazyVGrid(columns: columns, spacing: 12) {
+          ForEach(results) { item in
+            NavigationLink {
+              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+            } label: {
+              SearchResultCell(item: item)
             }
-          }
-          .padding(horizontalSizeClass == .regular ? 20 : 12)
-        }
-      }
-      .background(Color.black.ignoresSafeArea())
-      .navigationTitle("Search")
-      .searchable(text: $searchText, prompt: "Search videos")
-      .onSubmit(of: .search) {
-        Task { await search() }
-      }
-      .onChange(of: searchText) { _, newValue in
-        if newValue.isEmpty {
-          debounceTask?.cancel()
-          results = []
-          hasSearched = false
-          searchError = nil
-        } else if newValue.count >= 2 {
-          debounceTask?.cancel()
-          debounceTask = Task {
-            if (try? await Task.sleep(for: .milliseconds(400))) != nil {
-              await search()
-            }
+            .buttonStyle(.plain)
           }
         }
+        .padding(horizontalSizeClass == .regular ? 20 : 12)
       }
-      .onAppear {
-        // Seed demo recent searches once if list is empty
-        if appState.isDemoMode && recentSearchesRaw.isEmpty {
-          recentSearchesRaw = ["Action movies", "The Signal", "2024"].joined(separator: "\u{001F}")
+    }
+    .background(Color.black.ignoresSafeArea())
+    .navigationTitle("Search")
+    .searchable(text: $searchText, prompt: "Search videos")
+    .onSubmit(of: .search) {
+      Task { await search() }
+    }
+    .onChange(of: searchText) { _, newValue in
+      if newValue.isEmpty {
+        debounceTask?.cancel()
+        results = []
+        hasSearched = false
+        searchError = nil
+      } else if newValue.count >= 2 {
+        debounceTask?.cancel()
+        debounceTask = Task {
+          if (try? await Task.sleep(for: .milliseconds(400))) != nil {
+            await search()
+          }
         }
       }
+    }
+    .onAppear {
+      // Seed demo recent searches once if list is empty
+      if appState.isDemoMode && recentSearchesRaw.isEmpty {
+        recentSearchesRaw = ["Action movies", "The Signal", "2024"].joined(separator: "\u{001F}")
+      }
+    }
+
+    if isEmbedded {
+      content
+    } else {
+      NavigationStack { content }
     }
   }
 
@@ -355,6 +360,8 @@ private struct RecentSearchesView: View {
                 Image(systemName: "xmark")
                   .font(.caption2)
                   .foregroundStyle(Color.dsTextSecondary)
+                  .frame(minWidth: 44, minHeight: 44)
+                  .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
               .accessibilityLabel("Remove \(query) from recent searches")
@@ -454,6 +461,7 @@ private struct SearchResultCell: View {
 struct DownloadsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  var isEmbedded: Bool = false
   @State private var downloads: [DownloadedItem] = []
   @State private var totalBytes: Int64 = 0
   @State private var availableBytes: Int64 = 0
@@ -483,76 +491,80 @@ struct DownloadsView: View {
   }
 
   var body: some View {
-    NavigationStack {
-      Group {
-        if downloads.isEmpty && inProgressIDs.isEmpty {
-          ContentUnavailableView("No Downloads", systemImage: "arrow.down.circle", description: Text("Downloaded videos will appear here for offline viewing"))
-        } else {
-          ScrollView {
-            VStack(spacing: 16) {
-              // Storage indicator
-              storageSection
+    let content = Group {
+      if downloads.isEmpty && inProgressIDs.isEmpty {
+        ContentUnavailableView("No Downloads", systemImage: "arrow.down.circle", description: Text("Downloaded videos will appear here for offline viewing"))
+      } else {
+        ScrollView {
+          VStack(spacing: 16) {
+            // Storage indicator
+            storageSection
 
-              // Active and paused downloads
-              if !inProgressIDs.isEmpty {
-                activeDownloadsSection
-              }
+            // Active and paused downloads
+            if !inProgressIDs.isEmpty {
+              activeDownloadsSection
+            }
 
-              // Completed downloads grid
-              if !downloads.isEmpty {
-                LazyVGrid(columns: columns, spacing: 12) {
-                  ForEach(downloads) { item in
-                    Button {
-                      playerItem = item
-                      showPlayer = true
-                    } label: {
-                      DownloadedItemCell(item: item) {
-                        deleteDownload(item)
-                      }
+            // Completed downloads grid
+            if !downloads.isEmpty {
+              LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(downloads) { item in
+                  Button {
+                    playerItem = item
+                    showPlayer = true
+                  } label: {
+                    DownloadedItemCell(item: item) {
+                      deleteDownload(item)
                     }
-                    .buttonStyle(.plain)
                   }
+                  .buttonStyle(.plain)
                 }
-                .padding(.horizontal, horizontalSizeClass == .regular ? 20 : 12)
-                .padding(.bottom, horizontalSizeClass == .regular ? 20 : 12)
               }
+              .padding(.horizontal, horizontalSizeClass == .regular ? 20 : 12)
+              .padding(.bottom, horizontalSizeClass == .regular ? 20 : 12)
             }
           }
         }
       }
-      .background(Color.black.ignoresSafeArea())
-      .navigationTitle("Downloads")
-      .onAppear {
-        loadDownloads()
-        loadStorageInfo()
+    }
+    .background(Color.black.ignoresSafeArea())
+    .navigationTitle("Downloads")
+    .onAppear {
+      loadDownloads()
+      loadStorageInfo()
+    }
+    .onChange(of: downloadManager.activeDownloads.count) { _, _ in
+      loadDownloads()
+      loadStorageInfo()
+    }
+    .onChange(of: downloadManager.pausedDownloads.count) { _, _ in
+      loadDownloads()
+      loadStorageInfo()
+    }
+    .fullScreenCover(isPresented: $showPlayer, onDismiss: { showPlayer = false }) {
+      if let item = playerItem {
+        GestureVideoPlayer(
+          url: URL(fileURLWithPath: item.videoPath),
+          title: item.title,
+          resumePosition: Double(item.resumePositionSeconds),
+          onDismiss: { showPlayer = false },
+          onProgressUpdate: { currentTime, _ in
+            DownloadManager.shared.updateResumePosition(
+              itemId: item.id,
+              positionSeconds: Int(currentTime)
+            )
+          }
+        )
+        #if !os(tvOS)
+        .toolbarVisibility(.hidden, for: .tabBar)
+        #endif
       }
-      .onChange(of: downloadManager.activeDownloads.count) { _, _ in
-        loadDownloads()
-        loadStorageInfo()
-      }
-      .onChange(of: downloadManager.pausedDownloads.count) { _, _ in
-        loadDownloads()
-        loadStorageInfo()
-      }
-      .fullScreenCover(isPresented: $showPlayer, onDismiss: { showPlayer = false }) {
-        if let item = playerItem {
-          GestureVideoPlayer(
-            url: URL(fileURLWithPath: item.videoPath),
-            title: item.title,
-            resumePosition: Double(item.resumePositionSeconds),
-            onDismiss: { showPlayer = false },
-            onProgressUpdate: { currentTime, _ in
-              DownloadManager.shared.updateResumePosition(
-                itemId: item.id,
-                positionSeconds: Int(currentTime)
-              )
-            }
-          )
-          #if !os(tvOS)
-          .toolbarVisibility(.hidden, for: .tabBar)
-          #endif
-        }
-      }
+    }
+
+    if isEmbedded {
+      content
+    } else {
+      NavigationStack { content }
     }
   }
 
@@ -895,12 +907,12 @@ private struct DownloadedItemCell: View {
 struct SettingsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.openURL) private var openURL
+  var isEmbedded: Bool = false
 
   var body: some View {
     @Bindable var appState = appState
 
-    NavigationStack {
-    Form {
+    let form = Form {
       Section {
         HStack {
           Text("Default Port")
@@ -952,7 +964,12 @@ struct SettingsView: View {
       }
     }
     .navigationTitle("Settings")
-    } // NavigationStack
+
+    if isEmbedded {
+      form
+    } else {
+      NavigationStack { form }
+    }
   }
 }
 

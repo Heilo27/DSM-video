@@ -222,9 +222,10 @@ final class AppState {
           do {
             let tempClient = APIClient(baseURL: url, token: nil)
             let resp = try await tempClient.login(username: username, password: savedPassword)
-            // Success — persist resolved address and session
-            baseURL = urlStr
+            // Success — set token BEFORE baseURL so the first updateAPI() call has
+            // the correct token and no brief nil-token APIClient is created.
             sessionToken = resp.token
+            baseURL = urlStr
             if rememberMe {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             } else {

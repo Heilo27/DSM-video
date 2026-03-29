@@ -158,7 +158,7 @@ private struct TVShowDetailSplitView: View {
           .foregroundStyle(.white)
           .padding(.top, 60)
         } else {
-          ForEach(Array(seasons.enumerated()), id: \.offset) { _, season in
+          ForEach(seasons, id: \.seasonNumber) { season in
             TVSeasonSection(show: show, season: season, library: library)
           }
         }
@@ -222,11 +222,12 @@ private struct TVSeasonSection: View {
           Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
             .font(.system(size: 16, weight: .semibold))
             .foregroundStyle(Color.dsTextSecondary)
-            .accessibilityLabel(isExpanded ? "Collapse season" : "Expand season")
+            .accessibilityHidden(true)
         }
         .padding(.vertical, 20)
       }
       .buttonStyle(.plain)
+      .accessibilityLabel("Season \(season.seasonNumber), \(isExpanded ? "expanded" : "collapsed")")
 
       Rectangle()
         .fill(Color.dsBorderSubtle)
@@ -412,20 +413,24 @@ private struct TVShowDetailScrollView: View {
       VStack(alignment: .leading, spacing: 0) {
         showHeader
 
-        if isLoading && seasons.isEmpty {
-          ProgressView("Loading").padding(.top, 32).frame(maxWidth: .infinity)
-        } else if let error {
-          ContentUnavailableView(
-            "Couldn't load seasons",
-            systemImage: "exclamationmark.triangle",
-            description: Text(error)
-          )
-          .padding(.top, 32)
-        } else {
-          ForEach(Array(seasons.enumerated()), id: \.offset) { _, season in
-            iOSSeasonSection(show: show, season: season, library: library)
+        VStack(alignment: .leading, spacing: 0) {
+          if isLoading && seasons.isEmpty {
+            ProgressView("Loading").padding(.top, 32).frame(maxWidth: .infinity)
+          } else if let error {
+            ContentUnavailableView(
+              "Couldn't load seasons",
+              systemImage: "exclamationmark.triangle",
+              description: Text(error)
+            )
+            .padding(.top, 32)
+          } else {
+            ForEach(seasons, id: \.seasonNumber) { season in
+              iOSSeasonSection(show: show, season: season, library: library)
+            }
           }
         }
+        .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
+        .frame(maxWidth: .infinity, alignment: .center)
       }
     }
     .background(Color.black.ignoresSafeArea())
@@ -433,6 +438,9 @@ private struct TVShowDetailScrollView: View {
     .task { await load() }
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
+    .toolbarBackground(.visible, for: .navigationBar)
+    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+    .toolbarColorScheme(.dark, for: .navigationBar)
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
         Menu {
@@ -482,7 +490,7 @@ private struct TVShowDetailScrollView: View {
       LinearGradient(
         stops: [
           .init(color: .clear, location: 0.0),
-          .init(color: .black.opacity(0.6), location: 0.55),
+          .init(color: .black.opacity(0.8), location: 0.55),
           .init(color: .black, location: 1.0)
         ],
         startPoint: .top,
@@ -561,6 +569,8 @@ private struct iOSSeasonSection: View {
             .foregroundStyle(.white.opacity(0.75))
             .accessibilityHidden(true)
         }
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .contentShape(Rectangle())
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
       }
@@ -640,6 +650,8 @@ private struct iOSEpisodeRow: View {
         .font(.caption.weight(.semibold).monospacedDigit())
         .foregroundStyle(.white.opacity(0.75))
         .frame(width: 32, alignment: .center)
+        .accessibilityLabel(ep.episodeNumber.map { "Episode \($0)" } ?? "")
+        .accessibilityHidden(ep.episodeNumber == nil)
 
       VStack(alignment: .leading, spacing: 3) {
         Text(ep.title)

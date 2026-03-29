@@ -19,6 +19,8 @@ struct LibrariesView: View {
     let content = Group {
       if isLoading && libraries.isEmpty {
         ProgressView("Loading libraries")
+          .accessibilityLabel("Loading libraries, please wait")
+          .accessibilityAddTraits(.updatesFrequently)
       } else if let error {
         ContentUnavailableView("Couldn't load libraries", systemImage: "exclamationmark.triangle", description: Text(error))
       } else if libraries.isEmpty {
@@ -87,111 +89,18 @@ struct LibraryHomeView: View {
   /// (e.g. the iPad split-view detail column) to avoid nesting stacks.
   var isEmbedded: Bool = false
 
-  // Seed from cache synchronously so the very first render already has data — no empty flash.
-  // Call loadForPrerender() once so the two @State defaults share the same cache read.
-  private static let _prerender = HomeCache.loadForPrerender()
-  @State private var allItems: [ItemSummary] = LibraryHomeView._prerender?.items ?? []
-  @State private var libraries: [Library] = LibraryHomeView._prerender?.libraries ?? []
+  @State private var allItems: [ItemSummary] = []
+  @State private var libraries: [Library] = []
   @State private var isLoading: Bool = false
   @State private var isBackgroundRefreshing: Bool = false
   @State private var backgroundFetchTask: Task<Void, Never>?
   @State private var error: String?
 
-  // MARK: - Rail Filters
-
-  private var continueWatchingItems: [ItemSummary] {
-    // Items the user has actually started (positionSeconds > 0) and not yet finished.
-    let sorted = allItems
-      .filter { item in
-        guard let p = item.progress,
-              p.durationSeconds > 0,
-              p.positionSeconds > 0 else { return false }
-        let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
-        return frac >= 0.05 && frac < 0.95
-      }
-      .sorted { a, b in
-        parseDate(a.progress?.updatedAt ?? a.addedAt) > parseDate(b.progress?.updatedAt ?? b.addedAt)
-      }
-    return Array(deduplicated(sorted).prefix(10))
-  }
-
-  private var justAddedItems: [ItemSummary] {
-    // Exclude items already in Continue Watching or Recently Watched —
-    // a movie you've started shouldn't appear here too.
-    let watchedIDs = Set((continueWatchingItems + recentlyWatchedItems).map(\.id))
-    let sorted = allItems
-      .filter { !watchedIDs.contains($0.id) }
-      .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    let deduped = deduplicatedByShow(sorted)
-    return Array(deduped.prefix(10))
-  }
-
-  private var recentlyWatchedItems: [ItemSummary] {
-    let sorted = allItems
-      .filter { item in
-        guard let p = item.progress, p.durationSeconds > 0 else { return false }
-        let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
-        return frac >= 0.95
-      }
-      .sorted { a, b in
-        parseDate(a.progress?.updatedAt ?? a.addedAt) > parseDate(b.progress?.updatedAt ?? b.addedAt)
-      }
-    return deduplicated(sorted)
-  }
-
-  private static let _dateFormatterFractional: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f
-  }()
-
-  private static let _dateFormatter: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime]
-    return f
-  }()
-
-  private func parseDate(_ iso: String) -> Date {
-    if let d = Self._dateFormatterFractional.date(from: iso) { return d }
-    return Self._dateFormatter.date(from: iso) ?? Date.distantPast
-  }
-
-  /// Deduplicates by exact title+type — used for Continue Watching and Recently Watched
-  /// where items already have show-level titles from the server.
-  private func deduplicated(_ items: [ItemSummary]) -> [ItemSummary] {
-    var seen = Set<String>()
-    return items.filter { item in
-      let key = item.title.lowercased() + "|\(item.type)"
-      guard !seen.contains(key) else { return false }
-      seen.insert(key)
-      return true
-    }
-  }
-
-  /// Deduplicates by show — TV episodes are grouped by `showName` (from server) so
-  /// all episodes of the same show collapse to one entry. Movies pass through unchanged.
-  private func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
-    var seen = Set<String>()
-    return items.filter { item in
-      let key: String
-      if let showName = item.showName, !showName.isEmpty {
-        // Use the server-supplied show name — most reliable grouping
-        key = "tv|\(showName.lowercased())"
-      } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
-        // Fallback: strip season/episode markers from title
-        let base = item.title
-          .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
-          .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
-          .lowercased()
-        key = "tv|\(base)"
-      } else {
-        key = item.title.lowercased() + "|\(item.type)"
-      }
-      guard !seen.contains(key) else { return false }
-      seen.insert(key)
-      return true
-    }
-  }
+  // Pre-computed rail data — updated off-main-thread whenever allItems changes.
+  // Never computed inside body to avoid blocking the main thread with 4500+ item sorts.
+  @State private var continueWatchingItems: [ItemSummary] = []
+  @State private var justAddedItems: [ItemSummary] = []
+  @State private var recentlyWatchedItems: [ItemSummary] = []
 
   private var firstMovieLibrary: Library? {
     libraries.first(where: { $0.kind == "movie" || $0.kind == "movies" }) ?? libraries.first
@@ -199,6 +108,91 @@ struct LibraryHomeView: View {
 
   private var allRailsEmpty: Bool {
     continueWatchingItems.isEmpty && justAddedItems.isEmpty && recentlyWatchedItems.isEmpty
+  }
+
+  // MARK: - Rail Computation (off main thread)
+
+  /// Recomputes all three rail arrays from `items` on a background thread, then
+  /// applies the results back on @MainActor. Call whenever allItems changes.
+  private func recomputeRails(from items: [ItemSummary]) {
+    Task.detached(priority: .userInitiated) {
+      let (cont, added, watched) = Self.computeRails(items)
+      await MainActor.run {
+        self.continueWatchingItems = cont
+        self.justAddedItems = added
+        self.recentlyWatchedItems = watched
+      }
+    }
+  }
+
+  private nonisolated static func computeRails(_ allItems: [ItemSummary])
+    -> (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary])
+  {
+    let formatterFrac: ISO8601DateFormatter = {
+      let f = ISO8601DateFormatter()
+      f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      return f
+    }()
+    let formatter: ISO8601DateFormatter = {
+      let f = ISO8601DateFormatter()
+      f.formatOptions = [.withInternetDateTime]
+      return f
+    }()
+    func parseDate(_ iso: String) -> Date {
+      formatterFrac.date(from: iso) ?? formatter.date(from: iso) ?? .distantPast
+    }
+
+    func deduplicated(_ items: [ItemSummary]) -> [ItemSummary] {
+      var seen = Set<String>()
+      return items.filter { seen.insert($0.title.lowercased() + "|\($0.type)").inserted }
+    }
+
+    func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
+      var seen = Set<String>()
+      return items.filter { item in
+        let key: String
+        if let showName = item.showName, !showName.isEmpty {
+          key = "tv|\(showName.lowercased())"
+        } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
+          let base = item.title
+            .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
+            .lowercased()
+          key = "tv|\(base)"
+        } else {
+          key = item.title.lowercased() + "|\(item.type)"
+        }
+        return seen.insert(key).inserted
+      }
+    }
+
+    let continueWatching = Array(deduplicated(
+      allItems
+        .filter { item in
+          guard let p = item.progress, p.durationSeconds > 0, p.positionSeconds > 0 else { return false }
+          let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
+          return frac >= 0.05 && frac < 0.95
+        }
+        .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
+    ).prefix(10))
+
+    let recentlyWatched = deduplicated(
+      allItems
+        .filter { item in
+          guard let p = item.progress, p.durationSeconds > 0 else { return false }
+          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.95
+        }
+        .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
+    )
+
+    let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
+    let justAdded = Array(deduplicatedByShow(
+      allItems
+        .filter { !watchedIDs.contains($0.id) }
+        .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
+    ).prefix(10))
+
+    return (continueWatching, justAdded, recentlyWatched)
   }
 
   // MARK: - Body
@@ -217,7 +211,7 @@ struct LibraryHomeView: View {
           Button("Retry") { Task { await load() } }
             .buttonStyle(.bordered)
         }
-      } else if allRailsEmpty && !isLoading {
+      } else if allRailsEmpty && !isLoading && allItems.isEmpty {
         ContentUnavailableView(
           "Nothing here yet",
           systemImage: "play.rectangle",
@@ -255,7 +249,11 @@ struct LibraryHomeView: View {
     .navigationTitle("Home")
     .task { await load() }
     .refreshable { await forceRefresh() }
-    .onDisappear { backgroundFetchTask?.cancel() }
+    .onChange(of: allItems) { _, new in recomputeRails(from: new) }
+    .onDisappear {
+      backgroundFetchTask?.cancel()
+      isBackgroundRefreshing = false
+    }
     .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
       guard !allItems.isEmpty else { return }
       Task { await refreshProgress() }
@@ -286,12 +284,44 @@ struct LibraryHomeView: View {
     let chunks = stride(from: 0, to: ids.count, by: chunkSize).map {
       Array(ids[$0..<min($0 + chunkSize, ids.count)])
     }
+    // Capture api reference before leaving @MainActor
+    let api = appState.api
     var progressMap: [String: ItemProgress] = [:]
     do {
-      for chunk in chunks {
-        let batch = try await appState.api.progressBatch(ids: chunk)
-        progressMap.merge(batch.progress) { _, new in new }
+      // Throttle to 4 concurrent requests — the NAS serializes beyond that anyway
+      // and flooding it causes queue buildup that makes every request slower.
+      // Per-batch failures are absorbed (Result wrapping) so a single failed batch
+      // does not wipe all progress for the user (P2-2).
+      let maxConcurrent = 4
+      let results = try await withThrowingTaskGroup(of: Result<[String: ItemProgress], Error>.self) { group in
+        var inFlight = 0
+        var chunkIterator = chunks.makeIterator()
+        // Seed the initial batch
+        while inFlight < maxConcurrent, let chunk = chunkIterator.next() {
+          group.addTask {
+            do { return .success(try await api.progressBatch(ids: chunk).progress) }
+            catch { return .failure(error) }
+          }
+          inFlight += 1
+        }
+        var merged: [String: ItemProgress] = [:]
+        for try await batchResult in group {
+          if case .success(let batch) = batchResult {
+            merged.merge(batch) { _, new in new }
+          }
+          inFlight -= 1
+          // Enqueue next chunk as a slot opens
+          if let chunk = chunkIterator.next() {
+            group.addTask {
+              do { return .success(try await api.progressBatch(ids: chunk).progress) }
+              catch { return .failure(error) }
+            }
+            inFlight += 1
+          }
+        }
+        return merged
       }
+      progressMap = results
       allItems = allItems.map { item in
         if let p = progressMap[item.id] {
           return ItemSummary(id: item.id, type: item.type, title: item.title,
@@ -332,34 +362,53 @@ struct LibraryHomeView: View {
     loadLog.info("load: serverURL=\(serverURL)")
 
     // Items already in memory — re-entering tab or returning from player.
-    // Fire-and-forget: progress refresh and optional content re-fetch both run in background.
     if !allItems.isEmpty {
       Task { await refreshProgress() }
-      if HomeCache.isStale(serverURL: serverURL) {
-        loadLog.info("load: in-memory items, cache stale — background content refresh")
-        backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
+      // isStale reads disk — do it off the main actor.
+      // Uses loadWithStaleness internally (single decode, P2-1).
+      Task {
+        let stale = await Task.detached(priority: .utility) {
+          HomeCache.isStale(serverURL: serverURL)
+        }.value
+        if stale {
+          loadLog.info("load: in-memory items, cache stale — background content refresh")
+          backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
+        }
       }
       return
     }
 
-    // Cold start: populate from cache immediately so the UI renders on this frame,
-    // then kick off progress + optional content refresh entirely in the background.
-    if let cached = HomeCache.load(serverURL: serverURL) {
-      loadLog.info("load: cache HIT — rendering \(cached.items.count) items immediately")
-      libraries = cached.libraries
-      allItems = cached.items
-      // Both tasks are fire-and-forget — UI is already showing cached items.
+    // Cold start: read cache off the main actor so we don't block the animation.
+    // The detached task decodes on a background thread; results are applied back on @MainActor.
+    isLoading = true
+    // Read cache + compute rails on a background thread so the main thread stays free.
+    // Everything is ready to apply in one atomic render pass when we return.
+    // Uses loadWithStaleness to decode the file only once (P2-1: no double decode).
+    typealias CacheResult = (entry: HomeCacheEntry, rails: (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary]), stale: Bool)?
+    let result: CacheResult = await Task.detached(priority: .userInitiated) {
+      guard let (entry, stale) = HomeCache.loadWithStaleness(serverURL: serverURL) else { return nil }
+      let rails = Self.computeRails(entry.items)
+      return (entry, rails, stale)
+    }.value
+
+    // Back on @MainActor — single render pass, everything ready
+    isLoading = false
+    if let result {
+      loadLog.info("load: cache HIT — rendering \(result.entry.items.count) items immediately")
+      libraries = result.entry.libraries
+      allItems = result.entry.items
+      continueWatchingItems = result.rails.continueWatching
+      justAddedItems = result.rails.justAdded
+      recentlyWatchedItems = result.rails.recentlyWatched
       Task { await refreshProgress() }
-      if HomeCache.isStale(serverURL: serverURL) {
+      if result.stale {
         loadLog.info("load: cache stale — background content refresh")
         backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
       }
-      return
+    } else {
+      loadLog.info("load: no cache — fetching from network")
+      await fetchFromNetwork(serverURL: serverURL, background: false)
     }
-
-    // No cache — show spinner and fetch
-    loadLog.info("load: no cache — fetching from network")
-    await fetchFromNetwork(serverURL: serverURL, background: false)
   }
 
   /// Pull-to-refresh: cancel any in-flight background fetch, wipe the cache, and re-fetch everything.
@@ -404,19 +453,22 @@ struct LibraryHomeView: View {
     switch result {
     case .noChange(let libs):
       loadLog.info("fetchFromNetwork: no change — updating libs, touching cache")
-      HomeCache.touch(serverURL: serverURL)
+      Task.detached(priority: .utility) { HomeCache.touch(serverURL: serverURL) }
       libraries = libs
       appState.clearNetworkError()
-      await refreshProgress()
+      Task { await refreshProgress() }
 
     case .updated(let libs, let merged, let counts, let updatedAt):
       loadLog.info("fetchFromNetwork: update complete — \(merged.count) items")
       libraries = libs
       allItems = merged
-      HomeCache.save(serverURL: serverURL, libraries: libs, items: merged,
-                     counts: counts, updatedAt: updatedAt)
+      // Save off main actor — encoding 4563 items is ~2.7MB and blocks the run loop if done here
+      Task.detached(priority: .utility) {
+        HomeCache.save(serverURL: serverURL, libraries: libs, items: merged,
+                       counts: counts, updatedAt: updatedAt)
+      }
       appState.clearNetworkError()
-      await refreshProgress()
+      Task { await refreshProgress() }
 
     case .failure(let err):
       loadLog.error("fetchFromNetwork: ERROR — \(err.localizedDescription)")

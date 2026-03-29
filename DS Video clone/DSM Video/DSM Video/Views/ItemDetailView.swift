@@ -134,7 +134,7 @@ struct ItemDetailView: View {
         #else
         .padding(.horizontal, 16)
         .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .center)
         #endif
         .padding(.top, 16)
       }
@@ -143,6 +143,9 @@ struct ItemDetailView: View {
     .navigationTitle(detail?.title ?? fallbackTitle)
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
+    .toolbarBackground(.visible, for: .navigationBar)
+    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+    .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
     .task(id: itemID) { await load() }
     .fullScreenCover(isPresented: $showPlayer) {
@@ -239,7 +242,7 @@ struct ItemDetailView: View {
         LinearGradient(
           stops: [
             .init(color: .clear, location: 0.0),
-            .init(color: .black.opacity(0.6), location: 0.55),
+            .init(color: .black.opacity(0.8), location: 0.55),
             .init(color: .black, location: 1.0)
           ],
           startPoint: .top,
@@ -388,7 +391,7 @@ struct ItemDetailView: View {
     .background(Color(white: 0.12))
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     .disabled(isStartingDownload && !isDownloading)
-    .accessibilityLabel(isDownloaded ? "Remove download" : isDownloading ? "Cancel download" : "Download")
+    .accessibilityLabel(isStartingDownload ? "Starting download" : (isDownloaded ? "Remove download" : (isDownloading ? "Cancel download" : "Download")))
     .accessibilityValue(isDownloading && downloadProgress > 0 && downloadProgress < 1 ? "\(Int(downloadProgress * 100)) percent downloaded" : "")
   }
 
@@ -658,6 +661,13 @@ private struct PlayerSheet: View {
           title: title,
           resumePosition: resumePosition,
           onDismiss: {
+            // Guard: if user dismissed before video started or position/duration are
+            // unknown, skip setProgress entirely — must not overwrite real saved progress
+            // with 0/0 on instant dismiss (P2-3).
+            guard lastSyncedPosition > 0 && lastKnownDuration > 0 else {
+              dismiss()
+              return
+            }
             if isOffline {
               // Persist final position locally for resume-on-reopen
               DownloadManager.shared.updateResumePosition(

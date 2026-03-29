@@ -25,66 +25,67 @@ nonisolated enum HomeCache {
 
   private static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
 
+  /// Serial queue that serializes all file I/O — prevents touch/save races when two concurrent
+  /// refresh cycles overlap (P1-3). All readData/writeData calls go through this queue.
+  static let ioQueue = DispatchQueue(label: "HomeCache.io", qos: .utility)
+
   private static var cacheFileURL: URL {
     // Use Documents (not Caches) — the OS purges Caches under storage pressure,
     // which causes cold-start network fetches for large libraries.
     // Documents are only cleared on app uninstall.
-    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+      preconditionFailure("HomeCache: cannot locate Documents directory — file system unavailable")
+    }
     return docs.appendingPathComponent(cacheFileName)
   }
 
   private static func readData() -> Data? {
-    try? Data(contentsOf: cacheFileURL)
+    ioQueue.sync { try? Data(contentsOf: cacheFileURL) }
   }
 
   private static func writeData(_ data: Data) {
-    try? data.write(to: cacheFileURL, options: .atomic)
+    ioQueue.sync { try? data.write(to: cacheFileURL, options: .atomic) }
   }
 
-  /// Load cache without server URL validation — used for synchronous pre-render seeding only.
-  /// The async load() path still validates serverURL and will replace data if it mismatches.
-  static func loadForPrerender() -> HomeCacheEntry? {
-    guard let data = readData(),
-          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data) else { return nil }
-    let age = Date().timeIntervalSince(entry.savedAt)
-    guard age < maxAgeSeconds else { return nil }
-    return entry
-  }
+  // MARK: - Combined load+staleness (P2-1: single file decode on cold start)
 
-  static func load(serverURL: String) -> HomeCacheEntry? {
-    log.debug("load: reading cache file")
+  /// Reads the cache file once and returns both the entry and its staleness.
+  /// Callers on cold start should use this instead of calling `load` + `isStale` separately,
+  /// avoiding a double file read + decode.
+  static func loadWithStaleness(serverURL: String) -> (entry: HomeCacheEntry, isStale: Bool)? {
+    log.debug("loadWithStaleness: reading cache file")
     guard let data = readData() else {
-      log.info("load: no cache — cold start")
+      log.info("loadWithStaleness: no cache — cold start")
       return nil
     }
     guard let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data) else {
-      log.error("load: decode failed — cache corrupt, discarding")
+      log.error("loadWithStaleness: decode failed — cache corrupt, discarding")
       return nil
     }
     guard entry.serverURL == serverURL else {
-      log.info("load: server URL mismatch — ignoring stale cache")
+      log.info("loadWithStaleness: server URL mismatch — ignoring stale cache")
       return nil
     }
     let age = Date().timeIntervalSince(entry.savedAt)
     guard age < maxAgeSeconds else {
-      log.info("load: cache expired (age=\(Int(age))s) — discarding")
+      log.info("loadWithStaleness: cache expired (age=\(Int(age))s) — discarding")
       return nil
     }
-    log.info("load: HIT — \(entry.items.count) items, \(entry.libraries.count) libs, age=\(Int(age))s")
-    return entry
+    let stale = age > staleAgeSeconds
+    log.info("loadWithStaleness: HIT — \(entry.items.count) items, age=\(Int(age))s, stale=\(stale)")
+    return (entry, stale)
+  }
+
+  static func load(serverURL: String) -> HomeCacheEntry? {
+    loadWithStaleness(serverURL: serverURL)?.entry
   }
 
   /// Returns true if the cache exists but is older than 24 hours — triggers a full re-fetch
   /// rather than relying solely on count/lastUpdatedAt change detection.
   static func isStale(serverURL: String) -> Bool {
-    guard let data = readData(),
-          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
-          entry.serverURL == serverURL
-    else { return false }
-    let age = Date().timeIntervalSince(entry.savedAt)
-    let stale = age > staleAgeSeconds
-    log.info("isStale: age=\(Int(age))s threshold=\(Int(staleAgeSeconds))s → \(stale ? "STALE" : "fresh")")
-    return stale
+    guard let result = loadWithStaleness(serverURL: serverURL) else { return false }
+    log.info("isStale: → \(result.isStale ? "STALE" : "fresh")")
+    return result.isStale
   }
 
   static func save(serverURL: String, libraries: [Library], items: [ItemSummary],
