@@ -26,8 +26,11 @@ nonisolated enum HomeCache {
   private static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
 
   private static var cacheFileURL: URL {
-    let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-    return caches.appendingPathComponent(cacheFileName)
+    // Use Documents (not Caches) — the OS purges Caches under storage pressure,
+    // which causes cold-start network fetches for large libraries.
+    // Documents are only cleared on app uninstall.
+    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    return docs.appendingPathComponent(cacheFileName)
   }
 
   private static func readData() -> Data? {

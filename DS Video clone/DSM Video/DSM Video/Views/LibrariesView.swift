@@ -280,9 +280,18 @@ struct LibraryHomeView: View {
   private func refreshProgress() async {
     guard !allItems.isEmpty, !appState.isDemoMode else { return }
     let ids = allItems.map(\.id)
+    // Chunk into batches of 200 to avoid URL length limits on large libraries.
+    // A single query with 4000+ IDs (~32KB URL) silently fails on most servers.
+    let chunkSize = 200
+    let chunks = stride(from: 0, to: ids.count, by: chunkSize).map {
+      Array(ids[$0..<min($0 + chunkSize, ids.count)])
+    }
+    var progressMap: [String: ItemProgress] = [:]
     do {
-      let batch = try await appState.api.progressBatch(ids: ids)
-      let progressMap = batch.progress
+      for chunk in chunks {
+        let batch = try await appState.api.progressBatch(ids: chunk)
+        progressMap.merge(batch.progress) { _, new in new }
+      }
       allItems = allItems.map { item in
         if let p = progressMap[item.id] {
           return ItemSummary(id: item.id, type: item.type, title: item.title,
@@ -296,7 +305,7 @@ struct LibraryHomeView: View {
           return item.withoutProgress
         }
       }
-      loadLog.info("refreshProgress: merged progress for \(progressMap.count) of \(ids.count) items")
+      loadLog.info("refreshProgress: merged progress for \(progressMap.count) of \(ids.count) items (\(chunks.count) chunks)")
     } catch {
       loadLog.warning("refreshProgress: failed — \(error.localizedDescription)")
       // Non-fatal: rails will just show stale or nil progress
