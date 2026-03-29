@@ -198,11 +198,6 @@ struct LibraryHomeView: View {
 
   // MARK: - Body
 
-  // Skeletons show until railsReady — the moment recomputeRails() finishes its first pass.
-  // Using railsReady (not allItems.isEmpty) closes the gap where allItems arrives but
-  // the background sort hasn't written results yet, which caused sections to flash empty.
-  private var railsLoading: Bool { !railsReady }
-
   var body: some View {
     let content = Group {
       if let error, allItems.isEmpty {
@@ -217,36 +212,41 @@ struct LibraryHomeView: View {
             .buttonStyle(.bordered)
         }
       } else {
-        // Always render all three rails in fixed order.
-        // While loading, each rail shows skeleton placeholder cards so the
-        // layout is stable and nothing jumps around as content arrives.
-        // A rail is only hidden once loading is done AND it's genuinely empty.
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
-            if railsLoading || !continueWatchingItems.isEmpty {
-              HomeRail(
-                title: "Continue Watching",
-                items: continueWatchingItems,
-                seeAllLibrary: firstMovieLibrary,
-                isLoading: railsLoading
-              )
-            }
-            if railsLoading || !justAddedItems.isEmpty {
-              HomeRail(
-                title: "Just Added",
-                items: justAddedItems,
-                seeAllLibrary: firstMovieLibrary,
-                isLoading: railsLoading
-              )
-            }
-            if railsLoading || !recentlyWatchedItems.isEmpty {
-              HomeRail(
-                title: "Recently Watched",
-                items: recentlyWatchedItems,
-                seeAllLibrary: firstMovieLibrary,
-                isLoading: railsLoading
-              )
-            }
+            // All three rails are always in the view tree — no conditional mounting.
+            // isLoading=true shows skeleton cards. Once railsReady, real items appear.
+            // A section is only hidden (opacity+height collapsed) after the first
+            // successful load confirms it has no items — never mid-load.
+            HomeRail(
+              title: "Continue Watching",
+              items: continueWatchingItems,
+              seeAllLibrary: firstMovieLibrary,
+              isLoading: !railsReady
+            )
+            .opacity(railsReady && continueWatchingItems.isEmpty ? 0 : 1)
+            .frame(height: railsReady && continueWatchingItems.isEmpty ? 0 : nil)
+            .clipped()
+
+            HomeRail(
+              title: "Just Added",
+              items: justAddedItems,
+              seeAllLibrary: firstMovieLibrary,
+              isLoading: !railsReady
+            )
+            .opacity(railsReady && justAddedItems.isEmpty ? 0 : 1)
+            .frame(height: railsReady && justAddedItems.isEmpty ? 0 : nil)
+            .clipped()
+
+            HomeRail(
+              title: "Recently Watched",
+              items: recentlyWatchedItems,
+              seeAllLibrary: firstMovieLibrary,
+              isLoading: !railsReady
+            )
+            .opacity(railsReady && recentlyWatchedItems.isEmpty ? 0 : 1)
+            .frame(height: railsReady && recentlyWatchedItems.isEmpty ? 0 : nil)
+            .clipped()
           }
           .padding(.vertical, 16)
         }
