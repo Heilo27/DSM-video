@@ -18,36 +18,32 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    // launchDone gates app content insertion (prevents .task{} network calls during animation).
     // launchVisible controls whether the launch overlay is in the view tree.
-    // They're set separately so the app content is inserted first, then the overlay fades out.
-    @State private var launchDone = false
+    // App content is always inserted so .task{} fires immediately and the
+    // cache loads during the animation — content is ready when the overlay fades out.
     @State private var launchVisible = true
 
     var body: some View {
         ZStack {
-            // App content — inserted only after animation finishes so network tasks
-            // don't run concurrently with the launch animation sequence.
-            if launchDone {
-                #if os(tvOS)
-                TVMainView()
-                #else
-                if appState.sessionToken == nil {
-                    LoginView()
-                } else {
-                    MainView(layout: (horizontalSizeClass ?? .regular) == .regular ? .split : .tabs)
-                }
-                #endif
+            // App content — always in tree so .task{} fires immediately and
+            // the cache is loaded before the animation completes.
+            // The launch overlay sits on top and covers it until fade-out.
+            #if os(tvOS)
+            TVMainView()
+            #else
+            if appState.sessionToken == nil {
+                LoginView()
+            } else {
+                MainView(layout: (horizontalSizeClass ?? .regular) == .regular ? .split : .tabs)
             }
+            #endif
 
             // Launch overlay — kept in tree until fade-out completes so the
             // animation Task owns its @State for its full lifetime.
             if launchVisible {
                 LaunchAnimationView {
-                    // Step 1: Insert app content (still hidden under overlay)
-                    launchDone = true
-                    // Step 2: Fade out overlay, then remove from tree
-                    withAnimation(.easeIn(duration: 0.25)) {
+                    // Fade out overlay to reveal already-loaded app content
+                    withAnimation(.easeIn(duration: 0.18)) {
                         launchVisible = false
                     }
                 }
@@ -186,7 +182,11 @@ private struct LaunchAnimationView: View {
             flashIntensity = 1.0
         }
 
-        try? await Task.sleep(for: .milliseconds(130))
+        // Fade flash back out before handing off — prevents white linger over app content
+        withAnimation(.easeOut(duration: 0.15)) {
+            flashIntensity = 0
+        }
+        try? await Task.sleep(for: .milliseconds(160))
         launchLog.info("Phase 7: sequence complete — handing off to app")
         onComplete()
     }
