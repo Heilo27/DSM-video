@@ -68,12 +68,17 @@ final class DownloadManager: NSObject {
 
   private(set) var activeDownloads: [String: ActiveDownload] = [:]
   private(set) var downloadProgress: [String: Double] = [:]
+  /// In-memory map of itemId → resume data blob for paused downloads.
+  private(set) var pausedDownloads: [String: Data] = [:]
 
   private var backgroundSession: URLSession!
   private var downloadTasks: [URLSessionDownloadTask: String] = [:]
   private var pendingDownloadInfo: [String: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int)] = [:]
 
   private let storageKey = "dsReel.downloadedItems"
+  private let resumeDataKey = "dsReel.resumeData"
+  /// Persists minimal metadata for paused downloads across app launches.
+  private let pausedMetaKey = "dsReel.pausedMeta"
   private var cachedDownloadedItems: [DownloadedItem]?
 
   override private init() {
@@ -82,6 +87,7 @@ final class DownloadManager: NSObject {
     config.isDiscretionary = false
     config.sessionSendsLaunchEvents = true
     backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
+    loadPersistedResumeData()
   }
 
   // MARK: - Public API
@@ -118,12 +124,17 @@ final class DownloadManager: NSObject {
   }
 
   func cancelDownload(itemId: String) {
-    guard let download = activeDownloads[itemId] else { return }
-    download.task.cancel()
-    downloadTasks.removeValue(forKey: download.task)
-    activeDownloads.removeValue(forKey: itemId)
-    downloadProgress.removeValue(forKey: itemId)
+    // Cancel an active download if present
+    if let download = activeDownloads[itemId] {
+      download.task.cancel()
+      downloadTasks.removeValue(forKey: download.task)
+      activeDownloads.removeValue(forKey: itemId)
+      downloadProgress.removeValue(forKey: itemId)
+    }
+    // Clean up all state regardless of whether download was active or paused
     pendingDownloadInfo.removeValue(forKey: itemId)
+    pausedDownloads.removeValue(forKey: itemId)
+    removePersistedResumeData(for: itemId)
   }
 
   func deleteDownload(itemId: String) {
@@ -142,6 +153,9 @@ final class DownloadManager: NSObject {
     items.remove(at: index)
     saveDownloadedItems(items)
     cachedDownloadedItems = nil
+    // Clear any resume data that might be lingering
+    pausedDownloads.removeValue(forKey: itemId)
+    removePersistedResumeData(for: itemId)
   }
 
   func isDownloaded(itemId: String) -> Bool {
@@ -150,6 +164,63 @@ final class DownloadManager: NSObject {
 
   func isDownloading(itemId: String) -> Bool {
     activeDownloads[itemId] != nil
+  }
+
+  func isPaused(itemId: String) -> Bool {
+    pausedDownloads[itemId] != nil
+  }
+
+  /// Returns the display title for a paused download (sourced from pendingDownloadInfo).
+  func pausedDownloadTitle(itemId: String) -> String? {
+    pendingDownloadInfo[itemId]?.title
+  }
+
+  /// Pause an active download, capturing resume data so it can be continued later.
+  func pauseDownload(itemId: String) {
+    guard let download = activeDownloads[itemId] else { return }
+
+    download.task.cancel(byProducingResumeData: { [weak self] resumeData in
+      guard let self else { return }
+      Task { @MainActor in
+        // Remove from active tracking
+        self.downloadTasks.removeValue(forKey: download.task)
+        self.activeDownloads.removeValue(forKey: itemId)
+        self.downloadProgress.removeValue(forKey: itemId)
+        // Store resume data (keep pendingDownloadInfo so metadata is available for resume)
+        if let data = resumeData {
+          self.pausedDownloads[itemId] = data
+          self.persistResumeData(data, for: itemId)
+          self.persistPausedMeta(for: itemId)
+        }
+      }
+    })
+  }
+
+  /// Resume a previously paused download. Falls back to a fresh download if resume data is unavailable.
+  func resumeDownload(itemId: String) {
+    guard let info = pendingDownloadInfo[itemId] else { return }
+    guard activeDownloads[itemId] == nil else { return } // already active
+
+    if let resumeData = pausedDownloads[itemId] {
+      // Resume with saved data
+      let task = backgroundSession.downloadTask(withResumeData: resumeData)
+      downloadTasks[task] = itemId
+      let download = ActiveDownload(
+        id: itemId,
+        title: info.title,
+        progress: downloadProgress[itemId] ?? 0,
+        task: task
+      )
+      activeDownloads[itemId] = download
+      // Clear the paused state
+      pausedDownloads.removeValue(forKey: itemId)
+      removePersistedResumeData(for: itemId)
+      task.resume()
+    } else {
+      // No resume data — cannot resume without the original video URL.
+      // pendingDownloadInfo doesn't store the URL, so this is a no-op.
+      // Callers should use startDownload(...) with the original URL in this case.
+    }
   }
 
   func getDownloadedItems() -> [DownloadedItem] {
@@ -228,6 +299,64 @@ final class DownloadManager: NSObject {
   }
 
   // MARK: - Private
+
+  // MARK: Resume Data Persistence
+
+  /// Load persisted resume data blobs and paused item metadata from UserDefaults into the in-memory maps.
+  private func loadPersistedResumeData() {
+    // Load resume data blobs
+    if let raw = UserDefaults.standard.dictionary(forKey: resumeDataKey) as? [String: String] {
+      for (itemId, base64) in raw {
+        if let data = Data(base64Encoded: base64) {
+          pausedDownloads[itemId] = data
+        }
+      }
+    }
+    // Restore minimal pendingDownloadInfo so paused items remain resumable after app launch
+    if let raw = UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]] {
+      for (itemId, meta) in raw {
+        let title = meta["title"] ?? itemId
+        let year = meta["year"].flatMap { Int($0) }
+        let posterURL = meta["posterURL"].flatMap { URL(string: $0) }
+        let durationSeconds = meta["durationSeconds"].flatMap { Int($0) } ?? 0
+        // Only restore if we have resume data; otherwise metadata is orphaned
+        if pausedDownloads[itemId] != nil {
+          pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds)
+        }
+      }
+    }
+  }
+
+  /// Persist a single resume data blob to UserDefaults (stored as base64 per itemId).
+  private func persistResumeData(_ data: Data, for itemId: String) {
+    var store = (UserDefaults.standard.dictionary(forKey: resumeDataKey) as? [String: String]) ?? [:]
+    store[itemId] = data.base64EncodedString()
+    UserDefaults.standard.set(store, forKey: resumeDataKey)
+  }
+
+  /// Persist minimal metadata for a paused download so it can be displayed and resumed after app relaunch.
+  private func persistPausedMeta(for itemId: String) {
+    guard let info = pendingDownloadInfo[itemId] else { return }
+    var store = (UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]]) ?? [:]
+    var meta: [String: String] = ["title": info.title]
+    if let year = info.year { meta["year"] = "\(year)" }
+    if let posterURL = info.posterURL { meta["posterURL"] = posterURL.absoluteString }
+    meta["durationSeconds"] = "\(info.durationSeconds)"
+    store[itemId] = meta
+    UserDefaults.standard.set(store, forKey: pausedMetaKey)
+  }
+
+  /// Remove a single item's resume data and paused metadata from UserDefaults.
+  private func removePersistedResumeData(for itemId: String) {
+    if var store = UserDefaults.standard.dictionary(forKey: resumeDataKey) as? [String: String] {
+      store.removeValue(forKey: itemId)
+      UserDefaults.standard.set(store, forKey: resumeDataKey)
+    }
+    if var store = UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]] {
+      store.removeValue(forKey: itemId)
+      UserDefaults.standard.set(store, forKey: pausedMetaKey)
+    }
+  }
 
   private func saveDownloadedItems(_ items: [DownloadedItem]) {
     guard let data = try? JSONEncoder().encode(items) else { return }
@@ -382,13 +511,27 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
   nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard let downloadTask = task as? URLSessionDownloadTask else { return }
+    // Extract resume data from the error userInfo before crossing into MainActor context
+    let resumeData = (error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
     Task { @MainActor in
       guard let itemId = downloadTasks[downloadTask] else { return }
-      if error != nil {
+      if let error {
+        let nsError = error as NSError
+        if nsError.code == NSURLErrorCancelled, let data = resumeData {
+          // Download was paused (cancel with resume data) — save resume data, leave pendingDownloadInfo intact
+          pausedDownloads[itemId] = data
+          persistResumeData(data, for: itemId)
+          persistPausedMeta(for: itemId)
+        }
+        // Always clean up active state on any error/cancellation
         activeDownloads.removeValue(forKey: itemId)
         downloadProgress.removeValue(forKey: itemId)
-        pendingDownloadInfo.removeValue(forKey: itemId)
         downloadTasks.removeValue(forKey: downloadTask)
+        // Note: pendingDownloadInfo is intentionally kept when pausing so resumeDownload can access it
+        if nsError.code != NSURLErrorCancelled || resumeData == nil {
+          // Genuine failure (not a pause) — clean up pendingDownloadInfo too
+          pendingDownloadInfo.removeValue(forKey: itemId)
+        }
       }
     }
   }

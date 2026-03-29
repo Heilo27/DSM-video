@@ -16,7 +16,6 @@ struct ItemDetailView: View {
 
   @State private var showPlayer: Bool = false
   @State private var showDemoAlert: Bool = false
-  @State private var showNoTrailerAlert: Bool = false
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
 
@@ -69,20 +68,6 @@ struct ItemDetailView: View {
             // Download icon button (iOS only)
             #if !os(tvOS)
             downloadIconButton
-
-            // Trailer icon button (iOS only)
-            Button {
-              showNoTrailerAlert = true
-            } label: {
-              Image(systemName: "film")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-                .frame(width: 52, height: 52)
-            }
-            .background(Color(white: 0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .accessibilityLabel("Trailer")
-            // TODO: Replace alert with actual trailer playback when TMDB integration is added
             #endif
           }
 
@@ -171,11 +156,6 @@ struct ItemDetailView: View {
       Button("OK", role: .cancel) { }
     } message: {
       Text("Video playback is not available in the demo. In the real app, this button streams directly from your Synology NAS.")
-    }
-    .alert("No Trailer Available", isPresented: $showNoTrailerAlert) {
-      Button("OK", role: .cancel) { }
-    } message: {
-      Text("Trailer support coming soon.")
     }
     #if !os(tvOS)
     .toolbar {
@@ -386,7 +366,7 @@ struct ItemDetailView: View {
             Circle()
               .stroke(Color(white: 0.3), lineWidth: 2)
             Circle()
-              .trim(from: 0, to: downloadProgress)
+              .trim(from: 0, to: min(1.0, max(0.0, downloadProgress)))
               .stroke(DSReelBrandColor.background, lineWidth: 2)
               .rotationEffect(.degrees(-90))
           }
@@ -447,7 +427,7 @@ struct ItemDetailView: View {
     do {
       detail = try await appState.api.itemDetail(id: itemID)
     } catch {
-      self.error = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
+      self.error = (error as? APIError)?.userMessage ?? "Unknown error."
     }
   }
 
@@ -481,7 +461,6 @@ struct ItemDetailView: View {
       )
     } catch {
       let message = (error as? APIError)?.userMessage
-        ?? (error as? WebAPIError)?.userMessage
         ?? error.localizedDescription
       self.error = message
     }
@@ -766,7 +745,7 @@ private struct PlayerSheet: View {
       resumePosition = Double(info.resumePositionSeconds)
       playbackURL = url
     } catch {
-      self.error = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
+      self.error = (error as? APIError)?.userMessage ?? "Unknown error."
     }
   }
 }

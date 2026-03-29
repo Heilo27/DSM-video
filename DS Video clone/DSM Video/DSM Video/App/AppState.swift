@@ -60,10 +60,7 @@ final class AppState {
       }
       updateAPI()
     }
-  } // For compatibility, stores session ID
-  var sessionID: String? // Video Station session ID
-  var synoToken: String? // Video Station CSRF token
-  var deviceID: String? // Device ID (did) from login - needed for Cookie header
+  }
   var isLoggingIn: Bool = false
   var loginError: String?
 
@@ -85,17 +82,6 @@ final class AppState {
     api = APIClient(
       baseURL: url,
       token: sessionToken
-    )
-  }
-
-  // Legacy Video Station WebAPI client (for reference/debugging)
-  var videoStationAPI: VideoStationWebAPIClient? {
-    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else { return nil }
-    return VideoStationWebAPIClient(
-      baseURL: url,
-      sessionID: sessionID,
-      synoToken: synoToken,
-      deviceID: deviceID
     )
   }
 
@@ -230,7 +216,6 @@ final class AppState {
             // Success — persist resolved address and session
             baseURL = urlStr
             sessionToken = resp.token
-            sessionID = nil; synoToken = nil; deviceID = nil
             if rememberMe {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             } else {
@@ -258,9 +243,6 @@ final class AppState {
 
       // Store session token (didSet persists to Keychain when rememberMe is on)
       sessionToken = resp.token
-      sessionID = nil // Clear Video Station session
-      synoToken = nil
-      deviceID = nil
 
       if rememberMe {
         Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
@@ -278,9 +260,6 @@ final class AppState {
   func logout() {
     Self.deleteFromKeychain(account: Keys.keychainAccountToken)
     sessionToken = nil
-    sessionID = nil
-    synoToken = nil
-    deviceID = nil
     pairingCode = nil
     isDemoMode = false
   }
@@ -296,11 +275,6 @@ final class AppState {
       case .network:       isUnreachable = true   // Can't reach server at all
       case .http(401):     isUnreachable = true   // Session expired / token invalid
       case .http(403):     isUnreachable = true   // Auth rejected
-      default:             isUnreachable = false
-      }
-    } else if let webErr = error as? WebAPIError {
-      switch webErr {
-      case .network:       isUnreachable = true
       default:             isUnreachable = false
       }
     } else {
@@ -321,9 +295,6 @@ final class AppState {
     // Only clear the session token — baseURL, username, password stay.
     Self.deleteFromKeychain(account: Keys.keychainAccountToken)
     sessionToken = nil
-    sessionID = nil
-    synoToken = nil
-    deviceID = nil
     isDemoMode = false
     loginError = "Connection lost. You may be away from your home network — try QuickConnect."
   }

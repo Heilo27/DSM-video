@@ -63,7 +63,7 @@ struct LibrariesView: View {
       libraries = response.libraries
     } catch {
       appState.handleConnectionFailure(error)
-      let errorMsg = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
+      let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
       self.error = errorMsg
     }
   }

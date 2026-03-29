@@ -132,7 +132,7 @@ struct LoginView: View {
               .tint(DSReelBrandColor.background)
               .frame(maxWidth: .infinity, minHeight: 52)
           } else {
-            Text("Login")
+            Text("Connect")
               .font(.headline)
               .frame(maxWidth: .infinity, minHeight: 52)
           }

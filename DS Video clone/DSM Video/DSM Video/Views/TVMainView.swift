@@ -393,7 +393,7 @@ private struct TVLibraryRail: View {
     do {
       items = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
     } catch {
-      self.error = (error as? WebAPIError)?.userMessage ?? "Couldn't load"
+      self.error = (error as? APIError)?.userMessage ?? "Couldn't load"
     }
   }
 }

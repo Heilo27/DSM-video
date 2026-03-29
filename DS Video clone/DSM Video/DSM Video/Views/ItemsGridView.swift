@@ -163,7 +163,7 @@ struct ItemsGridView: View {
       items = allItems
       error = nil
     } catch {
-      let errorMsg = (error as? WebAPIError)?.userMessage ?? (error as? APIError)?.userMessage ?? "Unknown error."
+      let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
       if items.isEmpty {
         self.error = errorMsg
       }

@@ -476,10 +476,20 @@ struct DownloadsView: View {
     Array(downloadManager.activeDownloads.keys).sorted()
   }
 
+  private var pausedDownloadIDs: [String] {
+    Array(downloadManager.pausedDownloads.keys).sorted()
+  }
+
+  private var inProgressIDs: [String] {
+    // Combined: active (downloading) + paused — both shown in the "Downloading" section
+    let all = Set(activeDownloadIDs).union(Set(pausedDownloadIDs))
+    return all.sorted()
+  }
+
   var body: some View {
     NavigationStack {
       Group {
-        if downloads.isEmpty && activeDownloadIDs.isEmpty {
+        if downloads.isEmpty && inProgressIDs.isEmpty {
           ContentUnavailableView("No Downloads", systemImage: "arrow.down.circle", description: Text("Downloaded videos will appear here for offline viewing"))
         } else {
           ScrollView {
@@ -487,8 +497,8 @@ struct DownloadsView: View {
               // Storage indicator
               storageSection
 
-              // Active downloads
-              if !activeDownloadIDs.isEmpty {
+              // Active and paused downloads
+              if !inProgressIDs.isEmpty {
                 activeDownloadsSection
               }
 
@@ -521,6 +531,10 @@ struct DownloadsView: View {
         loadStorageInfo()
       }
       .onChange(of: downloadManager.activeDownloads.count) { _, _ in
+        loadDownloads()
+        loadStorageInfo()
+      }
+      .onChange(of: downloadManager.pausedDownloads.count) { _, _ in
         loadDownloads()
         loadStorageInfo()
       }
@@ -600,18 +614,33 @@ struct DownloadsView: View {
         .padding(.horizontal)
 
       VStack(spacing: 0) {
-        ForEach(activeDownloadIDs, id: \.self) { itemID in
+        ForEach(inProgressIDs, id: \.self) { itemID in
+          let isActive = downloadManager.isDownloading(itemId: itemID)
+          let isPaused = downloadManager.isPaused(itemId: itemID)
+          // Resolve title: active downloads have an ActiveDownload entry; paused ones
+          // keep their info in pendingDownloadInfo (private) — we surface the title via
+          // the activeDownloads entry while active, or fall back to a generic label.
           let download = downloadManager.activeDownloads[itemID]
           let progress = downloadManager.downloadProgress[itemID] ?? 0
+          // Active downloads carry a title in ActiveDownload; paused ones expose it via
+          // pausedDownloadTitle(itemId:) which reads from pendingDownloadInfo.
+          let displayTitle: String = download?.title
+            ?? downloadManager.pausedDownloadTitle(itemId: itemID)
+            ?? "Downloading\u{2026}"
+
           ActiveDownloadCell(
-            title: download?.title ?? "Downloading\u{2026}",
+            title: displayTitle,
             progress: progress,
+            isActive: isActive,
+            isPaused: isPaused,
+            onPause: { downloadManager.pauseDownload(itemId: itemID) },
+            onResume: { downloadManager.resumeDownload(itemId: itemID) },
             onCancel: { downloadManager.cancelDownload(itemId: itemID) }
           )
           .padding(.horizontal)
           .padding(.vertical, 8)
 
-          if itemID != activeDownloadIDs.last {
+          if itemID != inProgressIDs.last {
             Divider()
               .background(Color.dsSurface)
               .padding(.horizontal)
@@ -683,17 +712,32 @@ struct DownloadsView: View {
 private struct ActiveDownloadCell: View {
   let title: String
   let progress: Double
+  let isActive: Bool
+  let isPaused: Bool
+  let onPause: () -> Void
+  let onResume: () -> Void
   let onCancel: () -> Void
 
   var body: some View {
     HStack(spacing: 12) {
       VStack(alignment: .leading, spacing: 4) {
-        Text(title)
-          .font(.subheadline)
-          .foregroundStyle(Color.dsTextPrimary)
-          .lineLimit(1)
+        HStack(spacing: 4) {
+          Text(title)
+            .font(.subheadline)
+            .foregroundStyle(Color.dsTextPrimary)
+            .lineLimit(1)
+          if isPaused {
+            Text("Paused")
+              .font(.caption2)
+              .foregroundStyle(Color.dsTextSecondary)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 2)
+              .background(Color.dsSurface)
+              .clipShape(RoundedRectangle(cornerRadius: 4))
+          }
+        }
         ProgressView(value: progress)
-          .tint(Color.dsAccent)
+          .tint(isPaused ? Color.dsTextSecondary : Color.dsAccent)
         Text("\(Int(progress * 100))%")
           .font(.caption)
           .foregroundStyle(Color.dsTextSecondary)
@@ -702,16 +746,42 @@ private struct ActiveDownloadCell: View {
 
       Spacer()
 
+      // Pause / Resume button — 44 pt tap target
+      if isActive {
+        Button(action: onPause) {
+          Image(systemName: "pause.circle.fill")
+            .font(.title3)
+            .foregroundStyle(Color.dsAccent)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 44, height: 44)
+        .accessibilityLabel("Pause download")
+      } else if isPaused {
+        Button(action: onResume) {
+          Image(systemName: "play.circle.fill")
+            .font(.title3)
+            .foregroundStyle(Color.dsAccent)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 44, height: 44)
+        .accessibilityLabel("Resume download")
+      }
+
+      // Cancel button — always present
       Button(action: onCancel) {
         Image(systemName: "xmark.circle.fill")
           .font(.title3)
           .foregroundStyle(Color.dsTextSecondary)
       }
       .buttonStyle(.plain)
+      .frame(width: 44, height: 44)
       .accessibilityLabel("Cancel download")
     }
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(title), downloading, \(Int(progress * 100)) percent complete")
+    .accessibilityLabel(isPaused
+      ? "\(title), paused at \(Int(progress * 100)) percent"
+      : "\(title), downloading, \(Int(progress * 100)) percent complete"
+    )
   }
 }
 

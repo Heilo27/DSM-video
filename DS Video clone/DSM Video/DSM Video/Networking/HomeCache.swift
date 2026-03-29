@@ -3,7 +3,7 @@ import os.log
 
 // MARK: - HomeCacheEntry
 
-struct HomeCacheEntry: Codable, Sendable {
+nonisolated struct HomeCacheEntry: Codable, Sendable {
   let serverURL: String
   let libraries: [Library]
   let items: [ItemSummary]
@@ -18,12 +18,12 @@ struct HomeCacheEntry: Codable, Sendable {
 // File-based cache in the Caches directory — faster than UserDefaults for large data
 // and does not bloat the UserDefaults plist.
 
-enum HomeCache {
+nonisolated enum HomeCache {
   private static let cacheFileName = "dsReel-homeCache.json"
   private static let backgroundRefreshAgeSeconds: TimeInterval = 30 * 60
   private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600
 
-  private static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
+  private nonisolated(unsafe) static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
 
   private static var cacheFileURL: URL {
     let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
