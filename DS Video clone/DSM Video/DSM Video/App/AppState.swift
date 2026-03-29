@@ -306,10 +306,11 @@ final class AppState {
     }
   }
 
-  /// Call after a successful API operation to clear server-unreachable state.
-  /// isOffline is managed exclusively by NWPathMonitor.
+  /// Call after a successful API operation to clear network error state.
+  /// Both flags cleared here; NWPathMonitor also clears isOffline independently on path recovery.
   func clearNetworkError() {
     serverUnreachable = false
+    isOffline = false
   }
 
   private func startNetworkMonitoring() {

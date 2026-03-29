@@ -88,7 +88,11 @@ private actor MacImageCache {
   }
 
   func setImage(_ image: NSImage, for url: URL) {
-    cache.setObject(image, forKey: url as NSURL)
+    // Approximate cost in bytes so totalCostLimit is actually enforced
+    let cost = image.representations.reduce(0) { acc, rep in
+      acc + rep.pixelsWide * rep.pixelsHigh * 4
+    }
+    cache.setObject(image, forKey: url as NSURL, cost: max(cost, 1))
   }
 
   func clearInFlightTask(for url: URL) {
