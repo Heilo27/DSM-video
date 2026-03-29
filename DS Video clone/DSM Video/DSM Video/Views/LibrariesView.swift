@@ -101,6 +101,9 @@ struct LibraryHomeView: View {
   @State private var continueWatchingItems: [ItemSummary] = []
   @State private var justAddedItems: [ItemSummary] = []
   @State private var recentlyWatchedItems: [ItemSummary] = []
+  // True only after the first recomputeRails() completes and writes results back.
+  // Keeps skeletons visible during the gap between allItems arriving and rails being ready.
+  @State private var railsReady: Bool = false
 
   private var firstMovieLibrary: Library? {
     libraries.first(where: { $0.kind == "movie" || $0.kind == "movies" }) ?? libraries.first
@@ -109,7 +112,8 @@ struct LibraryHomeView: View {
   // MARK: - Rail Computation (off main thread)
 
   /// Recomputes all three rail arrays from `items` on a background thread, then
-  /// applies the results back on @MainActor. Call whenever allItems changes.
+  /// applies the results back on @MainActor in a single write — including setting
+  /// railsReady=true so skeletons are replaced atomically, never mid-update.
   private func recomputeRails(from items: [ItemSummary]) {
     Task.detached(priority: .userInitiated) {
       let (cont, added, watched) = Self.computeRails(items)
@@ -117,6 +121,7 @@ struct LibraryHomeView: View {
         self.continueWatchingItems = cont
         self.justAddedItems = added
         self.recentlyWatchedItems = watched
+        self.railsReady = true
       }
     }
   }
@@ -193,8 +198,10 @@ struct LibraryHomeView: View {
 
   // MARK: - Body
 
-  // A rail is still loading if allItems haven't arrived yet (either in-flight or not yet populated)
-  private var railsLoading: Bool { isLoading || allItems.isEmpty }
+  // Skeletons show until railsReady — the moment recomputeRails() finishes its first pass.
+  // Using railsReady (not allItems.isEmpty) closes the gap where allItems arrives but
+  // the background sort hasn't written results yet, which caused sections to flash empty.
+  private var railsLoading: Bool { !railsReady }
 
   var body: some View {
     let content = Group {
@@ -399,6 +406,7 @@ struct LibraryHomeView: View {
       continueWatchingItems = result.rails.continueWatching
       justAddedItems = result.rails.justAdded
       recentlyWatchedItems = result.rails.recentlyWatched
+      railsReady = true
       Task { await refreshProgress() }
       if result.stale {
         loadLog.info("load: cache stale — background content refresh")
@@ -418,6 +426,7 @@ struct LibraryHomeView: View {
     backgroundFetchTask?.cancel()
     backgroundFetchTask = nil
     isBackgroundRefreshing = false
+    railsReady = false
     HomeCache.invalidate()
     await fetchFromNetwork(serverURL: serverURL, background: false)
   }
