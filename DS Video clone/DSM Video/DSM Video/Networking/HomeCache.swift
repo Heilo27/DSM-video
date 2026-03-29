@@ -78,7 +78,8 @@ nonisolated enum HomeCache {
   static func save(serverURL: String, libraries: [Library], items: [ItemSummary],
                    counts: [String: Int], updatedAt: [String: String]) {
     log.info("save: encoding \(items.count) items, \(libraries.count) libs")
-    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: items,
+    let strippedItems = items.map { $0.withoutProgress }
+    let entry = HomeCacheEntry(serverURL: serverURL, libraries: libraries, items: strippedItems,
                                savedAt: Date(), libraryCounts: counts, libraryUpdatedAt: updatedAt)
     guard let data = try? JSONEncoder().encode(entry) else {
       log.error("save: encode failed")

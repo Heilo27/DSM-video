@@ -73,6 +73,17 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
   let episodeNumber: Int?
 }
 
+extension ItemSummary {
+  var withoutProgress: ItemSummary {
+    ItemSummary(id: id, type: type, title: title, year: year,
+                durationSeconds: durationSeconds, addedAt: addedAt,
+                rating: rating, posterImageId: posterImageId,
+                backdropImageId: backdropImageId, progress: nil,
+                showName: showName, seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber)
+  }
+}
+
 // MARK: - TV Shows
 
 struct TVShow: Decodable, Identifiable, Hashable {
@@ -149,6 +160,10 @@ struct ProgressRequest: Encodable {
 
 struct ProgressResponse: Decodable {
   let ok: Bool
+}
+
+struct ProgressBatchResponse: Decodable {
+  let progress: [String: ItemProgress]
 }
 
 // MARK: - TMDb Manual Fix

@@ -360,6 +360,27 @@ class Store:
             )
         return int(total), items
 
+    def get_library_summaries(self) -> List[Dict[str, Any]]:
+        """Returns count and latest updated_at per library in a single query.
+        Used by the iOS client to detect library changes without fetching all items.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT library_id, COUNT(*) as count, MAX(updated_at) as last_updated_at
+                FROM items
+                GROUP BY library_id
+                """
+            ).fetchall()
+        return [
+            {
+                "libraryId": r["library_id"],
+                "count": r["count"],
+                "lastUpdatedAt": r["last_updated_at"],
+            }
+            for r in rows
+        ]
+
     def search_items(
         self, query: str, limit: int, offset: int
     ) -> Tuple[int, List[Dict[str, Any]]]:
@@ -730,6 +751,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/libraries" and self.command == "GET":
             return _write_json(self, HTTPStatus.OK, {"libraries": self.app.configured_libraries()})
 
+        # Lightweight summary: count + lastUpdatedAt per library in one DB query.
+        # Used by the iOS client to detect changes without fetching all items.
+        if path == "/api/v1/libraries/summary" and self.command == "GET":
+            return _write_json(self, HTTPStatus.OK, {"libraries": self.app.store.get_library_summaries()})
+
         if path == "/api/v1/items" and self.command == "GET":
             qs = parse_qs(parsed.query)
             library_id = (qs.get("libraryId") or [None])[0]
@@ -811,6 +837,13 @@ class Handler(BaseHTTPRequestHandler):
                     "resumePositionSeconds": resume,
                 },
             )
+
+        if path == "/api/v1/progress" and self.command == "GET":
+            qs = parse_qs(parsed.query)
+            raw_ids = (qs.get("ids") or [""])[0]
+            item_ids = [i for i in raw_ids.split(",") if i][:500]
+            result = self.app.store.get_progress_batch(user["sub"], item_ids) if item_ids else {}
+            return _write_json(self, HTTPStatus.OK, {"progress": result})
 
         m = re.fullmatch(r"/api/v1/items/([^/]+)/progress", path)
         if m and self.command == "POST":

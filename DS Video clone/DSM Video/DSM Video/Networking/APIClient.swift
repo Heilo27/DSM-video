@@ -102,6 +102,16 @@ struct APIClient {
     )
   }
 
+  func progressBatch(ids: [String]) async throws -> ProgressBatchResponse {
+    guard !ids.isEmpty else { return ProgressBatchResponse(progress: [:]) }
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/progress"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    comps.queryItems = [URLQueryItem(name: "ids", value: ids.joined(separator: ","))]
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ProgressBatchResponse.self)
+  }
+
   // MARK: - TMDb Manual Fix
 
   func tmdbSearch(itemId: String, query: String? = nil, year: Int? = nil, type: String? = nil) async throws -> TMDbSearchResponse {

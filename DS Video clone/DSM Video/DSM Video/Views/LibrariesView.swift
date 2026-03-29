@@ -244,7 +244,45 @@ struct LibraryHomeView: View {
       .navigationTitle("Home")
       .task { await load() }
       .refreshable { await load() }
+      .onAppear {
+        // Re-entering the tab (e.g. returning from the player) — refresh progress
+        // so Continue Watching and Recently Watched reflect the latest watch state.
+        if !allItems.isEmpty {
+          Task { await refreshProgress() }
+        }
+      }
       .background(Color.black.ignoresSafeArea())
+    }
+  }
+
+  // MARK: - Progress Refresh
+
+  /// Fetches current watch progress for all in-memory items and merges it
+  /// into `allItems`. Does NOT write to the cache — the cache is kept
+  /// progress-free so stale progress never survives across app restarts.
+  private func refreshProgress() async {
+    guard !allItems.isEmpty, !appState.isDemoMode else { return }
+    let ids = allItems.map(\.id)
+    do {
+      let batch = try await appState.api.progressBatch(ids: ids)
+      let progressMap = batch.progress
+      allItems = allItems.map { item in
+        if let p = progressMap[item.id] {
+          return ItemSummary(id: item.id, type: item.type, title: item.title,
+                             year: item.year, durationSeconds: item.durationSeconds,
+                             addedAt: item.addedAt, rating: item.rating,
+                             posterImageId: item.posterImageId,
+                             backdropImageId: item.backdropImageId, progress: p,
+                             showName: item.showName, seasonNumber: item.seasonNumber,
+                             episodeNumber: item.episodeNumber)
+        } else {
+          return item.withoutProgress
+        }
+      }
+      loadLog.info("refreshProgress: merged progress for \(progressMap.count) of \(ids.count) items")
+    } catch {
+      loadLog.warning("refreshProgress: failed — \(error.localizedDescription)")
+      // Non-fatal: rails will just show stale or nil progress
     }
   }
 
@@ -271,6 +309,8 @@ struct LibraryHomeView: View {
     // run as a background check — never block the UI with a foreground fetch.
     if !allItems.isEmpty {
       loadLog.info("load: items already loaded — running background check only")
+      // Always refresh progress so Continue Watching / Recently Watched are current.
+      Task { await refreshProgress() }
       if HomeCache.needsRefresh(serverURL: serverURL) {
         Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
       } else {
@@ -284,6 +324,8 @@ struct LibraryHomeView: View {
       loadLog.info("load: cache HIT — rendering \(cached.items.count) items immediately (no spinner)")
       libraries = cached.libraries
       allItems = cached.items
+      // Immediately refresh progress so rails reflect current watch state.
+      await refreshProgress()
       if HomeCache.needsRefresh(serverURL: serverURL) {
         loadLog.info("load: cache stale — scheduling background refresh")
         Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
@@ -330,6 +372,7 @@ struct LibraryHomeView: View {
       loadLog.info("fetchFromNetwork: no change — updating libs, touching cache")
       HomeCache.touch(serverURL: serverURL)
       libraries = libs
+      await refreshProgress()
 
     case .updated(let libs, let merged, let counts, let updatedAt):
       loadLog.info("fetchFromNetwork: update complete — \(merged.count) items")
@@ -337,6 +380,7 @@ struct LibraryHomeView: View {
       allItems = merged
       HomeCache.save(serverURL: serverURL, libraries: libs, items: merged,
                      counts: counts, updatedAt: updatedAt)
+      await refreshProgress()
 
     case .failure(let err):
       loadLog.error("fetchFromNetwork: ERROR — \(err.localizedDescription)")
