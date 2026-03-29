@@ -3,6 +3,10 @@ import Combine
 import SwiftUI
 import os.log
 
+extension Notification.Name {
+    static let playerDidDismiss = Notification.Name("com.dsm.dsvideo.playerDidDismiss")
+}
+
 #if os(iOS) || os(tvOS)
 import MediaPlayer
 import UIKit
@@ -734,6 +738,7 @@ struct GestureVideoPlayer: View {
         player?.pause()
         player = nil
         cancellables.removeAll()
+        NotificationCenter.default.post(name: .playerDidDismiss, object: nil)
     }
 
     private func togglePlayPause() {

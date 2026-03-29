@@ -246,12 +246,9 @@ struct LibraryHomeView: View {
       .navigationTitle("Home")
       .task { await load() }
       .refreshable { await load() }
-      .onAppear {
-        // Re-entering the tab (e.g. returning from the player) — refresh progress
-        // so Continue Watching and Recently Watched reflect the latest watch state.
-        if !allItems.isEmpty {
-          Task { await refreshProgress() }
-        }
+      .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
+        guard !allItems.isEmpty else { return }
+        Task { await refreshProgress() }
       }
       .background(Color.black.ignoresSafeArea())
     }

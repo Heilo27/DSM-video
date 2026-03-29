@@ -73,7 +73,7 @@ final class DownloadManager: NSObject {
 
   private var backgroundSession: URLSession!
   private var downloadTasks: [URLSessionDownloadTask: String] = [:]
-  private var pendingDownloadInfo: [String: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int)] = [:]
+  private var pendingDownloadInfo: [String: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?)] = [:]
 
   private let storageKey = "dsReel.downloadedItems"
   private let resumeDataKey = "dsReel.resumeData"
@@ -114,7 +114,7 @@ final class DownloadManager: NSObject {
 
     let task = backgroundSession.downloadTask(with: request)
     downloadTasks[task] = itemId
-    pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds)
+    pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: token)
 
     let download = ActiveDownload(id: itemId, title: title, progress: 0, task: task)
     activeDownloads[itemId] = download
@@ -321,7 +321,7 @@ final class DownloadManager: NSObject {
         let durationSeconds = meta["durationSeconds"].flatMap { Int($0) } ?? 0
         // Only restore if we have resume data; otherwise metadata is orphaned
         if pausedDownloads[itemId] != nil {
-          pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds)
+          pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: nil)
         }
       }
     }
@@ -429,18 +429,20 @@ final class DownloadManager: NSObject {
     let posterDestination = dir.appendingPathComponent(posterFilename)
 
     Task {
-      let req = URLRequest(url: posterURL)
-      // Video Station embeds the SID in the URL; REST API uses Bearer token.
-      if !posterURL.absoluteString.contains("_sid=") {
-        // No token available here — poster URL is expected to be self-authenticated
-        // (e.g., contains _sid) or publicly accessible. Skip header if no SID.
+      var req = URLRequest(url: posterURL)
+      if let tok = info.token {
+        req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
       }
 
       do {
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200,
-              !data.isEmpty else { return }
+              !data.isEmpty else {
+          let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+          print("[DownloadManager] Poster fetch failed: HTTP \(status) for \(posterURL)")
+          return
+        }
 
         try data.write(to: posterDestination, options: .atomic)
 
