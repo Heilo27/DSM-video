@@ -392,19 +392,19 @@ struct LibraryHomeView: View {
     // and recentlyWatched would be empty. Skeletons stay until refreshProgress()
     // finishes and recomputeRails() fires with items+progress both ready.
     isLoading = true
-    typealias CacheResult = (entry: HomeCacheEntry, stale: Bool)?
+    typealias CacheResult = (entry: HomeCacheEntry, isStale: Bool)?
     let result: CacheResult = await Task.detached(priority: .userInitiated) {
       HomeCache.loadWithStaleness(serverURL: serverURL)
     }.value
 
     isLoading = false
     if let result {
-      loadLog.info("load: cache HIT — \(result.entry.items.count) items, stale=\(result.stale)")
+      loadLog.info("load: cache HIT — \(result.entry.items.count) items, stale=\(result.isStale)")
       libraries = result.entry.libraries
       allItems = result.entry.items
       // railsReady stays false — skeletons shown until refreshProgress() → recomputeRails()
       Task { await refreshProgress() }
-      if result.stale {
+      if result.isStale {
         loadLog.info("load: cache stale — background content refresh")
         backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
       }

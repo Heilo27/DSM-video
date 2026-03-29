@@ -145,28 +145,14 @@ struct TVLoginView: View {
 
 // MARK: - Home
 
-private let _tvHomeDateFormatterFractional: ISO8601DateFormatter = {
-  let f = ISO8601DateFormatter()
-  f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-  return f
-}()
-
-private let _tvHomeDateFormatter: ISO8601DateFormatter = {
-  let f = ISO8601DateFormatter()
-  f.formatOptions = [.withInternetDateTime]
-  return f
-}()
-
-private func parseTVHomeDate(_ iso: String) -> Date {
-  if let d = _tvHomeDateFormatterFractional.date(from: iso) { return d }
-  return _tvHomeDateFormatter.date(from: iso) ?? Date.distantPast
-}
-
 private struct TVHomeView: View {
   @Environment(AppState.self) private var appState
   @State private var libraries: [Library] = []
+  @State private var allItems: [ItemSummary] = []
   @State private var continueWatching: [ItemSummary] = []
   @State private var justAdded: [ItemSummary] = []
+  @State private var recentlyWatched: [ItemSummary] = []
+  @State private var railsReady: Bool = false
   @State private var isLoading: Bool = false
   @State private var loadError: String?
   @State private var showPairing: Bool = false
@@ -178,46 +164,60 @@ private struct TVHomeView: View {
       ZStack(alignment: .top) {
         Color.black.ignoresSafeArea()
 
-        ScrollView(.vertical, showsIndicators: false) {
-          VStack(alignment: .leading, spacing: 56) {
-            if let loadError {
-              ContentUnavailableView(
-                "Unable to Load",
-                systemImage: "exclamationmark.triangle",
-                description: Text(loadError)
-              )
-              .foregroundStyle(.white)
-              .padding(.top, 60)
-            } else {
-              // Continue Watching rail
-              if !continueWatching.isEmpty {
-                TVLandscapeRail(title: "Continue Watching", items: continueWatching)
-              }
+        VStack(spacing: 0) {
+          // Offline banner at top
+          OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
+            .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
 
-              // Just Added rail
-              if !justAdded.isEmpty {
-                TVLandscapeRail(title: "Just Added", items: justAdded)
-              }
-
-              // Empty state
-              if libraries.isEmpty && !isLoading {
+          ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 56) {
+              if let loadError {
                 ContentUnavailableView(
-                  "No Libraries",
-                  systemImage: "film.stack",
-                  description: Text("No video libraries were found on your NAS.")
+                  "Unable to Load",
+                  systemImage: "exclamationmark.triangle",
+                  description: Text(loadError)
                 )
                 .foregroundStyle(.white)
-                .padding(.top, 40)
-              }
+                .padding(.top, 60)
+              } else {
+                // Continue Watching — always in tree, collapses when empty post-load
+                TVLandscapeRail(title: "Continue Watching", items: continueWatching, isLoading: !railsReady)
+                  .opacity(railsReady && continueWatching.isEmpty ? 0 : 1)
+                  .frame(height: railsReady && continueWatching.isEmpty ? 0 : nil)
+                  .clipped()
 
-              // Per-library rails
-              ForEach(libraries) { lib in
-                TVLibraryRail(library: lib)
+                // Just Added — always in tree
+                TVLandscapeRail(title: "Just Added", items: justAdded, isLoading: !railsReady)
+                  .opacity(railsReady && justAdded.isEmpty ? 0 : 1)
+                  .frame(height: railsReady && justAdded.isEmpty ? 0 : nil)
+                  .clipped()
+
+                // Recently Watched — always in tree (new rail)
+                TVLandscapeRail(title: "Recently Watched", items: recentlyWatched, isLoading: !railsReady)
+                  .opacity(railsReady && recentlyWatched.isEmpty ? 0 : 1)
+                  .frame(height: railsReady && recentlyWatched.isEmpty ? 0 : nil)
+                  .clipped()
+
+                // Empty state
+                if libraries.isEmpty && !isLoading {
+                  ContentUnavailableView(
+                    "No Libraries",
+                    systemImage: "film.stack",
+                    description: Text("No video libraries were found on your NAS.")
+                  )
+                  .foregroundStyle(.white)
+                  .padding(.top, 40)
+                }
+
+                // Per-library rails
+                ForEach(libraries) { lib in
+                  TVLibraryRail(library: lib)
+                }
               }
             }
+            .padding(.top, 60)
+            .padding(.bottom, 80)
           }
-          .padding(.top, 60)
-          .padding(.bottom, 80)
         }
       }
       .toolbar {
@@ -260,21 +260,27 @@ private struct TVHomeView: View {
         .environment(appState)
     }
     .task { await load() }
+    .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
+      guard !allItems.isEmpty else { return }
+      Task { await refreshProgress() }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
+      Task { await load() }
+    }
   }
+
+  // MARK: - Load
 
   private func load() async {
     guard !isLoading else { return }
+
     if appState.isDemoMode {
       libraries = DemoData.libraries
-      let allItems = DemoData.movieItems + DemoData.tvItems
-      continueWatching = allItems.filter { item in
-        guard let progress = item.progress, progress.durationSeconds > 0 else { return false }
-        let frac = Double(progress.positionSeconds) / Double(progress.durationSeconds)
-        return frac > 0 && frac < 0.95
-      }
-      justAdded = Array(allItems.prefix(20))
+      allItems = DemoData.movieItems + DemoData.tvItems
+      await refreshProgress()
       return
     }
+
     loadError = nil
     isLoading = true
     defer { isLoading = false }
@@ -283,7 +289,7 @@ private struct TVHomeView: View {
       libraries = try await appState.api.libraries().libraries
 
       let api = appState.api
-      var allItems: [ItemSummary] = []
+      var fetched: [ItemSummary] = []
       await withTaskGroup(of: [ItemSummary].self) { group in
         for lib in libraries {
           group.addTask {
@@ -291,28 +297,11 @@ private struct TVHomeView: View {
           }
         }
         for await items in group {
-          allItems.append(contentsOf: items)
+          fetched.append(contentsOf: items)
         }
       }
-
-      continueWatching = allItems
-        .filter { item in
-          guard let progress = item.progress, progress.durationSeconds > 0 else { return false }
-          let frac = Double(progress.positionSeconds) / Double(progress.durationSeconds)
-          return frac > 0 && frac < 0.95
-        }
-        .sorted { ($0.progress?.updatedAt ?? "") > ($1.progress?.updatedAt ?? "") }
-
-      justAdded = Array(
-        allItems
-          .sorted { lhs, rhs in
-            let l = parseTVHomeDate(lhs.addedAt)
-            let r = parseTVHomeDate(rhs.addedAt)
-            if l != Date.distantPast || r != Date.distantPast { return l > r }
-            return lhs.addedAt > rhs.addedAt
-          }
-          .prefix(20)
-      )
+      allItems = fetched
+      await refreshProgress()
     } catch {
       appState.handleConnectionFailure(error)
       loadError =
@@ -320,13 +309,167 @@ private struct TVHomeView: View {
         ?? "Failed to load content. Check your connection and try again."
     }
   }
+
+  // MARK: - Progress Refresh
+
+  /// Fetches current watch progress for all in-memory items, merges it, then recomputes rails.
+  /// Guards on isDemoMode — demo items already have embedded progress.
+  private func refreshProgress() async {
+    guard !allItems.isEmpty, !appState.isDemoMode else {
+      recomputeRails()
+      return
+    }
+    let ids = allItems.map(\.id)
+    let chunkSize = 200
+    let chunks = stride(from: 0, to: ids.count, by: chunkSize).map {
+      Array(ids[$0..<min($0 + chunkSize, ids.count)])
+    }
+    let api = appState.api
+    var progressMap: [String: ItemProgress] = [:]
+    do {
+      let maxConcurrent = 4
+      let results = try await withThrowingTaskGroup(of: Result<[String: ItemProgress], Error>.self) { group in
+        var inFlight = 0
+        var chunkIterator = chunks.makeIterator()
+        while inFlight < maxConcurrent, let chunk = chunkIterator.next() {
+          group.addTask {
+            do { return .success(try await api.progressBatch(ids: chunk).progress) }
+            catch { return .failure(error) }
+          }
+          inFlight += 1
+        }
+        var merged: [String: ItemProgress] = [:]
+        for try await batchResult in group {
+          if case .success(let batch) = batchResult {
+            merged.merge(batch) { _, new in new }
+          }
+          inFlight -= 1
+          if let chunk = chunkIterator.next() {
+            group.addTask {
+              do { return .success(try await api.progressBatch(ids: chunk).progress) }
+              catch { return .failure(error) }
+            }
+            inFlight += 1
+          }
+        }
+        return merged
+      }
+      progressMap = results
+      allItems = allItems.map { item in
+        if let p = progressMap[item.id] {
+          return ItemSummary(id: item.id, type: item.type, title: item.title,
+                             year: item.year, durationSeconds: item.durationSeconds,
+                             addedAt: item.addedAt, rating: item.rating,
+                             posterImageId: item.posterImageId,
+                             backdropImageId: item.backdropImageId, progress: p,
+                             showName: item.showName, seasonNumber: item.seasonNumber,
+                             episodeNumber: item.episodeNumber)
+        } else {
+          return item.withoutProgress
+        }
+      }
+    } catch {
+      // Non-fatal: rails will show without progress data
+    }
+    recomputeRails()
+  }
+
+  // MARK: - Rail Computation
+
+  /// Recomputes all three rail arrays off the main thread, then applies results atomically.
+  /// Always sets railsReady=true — only call when items+progress are both final.
+  private func recomputeRails() {
+    let items = allItems
+    Task.detached(priority: .userInitiated) {
+      let (cont, added, watched) = Self.computeRails(items)
+      await MainActor.run {
+        self.continueWatching = cont
+        self.justAdded = added
+        self.recentlyWatched = watched
+        self.railsReady = true
+      }
+    }
+  }
+
+  private nonisolated static func computeRails(_ allItems: [ItemSummary])
+    -> (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary])
+  {
+    let formatterFrac: ISO8601DateFormatter = {
+      let f = ISO8601DateFormatter()
+      f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      return f
+    }()
+    let formatter: ISO8601DateFormatter = {
+      let f = ISO8601DateFormatter()
+      f.formatOptions = [.withInternetDateTime]
+      return f
+    }()
+    func parseDate(_ iso: String) -> Date {
+      formatterFrac.date(from: iso) ?? formatter.date(from: iso) ?? .distantPast
+    }
+
+    func deduplicated(_ items: [ItemSummary]) -> [ItemSummary] {
+      var seen = Set<String>()
+      return items.filter { seen.insert($0.title.lowercased() + "|\($0.type)").inserted }
+    }
+
+    func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
+      var seen = Set<String>()
+      return items.filter { item in
+        let key: String
+        if let showName = item.showName, !showName.isEmpty {
+          key = "tv|\(showName.lowercased())"
+        } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
+          let base = item.title
+            .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
+            .lowercased()
+          key = "tv|\(base)"
+        } else {
+          key = item.title.lowercased() + "|\(item.type)"
+        }
+        return seen.insert(key).inserted
+      }
+    }
+
+    let continueWatching = Array(deduplicated(
+      allItems
+        .filter { item in
+          guard let p = item.progress, p.durationSeconds > 0, p.positionSeconds > 0 else { return false }
+          let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
+          return frac >= 0.05 && frac < 0.95
+        }
+        .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
+    ).prefix(10))
+
+    let recentlyWatched = deduplicated(
+      allItems
+        .filter { item in
+          guard let p = item.progress, p.durationSeconds > 0 else { return false }
+          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.95
+        }
+        .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
+    )
+
+    let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
+    let justAdded = Array(deduplicatedByShow(
+      allItems
+        .filter { !watchedIDs.contains($0.id) }
+        .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
+    ).prefix(10))
+
+    return (continueWatching, justAdded, recentlyWatched)
+  }
 }
 
-// MARK: - Landscape Card Rail (Continue Watching / Just Added)
+// MARK: - Landscape Card Rail (Continue Watching / Just Added / Recently Watched)
 
 private struct TVLandscapeRail: View {
   let title: String
   let items: [ItemSummary]
+  var isLoading: Bool = false
+
+  private let skeletonCount = 4
 
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
@@ -337,15 +480,21 @@ private struct TVLandscapeRail: View {
 
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(alignment: .top, spacing: 28) {
-          ForEach(items) { item in
-            NavigationLink {
-              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-            } label: {
-              TVLandscapeCard(item: item)
+          if isLoading {
+            ForEach(0..<skeletonCount, id: \.self) { _ in
+              TVSkeletonLandscapeCard()
             }
-            .buttonStyle(.card)
-            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
-            .accessibilityHint("Opens video details")
+          } else {
+            ForEach(items) { item in
+              NavigationLink {
+                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+              } label: {
+                TVLandscapeCard(item: item)
+              }
+              .buttonStyle(.card)
+              .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+              .accessibilityHint("Opens video details")
+            }
           }
         }
         .padding(.horizontal, 60)
@@ -355,7 +504,7 @@ private struct TVLandscapeRail: View {
   }
 }
 
-// MARK: - Library Rail (per-library, landscape cards)
+// MARK: - Library Rail (per-library, portrait cards)
 
 private struct TVLibraryRail: View {
   @Environment(AppState.self) private var appState
@@ -364,6 +513,8 @@ private struct TVLibraryRail: View {
   @State private var items: [ItemSummary] = []
   @State private var isLoading: Bool = false
   @State private var error: String?
+
+  private let skeletonCount = 5
 
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
@@ -397,16 +548,21 @@ private struct TVLibraryRail: View {
 
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(alignment: .top, spacing: 28) {
-          ForEach(items.prefix(20)) { item in
-            NavigationLink {
-              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-            } label: {
-              // TV library uses portrait cards for movie/show posters
-              TVPortraitCard(item: item)
+          if isLoading && items.isEmpty {
+            ForEach(0..<skeletonCount, id: \.self) { _ in
+              TVSkeletonPortraitCard()
             }
-            .buttonStyle(.card)
-            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
-            .accessibilityHint("Opens video details")
+          } else {
+            ForEach(items.prefix(20)) { item in
+              NavigationLink {
+                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+              } label: {
+                TVPortraitCard(item: item)
+              }
+              .buttonStyle(.card)
+              .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+              .accessibilityHint("Opens video details")
+            }
           }
         }
         .padding(.horizontal, 60)
@@ -429,7 +585,73 @@ private struct TVLibraryRail: View {
   }
 }
 
-// MARK: - Landscape Card (16:9, for Continue Watching / Just Added)
+// MARK: - Skeleton Cards
+
+/// Skeleton placeholder for landscape (16:9) cards — matches TVLandscapeCard dimensions (380×214pt).
+private struct TVSkeletonLandscapeCard: View {
+  private let cardWidth: CGFloat = 380
+  private let cardHeight: CGFloat = 214
+  @State private var shimmerPhase: CGFloat = 0
+
+  var body: some View {
+    RoundedRectangle(cornerRadius: 12, style: .continuous)
+      .fill(Color.white.opacity(0.08))
+      .frame(width: cardWidth, height: cardHeight)
+      .overlay(
+        GeometryReader { geo in
+          LinearGradient(
+            gradient: Gradient(colors: [.clear, Color.white.opacity(0.12), .clear]),
+            startPoint: .leading,
+            endPoint: .trailing
+          )
+          .frame(width: geo.size.width * 2)
+          .offset(x: shimmerPhase * (geo.size.width * 3) - geo.size.width)
+          .clipped()
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      )
+      .accessibilityHidden(true)
+      .onAppear {
+        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+          shimmerPhase = 1
+        }
+      }
+  }
+}
+
+/// Skeleton placeholder for portrait (2:3) cards — matches TVPortraitCard dimensions (220×330pt).
+private struct TVSkeletonPortraitCard: View {
+  private let cardWidth: CGFloat = 220
+  private let cardHeight: CGFloat = 330
+  @State private var shimmerPhase: CGFloat = 0
+
+  var body: some View {
+    RoundedRectangle(cornerRadius: 12, style: .continuous)
+      .fill(Color.white.opacity(0.08))
+      .frame(width: cardWidth, height: cardHeight)
+      .overlay(
+        GeometryReader { geo in
+          LinearGradient(
+            gradient: Gradient(colors: [.clear, Color.white.opacity(0.12), .clear]),
+            startPoint: .leading,
+            endPoint: .trailing
+          )
+          .frame(width: geo.size.width * 2)
+          .offset(x: shimmerPhase * (geo.size.width * 3) - geo.size.width)
+          .clipped()
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      )
+      .accessibilityHidden(true)
+      .onAppear {
+        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+          shimmerPhase = 1
+        }
+      }
+  }
+}
+
+// MARK: - Landscape Card (16:9, for Continue Watching / Just Added / Recently Watched)
 
 private struct TVLandscapeCard: View {
   @Environment(AppState.self) private var appState
