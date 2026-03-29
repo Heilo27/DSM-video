@@ -652,11 +652,21 @@ private struct PlayerSheet: View {
           resumePosition: resumePosition,
           onDismiss: {
             if isOffline {
-              // Persist final position locally for offline items
+              // Persist final position locally for resume-on-reopen
               DownloadManager.shared.updateResumePosition(
                 itemId: itemID,
                 positionSeconds: lastSyncedPosition
               )
+              // Also sync to server so home rails (Continue Watching) reflect progress
+              let positionAtDismiss = lastSyncedPosition
+              let durationAtDismiss = lastKnownDuration
+              Task {
+                try? await appState.api.setProgress(
+                  id: itemID,
+                  positionSeconds: positionAtDismiss,
+                  durationSeconds: durationAtDismiss
+                )
+              }
             } else {
               // Save final position to the server for online items.
               // Task is unavoidable here since onDismiss is a sync closure.
@@ -694,19 +704,19 @@ private struct PlayerSheet: View {
             lastSyncedPosition = positionInt
 
             if isOffline {
-              // Persist position locally (debounced, same cadence as online sync)
+              // Persist position locally for resume-on-reopen
               DownloadManager.shared.updateResumePosition(
                 itemId: itemID,
                 positionSeconds: positionInt
               )
-            } else {
-              Task {
-                try? await appState.api.setProgress(
-                  id: itemID,
-                  positionSeconds: positionInt,
-                  durationSeconds: durationInt
-                )
-              }
+            }
+            // Always sync to server (online or offline) so home rails stay current
+            Task {
+              try? await appState.api.setProgress(
+                id: itemID,
+                positionSeconds: positionInt,
+                durationSeconds: durationInt
+              )
             }
           }
         )
