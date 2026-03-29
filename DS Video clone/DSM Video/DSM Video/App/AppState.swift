@@ -183,9 +183,11 @@ final class AppState {
     defer { isLoggingIn = false }
 
     // Demo mode — App Review credentials. No network required.
-    // Credentials are compared via SHA-256 to avoid plaintext extraction from the binary.
-    if sha256(username.trimmingCharacters(in: .whitespaces)) == sha256("appledemo") &&
-       sha256(savedPassword) == sha256("DSVideo2024") {
+    // Pre-computed SHA-256 hashes so plaintext credentials are not stored in the binary.
+    let demoUserHash = "fd3585e838137398830f6e33b448a8616344ca4352539a7da3b3e5cecd0957c4"
+    let demoPassHash = "293211d16112d308c2b21026d33e94326940be9f79a8bcd6f681c6f528c60058"
+    if sha256(username.trimmingCharacters(in: .whitespaces)) == demoUserHash &&
+       sha256(savedPassword) == demoPassHash {
       isDemoMode = true
       sessionToken = "demo"
       return

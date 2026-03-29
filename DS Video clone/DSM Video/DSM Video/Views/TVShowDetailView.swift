@@ -706,21 +706,24 @@ private struct EpisodeDetailView: View {
     self.library = library
   }
 
-  private var current: ItemSummary {
-    guard currentIndex < episodes.count else { return episodes[episodes.count - 1] }
-    return episodes[currentIndex]
+  private var current: ItemSummary? {
+    guard !episodes.isEmpty else { return nil }
+    let index = min(currentIndex, episodes.count - 1)
+    return episodes[index]
   }
   private var hasNext: Bool { episodes.count > 0 && currentIndex + 1 < episodes.count }
 
   var body: some View {
-    ItemDetailView(
-      itemID: current.id,
-      fallbackTitle: current.title,
-      nextEpisode: hasNext ? episodes[currentIndex + 1] : nil,
-      onNextEpisode: hasNext ? {
-        currentIndex += 1
-      } : nil
-    )
+    if let current {
+      ItemDetailView(
+        itemID: current.id,
+        fallbackTitle: current.title,
+        nextEpisode: hasNext ? episodes[currentIndex + 1] : nil,
+        onNextEpisode: hasNext ? {
+          currentIndex += 1
+        } : nil
+      )
+    }
   }
 }
 #endif

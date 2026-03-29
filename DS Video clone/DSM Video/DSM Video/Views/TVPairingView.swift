@@ -145,7 +145,8 @@ struct TVPairingView: View {
         .environment(appState)
     }
     .onAppear {
-      if pairingCode == nil && !isGenerating {
+      // Only auto-generate if we have a session — generatePairingCode requires auth
+      if pairingCode == nil && !isGenerating && appState.sessionToken != nil {
         Task { await generate() }
       }
     }

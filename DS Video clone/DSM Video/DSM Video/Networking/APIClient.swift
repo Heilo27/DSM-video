@@ -92,16 +92,19 @@ struct APIClient {
   }
 
   func itemDetail(id: String) async throws -> ItemDetail {
-    try await request(path: "/api/v1/items/\(id)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self)
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    return try await request(path: "/api/v1/items/\(enc)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self)
   }
 
   func playback(id: String) async throws -> PlaybackInfo {
-    try await request(path: "/api/v1/items/\(id)/playback", method: "GET", body: Optional<Int>.none, response: PlaybackInfo.self)
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    return try await request(path: "/api/v1/items/\(enc)/playback", method: "GET", body: Optional<Int>.none, response: PlaybackInfo.self)
   }
 
   func setProgress(id: String, positionSeconds: Int, durationSeconds: Int) async throws {
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
     _ = try await request(
-      path: "/api/v1/items/\(id)/progress",
+      path: "/api/v1/items/\(enc)/progress",
       method: "POST",
       body: ProgressRequest(positionSeconds: positionSeconds, durationSeconds: durationSeconds, state: "playing"),
       response: ProgressResponse.self
@@ -121,7 +124,8 @@ struct APIClient {
   // MARK: - TMDb Manual Fix
 
   func tmdbSearch(itemId: String, query: String? = nil, year: Int? = nil, type: String? = nil) async throws -> TMDbSearchResponse {
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items/\(itemId)/tmdb-search"), resolvingAgainstBaseURL: false) else {
+    let enc = itemId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? itemId
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items/\(enc)/tmdb-search"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
     }
     var queryItems: [URLQueryItem] = []
@@ -135,8 +139,9 @@ struct APIClient {
 
   func tmdbFix(itemId: String, tmdbId: Int, type: String) async throws {
     struct Body: Encodable { let tmdbId: Int; let type: String }
+    let enc = itemId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? itemId
     _ = try await request(
-      path: "/api/v1/items/\(itemId)/tmdb-fix",
+      path: "/api/v1/items/\(enc)/tmdb-fix",
       method: "POST",
       body: Body(tmdbId: tmdbId, type: type),
       response: EmptyDecodable.self
