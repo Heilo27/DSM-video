@@ -632,6 +632,7 @@ private struct MetadataPill: View {
 private struct PlayerSheet: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
   let itemID: String
   let title: String
 
@@ -737,6 +738,19 @@ private struct PlayerSheet: View {
       }
     }
     .task { await start() }
+    .onChange(of: scenePhase) { _, newPhase in
+      if newPhase == .background, lastSyncedPosition > 0 {
+        let pos = lastSyncedPosition
+        let dur = lastKnownDuration
+        Task {
+          try? await appState.api.setProgress(
+            id: itemID,
+            positionSeconds: pos,
+            durationSeconds: dur
+          )
+        }
+      }
+    }
   }
 
   private func start() async {

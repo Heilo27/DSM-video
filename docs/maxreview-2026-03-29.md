@@ -1,8 +1,8 @@
 # MaxReview — DSVideo — 2026-03-29
 
-**Cycle:** 1 of 3 max
+**Cycle:** 1 of 3 max (complete)
 **Branch:** main
-**Status:** Phase 3 in progress → Fix cycle pending
+**Status:** PASS — all P0/P1 issues resolved, 38 tests passing
 
 ---
 
@@ -112,7 +112,22 @@
 
 ---
 
-## Fix Cycle 1 Plan
+## Phase 5B Re-Review — PASS
+
+3 minor cleanup issues found and fixed in same cycle:
+- TVShowsView sort chip used chipLabel not rawValue (incomplete TASK-250)
+- TVPortraitCard progress bar missing accessibilityHidden (incomplete TASK-248)
+- LoginView tagline at 0.90 opacity — exceeds 0.85 minimum, no change needed
+
+**Commits:**
+- `48b9f63` — MaxReview cycle 1: fix 23 issues (P0×2, P1×9, P2×10, P3×2)
+- `40ad4d8` — MaxReview cycle 1 cleanup: fix 2 incomplete a11y issues
+
+**Test suite:** 38/38 passing
+
+---
+
+## Fix Cycle 1 Plan (completed)
 
 **Scotty handles:** TASK-235, 236, 237, 238, 239, 240, 252, 253, 254, 255, 258
 **Vernier handles:** TASK-241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251

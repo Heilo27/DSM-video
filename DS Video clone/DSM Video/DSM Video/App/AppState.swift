@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Network
 import Observation
 import Security
 import SwiftUI
@@ -48,6 +49,11 @@ final class AppState {
   }
 
   var isDemoMode: Bool = false
+
+  var isOffline: Bool = false
+  var serverUnreachable: Bool = false
+
+  private var networkMonitor: NWPathMonitor?
 
   var sessionToken: String? {
     didSet {
@@ -115,6 +121,7 @@ final class AppState {
       baseURL: resolvedInitURL,
       token: storedToken
     )
+    startNetworkMonitoring()
   }
 
   // MARK: - Keychain
@@ -265,39 +272,61 @@ final class AppState {
     loginError = nil
   }
 
-  /// Called when a network operation fails. If the error indicates the server
-  /// is unreachable (left home network, server offline) or the session expired,
-  /// clears the session and returns to the login screen.
-  /// Does nothing for transient errors (e.g. a single page load failure).
+  /// Called when a network operation fails. Distinguishes:
+  ///   - Auth failure (401/403) → clear session, force re-login
+  ///   - No internet → set isOffline (NWPathMonitor manages recovery)
+  ///   - Server unreachable → set serverUnreachable
+  ///   - Transient errors → no state change
+  /// Does NOT auto-logout on network errors — the user should stay logged in
+  /// and resume automatically when connectivity returns.
   func handleConnectionFailure(_ error: Error) {
-    let isUnreachable: Bool
     if let apiErr = error as? APIError {
       switch apiErr {
-      case .network:       isUnreachable = true   // Can't reach server at all
-      case .http(401):     isUnreachable = true   // Session expired / token invalid
-      case .http(403):     isUnreachable = true   // Auth rejected
-      default:             isUnreachable = false
-      }
-    } else {
-      // URLError — connection refused, timed out, no route to host, etc.
-      let urlErr = error as? URLError
-      switch urlErr?.code {
-      case .notConnectedToInternet, .networkConnectionLost,
-           .cannotConnectToHost, .cannotFindHost, .timedOut,
-           .dnsLookupFailed, .secureConnectionFailed:
-        isUnreachable = true
+      case .http(401), .http(403):
+        // Token expired or rejected — must re-authenticate
+        Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+        sessionToken = nil
+        isDemoMode = false
+        loginError = "Your session expired. Please sign in again."
+      case .network:
+        serverUnreachable = true
       default:
-        isUnreachable = false
+        break  // transient, don't change state
+      }
+    } else if let urlErr = error as? URLError {
+      switch urlErr.code {
+      case .notConnectedToInternet, .networkConnectionLost:
+        isOffline = true
+      case .cannotConnectToHost, .cannotFindHost, .timedOut,
+           .dnsLookupFailed, .secureConnectionFailed:
+        serverUnreachable = true
+      default:
+        break
       }
     }
+  }
 
-    guard isUnreachable else { return }
-    // Preserve credentials so the user can log back in without re-typing them.
-    // Only clear the session token — baseURL, username, password stay.
-    Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-    sessionToken = nil
-    isDemoMode = false
-    loginError = "Connection lost. You may be away from your home network — try QuickConnect."
+  /// Call after a successful API operation to clear server-unreachable state.
+  /// isOffline is managed exclusively by NWPathMonitor.
+  func clearNetworkError() {
+    serverUnreachable = false
+  }
+
+  private func startNetworkMonitoring() {
+    let monitor = NWPathMonitor()
+    networkMonitor = monitor
+    monitor.pathUpdateHandler = { [weak self] path in
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        let wasOffline = self.isOffline
+        self.isOffline = path.status != .satisfied
+        // When network comes back, trigger a background refresh
+        if wasOffline && !self.isOffline {
+          NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
+        }
+      }
+    }
+    monitor.start(queue: DispatchQueue(label: "com.dsm.networkMonitor"))
   }
 
   func generatePairingCode() async {
@@ -337,6 +366,10 @@ final class AppState {
       loginError = (error as? APIError)?.userMessage ?? "Invalid pairing code."
     }
   }
+}
+
+extension Notification.Name {
+  static let networkDidReconnect = Notification.Name("dsm.networkDidReconnect")
 }
 
 func normalizedBaseURL(_ input: String, forceHTTPS: Bool, defaultPort: Int = 8090) -> URL? {

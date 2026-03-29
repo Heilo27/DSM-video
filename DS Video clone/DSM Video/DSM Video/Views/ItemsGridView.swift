@@ -26,6 +26,7 @@ struct ItemsGridView: View {
   let library: Library
 
   @State private var items: [ItemSummary] = []
+  @State private var sortedItems: [ItemSummary] = []
   @State private var isLoading: Bool = false
   @State private var error: String?
   @State private var sortOption: SortOption = {
@@ -33,14 +34,14 @@ struct ItemsGridView: View {
     return SortOption(rawValue: raw) ?? .addedNewest
   }()
 
-  private var sortedItems: [ItemSummary] {
-    switch sortOption {
-    case .addedNewest:  return items.sorted { $0.addedAt > $1.addedAt }
-    case .addedOldest:  return items.sorted { $0.addedAt < $1.addedAt }
-    case .nameAsc:      return items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-    case .nameDesc:     return items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
-    case .releaseNewest: return items.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
-    case .releaseOldest: return items.sorted { ($0.year ?? Int.max) < ($1.year ?? Int.max) }
+  private func sorted(_ list: [ItemSummary], by option: SortOption) -> [ItemSummary] {
+    switch option {
+    case .addedNewest:   return list.sorted { $0.addedAt > $1.addedAt }
+    case .addedOldest:   return list.sorted { $0.addedAt < $1.addedAt }
+    case .nameAsc:       return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    case .nameDesc:      return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
+    case .releaseNewest: return list.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+    case .releaseOldest: return list.sorted { ($0.year ?? Int.max) < ($1.year ?? Int.max) }
     }
   }
 
@@ -98,10 +99,22 @@ struct ItemsGridView: View {
     #if !os(tvOS)
     .refreshable { await load() }
     .safeAreaInset(edge: .top, spacing: 0) {
-      SortChipBar(selection: $sortOption)
+      VStack(spacing: 0) {
+        SortChipBar(selection: $sortOption)
+        if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
+          Text("Showing cached content")
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.5))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .background(Color.black)
+        }
+      }
     }
+    .onChange(of: items) { _, new in sortedItems = sorted(new, by: sortOption) }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.sortOption")
+      sortedItems = sorted(items, by: new)
     }
     #else
     .toolbar {
@@ -117,8 +130,10 @@ struct ItemsGridView: View {
         }
       }
     }
+    .onChange(of: items) { _, new in sortedItems = sorted(new, by: sortOption) }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.sortOption")
+      sortedItems = sorted(items, by: new)
     }
     #endif
   }
@@ -139,6 +154,7 @@ struct ItemsGridView: View {
     guard !isLoading else { return }
     if appState.isDemoMode {
       items = DemoData.items(for: library)
+      sortedItems = sorted(items, by: sortOption)
       return
     }
     isLoading = true
@@ -178,6 +194,7 @@ struct ItemsGridView: View {
         let key = "\($0.title)|\($0.year ?? -1)"
         return deduped[key]?.id == $0.id
       }
+      sortedItems = sorted(items, by: sortOption)
       error = nil
     } catch {
       let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."

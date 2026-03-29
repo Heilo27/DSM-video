@@ -72,6 +72,8 @@ struct GestureVideoPlayer: View {
         case backward, forward
     }
 
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         playerContent
             .onAppear {
@@ -91,6 +93,13 @@ struct GestureVideoPlayer: View {
                     unlockOrientation()
                 }
                 #endif
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .background {
+                    // Flush progress immediately so it's persisted before the process suspends
+                    onProgressUpdate?(currentTime, duration)
+                    player?.pause()
+                }
             }
             #if os(iOS)
             .statusBarHidden(true)

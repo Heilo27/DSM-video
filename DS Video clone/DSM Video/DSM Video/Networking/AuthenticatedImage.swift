@@ -59,6 +59,44 @@ private actor ImageCache {
 }
 #endif
 
+// MARK: - Image Cache (AppKit platforms only)
+
+#if canImport(AppKit)
+private actor MacImageCache {
+  static let shared = MacImageCache()
+
+  private let cache = NSCache<NSURL, NSImage>()
+  private var inFlightTasks: [URL: Task<NSImage?, Never>] = [:]
+
+  init() {
+    cache.totalCostLimit = 100 * 1024 * 1024
+    cache.countLimit = 200
+  }
+
+  func fetchOrJoin(for url: URL) -> (cached: NSImage?, task: Task<NSImage?, Never>?, isNew: Bool) {
+    if let cached = cache.object(forKey: url as NSURL) {
+      return (cached, nil, false)
+    }
+    if let existing = inFlightTasks[url] {
+      return (nil, existing, false)
+    }
+    return (nil, nil, true)
+  }
+
+  func registerTask(_ task: Task<NSImage?, Never>, for url: URL) {
+    inFlightTasks[url] = task
+  }
+
+  func setImage(_ image: NSImage, for url: URL) {
+    cache.setObject(image, forKey: url as NSURL)
+  }
+
+  func clearInFlightTask(for url: URL) {
+    inFlightTasks[url] = nil
+  }
+}
+#endif
+
 // MARK: - AuthenticatedImage
 
 struct AuthenticatedImage: View {
@@ -205,32 +243,61 @@ struct AuthenticatedImage: View {
 
   private func loadIfNeeded() async {
     guard let url, !isLoading, image == nil else { return }
-    isLoading = true
 
-    var req = URLRequest(url: url)
-    if url.absoluteString.contains("_sid=") {
-      // Video Station: session ID already in URL, no header needed
-    } else if let token {
-      req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    let outcome = await MacImageCache.shared.fetchOrJoin(for: url)
+
+    if let cached = outcome.cached {
+      image = Image(nsImage: cached)
+      return
     }
 
-    do {
-      let (data, response) = try await URLSession.shared.data(for: req)
-      if let httpResponse = response as? HTTPURLResponse,
-         httpResponse.statusCode != 200 {
-        didFail = true
-        isLoading = false
-        return
-      }
-      if let nsImage = NSImage(data: data) {
-        image = Image(nsImage: nsImage)
+    if let existingTask = outcome.task {
+      if let result = await existingTask.value {
+        image = Image(nsImage: result)
       } else {
         didFail = true
       }
-    } catch {
+      return
+    }
+
+    // outcome.isNew == true: we are responsible for the fetch
+    isLoading = true
+
+    let fetchTask = Task<NSImage?, Never> {
+      var req = URLRequest(url: url)
+      if url.absoluteString.contains("_sid=") {
+        // Video Station: session ID already in URL
+      } else if let token {
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      }
+      do {
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let httpResponse = response as? HTTPURLResponse,
+           httpResponse.statusCode != 200 {
+          return nil
+        }
+        return NSImage(data: data)
+      } catch {
+        return nil
+      }
+    }
+
+    await MacImageCache.shared.registerTask(fetchTask, for: url)
+
+    let result = await fetchTask.value
+    if let nsImage = result {
+      await MacImageCache.shared.setImage(nsImage, for: url)
+    }
+    await MacImageCache.shared.clearInFlightTask(for: url)
+
+    isLoading = false
+
+    if let nsImage = result {
+      image = Image(nsImage: nsImage)
+    } else {
       didFail = true
     }
-    isLoading = false
   }
   #endif
 }
+

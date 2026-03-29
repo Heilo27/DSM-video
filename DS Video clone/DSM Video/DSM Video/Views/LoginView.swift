@@ -150,10 +150,15 @@ struct LoginView: View {
         .padding(.horizontal, 24)
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
         #endif
-        .disabled(appState.isLoggingIn)
+        .disabled(appState.isLoggingIn || appState.isOffline)
         .accessibilityLabel(appState.isLoggingIn ? "Connecting, please wait" : "Connect")
 
-        if let err = appState.loginError {
+        if appState.isOffline {
+          Text("No internet connection")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 24)
+        } else if let err = appState.loginError {
           Text(err)
             .font(.footnote)
             .foregroundStyle(.white.opacity(0.95))

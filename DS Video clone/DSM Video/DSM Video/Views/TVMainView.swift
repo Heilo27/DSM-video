@@ -171,6 +171,7 @@ private struct TVHomeView: View {
   @State private var loadError: String?
   @State private var showPairing: Bool = false
   @State private var showSettings: Bool = false
+  @State private var showSearch: Bool = false
 
   var body: some View {
     NavigationStack {
@@ -228,6 +229,14 @@ private struct TVHomeView: View {
               .foregroundStyle(.white)
           }
         }
+        ToolbarItem(placement: .topBarLeading) {
+          Button {
+            showSearch = true
+          } label: {
+            Label("Search", systemImage: "magnifyingglass")
+              .foregroundStyle(.white)
+          }
+        }
         ToolbarItem(placement: .topBarTrailing) {
           Button {
             showPairing = true
@@ -244,6 +253,10 @@ private struct TVHomeView: View {
     }
     .sheet(isPresented: $showPairing) {
       TVPairingView()
+        .environment(appState)
+    }
+    .sheet(isPresented: $showSearch) {
+      TVSearchView()
         .environment(appState)
     }
     .task { await load() }
@@ -667,6 +680,145 @@ private struct TVSettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
       }
       .navigationTitle("Settings")
+    }
+  }
+}
+
+// MARK: - Search
+
+private struct TVSearchView: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
+
+  @State private var searchText: String = ""
+  @State private var results: [ItemSummary] = []
+  @State private var isSearching: Bool = false
+  @State private var hasSearched: Bool = false
+  @State private var searchError: String?
+  @State private var debounceTask: Task<Void, Never>?
+
+  var body: some View {
+    NavigationStack {
+      VStack(alignment: .leading, spacing: 32) {
+        TextField("Search your library", text: $searchText)
+          .font(.system(size: 32))
+          .frame(maxWidth: 800)
+          .onSubmit { Task { await search() } }
+          .onChange(of: searchText) { _, newValue in
+            if newValue.isEmpty {
+              debounceTask?.cancel()
+              results = []
+              hasSearched = false
+              searchError = nil
+            } else if newValue.count >= 2 {
+              debounceTask?.cancel()
+              debounceTask = Task {
+                if (try? await Task.sleep(for: .milliseconds(500))) != nil {
+                  await search()
+                }
+              }
+            }
+          }
+
+        if isSearching {
+          ProgressView("Searching…")
+            .frame(maxWidth: .infinity, alignment: .center)
+        } else if let err = searchError {
+          Text(err)
+            .font(.callout)
+            .foregroundStyle(Color.dsError)
+        } else if hasSearched && results.isEmpty {
+          ContentUnavailableView(
+            "No Results",
+            systemImage: "magnifyingglass",
+            description: Text("No videos match \"\(searchText)\"")
+          )
+          .foregroundStyle(.white)
+        } else if !results.isEmpty {
+          ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+              ForEach(results) { item in
+                NavigationLink {
+                  ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                } label: {
+                  HStack(spacing: 16) {
+                    if let posterID = item.posterImageId {
+                      AuthenticatedImage(
+                        url: appState.api.imageURL(id: posterID, width: 120),
+                        token: appState.sessionToken
+                      )
+                      .scaledToFill()
+                      .frame(width: 60, height: 90)
+                      .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    } else {
+                      RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(white: 0.15))
+                        .frame(width: 60, height: 90)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                      Text(item.title)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.white)
+                      if let year = item.year {
+                        Text(String(year))
+                          .font(.system(size: 16))
+                          .foregroundStyle(Color.dsTextSecondary)
+                      }
+                    }
+                    Spacer()
+                  }
+                  .padding(.vertical, 12)
+                  .padding(.horizontal, 60)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+                Divider().background(Color(white: 0.2)).padding(.horizontal, 60)
+              }
+            }
+          }
+        } else if !hasSearched {
+          Text("Enter a title to search your library")
+            .font(.system(size: 22))
+            .foregroundStyle(Color.dsTextSecondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+
+        Spacer()
+      }
+      .padding(.top, 60)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color.black.ignoresSafeArea())
+      .navigationTitle("Search")
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Done") { dismiss() }
+        }
+      }
+    }
+  }
+
+  private func search() async {
+    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard query.count >= 2 else { return }
+
+    isSearching = true
+    hasSearched = true
+    defer { isSearching = false }
+
+    guard !appState.isDemoMode else {
+      let allDemoItems = DemoData.movieItems + DemoData.tvItems
+      results = allDemoItems.filter { $0.title.localizedCaseInsensitiveContains(query) }
+      searchError = nil
+      return
+    }
+
+    do {
+      let response = try await appState.api.search(query: query, limit: 100)
+      results = response.items
+      searchError = nil
+    } catch {
+      results = []
+      searchError = (error as? APIError)?.userMessage ?? error.localizedDescription
     }
   }
 }

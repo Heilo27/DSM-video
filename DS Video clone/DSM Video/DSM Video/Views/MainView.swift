@@ -10,26 +10,34 @@ struct MainView: View {
   let layout: Layout
 
   var body: some View {
-    switch layout {
-    case .tabs:
-      TabView {
-        LibraryHomeView()
-          .tabItem { Label("Home", systemImage: "play.rectangle") }
+    ZStack(alignment: .top) {
+      switch layout {
+      case .tabs:
+        TabView {
+          LibraryHomeView()
+            .tabItem { Label("Home", systemImage: "play.rectangle") }
 
-        LibrariesView()
-          .tabItem { Label("Libraries", systemImage: "square.grid.2x2") }
+          LibrariesView()
+            .tabItem { Label("Libraries", systemImage: "square.grid.2x2") }
 
-        SearchView()
-          .tabItem { Label("Search", systemImage: "magnifyingglass") }
+          SearchView()
+            .tabItem { Label("Search", systemImage: "magnifyingglass") }
 
-        DownloadsView()
-          .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
+          DownloadsView()
+            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
 
-        SettingsView()
-          .tabItem { Label("Settings", systemImage: "gearshape") }
+          SettingsView()
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+        }
+      case .split:
+        SplitView()
       }
-    case .split:
-      SplitView()
+
+      VStack(spacing: 0) {
+        OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
+          .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
+        Spacer()
+      }
     }
   }
 }

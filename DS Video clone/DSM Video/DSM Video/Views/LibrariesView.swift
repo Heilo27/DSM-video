@@ -260,6 +260,9 @@ struct LibraryHomeView: View {
       guard !allItems.isEmpty else { return }
       Task { await refreshProgress() }
     }
+    .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
+      Task { await load() }
+    }
     .background(Color.black.ignoresSafeArea())
 
     if isEmbedded {
@@ -394,6 +397,7 @@ struct LibraryHomeView: View {
       loadLog.info("fetchFromNetwork: no change — updating libs, touching cache")
       HomeCache.touch(serverURL: serverURL)
       libraries = libs
+      appState.clearNetworkError()
       await refreshProgress()
 
     case .updated(let libs, let merged, let counts, let updatedAt):
@@ -402,6 +406,7 @@ struct LibraryHomeView: View {
       allItems = merged
       HomeCache.save(serverURL: serverURL, libraries: libs, items: merged,
                      counts: counts, updatedAt: updatedAt)
+      appState.clearNetworkError()
       await refreshProgress()
 
     case .failure(let err):
