@@ -20,8 +20,8 @@ nonisolated struct HomeCacheEntry: Codable, Sendable {
 
 nonisolated enum HomeCache {
   private static let cacheFileName = "dsReel-homeCache.json"
-  private static let backgroundRefreshAgeSeconds: TimeInterval = 30 * 60
-  private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600
+  private static let staleAgeSeconds: TimeInterval = 24 * 3600   // force full re-fetch after 24h
+  private static let maxAgeSeconds: TimeInterval = 7 * 24 * 3600 // discard cache after 7 days
 
   private static let log = Logger(subsystem: "com.dsm.dsvideo", category: "HomeCache")
 
@@ -36,6 +36,16 @@ nonisolated enum HomeCache {
 
   private static func writeData(_ data: Data) {
     try? data.write(to: cacheFileURL, options: .atomic)
+  }
+
+  /// Load cache without server URL validation — used for synchronous pre-render seeding only.
+  /// The async load() path still validates serverURL and will replace data if it mismatches.
+  static func loadForPrerender() -> HomeCacheEntry? {
+    guard let data = readData(),
+          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data) else { return nil }
+    let age = Date().timeIntervalSince(entry.savedAt)
+    guard age < maxAgeSeconds else { return nil }
+    return entry
   }
 
   static func load(serverURL: String) -> HomeCacheEntry? {
@@ -61,17 +71,16 @@ nonisolated enum HomeCache {
     return entry
   }
 
-  static func needsRefresh(serverURL: String) -> Bool {
+  /// Returns true if the cache exists but is older than 24 hours — triggers a full re-fetch
+  /// rather than relying solely on count/lastUpdatedAt change detection.
+  static func isStale(serverURL: String) -> Bool {
     guard let data = readData(),
           let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data),
           entry.serverURL == serverURL
-    else {
-      log.info("needsRefresh: no valid cache — refresh needed")
-      return true
-    }
+    else { return false }
     let age = Date().timeIntervalSince(entry.savedAt)
-    let stale = age > backgroundRefreshAgeSeconds
-    log.info("needsRefresh: age=\(Int(age))s threshold=\(Int(backgroundRefreshAgeSeconds))s → \(stale ? "STALE" : "FRESH")")
+    let stale = age > staleAgeSeconds
+    log.info("isStale: age=\(Int(age))s threshold=\(Int(staleAgeSeconds))s → \(stale ? "STALE" : "fresh")")
     return stale
   }
 
