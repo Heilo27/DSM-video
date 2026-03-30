@@ -209,6 +209,7 @@ struct LibraryHomeView: View {
       // TASK-299: show spinner during both network load and cache decode to avoid black screen
       if (isLoading || isCacheDecoding) && allItems.isEmpty {
         ProgressView("Loading content")
+          .tint(Color.dsTextPrimary)
           .accessibilityLabel("Loading content, please wait")
           .accessibilityAddTraits(.updatesFrequently)
       } else if let error {
@@ -220,6 +221,7 @@ struct LibraryHomeView: View {
           )
           Button("Retry") { Task { await load() } }
             .buttonStyle(.bordered)
+            .accessibilityLabel("Retry loading content")
         }
       } else if allRailsEmpty && !isLoading && !isCacheDecoding && allItems.isEmpty {
         ContentUnavailableView(
@@ -256,6 +258,7 @@ struct LibraryHomeView: View {
         }
       }
     }
+    .preferredColorScheme(.dark)
     .navigationTitle("Home")
     .onAppear {
       loadLog.info("LibraryHomeView: onAppear — allItems=\(allItems.count) cont=\(continueWatchingItems.count) added=\(justAddedItems.count) watched=\(recentlyWatchedItems.count) isLoading=\(isLoading) isCacheDecoding=\(isCacheDecoding)")
