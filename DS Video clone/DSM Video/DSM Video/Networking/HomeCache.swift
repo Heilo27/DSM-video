@@ -80,6 +80,12 @@ nonisolated enum HomeCache {
     loadWithStaleness(serverURL: serverURL)?.entry
   }
 
+  /// Cheap existence check — avoids showing a spinner when cached content is imminent.
+  /// Does not decode the file; just checks if it exists on disk.
+  static func cacheFileExists() -> Bool {
+    FileManager.default.fileExists(atPath: cacheFileURL.path)
+  }
+
   /// Returns true if the cache exists but is older than 24 hours — triggers a full re-fetch
   /// rather than relying solely on count/lastUpdatedAt change detection.
   static func isStale(serverURL: String) -> Bool {

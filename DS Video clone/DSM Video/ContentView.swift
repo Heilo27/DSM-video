@@ -23,6 +23,15 @@ struct RootView: View {
     // cache loads during the animation — content is ready when the overlay fades out.
     @State private var launchVisible = true
 
+    // Freeze the layout after first computed value so orientation changes from the
+    // video player (landscape lock/unlock) don't recreate MainView and re-trigger load().
+    @State private var frozenLayout: MainView.Layout?
+
+    private var resolvedLayout: MainView.Layout {
+        if let frozen = frozenLayout { return frozen }
+        return (horizontalSizeClass ?? .regular) == .regular ? .split : .tabs
+    }
+
     var body: some View {
         ZStack {
             // App content — always in tree so .task{} fires immediately and
@@ -34,7 +43,12 @@ struct RootView: View {
             if appState.sessionToken == nil {
                 LoginView()
             } else {
-                MainView(layout: (horizontalSizeClass ?? .regular) == .regular ? .split : .tabs)
+                MainView(layout: resolvedLayout)
+                    .onAppear {
+                        if frozenLayout == nil {
+                            frozenLayout = resolvedLayout
+                        }
+                    }
             }
             #endif
 
@@ -48,6 +62,11 @@ struct RootView: View {
                     }
                 }
                 .ignoresSafeArea()
+            }
+        }
+        .onChange(of: appState.sessionToken) { _, newToken in
+            if newToken == nil {
+                frozenLayout = nil
             }
         }
         .preferredColorScheme(.dark)

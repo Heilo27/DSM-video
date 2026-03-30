@@ -92,6 +92,7 @@ struct LibraryHomeView: View {
   @State private var allItems: [ItemSummary] = []
   @State private var libraries: [Library] = []
   @State private var isLoading: Bool = false
+  @State private var isCacheDecoding: Bool = false   // true while background cache decode is in-flight
   @State private var isBackgroundRefreshing: Bool = false
   @State private var backgroundFetchTask: Task<Void, Never>?
   @State private var error: String?
@@ -101,27 +102,32 @@ struct LibraryHomeView: View {
   @State private var continueWatchingItems: [ItemSummary] = []
   @State private var justAddedItems: [ItemSummary] = []
   @State private var recentlyWatchedItems: [ItemSummary] = []
-  // True only after the first recomputeRails() completes and writes results back.
-  // Keeps skeletons visible during the gap between allItems arriving and rails being ready.
-  @State private var railsReady: Bool = false
+  // TASK-302: tracks whether the first-load VoiceOver announcement has fired this session
+  @State private var hasAnnouncedContent: Bool = false
 
   private var firstMovieLibrary: Library? {
     libraries.first(where: { $0.kind == "movie" || $0.kind == "movies" }) ?? libraries.first
   }
 
+  private var allRailsEmpty: Bool {
+    continueWatchingItems.isEmpty && justAddedItems.isEmpty && recentlyWatchedItems.isEmpty
+  }
+
   // MARK: - Rail Computation (off main thread)
 
   /// Recomputes all three rail arrays from `items` on a background thread, then
-  /// applies the results back on @MainActor in a single atomic write.
-  /// Always sets railsReady=true — call this only when items+progress are both final.
+  /// applies the results back on @MainActor. Call whenever allItems changes.
   private func recomputeRails(from items: [ItemSummary]) {
+    loadLog.debug("recomputeRails: triggered — \(items.count) items")
+    let t = Date()
     Task.detached(priority: .userInitiated) {
       let (cont, added, watched) = Self.computeRails(items)
+      let elapsed = String(format: "%.3f", Date().timeIntervalSince(t))
       await MainActor.run {
         self.continueWatchingItems = cont
         self.justAddedItems = added
         self.recentlyWatchedItems = watched
-        self.railsReady = true
+        loadLog.info("recomputeRails: done in \(elapsed)s — cont=\(cont.count) added=\(added.count) watched=\(watched.count)")
       }
     }
   }
@@ -200,8 +206,12 @@ struct LibraryHomeView: View {
 
   var body: some View {
     let content = Group {
-      if let error, allItems.isEmpty {
-        // Only show the full error state when we have nothing to display at all
+      // TASK-299: show spinner during both network load and cache decode to avoid black screen
+      if (isLoading || isCacheDecoding) && allItems.isEmpty {
+        ProgressView("Loading content")
+          .accessibilityLabel("Loading content, please wait")
+          .accessibilityAddTraits(.updatesFrequently)
+      } else if let error {
         VStack(spacing: 16) {
           ContentUnavailableView(
             "Couldn't load content",
@@ -211,59 +221,72 @@ struct LibraryHomeView: View {
           Button("Retry") { Task { await load() } }
             .buttonStyle(.bordered)
         }
+      } else if allRailsEmpty && !isLoading && !isCacheDecoding && allItems.isEmpty {
+        ContentUnavailableView(
+          "Nothing here yet",
+          systemImage: "play.rectangle",
+          description: Text("Add videos to your NAS to get started.")
+        )
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
-            // All three rails are always in the view tree — no conditional mounting.
-            // isLoading=true shows skeleton cards. Once railsReady, real items appear.
-            // A section is only hidden (opacity+height collapsed) after the first
-            // successful load confirms it has no items — never mid-load.
-            HomeRail(
-              title: "Continue Watching",
-              items: continueWatchingItems,
-              seeAllLibrary: firstMovieLibrary,
-              isLoading: !railsReady
-            )
-            .opacity(railsReady && continueWatchingItems.isEmpty ? 0 : 1)
-            .frame(height: railsReady && continueWatchingItems.isEmpty ? 0 : nil)
-            .clipped()
-
-            HomeRail(
-              title: "Just Added",
-              items: justAddedItems,
-              seeAllLibrary: firstMovieLibrary,
-              isLoading: !railsReady
-            )
-            .opacity(railsReady && justAddedItems.isEmpty ? 0 : 1)
-            .frame(height: railsReady && justAddedItems.isEmpty ? 0 : nil)
-            .clipped()
-
-            HomeRail(
-              title: "Recently Watched",
-              items: recentlyWatchedItems,
-              seeAllLibrary: firstMovieLibrary,
-              isLoading: !railsReady
-            )
-            .opacity(railsReady && recentlyWatchedItems.isEmpty ? 0 : 1)
-            .frame(height: railsReady && recentlyWatchedItems.isEmpty ? 0 : nil)
-            .clipped()
+            if !continueWatchingItems.isEmpty {
+              HomeRail(
+                title: "Continue Watching",
+                items: continueWatchingItems,
+                seeAllLibrary: firstMovieLibrary
+              )
+            }
+            if !justAddedItems.isEmpty {
+              HomeRail(
+                title: "Just Added",
+                items: justAddedItems,
+                seeAllLibrary: firstMovieLibrary
+              )
+            }
+            if !recentlyWatchedItems.isEmpty {
+              HomeRail(
+                title: "Recently Watched",
+                items: recentlyWatchedItems,
+                seeAllLibrary: firstMovieLibrary
+              )
+            }
           }
           .padding(.vertical, 16)
         }
       }
     }
     .navigationTitle("Home")
-    .task { await load() }
-    .refreshable { await forceRefresh() }
+    .onAppear {
+      loadLog.info("LibraryHomeView: onAppear — allItems=\(allItems.count) cont=\(continueWatchingItems.count) added=\(justAddedItems.count) watched=\(recentlyWatchedItems.count) isLoading=\(isLoading) isCacheDecoding=\(isCacheDecoding)")
+    }
     .onDisappear {
+      loadLog.info("LibraryHomeView: onDisappear — allItems=\(allItems.count) backgroundRefreshing=\(isBackgroundRefreshing)")
       backgroundFetchTask?.cancel()
       isBackgroundRefreshing = false
     }
+    .task { await load() }
+    .refreshable { await forceRefresh() }
+    .onChange(of: allItems) { old, new in
+      loadLog.debug("allItems changed: \(old.count) → \(new.count) — triggering recomputeRails")
+      recomputeRails(from: new)
+    }
+    // TASK-302: announce to VoiceOver once when content rails first appear
+    .onChange(of: justAddedItems) { _, new in
+      guard !new.isEmpty, !hasAnnouncedContent else { return }
+      hasAnnouncedContent = true
+      AccessibilityNotification.ScreenChanged(nil).post()
+    }
     .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
-      guard !allItems.isEmpty else { return }
+      loadLog.info("LibraryHomeView: playerDidDismiss — allItems=\(allItems.count), triggering refreshProgress")
+      guard !allItems.isEmpty else {
+        loadLog.warning("LibraryHomeView: playerDidDismiss — allItems empty, skipping refreshProgress")
+        return
+      }
       Task { await refreshProgress() }
     }
     .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
+      loadLog.info("LibraryHomeView: networkDidReconnect — triggering load()")
       Task { await load() }
     }
     .background(Color.black.ignoresSafeArea())
@@ -281,15 +304,17 @@ struct LibraryHomeView: View {
   /// into `allItems`. Does NOT write to the cache — the cache is kept
   /// progress-free so stale progress never survives across app restarts.
   private func refreshProgress() async {
-    guard !allItems.isEmpty, !appState.isDemoMode else { return }
+    guard !allItems.isEmpty, !appState.isDemoMode else {
+      loadLog.debug("refreshProgress: skipped — allItems=\(allItems.count) isDemoMode=\(appState.isDemoMode)")
+      return
+    }
     let ids = allItems.map(\.id)
-    // Chunk into batches of 200 to avoid URL length limits on large libraries.
-    // A single query with 4000+ IDs (~32KB URL) silently fails on most servers.
     let chunkSize = 200
     let chunks = stride(from: 0, to: ids.count, by: chunkSize).map {
       Array(ids[$0..<min($0 + chunkSize, ids.count)])
     }
-    // Capture api reference before leaving @MainActor
+    let progressStart = Date()
+    loadLog.info("refreshProgress: starting — \(ids.count) items, \(chunks.count) chunks, maxConcurrent=4")
     let api = appState.api
     var progressMap: [String: ItemProgress] = [:]
     do {
@@ -310,10 +335,16 @@ struct LibraryHomeView: View {
           inFlight += 1
         }
         var merged: [String: ItemProgress] = [:]
+        var batchIdx = 0
         for try await batchResult in group {
-          if case .success(let batch) = batchResult {
+          switch batchResult {
+          case .success(let batch):
+            loadLog.debug("refreshProgress: batch \(batchIdx) OK — \(batch.count) progress entries")
             merged.merge(batch) { _, new in new }
+          case .failure(let err):
+            loadLog.warning("refreshProgress: batch \(batchIdx) FAILED — \(err.localizedDescription)")
           }
+          batchIdx += 1
           inFlight -= 1
           // Enqueue next chunk as a slot opens
           if let chunk = chunkIterator.next() {
@@ -340,47 +371,46 @@ struct LibraryHomeView: View {
           return item.withoutProgress
         }
       }
-      loadLog.info("refreshProgress: merged progress for \(progressMap.count) of \(ids.count) items (\(chunks.count) chunks)")
+      let elapsed = String(format: "%.3f", Date().timeIntervalSince(progressStart))
+      loadLog.info("refreshProgress: done in \(elapsed)s — merged \(progressMap.count) of \(ids.count) items")
     } catch {
-      loadLog.warning("refreshProgress: failed — \(error.localizedDescription)")
-      // Non-fatal: rails will show without progress data
+      let elapsed = String(format: "%.3f", Date().timeIntervalSince(progressStart))
+      loadLog.warning("refreshProgress: FAILED after \(elapsed)s — \(error.localizedDescription)")
     }
-    // Recompute rails now that items+progress are both final.
-    // This is the only place recomputeRails is called — items alone (without progress)
-    // would give wrong results (empty Continue Watching / Recently Watched).
-    recomputeRails(from: allItems)
   }
 
   // MARK: - Load
 
   private func load() async {
-    loadLog.info("load: called — isLoading=\(isLoading) allItems=\(allItems.count)")
-    guard !isLoading else {
-      loadLog.warning("load: already loading, bailing out (guard against double-call)")
+    let callID = Int.random(in: 1000...9999)  // unique ID per call so interleaved logs are traceable
+    loadLog.info("load[\(callID)]: called — isLoading=\(isLoading) isCacheDecoding=\(isCacheDecoding) allItems=\(allItems.count) cont=\(continueWatchingItems.count) added=\(justAddedItems.count) watched=\(recentlyWatchedItems.count)")
+    guard !isLoading, !isCacheDecoding else {
+      loadLog.warning("load[\(callID)]: already loading or cache decoding, bailing out (isLoading=\(isLoading) isCacheDecoding=\(isCacheDecoding))")
       return
     }
 
     if appState.isDemoMode {
-      loadLog.info("load: demo mode — injecting DemoData")
+      loadLog.info("load[\(callID)]: demo mode — injecting DemoData")
       libraries = DemoData.libraries
       allItems = DemoData.movieItems + DemoData.tvItems
       return
     }
 
     let serverURL = appState.api.baseURL.absoluteString
-    loadLog.info("load: serverURL=\(serverURL)")
+    loadLog.info("load[\(callID)]: serverURL=\(serverURL)")
 
     // Items already in memory — re-entering tab or returning from player.
     if !allItems.isEmpty {
+      loadLog.info("load[\(callID)]: PATH=in-memory — \(allItems.count) items already loaded, triggering background refresh")
       Task { await refreshProgress() }
       // isStale reads disk — do it off the main actor.
-      // Uses loadWithStaleness internally (single decode, P2-1).
       Task {
         let stale = await Task.detached(priority: .utility) {
           HomeCache.isStale(serverURL: serverURL)
         }.value
+        loadLog.info("load[\(callID)]: in-memory staleness check — stale=\(stale)")
         if stale {
-          loadLog.info("load: in-memory items, cache stale — background content refresh")
+          loadLog.info("load[\(callID)]: cache stale — background content refresh")
           backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
         }
       }
@@ -388,28 +418,39 @@ struct LibraryHomeView: View {
     }
 
     // Cold start: read cache off the main actor so we don't block the animation.
-    // Rails are NOT computed here — cached items have no progress, so continueWatching
-    // and recentlyWatched would be empty. Skeletons stay until refreshProgress()
-    // finishes and recomputeRails() fires with items+progress both ready.
-    isLoading = true
-    typealias CacheResult = (entry: HomeCacheEntry, isStale: Bool)?
+    let cacheExists = HomeCache.cacheFileExists()
+    loadLog.info("load[\(callID)]: PATH=cold-start — cacheExists=\(cacheExists)")
+    isLoading = !cacheExists
+    isCacheDecoding = cacheExists   // suppress "Nothing here yet" while decode is in-flight
+    loadLog.info("load[\(callID)]: state → isLoading=\(isLoading) isCacheDecoding=\(isCacheDecoding)")
+
+    let decodeStart = Date()
+    defer {
+      isLoading = false
+      isCacheDecoding = false
+    }
+    typealias CacheResult = (entry: HomeCacheEntry, rails: (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary]), stale: Bool)?
     let result: CacheResult = await Task.detached(priority: .userInitiated) {
-      HomeCache.loadWithStaleness(serverURL: serverURL)
+      guard let (entry, stale) = HomeCache.loadWithStaleness(serverURL: serverURL) else { return nil }
+      let rails = Self.computeRails(entry.items)
+      return (entry, rails, stale)
     }.value
 
-    isLoading = false
+    let decodeElapsed = String(format: "%.3f", Date().timeIntervalSince(decodeStart))
     if let result {
-      loadLog.info("load: cache HIT — \(result.entry.items.count) items, stale=\(result.isStale)")
+      loadLog.info("load[\(callID)]: cache HIT in \(decodeElapsed)s — \(result.entry.items.count) items, stale=\(result.stale), cont=\(result.rails.continueWatching.count) added=\(result.rails.justAdded.count) watched=\(result.rails.recentlyWatched.count)")
       libraries = result.entry.libraries
       allItems = result.entry.items
-      // railsReady stays false — skeletons shown until refreshProgress() → recomputeRails()
+      continueWatchingItems = result.rails.continueWatching
+      justAddedItems = result.rails.justAdded
+      recentlyWatchedItems = result.rails.recentlyWatched
       Task { await refreshProgress() }
-      if result.isStale {
-        loadLog.info("load: cache stale — background content refresh")
+      if result.stale {
+        loadLog.info("load[\(callID)]: cache stale — launching background content refresh")
         backgroundFetchTask = Task { await fetchFromNetwork(serverURL: serverURL, background: true) }
       }
     } else {
-      loadLog.info("load: no cache — fetching from network")
+      loadLog.info("load[\(callID)]: cache MISS after \(decodeElapsed)s — fetching from network")
       await fetchFromNetwork(serverURL: serverURL, background: false)
     }
   }
@@ -422,7 +463,6 @@ struct LibraryHomeView: View {
     backgroundFetchTask?.cancel()
     backgroundFetchTask = nil
     isBackgroundRefreshing = false
-    railsReady = false
     HomeCache.invalidate()
     await fetchFromNetwork(serverURL: serverURL, background: false)
   }
@@ -599,97 +639,46 @@ private struct HomeRail: View {
   let title: String
   let items: [ItemSummary]
   let seeAllLibrary: Library?
-  var isLoading: Bool = false
-
-  // Poster card: 120pt wide, 2:3 aspect → 180pt tall
-  private let cardWidth: CGFloat = 120
-  private let skeletonCount = 5
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      // Header row — always shown, "See All" hidden while loading
+      // Header row
       HStack {
         Text(title)
-          .font(.title3.weight(.semibold))
+          .font(.system(size: 18, weight: .bold))
           .foregroundStyle(.white)
           .accessibilityAddTraits(.isHeader)
         Spacer()
-        if !isLoading, let lib = seeAllLibrary {
+        if let lib = seeAllLibrary {
           NavigationLink("See All") {
             ItemsGridView(library: lib)
           }
-          .font(.subheadline)
+          .font(.system(size: 14))
           .foregroundStyle(Color.dsAccent)
           .padding(.vertical, 12)
+          .padding(.horizontal, 8)
           .accessibilityLabel("See all in \(title)")
         }
       }
       .padding(.horizontal, 16)
 
-      // Horizontal scroll — real cards or skeleton placeholders
+      // Horizontal scroll of poster cards
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(spacing: 10) {
-          if isLoading {
-            ForEach(0..<skeletonCount, id: \.self) { _ in
-              SkeletonPosterCard(width: cardWidth)
+          ForEach(items) { item in
+            NavigationLink {
+              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+            } label: {
+              ItemPosterCell(item: item)
+                .frame(width: 110)
             }
-          } else {
-            ForEach(items) { item in
-              NavigationLink {
-                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-              } label: {
-                ItemPosterCell(item: item)
-                  .frame(width: cardWidth)
-              }
-              .buttonStyle(.plain)
-              .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
-              .accessibilityHint("Opens video details")
-            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+            .accessibilityHint("Opens video details")
           }
         }
         .padding(.horizontal, 16)
       }
-      .accessibilityLabel(isLoading ? "\(title), loading" : title)
     }
   }
 }
-
-// MARK: - SkeletonPosterCard
-
-private struct SkeletonPosterCard: View {
-  let width: CGFloat
-  @State private var shimmerPhase: CGFloat = 0
-
-  private var height: CGFloat { width * 1.5 }
-
-  var body: some View {
-    RoundedRectangle(cornerRadius: 8, style: .continuous)
-      .fill(Color.white.opacity(0.08))
-      .frame(width: width, height: height)
-      .overlay(
-        // Shimmer sweep
-        GeometryReader { geo in
-          LinearGradient(
-            gradient: Gradient(colors: [
-              .clear,
-              Color.white.opacity(0.12),
-              .clear,
-            ]),
-            startPoint: .leading,
-            endPoint: .trailing
-          )
-          .frame(width: geo.size.width * 2)
-          .offset(x: shimmerPhase * (geo.size.width * 3) - geo.size.width)
-          .clipped()
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-      )
-      .accessibilityHidden(true)
-      .onAppear {
-        withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
-          shimmerPhase = 1
-        }
-      }
-  }
-}
-

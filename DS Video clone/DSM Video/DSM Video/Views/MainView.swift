@@ -56,12 +56,33 @@ private struct SplitView: View {
   @State private var selection: SidebarSelection? = .home
   @State private var libraries: [Library] = []
 
+  private var isHomeSelected: Bool {
+    switch selection {
+    case .home, .none: return true
+    default: return false
+    }
+  }
+
   var body: some View {
     NavigationSplitView {
       SidebarView(selection: $selection, libraries: $libraries)
     } detail: {
+      // One NavigationStack owns all detail navigation. LibraryHomeView stays permanently
+      // in the tree (opacity trick) so its @State (allItems, rails, etc.) survives navigation.
+      // Without this, switching to a library and back recreates LibraryHomeView from scratch,
+      // discarding all loaded data and forcing a full reload every time.
       NavigationStack {
-        detailContent
+        ZStack {
+          LibraryHomeView(isEmbedded: true)
+            .opacity(isHomeSelected ? 1 : 0)
+            .allowsHitTesting(isHomeSelected)
+            .accessibilityHidden(!isHomeSelected)
+
+          if !isHomeSelected {
+            detailContent
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
     }
   }
@@ -70,7 +91,7 @@ private struct SplitView: View {
   private var detailContent: some View {
     switch selection {
     case .home, .none:
-      LibraryHomeView(isEmbedded: true)
+      EmptyView()
     case .search:
       SearchView(isEmbedded: true)
     case .downloads:
