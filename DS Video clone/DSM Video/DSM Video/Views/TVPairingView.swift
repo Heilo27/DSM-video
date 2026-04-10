@@ -35,6 +35,7 @@ struct TVPairingView: View {
                 .font(.system(size: 26, weight: .semibold))
                 .foregroundStyle(.white)
             )
+            .accessibilityHidden(true)
 
           Text("Pair iOS Device")
             .font(.system(size: 42, weight: .bold))
@@ -55,30 +56,39 @@ struct TVPairingView: View {
             .padding(.vertical, 40)
         } else if let code = pairingCode {
           VStack(spacing: 32) {
-            // Code display
-            Text(code)
-              .font(.system(size: 80, weight: .bold, design: .monospaced))
-              .foregroundStyle(.white)
-              .tracking(8)
-              .padding(.horizontal, 72)
-              .padding(.vertical, 40)
-              .background(Color(white: 0.1))
-              .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-              .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                  .stroke(Color.dsBorderStrong, lineWidth: 1)
-              )
-              .speechSpellsOutCharacters(true)
+            // Code + countdown grouped for VoiceOver
+            VStack(spacing: 16) {
+              Text(code)
+                .font(.system(size: 80, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .tracking(8)
+                .padding(.horizontal, 72)
+                .padding(.vertical, 40)
+                .background(Color(white: 0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                  RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.dsBorderStrong, lineWidth: 1)
+                )
+                .speechSpellsOutCharacters(true)
+                .privacySensitive()
 
-            // Countdown
-            if countdown > 0 {
-              HStack(spacing: 8) {
-                Image(systemName: "clock")
-                  .font(.system(size: 17))
-                  .foregroundStyle(Color.dsTextMuted)
-                Text("Expires in \(countdown)s")
-                  .font(.system(size: 19))
-                  .foregroundStyle(Color.dsTextSecondary)
+              if countdown > 0 {
+                HStack(spacing: 8) {
+                  Image(systemName: "clock")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Color.dsTextMuted)
+                    .accessibilityHidden(true)
+                  Text("Expires in \(countdown)s")
+                    .font(.system(size: 19))
+                    .foregroundStyle(Color.dsTextSecondary)
+                }
+              }
+            }
+            .accessibilityElement(children: .combine)
+            .onChange(of: countdown) { _, newValue in
+              if newValue == 60 || newValue == 30 || newValue == 10 {
+                AccessibilityNotification.Announcement("Code expires in \(newValue) seconds").post()
               }
             }
 

@@ -86,6 +86,7 @@ struct PairingCodeView: View {
           isScanning = false
           if scannedCode.count == 6 && scannedCode.allSatisfy(\.isNumber) {
             code = scannedCode
+            AccessibilityNotification.Announcement("QR code scanned. Pairing in progress.").post()
             Task { await submit() }
           } else {
             error = "Invalid code format. Please enter a 6-digit number."

@@ -96,6 +96,9 @@ final class AppState {
   init() {
     let d = UserDefaults.standard
     let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:8090"
+    // useHTTPS defaults to false for local NAS compatibility (most home NAS setups use HTTP).
+    // TODO(security/TASK-392): Consider defaulting to true once self-signed cert UX is resolved,
+    // or surface a clear "Connection is not encrypted" warning in the UI when HTTP is active.
     let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
     let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 8090
@@ -142,7 +145,7 @@ final class AppState {
       kSecAttrService as String: Keys.keychainService,
       kSecAttrAccount as String: account,
       kSecValueData as String: data,
-      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
+      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
     ]
     SecItemAdd(addQuery as CFDictionary, nil)
   }
@@ -187,6 +190,10 @@ final class AppState {
 
     // Demo mode — App Review credentials. No network required.
     // Pre-computed SHA-256 hashes so plaintext credentials are not stored in the binary.
+    // Note: SHA-256 is not a password KDF. This is acceptable here because the demo account
+    // has no real data — it uses a synthetic local session with no server tokens. The hashes
+    // in source code are intentionally public-safe. A future hardening option would be PBKDF2
+    // with a stored salt, but the risk/reward for a synthetic demo account is low.
     let demoUserHash = "fd3585e838137398830f6e33b448a8616344ca4352539a7da3b3e5cecd0957c4"
     let demoPassHash = "293211d16112d308c2b21026d33e94326940be9f79a8bcd6f681c6f528c60058"
     if sha256(username.trimmingCharacters(in: .whitespaces)) == demoUserHash &&
@@ -272,6 +279,8 @@ final class AppState {
 
   func logout() {
     Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+    Self.deleteFromKeychain(account: Keys.keychainAccount)
+    savedPassword = ""
     sessionToken = nil
     pairingCode = nil
     isDemoMode = false
@@ -320,16 +329,17 @@ final class AppState {
     isOffline = false
   }
 
-  func startHeartbeatTimer() {
-    heartbeatTimer?.invalidate()
+  private func startHeartbeatTimer() {
+    guard heartbeatTimer == nil else { return }  // guard against double-start
     heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
       Task { @MainActor [weak self] in
-        await self?.runHeartbeat()
+        guard let self, self.sessionToken != nil else { return }  // guard: no-op before login
+        await self.runHeartbeat()
       }
     }
   }
 
-  func stopHeartbeatTimer() {
+  private func stopHeartbeatTimer() {
     heartbeatTimer?.invalidate()
     heartbeatTimer = nil
   }
@@ -394,7 +404,6 @@ final class AppState {
   private let homeLog = Logger(subsystem: "com.dsm.dsvideo", category: "HomeState")
 
   // Persistent across tab switches — populated once, never cleared unless logout/forceRefresh
-  var homeAllItems: [ItemSummary] = []
   var homeLibraries: [Library] = []
   var homeContinueWatching: [ItemSummary] = []
   var homeJustAdded: [ItemSummary] = []
@@ -412,7 +421,6 @@ final class AppState {
   func clearHomeState() {
     homeBackgroundFetchTask?.cancel()
     homeBackgroundFetchTask = nil
-    homeAllItems = []
     homeLibraries = []
     homeContinueWatching = []
     homeJustAdded = []
@@ -533,14 +541,14 @@ final class AppState {
 
     if isDemoMode {
       homeLibraries = DemoData.libraries
-      homeAllItems = DemoData.movieItems + DemoData.tvItems
-      recomputeHomeRails(from: homeAllItems)
+      let demoItems = DemoData.movieItems + DemoData.tvItems
+      recomputeHomeRails(from: demoItems)
       return
     }
 
-    // Already have in-memory data — run heartbeat to check for changes
-    if !homeAllItems.isEmpty {
-      homeLog.info("homeLoad[\(callID)]: PATH=in-memory — \(self.homeAllItems.count) items, running heartbeat")
+    // Already have in-memory rail data — run heartbeat to check for changes
+    if !homeAllRailsEmpty || !homeLibraries.isEmpty {
+      homeLog.info("homeLoad[\(callID)]: PATH=in-memory — rails populated, running heartbeat")
       Task { await self.runHeartbeat() }
       return
     }
@@ -580,7 +588,6 @@ final class AppState {
     homeBackgroundFetchTask = nil
     homeIsBackgroundRefreshing = false
     await Task.detached(priority: .utility) { await LocalStore.shared.clearAll() }.value
-    homeAllItems = []
     homeIsLoading = true
     homeError = nil
     await runDeltaSync(background: false)
@@ -691,7 +698,7 @@ final class AppState {
         return
       }
       handleConnectionFailure(error)
-      if homeAllItems.isEmpty && homeContinueWatching.isEmpty {
+      if homeAllRailsEmpty && homeLibraries.isEmpty {
         homeError = (error as? APIError)?.userMessage ?? "Could not connect to server."
       }
     }

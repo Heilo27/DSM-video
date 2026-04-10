@@ -99,6 +99,7 @@ struct LoginView: View {
             #else
             .frame(height: 44)
             #endif
+            .privacySensitive()
         }
         #if os(tvOS)
         .background(Color.white)
@@ -115,7 +116,7 @@ struct LoginView: View {
 
         #if !os(tvOS)
         VStack(alignment: .leading, spacing: 12) {
-          Toggle(appState.useHTTPS ? "HTTPS (ON)" : "HTTPS (OFF)", isOn: $appState.useHTTPS)
+          Toggle("HTTPS", isOn: $appState.useHTTPS)
           Toggle("Remember me", isOn: $appState.rememberMe)
         }
         .tint(.white)
@@ -150,11 +151,11 @@ struct LoginView: View {
         .padding(.horizontal, 24)
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
         #endif
-        .disabled(appState.isLoggingIn || appState.isOffline)
+        .disabled(appState.isLoggingIn || (appState.isOffline && QuickConnectResolver.extractBareID(from: appState.baseURL) != nil))
         .accessibilityLabel(appState.isLoggingIn ? "Connecting, please wait" : "Connect")
 
-        if appState.isOffline {
-          Text("No internet connection")
+        if appState.isOffline && QuickConnectResolver.extractBareID(from: appState.baseURL) != nil {
+          Text("No internet connection (QuickConnect requires internet)")
             .font(.caption)
             .foregroundStyle(.orange)
             .padding(.horizontal, 24)

@@ -145,30 +145,9 @@ struct TVLoginView: View {
 
 // MARK: - Home
 
-private let _tvHomeDateFormatterFractional: ISO8601DateFormatter = {
-  let f = ISO8601DateFormatter()
-  f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-  return f
-}()
-
-private let _tvHomeDateFormatter: ISO8601DateFormatter = {
-  let f = ISO8601DateFormatter()
-  f.formatOptions = [.withInternetDateTime]
-  return f
-}()
-
-private func parseTVHomeDate(_ iso: String) -> Date {
-  if let d = _tvHomeDateFormatterFractional.date(from: iso) { return d }
-  return _tvHomeDateFormatter.date(from: iso) ?? Date.distantPast
-}
 
 private struct TVHomeView: View {
   @Environment(AppState.self) private var appState
-  @State private var libraries: [Library] = []
-  @State private var continueWatching: [ItemSummary] = []
-  @State private var justAdded: [ItemSummary] = []
-  @State private var isLoading: Bool = false
-  @State private var loadError: String?
   @State private var showPairing: Bool = false
   @State private var showSettings: Bool = false
   @State private var showSearch: Bool = false
@@ -180,7 +159,7 @@ private struct TVHomeView: View {
 
         ScrollView(.vertical, showsIndicators: false) {
           VStack(alignment: .leading, spacing: 56) {
-            if let loadError {
+            if let loadError = appState.homeError, appState.homeAllRailsEmpty {
               ContentUnavailableView(
                 "Unable to Load",
                 systemImage: "exclamationmark.triangle",
@@ -190,17 +169,17 @@ private struct TVHomeView: View {
               .padding(.top, 60)
             } else {
               // Continue Watching rail
-              if !continueWatching.isEmpty {
-                TVLandscapeRail(title: "Continue Watching", items: continueWatching)
+              if !appState.homeContinueWatching.isEmpty {
+                TVLandscapeRail(title: "Continue Watching", items: appState.homeContinueWatching)
               }
 
               // Just Added rail
-              if !justAdded.isEmpty {
-                TVLandscapeRail(title: "Just Added", items: justAdded)
+              if !appState.homeJustAdded.isEmpty {
+                TVLandscapeRail(title: "Just Added", items: appState.homeJustAdded)
               }
 
               // Empty state
-              if libraries.isEmpty && !isLoading {
+              if appState.homeLibraries.isEmpty && !appState.homeIsLoading {
                 ContentUnavailableView(
                   "No Libraries",
                   systemImage: "film.stack",
@@ -211,7 +190,7 @@ private struct TVHomeView: View {
               }
 
               // Per-library rails
-              ForEach(libraries) { lib in
+              ForEach(appState.homeLibraries) { lib in
                 TVLibraryRail(library: lib)
               }
             }
@@ -259,66 +238,7 @@ private struct TVHomeView: View {
       TVSearchView()
         .environment(appState)
     }
-    .task { await load() }
-  }
-
-  private func load() async {
-    guard !isLoading else { return }
-    if appState.isDemoMode {
-      libraries = DemoData.libraries
-      let allItems = DemoData.movieItems + DemoData.tvItems
-      continueWatching = allItems.filter { item in
-        guard let progress = item.progress, progress.durationSeconds > 0 else { return false }
-        let frac = Double(progress.positionSeconds) / Double(progress.durationSeconds)
-        return frac > 0 && frac < 0.95
-      }
-      justAdded = Array(allItems.prefix(20))
-      return
-    }
-    loadError = nil
-    isLoading = true
-    defer { isLoading = false }
-
-    do {
-      libraries = try await appState.api.libraries().libraries
-
-      let api = appState.api
-      var allItems: [ItemSummary] = []
-      await withTaskGroup(of: [ItemSummary].self) { group in
-        for lib in libraries {
-          group.addTask {
-            (try? await api.items(libraryId: lib.id, limit: 200, offset: 0).items) ?? []
-          }
-        }
-        for await items in group {
-          allItems.append(contentsOf: items)
-        }
-      }
-
-      continueWatching = allItems
-        .filter { item in
-          guard let progress = item.progress, progress.durationSeconds > 0 else { return false }
-          let frac = Double(progress.positionSeconds) / Double(progress.durationSeconds)
-          return frac > 0 && frac < 0.95
-        }
-        .sorted { ($0.progress?.updatedAt ?? "") > ($1.progress?.updatedAt ?? "") }
-
-      justAdded = Array(
-        allItems
-          .sorted { lhs, rhs in
-            let l = parseTVHomeDate(lhs.addedAt)
-            let r = parseTVHomeDate(rhs.addedAt)
-            if l != Date.distantPast || r != Date.distantPast { return l > r }
-            return lhs.addedAt > rhs.addedAt
-          }
-          .prefix(20)
-      )
-    } catch {
-      appState.handleConnectionFailure(error)
-      loadError =
-        (error as? APIError)?.userMessage
-        ?? "Failed to load content. Check your connection and try again."
-    }
+    .task { await appState.homeLoad() }
   }
 }
 
@@ -334,6 +254,7 @@ private struct TVLandscapeRail: View {
         .font(.system(size: 28, weight: .semibold))
         .foregroundStyle(.white)
         .padding(.horizontal, 60)
+        .accessibilityAddTraits(.isHeader)
 
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(alignment: .top, spacing: 28) {
@@ -387,6 +308,8 @@ private struct TVLibraryRail: View {
         .padding(.horizontal, 60)
       }
       .buttonStyle(.plain)
+      .accessibilityLabel(library.title)
+      .accessibilityHint("Opens full library")
 
       if let error {
         Text(error)
@@ -673,6 +596,7 @@ private struct TVSettingsView: View {
               .frame(maxWidth: 400, alignment: .leading)
           }
           .buttonStyle(.plain)
+          .accessibilityHint("Double-tap to sign out of your account")
 
           Spacer()
         }

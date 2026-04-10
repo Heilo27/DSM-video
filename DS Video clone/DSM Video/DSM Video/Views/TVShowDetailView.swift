@@ -122,12 +122,14 @@ private struct TVShowDetailSplitView: View {
             Circle()
               .fill(Color.dsTextMuted)
               .frame(width: 4, height: 4)
+              .accessibilityHidden(true)
           }
           Text("\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
             .font(.system(size: 20))
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
+      .accessibilityElement(children: .combine)
       .padding(.leading, 60)
       .padding(.bottom, 60)
     }
@@ -227,7 +229,7 @@ private struct TVSeasonSection: View {
         .padding(.vertical, 20)
       }
       .buttonStyle(.plain)
-      .accessibilityLabel("Season \(season.seasonNumber), \(isExpanded ? "expanded" : "collapsed")")
+      .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
 
       Rectangle()
         .fill(Color.dsBorderSubtle)
@@ -373,7 +375,7 @@ private struct TVEpisodeRow: View {
               .rotationEffect(.degrees(-90))
           }
           .frame(width: 32, height: 32)
-          .accessibilityLabel("Episode \(ep.episodeNumber ?? 0) progress, \(Int(frac * 100)) percent watched")
+          .accessibilityLabel("\(ep.episodeNumber.map { "Episode \($0), " } ?? "")\(Int(frac * 100)) percent watched")
         }
       }
     }
@@ -650,8 +652,7 @@ private struct iOSEpisodeRow: View {
         .font(.caption.weight(.semibold).monospacedDigit())
         .foregroundStyle(.white.opacity(0.75))
         .frame(width: 32, alignment: .center)
-        .accessibilityLabel(ep.episodeNumber.map { "Episode \($0)" } ?? "")
-        .accessibilityHidden(ep.episodeNumber == nil)
+        .accessibilityHidden(true)
 
       VStack(alignment: .leading, spacing: 3) {
         Text(ep.title)
@@ -679,7 +680,7 @@ private struct iOSEpisodeRow: View {
         } else {
           iOSCircularProgress(fraction: frac)
             .frame(width: 20, height: 20)
-            .accessibilityLabel("Episode \(ep.episodeNumber ?? 0) progress, \(Int(frac * 100)) percent watched")
+            .accessibilityLabel("\(Int(frac * 100)) percent watched")
         }
       }
 

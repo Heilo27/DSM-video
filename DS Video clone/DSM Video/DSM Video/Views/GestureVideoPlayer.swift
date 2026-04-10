@@ -99,8 +99,8 @@ struct GestureVideoPlayer: View {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .background {
-                    // Flush progress immediately so it's persisted before the process suspends
-                    onProgressUpdate?(currentTime, duration)
+                    // Pause playback when backgrounded. Progress sync is handled by
+                    // the parent PlayerSheet's own scenePhase handler to avoid a double write.
                     player?.pause()
                 }
             }
@@ -495,7 +495,7 @@ struct GestureVideoPlayer: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 8)
+            .padding(.top, videoFillMode == .fill ? max(geometry.safeAreaInsets.top, 8) : 8)
             .padding(.bottom, 16)
             .background(
                 LinearGradient(
@@ -584,6 +584,7 @@ struct GestureVideoPlayer: View {
         }
         .padding(24)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityHidden(true)
     }
 
     private var volumeIndicatorOverlay: some View {

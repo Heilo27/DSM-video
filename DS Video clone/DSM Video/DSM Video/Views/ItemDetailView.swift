@@ -13,6 +13,7 @@ struct ItemDetailView: View {
   @State private var detail: ItemDetail?
   @State private var isLoading: Bool = false
   @State private var error: String?
+  @State private var downloadError: String?
 
   @State private var showPlayer: Bool = false
   @State private var isStartingDownload: Bool = false
@@ -65,6 +66,16 @@ struct ItemDetailView: View {
             downloadIconButton
             #endif
           }
+
+          // Download error (separate from detail-load error to avoid clobbering the header)
+          #if !os(tvOS)
+          if let dlErr = downloadError {
+            Text(dlErr)
+              .font(.footnote)
+              .foregroundStyle(Color.dsError)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          }
+          #endif
 
           // Next Episode button (TV show context only)
           #if !os(tvOS)
@@ -297,6 +308,14 @@ struct ItemDetailView: View {
     let durationSeconds = detail?.durationSeconds
 
     if year != nil || contentRating != nil || starRating != nil || !genres.isEmpty || durationSeconds != nil {
+      let metaLabel: String = [
+        year.map { String($0) },
+        durationSeconds.flatMap { $0 > 0 ? formatDuration($0) : nil },
+        contentRating.flatMap { $0.isEmpty ? nil : $0 },
+        starRating.map { "Rating \(String(format: "%.1f", $0)) out of 10" },
+        genres.isEmpty ? nil : genres.joined(separator: ", ")
+      ].compactMap { $0 }.joined(separator: ", ")
+
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 8) {
           if let year {
@@ -330,6 +349,8 @@ struct ItemDetailView: View {
         }
         .padding(.vertical, 2)
       }
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(metaLabel)
     }
   }
 
@@ -438,7 +459,7 @@ struct ItemDetailView: View {
       // Get playback info to get the video URL
       let info = try await appState.api.playback(id: itemID)
       guard let videoURL = info.streamUrl ?? info.hlsMasterUrl else {
-        self.error = "No playable URL available for download."
+        self.downloadError = "No playable URL available for download."
         return
       }
 
@@ -460,7 +481,7 @@ struct ItemDetailView: View {
     } catch {
       let message = (error as? APIError)?.userMessage
         ?? error.localizedDescription
-      self.error = message
+      self.downloadError = message
     }
   }
 }
@@ -739,7 +760,7 @@ private struct PlayerSheet: View {
         ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(error))
           .foregroundStyle(.white)
       } else {
-        ProgressView()
+        ProgressView("Loading video")
           .tint(.white)
       }
     }

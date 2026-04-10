@@ -254,6 +254,8 @@ private struct SearchView: View {
               SearchResultCell(item: item)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? ""), \(item.type)")
+            .accessibilityHint("Opens video details")
           }
         }
         .padding(horizontalSizeClass == .regular ? 20 : 12)
@@ -285,6 +287,13 @@ private struct SearchView: View {
       if appState.isDemoMode && recentSearchesRaw.isEmpty {
         recentSearchesRaw = ["Action movies", "The Signal", "2024"].joined(separator: "\u{001F}")
       }
+    }
+    .onChange(of: results) { _, newResults in
+      guard hasSearched && !isSearching else { return }
+      let message = newResults.isEmpty
+        ? "No results found"
+        : "\(newResults.count) result\(newResults.count == 1 ? "" : "s") found"
+      AccessibilityNotification.Announcement(message).post()
     }
 
     if isEmbedded {
@@ -539,6 +548,7 @@ struct DownloadsView: View {
                     }
                   }
                   .buttonStyle(.plain)
+                  .accessibilityHint("Double-tap to play")
                 }
               }
               .padding(.horizontal, horizontalSizeClass == .regular ? 20 : 12)
@@ -957,6 +967,7 @@ struct SettingsView: View {
         } label: {
           Label("How To Use DSM Video", systemImage: "book")
         }
+        .accessibilityLabel("How To Use DSM Video")
       }
 
       Section("Support") {

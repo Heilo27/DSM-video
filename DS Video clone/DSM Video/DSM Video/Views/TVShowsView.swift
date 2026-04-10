@@ -82,7 +82,7 @@ struct TVShowsView: View {
   var body: some View {
     ScrollView {
       if isLoading && shows.isEmpty {
-        ProgressView("Loading")
+        ProgressView("Loading TV shows")
           #if os(tvOS)
           .padding(.top, 60)
           #else
@@ -120,7 +120,7 @@ struct TVShowsView: View {
               TVShowPosterCell(show: show)
             }
             .buttonStyle(.card)
-            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
+            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? ""), \(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
             .accessibilityHint("Opens show details")
           }
         }

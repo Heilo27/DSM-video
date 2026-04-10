@@ -31,19 +31,6 @@ struct Library: Codable, Identifiable, Hashable, Sendable {
   let kind: String
 }
 
-/// Lightweight per-library stat returned by GET /api/v1/libraries/summary.
-/// Used to detect additions/removals (count) and metadata rescans (lastUpdatedAt)
-/// without fetching any item data.
-struct LibrarySummary: Decodable, Sendable {
-  let libraryId: String
-  let count: Int
-  let lastUpdatedAt: String
-}
-
-struct LibrarySummariesResponse: Decodable {
-  let libraries: [LibrarySummary]
-}
-
 // MARK: - Items
 
 struct ItemsResponse: Decodable {

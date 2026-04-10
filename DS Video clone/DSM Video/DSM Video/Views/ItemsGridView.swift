@@ -358,5 +358,6 @@ struct ItemPosterCell: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.horizontal, 8)
     .padding(.bottom, 8)
+    .accessibilityHidden(true)
   }
 }

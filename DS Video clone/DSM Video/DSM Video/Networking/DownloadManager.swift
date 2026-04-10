@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os.log
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -65,6 +66,8 @@ struct ActiveDownload: Identifiable {
 @Observable
 final class DownloadManager: NSObject {
   static let shared = DownloadManager()
+
+  private let log = Logger(subsystem: "com.dsm.dsvideo", category: "DownloadManager")
 
   private(set) var activeDownloads: [String: ActiveDownload] = [:]
   private(set) var downloadProgress: [String: Double] = [:]
@@ -475,7 +478,7 @@ final class DownloadManager: NSObject {
               httpResponse.statusCode == 200,
               !data.isEmpty else {
           let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-          print("[DownloadManager] Poster fetch failed: HTTP \(status) for \(posterURL)")
+          log.debug("[DownloadManager] Poster fetch failed: HTTP \(status)")
           return
         }
 

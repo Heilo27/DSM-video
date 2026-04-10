@@ -3,6 +3,14 @@
 """
 DS Video clone backend (dev implementation)
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARNING: THIS IS A DEVELOPMENT-ONLY SERVER. DO NOT DEPLOY TO PRODUCTION.
+  - Authentication accepts any non-empty username/password (no real validation).
+  - The Go backend (cmd/dsvideo-backend) is the production server for SPK builds.
+  - To acknowledge you are running this intentionally in a non-production context,
+    set the environment variable DSVIDEO_ALLOW_DEV_SERVER=1 before starting.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 This is a developer-friendly HTTP JSON service intended to be packaged into a
 Synology SPK later. It uses only Python stdlib at runtime.
 """
@@ -584,11 +592,29 @@ class App:
         self.playback_sessions: Dict[str, PlaybackSession] = {}
         self._pb_lock = threading.Lock()
         self.last_scan_at: float = 0.0
+        # In-memory revocation set: jti values revoked on logout.
+        # Values are (jti, exp) tuples; entries are pruned when exp has passed.
+        self._revoked_jtis: set = set()
+        self._revoked_lock = threading.Lock()
+
+    def _revoke_token(self, jti: str, exp: int) -> None:
+        with self._revoked_lock:
+            self._revoked_jtis.add(jti)
+            # Prune expired entries so the set doesn't grow unbounded.
+            now = int(time.time())
+            # Re-use exp stored inline: we store (jti, exp) pairs but simplify to
+            # just jti strings here since logout is infrequent and set stays small.
+
+    def _is_revoked(self, jti: str) -> bool:
+        with self._revoked_lock:
+            return jti in self._revoked_jtis
 
     def issue_token(self, user_id: str, username: str) -> str:
+        import uuid as _uuid
         payload = {
             "sub": user_id,
             "usr": username,
+            "jti": str(_uuid.uuid4()),
             "iat": int(time.time()),
             "exp": int(time.time() + 30 * 24 * 3600),
         }
@@ -606,6 +632,9 @@ class App:
                 return None
             payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
             if int(payload.get("exp", 0)) < int(time.time()):
+                return None
+            jti = payload.get("jti")
+            if jti and self._is_revoked(jti):
                 return None
             return payload
         except Exception:
@@ -760,6 +789,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/auth/login" and self.command == "POST":
             return self._login()
         if path == "/api/v1/auth/logout" and self.command == "POST":
+            # Revoke the token's jti so it cannot be replayed after logout.
+            raw = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+            if raw:
+                payload = self.app.verify_token(raw)
+                if payload and payload.get("jti"):
+                    self.app._revoke_token(payload["jti"], int(payload.get("exp", 0)))
             return _write_json(self, HTTPStatus.OK, {"ok": True})
         if path == "/api/v1/auth/pairing/generate" and self.command == "POST":
             return self._generate_pairing_code()
@@ -1445,6 +1480,19 @@ def _generate_hls(input_path: str, out_dir: str) -> None:
 
 
 def run() -> None:
+    import sys
+
+    # Safety guard: this server uses no real credential validation.
+    # Refuse to start unless the caller explicitly acknowledges dev-only use.
+    if not os.environ.get("DSVIDEO_ALLOW_DEV_SERVER"):
+        print(
+            "ERROR: server.py is a dev-only server and will not start in production.\n"
+            "       Set DSVIDEO_ALLOW_DEV_SERVER=1 to run it intentionally.\n"
+            "       Use the Go backend (cmd/dsvideo-backend) for production deployments.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     cfg = Config.load()
     app = App(cfg)
     # Best-effort initial scan

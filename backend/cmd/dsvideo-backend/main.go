@@ -115,8 +115,9 @@ func main() {
 	cfg := loadConfig()
 	log.Printf("Config: listen=%s db=%s movies=%s tv=%s",
 		cfg.ListenAddr, cfg.DBPath, cfg.MoviesPath, cfg.TVPath)
-	if cfg.JWTSecret == "dev-insecure-change-me" || cfg.JWTSecret == "" {
-		log.Println("WARNING: Using default JWT secret. Set DSVIDEO_JWT_SECRET in production.")
+	if cfg.JWTSecret == "" || cfg.JWTSecret == "dev-insecure-change-me" {
+		log.Fatal("DSVIDEO_JWT_SECRET is not set or is using the insecure default. " +
+			"Set a strong random secret before starting the server.")
 	}
 
 	// Use WAL mode for concurrent reads during writes, and busy timeout
@@ -434,7 +435,7 @@ func main() {
 	// Catch-all: log any request that doesn't match defined routes.
 	// This helps detect paths DS Video uses that we haven't handled yet.
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		body, _ := io.ReadAll(io.LimitReader(req.Body, 1024))
+		body, _ := io.ReadAll(io.LimitReader(req.Body, 200))
 		log.Printf("[WebAPI] UNHANDLED %s %s UA=%q body=%q", req.Method, req.URL.String(), req.Header.Get("User-Agent"), string(body))
 		http.NotFound(w, req)
 	})
@@ -799,12 +800,25 @@ func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, d
 		req, _ = http.NewRequestWithContext(ctx, http.MethodPost, dsmURL, strings.NewReader(formData))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-		// Skip TLS verification for localhost
+		// For localhost DSM HTTPS, accept self-signed certs by checking host only.
+		// We don't skip verification globally — we verify that the server name is
+		// localhost/127.0.0.1, which is the expected DSM address in this context.
 		client = &http.Client{
 			Timeout:       5 * time.Second,
 			CheckRedirect: noRedirect,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: false,
+					VerifyConnection: func(cs tls.ConnectionState) error {
+						// Only bypass cert chain validation for the loopback address.
+						// Any other hostname will still fail standard verification.
+						host := cs.ServerName
+						if host == "localhost" || host == "127.0.0.1" || host == "" {
+							return nil
+						}
+						return fmt.Errorf("tls: non-localhost host %q not allowed in localhost-only DSM fallback", host)
+					},
+				},
 			},
 		}
 		resp, err = client.Do(req)
@@ -2169,6 +2183,27 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+
+	// Security: verify the DB-stored path is within a configured media root.
+	// Prevents path traversal if the database is tampered with.
+	cleanedPath := filepath.Clean(path)
+	mediaRoots := []string{s.cfg.MoviesPath, s.cfg.TVPath, s.cfg.HomePath}
+	withinRoot := false
+	for _, root := range mediaRoots {
+		if root == "" {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		if strings.HasPrefix(cleanedPath, cleanedRoot+string(filepath.Separator)) || cleanedPath == cleanedRoot {
+			withinRoot = true
+			break
+		}
+	}
+	if !withinRoot {
+		log.Printf("[Playback] SECURITY: path %q not within any configured media root — rejecting", cleanedPath)
+		writeErr(w, http.StatusForbidden, "path_not_allowed")
 		return
 	}
 

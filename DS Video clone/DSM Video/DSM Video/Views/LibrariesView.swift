@@ -36,6 +36,7 @@ struct LibrariesView: View {
           } label: {
             Label(lib.title, systemImage: libraryIcon(lib.kind))
           }
+          .accessibilityLabel(lib.title)
         }
       }
     }
@@ -96,7 +97,7 @@ struct LibraryHomeView: View {
 
   var body: some View {
     let content = Group {
-      if (appState.homeIsLoading || appState.homeIsCacheDecoding) && appState.homeAllItems.isEmpty {
+      if (appState.homeIsLoading || appState.homeIsCacheDecoding) && appState.homeAllRailsEmpty {
         ProgressView("Loading content")
           .tint(Color.dsTextPrimary)
           .accessibilityLabel("Loading content, please wait")
@@ -112,7 +113,7 @@ struct LibraryHomeView: View {
             .buttonStyle(.bordered)
             .accessibilityLabel("Retry loading content")
         }
-      } else if appState.homeAllRailsEmpty && !appState.homeIsLoading && !appState.homeIsCacheDecoding && appState.homeAllItems.isEmpty {
+      } else if appState.homeAllRailsEmpty && !appState.homeIsLoading && !appState.homeIsCacheDecoding {
         ContentUnavailableView(
           "Nothing here yet",
           systemImage: "play.rectangle",
@@ -159,7 +160,7 @@ struct LibraryHomeView: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
       loadLog.info("LibraryHomeView: playerDidDismiss — triggering homeRefreshProgress")
-      guard !appState.homeAllItems.isEmpty else { return }
+      guard !appState.homeAllRailsEmpty || !appState.homeLibraries.isEmpty else { return }
       Task { await appState.homeRefreshProgress() }
     }
     .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in

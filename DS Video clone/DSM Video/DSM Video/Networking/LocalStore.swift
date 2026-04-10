@@ -29,7 +29,7 @@ struct HomeRails: Sendable {
 actor LocalStore {
   static let shared: LocalStore = {
     let store = LocalStore()
-    Task { try? await store.setup() }
+    Task { await store.setupLogged() }
     return store
   }()
 
@@ -40,6 +40,15 @@ actor LocalStore {
 
   // Called once at startup. Using a separate async method avoids the actor-isolation
   // restriction on calling isolated methods from a synchronous init.
+  // setupLogged wraps setup() so errors are logged rather than silently swallowed.
+  func setupLogged() {
+    do {
+      try setup()
+    } catch {
+      log.error("LocalStore.setup failed: \(error.localizedDescription)")
+    }
+  }
+
   private func setup() throws {
     try openDatabase()
     try migrate()
@@ -60,6 +69,21 @@ actor LocalStore {
     exec("PRAGMA journal_mode=WAL")
     exec("PRAGMA synchronous=NORMAL")
     exec("PRAGMA foreign_keys=ON")
+
+    // Apply NSFileProtectionComplete to DB and WAL/SHM sidecars.
+    // WAL sidecars are created lazily when WAL mode activates; guards make this a no-op if absent.
+    applyFileProtection(to: dbURL)
+    applyFileProtection(to: docs.appendingPathComponent("dsreel.db-wal"))
+    applyFileProtection(to: docs.appendingPathComponent("dsreel.db-shm"))
+  }
+
+  private func applyFileProtection(to url: URL) {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: url.path) else { return }
+    try? fm.setAttributes(
+      [.protectionKey: FileProtectionType.complete],
+      ofItemAtPath: url.path
+    )
   }
 
   private func migrate() throws {
@@ -232,6 +256,14 @@ actor LocalStore {
 
   // MARK: - Rails Queries
 
+  // Shared 17-column projection used by all three rail queries.
+  private static let itemSelectColumns = """
+    i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
+    i.added_at, i.rating, i.poster_image_id, i.backdrop_image_id,
+    i.show_name, i.season_number, i.episode_number, i.change_seq,
+    p.position_seconds, p.duration_seconds, p.updated_at
+    """
+
   func queryRails() -> HomeRails {
     HomeRails(
       continueWatching: queryContinueWatching(),
@@ -242,10 +274,7 @@ actor LocalStore {
 
   private func queryContinueWatching() -> [ItemSummary] {
     let sql = """
-      SELECT i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-             i.added_at, i.rating, i.poster_image_id, i.backdrop_image_id,
-             i.show_name, i.season_number, i.episode_number, i.change_seq,
-             p.position_seconds, p.duration_seconds, p.updated_at
+      SELECT \(Self.itemSelectColumns)
       FROM items i
       JOIN progress p ON p.item_id = i.id
       WHERE p.duration_seconds > 0
@@ -257,18 +286,16 @@ actor LocalStore {
   }
 
   private func queryJustAdded() -> [ItemSummary] {
-    // Show recently-added items regardless of watch state.
-    // Exclude only fully-watched items (≥95%) which belong in Recently Watched.
+    // Show recently-added items that have not been started (< 5% watched).
+    // Mirrors the iOS home rail: exclude in-progress (>= 5%) and fully-watched (>= 95%)
+    // items, which belong in Continue Watching / Recently Watched respectively.
     let sql = """
-      SELECT i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-             i.added_at, i.rating, i.poster_image_id, i.backdrop_image_id,
-             i.show_name, i.season_number, i.episode_number, i.change_seq,
-             p.position_seconds, p.duration_seconds, p.updated_at
+      SELECT \(Self.itemSelectColumns)
       FROM items i
       LEFT JOIN progress p ON p.item_id = i.id
       WHERE p.item_id IS NULL
          OR p.duration_seconds = 0
-         OR CAST(p.position_seconds AS REAL) / p.duration_seconds < 0.95
+         OR CAST(p.position_seconds AS REAL) / p.duration_seconds < 0.05
       ORDER BY i.added_at DESC
       LIMIT 20
     """
@@ -277,10 +304,7 @@ actor LocalStore {
 
   private func queryRecentlyWatched() -> [ItemSummary] {
     let sql = """
-      SELECT i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-             i.added_at, i.rating, i.poster_image_id, i.backdrop_image_id,
-             i.show_name, i.season_number, i.episode_number, i.change_seq,
-             p.position_seconds, p.duration_seconds, p.updated_at
+      SELECT \(Self.itemSelectColumns)
       FROM items i
       JOIN progress p ON p.item_id = i.id
       WHERE p.duration_seconds > 0

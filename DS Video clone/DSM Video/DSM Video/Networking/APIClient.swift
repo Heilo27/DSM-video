@@ -19,12 +19,6 @@ struct APIClient {
     try await request(path: "/api/v1/libraries", method: "GET", body: Optional<Int>.none, response: LibrariesResponse.self, timeoutInterval: 15)
   }
 
-  /// One-request change detection: returns count + lastUpdatedAt per library.
-  /// The client compares these against its cache to decide which libraries need re-fetching.
-  func librariesSummary() async throws -> LibrarySummariesResponse {
-    try await request(path: "/api/v1/libraries/summary", method: "GET", body: Optional<Int>.none, response: LibrarySummariesResponse.self, timeoutInterval: 10)
-  }
-
   func items(libraryId: String, limit: Int = 50, offset: Int = 0) async throws -> ItemsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL

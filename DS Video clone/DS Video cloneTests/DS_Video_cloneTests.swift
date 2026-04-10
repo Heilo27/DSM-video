@@ -326,9 +326,9 @@ struct APIModelsCodingTests {
     #expect(detail.id == "m1")
     #expect(detail.title == "Inception")
     #expect(detail.year == 2010)
-    #expect(detail.genres.count == 2)
-    #expect(detail.cast.count == 1)
-    #expect(detail.cast[0].name == "Leonardo DiCaprio")
+    #expect(detail.genres?.count == 2)
+    #expect(detail.cast?.count == 1)
+    #expect(detail.cast?[0].name == "Leonardo DiCaprio")
     #expect(detail.images.poster.id == "poster1")
     #expect(detail.images.backdrop.mapperId == "42")
   }

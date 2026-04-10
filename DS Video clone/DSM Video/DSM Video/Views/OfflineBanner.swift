@@ -15,6 +15,7 @@ struct OfflineBanner: View {
       HStack(spacing: 8) {
         Image(systemName: isOffline ? "wifi.slash" : "server.rack")
           .font(.footnote.weight(.semibold))
+          .accessibilityHidden(true)
         Text(message)
           .font(.footnote.weight(.semibold))
       }
@@ -24,6 +25,9 @@ struct OfflineBanner: View {
       .frame(maxWidth: .infinity)
       .background(Color(white: 0.15))
       .transition(.move(edge: .top).combined(with: .opacity))
+      .onAppear {
+        AccessibilityNotification.Announcement(message).post()
+      }
     }
   }
 }
