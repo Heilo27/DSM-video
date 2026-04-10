@@ -15,7 +15,6 @@ struct ItemDetailView: View {
   @State private var error: String?
 
   @State private var showPlayer: Bool = false
-  @State private var showDemoAlert: Bool = false
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
 
@@ -45,11 +44,7 @@ struct ItemDetailView: View {
           // Action row: Play + compact icon buttons
           HStack(spacing: 12) {
             Button {
-              if appState.isDemoMode {
-                showDemoAlert = true
-              } else {
-                showPlayer = true
-              }
+              showPlayer = true
             } label: {
               Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
                 .font(.headline.weight(.semibold))
@@ -113,7 +108,7 @@ struct ItemDetailView: View {
               .fixedSize(horizontal: false, vertical: true)
           }
 
-          if let director = detail?.cast.first(where: { $0.role == "Director" }) {
+          if let director = detail?.cast?.first(where: { $0.role == "Director" }) {
             HStack(spacing: 4) {
               Text("Dir.")
                 .foregroundStyle(Color.dsTextSecondary)
@@ -154,11 +149,6 @@ struct ItemDetailView: View {
         #if !os(tvOS)
         .toolbarVisibility(.hidden, for: .tabBar)
         #endif
-    }
-    .alert("Demo Mode", isPresented: $showDemoAlert) {
-      Button("OK", role: .cancel) { }
-    } message: {
-      Text("Video playback is not available in the demo. In the real app, this button streams directly from your Synology NAS.")
     }
     #if !os(tvOS)
     .toolbar {
@@ -736,6 +726,12 @@ private struct PlayerSheet: View {
                 durationSeconds: durationInt
               )
             }
+          },
+          onPlaybackFailed: {
+            // Reset and re-fetch a fresh playback URL. Handles stale HLS sessions
+            // (e.g. server restart clears in-memory sessions, causing 404 on stream).
+            playbackURL = nil
+            Task { await start() }
           }
         )
         .ignoresSafeArea()

@@ -81,6 +81,9 @@ type Server struct {
 	metaInFlight  map[string]bool // lowercase title → in-progress guard
 	metaSemaphore chan struct{}   // limits concurrent TMDb API calls
 
+	// Serializes progress writes to avoid SQLite busy-timeout under concurrent playback.
+	progressMu sync.Mutex
+
 	// Token revocation list: jti → expiry unix timestamp
 	revokedTokens sync.Map
 
@@ -117,7 +120,10 @@ func main() {
 	}
 
 	// Use WAL mode for concurrent reads during writes, and busy timeout
-	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_txlock=immediate"
+	// WAL mode: readers never block writers, writers only block other writers.
+	// busy_timeout lets writers wait for the lock instead of failing immediately.
+	// Do NOT use _txlock=immediate — it prevents concurrent write transactions in WAL mode.
+	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)"
 	log.Printf("Opening database: %s", cfg.DBPath)
 	db, err := sql.Open("sqlite", dbConnStr)
 	if err != nil {
@@ -132,6 +138,16 @@ func main() {
 	if err := migrate(db); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
+
+	// Bootstrap seq counters if they are 0 but rows already exist.
+	// This handles the case where progress/items were written before seq tracking
+	// was implemented, preventing clients from skipping the initial progress fetch.
+	_, _ = db.Exec(`
+		UPDATE sync_state SET value = (SELECT COUNT(*) FROM progress)
+		WHERE key = 'progress_seq' AND value = 0 AND (SELECT COUNT(*) FROM progress) > 0;
+		UPDATE sync_state SET value = COALESCE((SELECT MAX(change_seq) FROM items), 0)
+		WHERE key = 'item_seq' AND value = 0 AND (SELECT COUNT(*) FROM items) > 0;
+	`)
 
 	// Initialize transcode components
 	prober := transcode.NewProber(cfg.FFprobePath)
@@ -298,13 +314,20 @@ func main() {
 		sub.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
 		sub.Get("/playback/{sessionId}/segments/{name}", s.handleHLSSegment)
 		sub.Get("/images/{id}", s.handleImage)
+		sub.Get("/version", s.handleVersion)
+		sub.Get("/sync/heartbeat", s.handleSyncHeartbeat)
 		sub.Group(func(sub chi.Router) {
 			sub.Use(s.authMiddleware)
 			sub.Post("/auth/pairing/generate", s.handlePairingGenerate)
+			sub.Post("/auth/refresh", s.handleTokenRefresh)
+			sub.Get("/sync/status", s.handleSyncStatus)
+			sub.Get("/sync/items", s.handleSyncItems)
+			sub.Get("/sync/deleted", s.handleSyncDeleted)
 			sub.Get("/libraries", s.handleLibraries)
 			sub.Get("/items", s.handleItems)
 			sub.Get("/items/{id}", s.handleItemDetail)
 			sub.Get("/items/{id}/playback", s.handlePlayback)
+			sub.Get("/progress/all", s.handleProgressAll)
 			sub.Get("/progress", s.handleProgressBatch)
 			sub.Post("/items/{id}/progress", s.handleProgress)
 			sub.Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
@@ -350,18 +373,27 @@ func main() {
 
 		// Images don't require auth - accessed via <img> tags which can't send headers
 		r.Get("/images/{id}", s.handleImage)
+		r.Get("/version", s.handleVersion)
+		r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.authMiddleware)
 
 			// Pairing generate requires auth — the caller's identity seeds the tvOS token
 			r.Post("/auth/pairing/generate", s.handlePairingGenerate)
+			r.Post("/auth/refresh", s.handleTokenRefresh)
+
+			// Delta sync endpoints
+			r.Get("/sync/status", s.handleSyncStatus)
+			r.Get("/sync/items", s.handleSyncItems)
+			r.Get("/sync/deleted", s.handleSyncDeleted)
 
 			r.Get("/libraries", s.handleLibraries)
 			r.Get("/libraries/summary", s.handleLibrariesSummary)
 			r.Get("/items", s.handleItems)
 			r.Get("/items/{id}", s.handleItemDetail)
 			r.Get("/items/{id}/playback", s.handlePlayback)
+			r.Get("/progress/all", s.handleProgressAll)
 			r.Get("/progress", s.handleProgressBatch)
 			r.Post("/items/{id}/progress", s.handleProgress)
 			r.Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
@@ -553,6 +585,8 @@ CREATE TABLE IF NOT EXISTS webapi_sessions (
 		"ALTER TABLE items ADD COLUMN episode_number INTEGER",
 		"ALTER TABLE items ADD COLUMN episode_title TEXT",
 		"ALTER TABLE items ADD COLUMN metadata_fetched_at TEXT",
+		// Delta sync support
+		"ALTER TABLE items ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, m := range migrations {
 		// Ignore errors - column may already exist
@@ -563,6 +597,7 @@ CREATE TABLE IF NOT EXISTS webapi_sessions (
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_items_library_added ON items(library_id, added_at)",
 		"CREATE INDEX IF NOT EXISTS idx_items_tmdb_id ON items(tmdb_id)",
+		"CREATE INDEX IF NOT EXISTS idx_items_change_seq ON items(change_seq)",
 	}
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
@@ -570,7 +605,62 @@ CREATE TABLE IF NOT EXISTS webapi_sessions (
 		}
 	}
 
+	// Step 4: Create sync_state and deleted_items tables (delta sync)
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS sync_state (
+  key   TEXT PRIMARY KEY,
+  value INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO sync_state(key, value) VALUES ('item_seq', 0);
+INSERT OR IGNORE INTO sync_state(key, value) VALUES ('progress_seq', 0);
+
+CREATE TABLE IF NOT EXISTS deleted_items (
+  item_id    TEXT NOT NULL,
+  change_seq INTEGER NOT NULL,
+  deleted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deleted_items_seq ON deleted_items(change_seq);
+`)
+	if err != nil {
+		return fmt.Errorf("create sync_state: %w", err)
+	}
+
 	return nil
+}
+
+// -------------------------
+// Sync State Helpers
+// -------------------------
+
+// incrementSeq atomically increments a sync counter and returns the new value.
+func (s *Server) incrementSeq(key string) int64 {
+	var newVal int64
+	_ = s.db.QueryRow(
+		`UPDATE sync_state SET value = value + 1 WHERE key = ? RETURNING value`, key,
+	).Scan(&newVal)
+	return newVal
+}
+
+// getSyncSeqs returns the current item_seq and progress_seq.
+func (s *Server) getSyncSeqs() (itemSeq, progressSeq int64) {
+	rows, err := s.db.Query(`SELECT key, value FROM sync_state WHERE key IN ('item_seq','progress_seq')`)
+	if err != nil {
+		return 0, 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var v int64
+		if rows.Scan(&k, &v) == nil {
+			switch k {
+			case "item_seq":
+				itemSeq = v
+			case "progress_seq":
+				progressSeq = v
+			}
+		}
+	}
+	return
 }
 
 // -------------------------
@@ -1967,6 +2057,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
 		http.ServeFile(w, r, cachedPath)
 		return
 	}
@@ -2009,6 +2100,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 			cached, time.Now().UTC().Format(time.RFC3339), imageID,
 		)
 
+		w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
 		http.ServeFile(w, r, cached)
 		return
 	}
@@ -2052,6 +2144,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
 	http.ServeFile(w, r, cached)
 }
 
@@ -2158,21 +2251,10 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode)
 			if err != nil {
 				log.Printf("Failed to start transcode session: %v", err)
-				// Fall back to legacy HLS generation
-				dir := filepath.Join(os.TempDir(), "dsvideo_hls_"+sessionID)
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					writeErr(w, http.StatusInternalServerError, "hls_prepare_failed")
-					return
-				}
-				ps.HLSDir = dir
-				go func() {
-					if err := s.legacyGenerateHLS(path, dir); err != nil {
-						log.Printf("legacy HLS generation failed for %s: %v", path, err)
-					}
-				}()
-			} else {
-				ps.HLSDir = hlsSession.OutputDir
+				writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
+				return
 			}
+			ps.HLSDir = hlsSession.OutputDir
 		} else {
 			// No HLS generator - fall back to direct serving for web clients
 			// (browser may or may not handle the format, but it's better than nothing)
@@ -2516,16 +2598,289 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	u := userFromCtx(r.Context())
 	now := time.Now().UTC().Format(time.RFC3339)
+	s.progressMu.Lock()
 	_, err := s.db.Exec(
 		"INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at) VALUES(?,?,?,?,?) "+
 			"ON CONFLICT(item_id, user_id) DO UPDATE SET position_seconds=excluded.position_seconds, duration_seconds=excluded.duration_seconds, updated_at=excluded.updated_at",
 		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now,
 	)
+	s.progressMu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
+	s.incrementSeq("progress_seq")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// -------------------------
+// Version & Sync Endpoints
+// -------------------------
+
+// handleVersion — GET /api/v1/version
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"serverVersion":    BuildVersion,
+		"minClientVersion": "1.0.0",
+		"capabilities":     []string{"delta-sync", "heartbeat", "token-refresh", "progress-all"},
+	})
+}
+
+// handleSyncStatus — GET /api/v1/sync/status
+func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	itemSeq, progressSeq := s.getSyncSeqs()
+	var totalItems int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&totalItems)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"itemSeq":     itemSeq,
+		"progressSeq": progressSeq,
+		"totalItems":  totalItems,
+	})
+}
+
+// handleSyncHeartbeat — GET /api/v1/sync/heartbeat (no auth required — token via query param)
+func (s *Server) handleSyncHeartbeat(w http.ResponseWriter, r *http.Request) {
+	itemSeq, progressSeq := s.getSyncSeqs()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"itemSeq":      itemSeq,
+		"progressSeq":  progressSeq,
+		"serverTimeMs": time.Now().UnixMilli(),
+	})
+}
+
+// handleSyncItems — GET /api/v1/sync/items?since=N&limit=500
+// Returns items with change_seq > since, ordered by change_seq ASC.
+// Special case: since=0 returns ALL items (>= 0) so a fresh client gets the
+// full library even if items haven't been rescanned and still have change_seq=0.
+func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	// afterRowid is used for offset-style pagination when all change_seq values
+	// are equal (e.g. 0 for pre-delta-sync DBs). The client passes the last
+	// rowid it received so we can page forward without re-fetching the same rows.
+	afterRowid, _ := strconv.ParseInt(r.URL.Query().Get("afterRowid"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+
+	u := userFromCtx(r.Context())
+
+	// When since=0 the client wants everything — use >= so items with the
+	// default change_seq=0 (pre-existing rows not yet rescanned) are included.
+	op := ">"
+	if since == 0 {
+		op = ">="
+	}
+	// When afterRowid is provided, add a secondary rowid filter to page through
+	// items that all share the same change_seq (avoids infinite loop at seq=0).
+	rowidClause := ""
+	if afterRowid > 0 {
+		rowidClause = "AND i.rowid > ?"
+	}
+	query := fmt.Sprintf(`
+		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
+		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
+		       i.show_name, i.season_number, i.episode_number, i.change_seq,
+		       p.position_seconds, p.duration_seconds, p.updated_at
+		FROM items i
+		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		WHERE i.change_seq %s ? %s
+		ORDER BY i.change_seq ASC, i.rowid ASC
+		LIMIT ?`, op, rowidClause)
+
+	var rows *sql.Rows
+	var err error
+	if afterRowid > 0 {
+		rows, err = s.db.Query(query, u.ID, since, afterRowid, limit+1)
+	} else {
+		rows, err = s.db.Query(query, u.ID, since, limit+1)
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	defer rows.Close()
+
+	type syncItem struct {
+		ID              string  `json:"id"`
+		LibraryID       string  `json:"libraryId"`
+		Type            string  `json:"type"`
+		Title           string  `json:"title"`
+		Year            *int    `json:"year,omitempty"`
+		DurationSeconds *int    `json:"durationSeconds,omitempty"`
+		AddedAt         string  `json:"addedAt"`
+		Rating          *float64 `json:"rating,omitempty"`
+		PosterImageID   *string  `json:"posterImageId,omitempty"`
+		BackdropImageID *string  `json:"backdropImageId,omitempty"`
+		ShowName        *string  `json:"showName,omitempty"`
+		SeasonNumber    *int    `json:"seasonNumber,omitempty"`
+		EpisodeNumber   *int    `json:"episodeNumber,omitempty"`
+		ChangeSeq       int64   `json:"changeSeq"`
+		Progress        *map[string]any `json:"progress,omitempty"`
+	}
+
+	items := make([]syncItem, 0, limit)
+	var maxSeq, maxRowid int64
+	for rows.Next() {
+		var item syncItem
+		var rowid int64
+		var year, dur, posSeconds, durSeconds sql.NullInt64
+		var rating sql.NullFloat64
+		var poster, backdrop, showName sql.NullString
+		var seasonNum, episodeNum sql.NullInt64
+		var progUpdatedAt sql.NullString
+
+		if err := rows.Scan(
+			&rowid, &item.ID, &item.LibraryID, &item.Type, &item.Title, &year, &dur,
+			&item.AddedAt, &rating, &poster, &backdrop,
+			&showName, &seasonNum, &episodeNum, &item.ChangeSeq,
+			&posSeconds, &durSeconds, &progUpdatedAt,
+		); err != nil {
+			continue
+		}
+		if rowid > maxRowid {
+			maxRowid = rowid
+		}
+		if year.Valid { v := int(year.Int64); item.Year = &v }
+		if dur.Valid { v := int(dur.Int64); item.DurationSeconds = &v }
+		if rating.Valid { item.Rating = &rating.Float64 }
+		if poster.Valid && poster.String != "" { item.PosterImageID = &item.ID }
+		if backdrop.Valid && backdrop.String != "" { item.BackdropImageID = &item.ID }
+		if showName.Valid { item.ShowName = &showName.String }
+		if seasonNum.Valid { v := int(seasonNum.Int64); item.SeasonNumber = &v }
+		if episodeNum.Valid { v := int(episodeNum.Int64); item.EpisodeNumber = &v }
+		if posSeconds.Valid && durSeconds.Valid {
+			p := map[string]any{
+				"positionSeconds": posSeconds.Int64,
+				"durationSeconds": durSeconds.Int64,
+				"updatedAt":       progUpdatedAt.String,
+			}
+			item.Progress = &p
+		}
+		if item.ChangeSeq > maxSeq {
+			maxSeq = item.ChangeSeq
+		}
+		items = append(items, item)
+	}
+
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+
+	// nextSeq is the cursor the client should pass as `since` on the next call.
+	// When all items share change_seq=0 (pre-delta-sync DB), maxSeq stays 0 —
+	// equal to `since` — so the client would loop forever re-fetching the same page.
+	// Use the server's authoritative item_seq when maxSeq won't advance the cursor.
+	nextSeq := maxSeq
+	if !hasMore && nextSeq <= since {
+		serverSeq, _ := s.getSyncSeqs()
+		if serverSeq > nextSeq {
+			nextSeq = serverSeq
+		} else {
+			// Server seq is also 0 (nothing scanned yet). Advance past since so
+			// the client treats this as "fully synced" and stops paging.
+			nextSeq = since + 1
+		}
+	}
+
+	// nextAfterRowid: when hasMore and the seq cursor can't advance (all items
+	// share the same change_seq), the client must page by rowid instead.
+	// It should pass afterRowid=<this value> on the next request.
+	resp := map[string]any{
+		"items":   items,
+		"nextSeq": nextSeq,
+		"hasMore": hasMore,
+	}
+	if hasMore && maxSeq <= since {
+		resp["nextAfterRowid"] = maxRowid
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleSyncDeleted — GET /api/v1/sync/deleted?since=N
+// Returns IDs of items deleted since the given change_seq.
+// We track deletions via a deleted_items table populated during scan cleanup.
+func (s *Server) handleSyncDeleted(w http.ResponseWriter, r *http.Request) {
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	itemSeq, _ := s.getSyncSeqs()
+
+	rows, err := s.db.Query(
+		`SELECT item_id FROM deleted_items WHERE change_seq > ? ORDER BY change_seq ASC`, since)
+	if err != nil {
+		// Table may not exist yet — return empty list gracefully
+		writeJSON(w, http.StatusOK, map[string]any{"deletedIds": []string{}, "asOf": itemSeq})
+		return
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deletedIds": ids, "asOf": itemSeq})
+}
+
+// handleTokenRefresh — POST /api/v1/auth/refresh
+// Accepts a valid JWT and returns a new one with a fresh expiry.
+func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r.Context())
+	// Generate new JTI
+	jtiBytes := make([]byte, 16)
+	if _, err := rand.Read(jtiBytes); err != nil {
+		writeErr(w, http.StatusInternalServerError, "token_generation_failed")
+		return
+	}
+	claims := jwt.MapClaims{
+		"sub": u.ID,
+		"usr": u.Username,
+		"jti": hex.EncodeToString(jtiBytes),
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(90 * 24 * time.Hour).Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(s.cfg.JWTSecret))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "token_signing_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": signed,
+		"user":  map[string]any{"id": u.ID, "username": u.Username, "displayName": u.Username},
+	})
+}
+
+// handleProgressAll — GET /api/v1/progress/all
+// Returns all progress rows for the authenticated user in a single query.
+func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r.Context())
+	rows, err := s.db.Query(
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ?",
+		u.ID,
+	)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	defer rows.Close()
+	result := make(map[string]any)
+	for rows.Next() {
+		var itemID, updatedAt string
+		var pos, dur int
+		if err := rows.Scan(&itemID, &pos, &dur, &updatedAt); err != nil {
+			continue
+		}
+		result[itemID] = map[string]any{
+			"positionSeconds": pos,
+			"durationSeconds": dur,
+			"updatedAt":       updatedAt,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"progress": result})
 }
 
 // handleProgressBatch — GET /api/v1/progress?ids=id1,id2,...
@@ -3170,6 +3525,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	var metaPending []metaPendingItem
+	// Track every path seen during the walk so we can remove stale DB entries afterward.
+	seenPaths := make(map[string]struct{})
 
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -3249,10 +3606,17 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			year = sql.NullInt64{Int64: int64(parsed.Year), Valid: true}
 		}
 
-		// Upsert via the transaction — no per-file lock contention.
+		seenPaths[path] = struct{}{}
+
+		// Increment item_seq inside the transaction to avoid a separate DB write
+		// that would compete with the open transaction for the write lock.
+		var seq int64
+		_ = tx.QueryRowContext(ctx,
+			`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+		).Scan(&seq)
 		if _, err := tx.Exec(
-			`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+			`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   library_id=excluded.library_id,
 			   type=excluded.type,
@@ -3265,9 +3629,10 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			   needs_transcode=COALESCE(excluded.needs_transcode, items.needs_transcode),
 			   duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
 			   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
-			   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END`,
+			   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
+			   change_seq=excluded.change_seq`,
 			id, libraryID, typ, title, year, path, duration, addedAt, now,
-			videoCodec, audioCodec, container, needsTranscode,
+			videoCodec, audioCodec, container, needsTranscode, seq,
 		); err != nil {
 			log.Printf("scan: upsert failed for %s: %v", path, err)
 		}
@@ -3289,6 +3654,35 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("scan: commit: %w", err)
+	}
+
+	// Remove stale DB entries whose files no longer exist on disk.
+	// This handles files that were renamed or deleted (e.g. .mp4 → .mkv).
+	staleRows, err := s.db.QueryContext(ctx, `SELECT id, path FROM items WHERE library_id = ?`, libraryID)
+	if err == nil {
+		var staleIDs []string
+		for staleRows.Next() {
+			var sid, spath string
+			if staleRows.Scan(&sid, &spath) == nil {
+				if _, seen := seenPaths[spath]; !seen {
+					staleIDs = append(staleIDs, sid)
+				}
+			}
+		}
+		staleRows.Close()
+		if len(staleIDs) > 0 {
+			log.Printf("scan: removing %d stale items from library %s", len(staleIDs), libraryID)
+			staleTx, err := s.db.BeginTx(ctx, nil)
+			if err == nil {
+				for _, sid := range staleIDs {
+					_, _ = staleTx.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, sid)
+					_, _ = staleTx.ExecContext(ctx,
+						`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,?)`,
+						sid, 0, now)
+				}
+				_ = staleTx.Commit()
+			}
+		}
 	}
 
 	// Transaction committed — write lock fully released before metadata fetches start.

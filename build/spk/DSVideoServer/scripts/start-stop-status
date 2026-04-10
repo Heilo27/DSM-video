@@ -26,6 +26,11 @@ find_go_binary() {
   return 1
 }
 
+pid_alive() {
+  # Use /proc instead of kill -0 to avoid EPERM when caller != process owner.
+  [ -d "/proc/${1}" ]
+}
+
 start() {
   mkdir -p "${VAR}"
 
@@ -39,9 +44,24 @@ start() {
     exit 1
   fi
 
-  if [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
+  if [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}")"; then
     echo "[${PACKAGE}] already running" >> "${LOG}"
     exit 0
+  fi
+
+  # Safety net: if port is already bound (orphan from a previous crash/upgrade),
+  # kill the holder so we don't immediately fail with "address already in use".
+  # Port 8090 = 0x2392. Find inode then map to pid via /proc/*/fd.
+  INODE="$(awk '$4 ~ /:2392 / || $4 ~ /:2392$/ {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | head -1)"
+  if [ -n "${INODE}" ]; then
+    HOLDER_PID="$(grep -rl "socket:\[${INODE}\]" /proc/*/fd 2>/dev/null | head -1 | cut -d/ -f3)"
+    if [ -n "${HOLDER_PID}" ] && pid_alive "${HOLDER_PID}"; then
+      echo "[${PACKAGE}] Port ${DSVIDEO_PORT:-8090} held by pid ${HOLDER_PID} — killing orphan before start" >> "${LOG}"
+      kill "${HOLDER_PID}" 2>/dev/null || true
+      sleep 2
+      pid_alive "${HOLDER_PID}" && kill -9 "${HOLDER_PID}" 2>/dev/null || true
+      sleep 1
+    fi
   fi
 
   # Default configuration (can be overridden by DSM package env/config files)
@@ -108,7 +128,7 @@ start() {
   # Verify the process stays alive for a couple seconds
   sleep 2
   PID="$(cat "${PIDFILE}")"
-  if ! kill -0 "${PID}" 2>/dev/null; then
+  if ! pid_alive "${PID}"; then
     echo "[${PACKAGE}] ERROR: Process died immediately after start. Check log above for errors." >> "${LOG}"
     echo "[${PACKAGE}] Last 20 lines of log:" >> "${LOG}"
     tail -20 "${LOG}" >> "${LOG}" 2>/dev/null || true
@@ -122,18 +142,18 @@ stop() {
     exit 0
   fi
   PID="$(cat "${PIDFILE}")" || true
-  if [ -n "${PID}" ] && kill -0 "${PID}" 2>/dev/null; then
-    kill "${PID}" || true
+  if [ -n "${PID}" ] && pid_alive "${PID}"; then
+    kill "${PID}" 2>/dev/null || true
     # Wait up to 10 seconds for process to actually terminate before returning.
     # Without this wait, rapid package upgrades fail with "address already in use"
     # because the new binary tries to bind the port while the old one is still dying.
     i=0
-    while [ $i -lt 10 ] && kill -0 "${PID}" 2>/dev/null; do
+    while [ $i -lt 10 ] && pid_alive "${PID}"; do
       sleep 1
       i=$((i + 1))
     done
     # Force-kill if still alive after grace period
-    if kill -0 "${PID}" 2>/dev/null; then
+    if pid_alive "${PID}"; then
       kill -9 "${PID}" 2>/dev/null || true
       sleep 1
     fi
@@ -143,7 +163,7 @@ stop() {
 }
 
 status() {
-  if [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
+  if [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}")"; then
     exit 0
   fi
   exit 1

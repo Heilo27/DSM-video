@@ -16,13 +16,13 @@ struct APIClient {
   }
 
   func libraries() async throws -> LibrariesResponse {
-    try await request(path: "/api/v1/libraries", method: "GET", body: Optional<Int>.none, response: LibrariesResponse.self)
+    try await request(path: "/api/v1/libraries", method: "GET", body: Optional<Int>.none, response: LibrariesResponse.self, timeoutInterval: 15)
   }
 
   /// One-request change detection: returns count + lastUpdatedAt per library.
   /// The client compares these against its cache to decide which libraries need re-fetching.
   func librariesSummary() async throws -> LibrarySummariesResponse {
-    try await request(path: "/api/v1/libraries/summary", method: "GET", body: Optional<Int>.none, response: LibrarySummariesResponse.self)
+    try await request(path: "/api/v1/libraries/summary", method: "GET", body: Optional<Int>.none, response: LibrarySummariesResponse.self, timeoutInterval: 10)
   }
 
   func items(libraryId: String, limit: Int = 50, offset: Int = 0) async throws -> ItemsResponse {
@@ -37,7 +37,7 @@ struct APIClient {
     guard let url = comps.url else {
       throw APIError.invalidURL
     }
-    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self)
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self, timeoutInterval: 120)
   }
 
   func search(query: String, limit: Int = 50, offset: Int = 0) async throws -> ItemsResponse {
@@ -68,9 +68,11 @@ struct APIClient {
     guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
       throw APIError.invalidURL
     }
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(encodedId)/seasons"), resolvingAgainstBaseURL: false) else {
-      throw APIError.invalidURL
-    }
+    var comps = URLComponents()
+    comps.scheme = baseURL.scheme
+    comps.host = baseURL.host
+    comps.port = baseURL.port
+    comps.percentEncodedPath = "/api/v1/tv/shows/\(encodedId)/seasons"
     comps.queryItems = [URLQueryItem(name: "libraryId", value: libraryId)]
     guard let url = comps.url else { throw APIError.invalidURL }
     return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TVSeasonsResponse.self)
@@ -80,9 +82,11 @@ struct APIClient {
     guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
       throw APIError.invalidURL
     }
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(encodedId)/episodes"), resolvingAgainstBaseURL: false) else {
-      throw APIError.invalidURL
-    }
+    var comps = URLComponents()
+    comps.scheme = baseURL.scheme
+    comps.host = baseURL.host
+    comps.port = baseURL.port
+    comps.percentEncodedPath = "/api/v1/tv/shows/\(encodedId)/episodes"
     comps.queryItems = [
       URLQueryItem(name: "libraryId", value: libraryId),
       URLQueryItem(name: "season", value: String(season)),
@@ -135,6 +139,13 @@ struct APIClient {
     return try Self.decoder.decode(ProgressBatchResponse.self, from: data)
   }
 
+  /// Fetches all progress rows for the authenticated user in a single request.
+  /// Prefer this over progressBatch for home-screen refresh — avoids N×chunked requests.
+  func progressAll() async throws -> ProgressBatchResponse {
+    try await request(path: "/api/v1/progress/all", method: "GET", body: Optional<Int>.none,
+                      response: ProgressBatchResponse.self, timeoutInterval: 15)
+  }
+
   // MARK: - TMDb Manual Fix
 
   func tmdbSearch(itemId: String, query: String? = nil, year: Int? = nil, type: String? = nil) async throws -> TMDbSearchResponse {
@@ -166,9 +177,11 @@ struct APIClient {
     guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
       throw APIError.invalidURL
     }
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows/\(encodedId)/tmdb-search"), resolvingAgainstBaseURL: false) else {
-      throw APIError.invalidURL
-    }
+    var comps = URLComponents()
+    comps.scheme = baseURL.scheme
+    comps.host = baseURL.host
+    comps.port = baseURL.port
+    comps.percentEncodedPath = "/api/v1/tv/shows/\(encodedId)/tmdb-search"
     if let q = query, !q.isEmpty {
       comps.queryItems = [URLQueryItem(name: "q", value: q)]
     }
@@ -181,12 +194,13 @@ struct APIClient {
     guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
       throw APIError.invalidURL
     }
-    _ = try await request(
-      path: "/api/v1/tv/shows/\(encodedId)/tmdb-fix",
-      method: "POST",
-      body: Body(tmdbId: tmdbId),
-      response: EmptyDecodable.self
-    )
+    var comps = URLComponents()
+    comps.scheme = baseURL.scheme
+    comps.host = baseURL.host
+    comps.port = baseURL.port
+    comps.percentEncodedPath = "/api/v1/tv/shows/\(encodedId)/tmdb-fix"
+    guard let url = comps.url else { throw APIError.invalidURL }
+    _ = try await request(url: url, method: "POST", body: Body(tmdbId: tmdbId), response: EmptyDecodable.self)
   }
 
   func imageURL(id: String, width: Int? = nil) -> URL? {
@@ -197,6 +211,53 @@ struct APIClient {
       comps.queryItems = [URLQueryItem(name: "w", value: String(width))]
     }
     return comps.url
+  }
+
+  // MARK: - Delta Sync
+
+  func serverVersion() async throws -> ServerVersion {
+    try await request(path: "/api/v1/version", method: "GET", body: Optional<Int>.none,
+                      response: ServerVersion.self, authorized: false, timeoutInterval: 5)
+  }
+
+  func syncStatus() async throws -> SyncStatusResponse {
+    try await request(path: "/api/v1/sync/status", method: "GET", body: Optional<Int>.none,
+                      response: SyncStatusResponse.self, timeoutInterval: 10)
+  }
+
+  func syncHeartbeat() async throws -> SyncHeartbeatResponse {
+    try await request(path: "/api/v1/sync/heartbeat", method: "GET", body: Optional<Int>.none,
+                      response: SyncHeartbeatResponse.self, authorized: false, timeoutInterval: 5)
+  }
+
+  func syncItems(since: Int, limit: Int = 500, afterRowid: Int? = nil) async throws -> SyncItemsResponse {
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/sync/items"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    var queryItems = [
+      URLQueryItem(name: "since", value: String(since)),
+      URLQueryItem(name: "limit", value: String(limit)),
+    ]
+    if let r = afterRowid { queryItems.append(URLQueryItem(name: "afterRowid", value: String(r))) }
+    comps.queryItems = queryItems
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none,
+                             response: SyncItemsResponse.self, timeoutInterval: 30)
+  }
+
+  func syncDeleted(since: Int) async throws -> SyncDeletedResponse {
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/sync/deleted"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    comps.queryItems = [URLQueryItem(name: "since", value: String(since))]
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none,
+                             response: SyncDeletedResponse.self, timeoutInterval: 10)
+  }
+
+  func refreshToken() async throws -> LoginResponse {
+    try await request(path: "/api/v1/auth/refresh", method: "POST", body: Optional<Int>.none,
+                      response: LoginResponse.self, timeoutInterval: 10)
   }
 
   func generatePairingCode() async throws -> PairingCodeResponse {
@@ -221,10 +282,11 @@ struct APIClient {
     method: String,
     body: B?,
     response: T.Type,
-    authorized: Bool = true
+    authorized: Bool = true,
+    timeoutInterval: TimeInterval = 60
   ) async throws -> T {
     let url = baseURL.appendingPathComponent(path)
-    return try await request(url: url, method: method, body: body, response: response, authorized: authorized)
+    return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
   }
 
   private static let decoder = JSONDecoder()
@@ -235,9 +297,10 @@ struct APIClient {
     method: String,
     body: B?,
     response: T.Type,
-    authorized: Bool = true
+    authorized: Bool = true,
+    timeoutInterval: TimeInterval = 60
   ) async throws -> T {
-    var req = URLRequest(url: url)
+    var req = URLRequest(url: url, timeoutInterval: timeoutInterval)
     req.httpMethod = method
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if authorized, let token {

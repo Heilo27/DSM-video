@@ -5,6 +5,25 @@ import UIKit
 import AppKit
 #endif
 
+// MARK: - Shared Image URLSession (disk-cached)
+
+/// Dedicated URLSession for image fetches with 512MB disk cache.
+/// Respects Cache-Control headers from the server so TMDb posters are cached for 7 days.
+private enum ImageSession {
+  static let shared: URLSession = {
+    let cache = URLCache(
+      memoryCapacity: 50 * 1024 * 1024,   // 50MB memory
+      diskCapacity: 512 * 1024 * 1024,    // 512MB disk
+      directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+        .first?.appendingPathComponent("com.dsm.imagecache")
+    )
+    let config = URLSessionConfiguration.default
+    config.urlCache = cache
+    config.requestCachePolicy = .returnCacheDataElseLoad
+    return URLSession(configuration: config)
+  }()
+}
+
 // MARK: - Image Cache (UIKit platforms only)
 
 #if canImport(UIKit)
@@ -172,7 +191,7 @@ struct AuthenticatedImage: View {
     isLoading = true
 
     let fetchTask = Task<UIImage?, Never> {
-      var req = URLRequest(url: url)
+      var req = URLRequest(url: url, timeoutInterval: 15)
 
       // Check if URL already has _sid parameter (Video Station) or use Bearer token (REST API)
       if url.absoluteString.contains("_sid=") {
@@ -183,7 +202,7 @@ struct AuthenticatedImage: View {
       }
 
       do {
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await ImageSession.shared.data(for: req)
 
         if let httpResponse = response as? HTTPURLResponse,
            httpResponse.statusCode != 200 {
@@ -268,14 +287,14 @@ struct AuthenticatedImage: View {
     isLoading = true
 
     let fetchTask = Task<NSImage?, Never> {
-      var req = URLRequest(url: url)
+      var req = URLRequest(url: url, timeoutInterval: 15)
       if url.absoluteString.contains("_sid=") {
         // Video Station: session ID already in URL
       } else if let token {
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
       }
       do {
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await ImageSession.shared.data(for: req)
         if let httpResponse = response as? HTTPURLResponse,
            httpResponse.statusCode != 200 {
           return nil

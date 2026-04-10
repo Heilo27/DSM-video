@@ -27,6 +27,9 @@ struct GestureVideoPlayer: View {
     var resumePosition: Double = 0
     var onDismiss: (() -> Void)?
     var onProgressUpdate: ((Double, Double) -> Void)?
+    /// Called when AVPlayer reports a fatal playback error. The caller can use
+    /// this to reset state and re-fetch a fresh playback URL (e.g. stale session).
+    var onPlaybackFailed: (() -> Void)?
 
     @State private var player: AVPlayer?
     @State private var isPlaying: Bool = false
@@ -242,17 +245,30 @@ struct GestureVideoPlayer: View {
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
-            Button("Dismiss") {
-                #if os(iOS)
-                unlockOrientation()
-                #endif
-                onDismiss?()
-            }
+            HStack(spacing: 12) {
+                if onPlaybackFailed != nil {
+                    Button("Retry") {
+                        playerError = nil
+                        onPlaybackFailed?()
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    .background(Color.dsAccent.opacity(0.8), in: Capsule())
+                }
+                Button("Dismiss") {
+                    #if os(iOS)
+                    unlockOrientation()
+                    #endif
+                    onDismiss?()
+                }
                 .font(.headline)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 24)
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.2), in: Capsule())
+            }
         }
     }
 

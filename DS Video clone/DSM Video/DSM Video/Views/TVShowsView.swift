@@ -1,4 +1,7 @@
 import SwiftUI
+import os.log
+
+private let tvLog = Logger(subsystem: "com.dsm.dsvideo", category: "TVShows")
 
 // MARK: - Sort Option
 
@@ -181,13 +184,16 @@ struct TVShowsView: View {
       shows = DemoData.tvShows
       return
     }
+    tvLog.info("TVShowsView.load: libraryId=\(library.id) baseURL=\(appState.api.baseURL.absoluteString)")
     isLoading = true
     defer { isLoading = false }
     do {
       let response = try await appState.api.tvShows(libraryId: library.id)
+      tvLog.info("TVShowsView.load: success — \(response.shows.count) shows")
       shows = response.shows
       error = nil
     } catch {
+      tvLog.error("TVShowsView.load: FAILED — \(String(describing: error))")
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       if shows.isEmpty { self.error = msg }
     }

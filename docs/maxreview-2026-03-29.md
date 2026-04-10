@@ -214,3 +214,30 @@ All 11 fixes verified correct. No regressions. Build clean.
 **Commit:** `fd0b4f2` — MaxReview session: fix 11 issues (P1×7, P2×4) + iPad/animation fixes
 
 **Final verdict: PASS** — Zero P0/P1 issues across all cycles.
+
+---
+
+## Session 2 — 2026-03-30 (post-revert + keep-alive work)
+
+**Trigger:** Post-session review after: fd0b4f2 revert, SplitView keep-alive, isCacheDecoding, frozenLayout, debug logging.
+**Cycles:** 1 | **Verdict:** PASS | **Commit:** bf41dc1
+
+### CI
+- iOS build: PASS | tvOS build: PASS | Tests: 20/20
+
+### Issues Fixed (12 total — P1×5, P2×6, P3×1)
+
+| Ticket | Sev | Description |
+|--------|-----|-------------|
+| TASK-295 | P1 | VoiceOver focused hidden LibraryHomeView — added accessibilityHidden |
+| TASK-296 | P1 | Double NavigationStack in SplitView — collapsed to single outer stack |
+| TASK-297 | P1 | frozenLayout not cleared on logout — clears on sessionToken→nil |
+| TASK-298 | P1 | isCacheDecoding not in load() re-entry guard — concurrent decodes possible |
+| TASK-299 | P1 | Black screen during cache decode — now shows ProgressView |
+| TASK-300 | P2 | isCacheDecoding stuck on task cancel — fixed with defer |
+| TASK-301 | P2 | ZStack missing frame in SplitView — added maxWidth/maxHeight infinity |
+| TASK-302 | P2 | No VoiceOver announcement on rails load — fires screenChanged once |
+| TASK-303 | P3 | ProgressView missing updatesFrequently trait |
+| TASK-304 | P2 | HomeRail title font wrong (title3/semibold → 18pt bold) |
+| TASK-305 | P2 | HomeRail "See All" font wrong + no horiz tap padding |
+| TASK-306 | P2 | HomeRail poster width 120→110pt per spec |

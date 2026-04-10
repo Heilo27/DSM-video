@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import re
+import io
 import shutil
 import sqlite3
 import subprocess
@@ -335,7 +336,8 @@ class Store:
             total = self._db.execute(f"SELECT COUNT(*) FROM items {where}", args).fetchone()[0]
             rows = self._db.execute(
                 f"""
-                SELECT id, type, title, year, duration_seconds, added_at, poster_image_id, backdrop_image_id
+                SELECT id, type, title, year, duration_seconds, added_at, poster_image_id, backdrop_image_id,
+                       show_title, season_number, episode_number
                 FROM items {where}
                 ORDER BY added_at DESC
                 LIMIT ? OFFSET ?
@@ -345,19 +347,24 @@ class Store:
 
         items: List[Dict[str, Any]] = []
         for r in rows:
-            items.append(
-                {
-                    "id": r["id"],
-                    "type": r["type"],
-                    "title": r["title"],
-                    "year": r["year"],
-                    "durationSeconds": r["duration_seconds"],
-                    "addedAt": r["added_at"],
-                    "rating": None,
-                    "posterImageId": r["poster_image_id"],
-                    "backdropImageId": r["backdrop_image_id"],
-                }
-            )
+            item: Dict[str, Any] = {
+                "id": r["id"],
+                "type": r["type"],
+                "title": r["title"],
+                "year": r["year"],
+                "durationSeconds": r["duration_seconds"],
+                "addedAt": r["added_at"],
+                "rating": None,
+                "posterImageId": r["poster_image_id"],
+                "backdropImageId": r["backdrop_image_id"],
+            }
+            if r["show_title"] is not None:
+                item["showName"] = r["show_title"]
+            if r["season_number"] is not None:
+                item["seasonNumber"] = r["season_number"]
+            if r["episode_number"] is not None:
+                item["episodeNumber"] = r["episode_number"]
+            items.append(item)
         return int(total), items
 
     def get_library_summaries(self) -> List[Dict[str, Any]]:
@@ -488,6 +495,22 @@ class Store:
             "positionSeconds": int(row["position_seconds"]),
             "durationSeconds": int(row["duration_seconds"]),
             "updatedAt": str(row["updated_at"]),
+        }
+
+    def get_all_progress(self, user_id: str) -> Dict[str, Dict[str, Any]]:
+        """Fetch all progress rows for a user in a single query."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        return {
+            row["item_id"]: {
+                "positionSeconds": int(row["position_seconds"]),
+                "durationSeconds": int(row["duration_seconds"]),
+                "updatedAt": str(row["updated_at"]),
+            }
+            for row in rows
         }
 
     def get_progress_batch(self, user_id: str, item_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -759,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/items" and self.command == "GET":
             qs = parse_qs(parsed.query)
             library_id = (qs.get("libraryId") or [None])[0]
-            limit = _clamp(_parse_int((qs.get("limit") or [None])[0], 50), 1, 200)
+            limit = _clamp(_parse_int((qs.get("limit") or [None])[0], 50), 1, 5_000)
             offset = _clamp(_parse_int((qs.get("offset") or [None])[0], 0), 0, 1_000_000)
             total, items = self.app.store.get_items(library_id, limit, offset)
             # Attach progress for this user (batch fetch for efficiency)
@@ -837,6 +860,10 @@ class Handler(BaseHTTPRequestHandler):
                     "resumePositionSeconds": resume,
                 },
             )
+
+        if path == "/api/v1/progress/all" and self.command == "GET":
+            result = self.app.store.get_all_progress(user["sub"])
+            return _write_json(self, HTTPStatus.OK, {"progress": result})
 
         if path == "/api/v1/progress" and self.command == "GET":
             qs = parse_qs(parsed.query)
@@ -1201,10 +1228,37 @@ class Handler(BaseHTTPRequestHandler):
         p = Path(img_path)
         if not p.exists() or not p.is_file():
             return _write_error(self, HTTPStatus.NOT_FOUND, "not_found")
-        raw = p.read_bytes()
+
+        # Honour ?w=N resize hint from the client — serves a scaled-down JPEG
+        # instead of the full-resolution source, dramatically reducing transfer size.
+        qs = parse_qs(urlparse(self.path).query)
+        w_param = qs.get("w", [None])[0]
+        target_width = int(w_param) if w_param and w_param.isdigit() else None
+
+        if target_width:
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(p) as pil_img:
+                    orig_w, orig_h = pil_img.size
+                    if orig_w > target_width:
+                        ratio = target_width / orig_w
+                        new_h = int(orig_h * ratio)
+                        pil_img = pil_img.resize((target_width, new_h), PILImage.LANCZOS)
+                    buf = io.BytesIO()
+                    pil_img.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
+                    raw = buf.getvalue()
+                    mime = "image/jpeg"
+            except Exception:
+                # Pillow failed — fall through to raw serve
+                raw = p.read_bytes()
+                mime = str(img["mime"])
+        else:
+            raw = p.read_bytes()
+            mime = str(img["mime"])
+
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", str(img["mime"]))
-        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Type", mime)
+        self.send_header("Cache-Control", "public, max-age=604800")  # 7 days
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)

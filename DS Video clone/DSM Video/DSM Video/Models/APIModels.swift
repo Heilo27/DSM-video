@@ -71,6 +71,32 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
   let showName: String?
   let seasonNumber: Int?
   let episodeNumber: Int?
+  // Delta sync metadata — nil when decoded from legacy API responses
+  let libraryId: String?
+  let changeSeq: Int?
+
+  nonisolated init(id: String, type: String, title: String, year: Int? = nil,
+                   durationSeconds: Int? = nil, addedAt: String, rating: Double? = nil,
+                   posterImageId: String? = nil, backdropImageId: String? = nil,
+                   progress: ItemProgress? = nil, showName: String? = nil,
+                   seasonNumber: Int? = nil, episodeNumber: Int? = nil,
+                   libraryId: String? = nil, changeSeq: Int? = nil) {
+    self.id = id
+    self.type = type
+    self.title = title
+    self.year = year
+    self.durationSeconds = durationSeconds
+    self.addedAt = addedAt
+    self.rating = rating
+    self.posterImageId = posterImageId
+    self.backdropImageId = backdropImageId
+    self.progress = progress
+    self.showName = showName
+    self.seasonNumber = seasonNumber
+    self.episodeNumber = episodeNumber
+    self.libraryId = libraryId
+    self.changeSeq = changeSeq
+  }
 }
 
 extension ItemSummary {
@@ -80,7 +106,8 @@ extension ItemSummary {
                 rating: rating, posterImageId: posterImageId,
                 backdropImageId: backdropImageId, progress: nil,
                 showName: showName, seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber)
+                episodeNumber: episodeNumber,
+                libraryId: libraryId, changeSeq: changeSeq)
   }
 }
 
@@ -136,8 +163,8 @@ struct ItemDetail: Decodable, Identifiable {
   let contentRating: String?
   let rating: Double?
   let summary: String?
-  let genres: [String]
-  let cast: [Person]
+  let genres: [String]?
+  let cast: [Person]?
   let images: Images
 }
 
@@ -197,4 +224,36 @@ struct PairingCodeResponse: Decodable {
 
 struct PairingCodeExchangeRequest: Encodable {
   let code: String
+}
+
+// MARK: - Delta Sync
+
+struct ServerVersion: Decodable {
+  let serverVersion: String
+  let minClientVersion: String
+  let capabilities: [String]
+}
+
+struct SyncStatusResponse: Decodable {
+  let itemSeq: Int
+  let progressSeq: Int
+  let totalItems: Int
+}
+
+struct SyncHeartbeatResponse: Decodable {
+  let itemSeq: Int
+  let progressSeq: Int
+  let serverTimeMs: Int64
+}
+
+struct SyncItemsResponse: Decodable {
+  let items: [ItemSummary]
+  let nextSeq: Int
+  let hasMore: Bool
+  let nextAfterRowid: Int?
+}
+
+struct SyncDeletedResponse: Decodable {
+  let deletedIds: [String]
+  let asOf: Int
 }

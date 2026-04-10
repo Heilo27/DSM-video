@@ -60,7 +60,7 @@ struct TVLoginView: View {
                 .font(.system(size: 72, weight: .bold))
                 .foregroundStyle(.white)
                 .tracking(-1)
-              Text("Your Synology NAS.\nOn your TV.")
+              Text("Your home video library.\nOn your TV.")
                 .font(.system(size: 24, weight: .regular))
                 .foregroundStyle(Color.dsTextSecondary)
                 .lineSpacing(4)

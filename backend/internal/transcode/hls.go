@@ -279,9 +279,15 @@ func (g *HLSGenerator) buildFFmpegArgs(session *HLSSession) []string {
 		args = append(args, "-c:v", "copy")
 	}
 
-	// Audio always transcoded to AAC for compatibility
+	// Audio transcoded to MP3 for NAS ffmpeg compatibility.
+	// NAS ffmpeg is compiled without AAC encoder (--disable-encoder=aac) but
+	// libmp3lame is available. MP3 is universally supported by HLS clients.
+	// -map flags: explicitly select first video+audio streams; '?' makes audio
+	// optional so ffmpeg doesn't fail if the source has no decodable audio track.
 	args = append(args,
-		"-c:a", "aac",
+		"-map", "0:v:0",
+		"-map", "0:a:0?",
+		"-c:a", "libmp3lame",
 		"-b:a", g.config.AudioBitrate,
 		"-ac", "2", // Stereo (downmix surround if needed)
 	)

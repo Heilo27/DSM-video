@@ -115,7 +115,7 @@ struct LoginView: View {
 
         #if !os(tvOS)
         VStack(alignment: .leading, spacing: 12) {
-          Toggle("HTTPS", isOn: $appState.useHTTPS)
+          Toggle(appState.useHTTPS ? "HTTPS (ON)" : "HTTPS (OFF)", isOn: $appState.useHTTPS)
           Toggle("Remember me", isOn: $appState.rememberMe)
         }
         .tint(.white)
@@ -277,7 +277,7 @@ private struct AboutView: View {
             .foregroundStyle(.secondary)
         }
 
-        Text("A native iOS client for Synology Video Station. Browse and stream your personal video library directly from your NAS.")
+        Text("Browse and stream your personal video library directly from your home server.")
           .font(.body)
           .multilineTextAlignment(.center)
           .foregroundStyle(.secondary)
@@ -313,14 +313,14 @@ private struct QuickConnectSheet: View {
     NavigationStack {
       Form {
         Section {
-          TextField("e.g. my-synology", text: $quickConnectID)
+          TextField("e.g. my-nas", text: $quickConnectID)
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
             .onSubmit { Task { await resolve() } }
         } header: {
           Text("QuickConnect ID")
         } footer: {
-          Text("Enter the QuickConnect ID from your Synology DSM control panel. The \(useHTTPS ? "secure (HTTPS)" : "standard (HTTP)") remote address will be used based on your HTTPS setting.")
+          Text("Enter the QuickConnect ID from your DSM control panel. The \(useHTTPS ? "secure (HTTPS)" : "standard (HTTP)") remote address will be used based on your HTTPS setting.")
         }
 
         if let error {

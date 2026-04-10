@@ -1009,7 +1009,7 @@ struct HowToView: View {
         )
         HowToStep(
           number: "2",
-          title: "Install on Your Synology NAS",
+          title: "Install on Your NAS",
           detail: "Open DSM in a browser. Go to Package Center → Manual Install, select the .spk file, and follow the prompts. You may need to allow third-party packages in Package Center settings."
         )
         HowToStep(
@@ -1020,7 +1020,7 @@ struct HowToView: View {
         HowToStep(
           number: "4",
           title: "Note Your NAS Address",
-          detail: "You'll need your NAS's local IP address (e.g. 192.168.1.100) or your Synology QuickConnect ID. Both are found in DSM → Control Panel → Network or QuickConnect."
+          detail: "You'll need your NAS's local IP address (e.g. 192.168.1.100) or your QuickConnect ID. Both are found in DSM → Control Panel → Network or QuickConnect."
         )
       } header: {
         Label("Server Setup", systemImage: "server.rack")
@@ -1033,7 +1033,7 @@ struct HowToView: View {
         HowToStep(
           number: "1",
           title: "Enter Your Server Address",
-          detail: "On the login screen, type your NAS's local IP address (e.g. 192.168.1.100) or your Synology QuickConnect ID. No need to include a port — the app uses 8090 automatically."
+          detail: "On the login screen, type your NAS's local IP address (e.g. 192.168.1.100) or your QuickConnect ID. No need to include a port — the app uses 8090 automatically."
         )
         HowToStep(
           number: "2",
@@ -1043,7 +1043,7 @@ struct HowToView: View {
         HowToStep(
           number: "3",
           title: "Enter Your DSM Credentials",
-          detail: "Use the same username and password you use to log in to your Synology DSM. These are your NAS account credentials."
+          detail: "Use the same username and password you use to log in to your DSM. These are your NAS account credentials."
         )
         HowToStep(
           number: "4",
@@ -1061,7 +1061,7 @@ struct HowToView: View {
         HowToStep(
           number: nil,
           title: "QuickConnect ID (Recommended)",
-          detail: "Log in with your QuickConnect ID and DSM Video can reach your NAS from anywhere — no static IP or port forwarding needed. Synology handles the routing."
+          detail: "Log in with your QuickConnect ID and DSM Video can reach your NAS from anywhere — no static IP or port forwarding needed."
         )
         HowToStep(
           number: nil,
