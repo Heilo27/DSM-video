@@ -278,7 +278,10 @@ actor LocalStore {
         duration_seconds=excluded.duration_seconds,
         updated_at=excluded.updated_at
     """
-    sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      log.error("upsertSingleProgress: sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
+      return
+    }
     defer { sqlite3_finalize(stmt) }
     let now = iso8601Formatter.string(from: Date())
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
@@ -461,10 +464,13 @@ actor LocalStore {
   // MARK: - Clear
 
   func clearAll() {
+    // Wrap in a transaction so a crash mid-clear cannot corrupt sync state (TASK-438).
+    exec("BEGIN TRANSACTION")
     exec("DELETE FROM items")
     exec("DELETE FROM progress")
     exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', 0)")
     exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('progress_seq', 0)")
+    exec("COMMIT")
   }
 
   // MARK: - Helpers

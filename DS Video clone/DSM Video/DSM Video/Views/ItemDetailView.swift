@@ -228,7 +228,8 @@ struct ItemDetailView: View {
                   .font(.caption2.weight(.semibold))
                   .foregroundStyle(.white)
                   .padding(.horizontal, 8)
-                  .padding(.vertical, 16)
+                  .padding(.vertical, 4)
+                  .frame(minHeight: 44)  // HIG minimum tap target (TASK-445)
                   .background(Color.black.opacity(0.7))
                   .clipShape(Capsule())
               }

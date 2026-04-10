@@ -164,9 +164,12 @@ struct LibraryHomeView: View {
       AccessibilityNotification.ScreenChanged(nil).post()
     }
     .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
-      loadLog.info("LibraryHomeView: playerDidDismiss — triggering homeRefreshProgress")
+      loadLog.info("LibraryHomeView: playerDidDismiss — refreshing progress from local store")
       guard !appState.homeAllRailsEmpty || !appState.homeLibraries.isEmpty else { return }
-      Task { await appState.homeRefreshProgress() }
+      // Call refreshProgressFromLocal directly instead of routing through homeRefreshProgress()
+      // (which is a no-op when homeIsBackgroundRefreshing is true). This ensures Continue
+      // Watching updates immediately after playback rather than waiting up to 30s (TASK-435).
+      Task { await appState.refreshProgressFromLocal() }
     }
     .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
       loadLog.info("LibraryHomeView: networkDidReconnect — triggering homeLoad")

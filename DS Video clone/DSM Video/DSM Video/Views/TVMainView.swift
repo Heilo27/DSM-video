@@ -221,8 +221,14 @@ private struct TVHomeView: View {
           Button {
             showPairing = true
           } label: {
-            Label("Pair iOS Device", systemImage: "iphone.and.arrow.right.inward")
-              .foregroundStyle(.white)
+            // iphone.and.arrow.right.inward is tvOS 17+; fall back for older tvOS (TASK-446).
+            if #available(tvOS 17, *) {
+              Label("Pair iOS Device", systemImage: "iphone.and.arrow.right.inward")
+                .foregroundStyle(.white)
+            } else {
+              Label("Pair iOS Device", systemImage: "iphone.and.arrow.right")
+                .foregroundStyle(.white)
+            }
           }
         }
       }

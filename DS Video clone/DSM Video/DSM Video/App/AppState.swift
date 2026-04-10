@@ -458,6 +458,9 @@ final class AppState {
     Task.detached(priority: .userInitiated) { [weak self] in
       let (cont, added, watched) = Self.computeHomeRails(items)
       let elapsed = String(format: "%.3f", Date().timeIntervalSince(t))
+      // Guard after the off-actor compute: if self was deallocated (e.g. logout)
+      // during the heavy lift, silently drop the result (TASK-434).
+      guard let self else { return }
       await Task { @MainActor [weak self] in
         guard let self else { return }
         self.homeContinueWatching = cont
@@ -661,14 +664,27 @@ final class AppState {
           }
         } while true
 
-        // Fetch and apply deletions
-        if let deleted = try? await apiSnapshot.syncDeleted(since: cursors.itemSeq), !deleted.deletedIds.isEmpty {
-          homeLog.info("runDeltaSync: \(deleted.deletedIds.count) deleted items")
-          await LocalStore.shared.deleteItems(deleted.deletedIds)
+        // Fetch and apply deletions. Only advance the item cursor if the deletion
+        // request succeeds — a failure means deleted IDs are unknown and must be
+        // retried on the next sync cycle (TASK-437).
+        var deletionSucceeded = true
+        do {
+          let deleted = try await apiSnapshot.syncDeleted(since: cursors.itemSeq)
+          if !deleted.deletedIds.isEmpty {
+            homeLog.info("runDeltaSync: \(deleted.deletedIds.count) deleted items")
+            await LocalStore.shared.deleteItems(deleted.deletedIds)
+          }
+        } catch {
+          homeLog.warning("runDeltaSync: syncDeleted failed — will retry on next sync: \(error.localizedDescription)")
+          deletionSucceeded = false
         }
 
-        await LocalStore.shared.setItemSeq(status.itemSeq)
-        homeLog.info("runDeltaSync: item sync complete — \(pageCount) page(s)")
+        if deletionSucceeded {
+          await LocalStore.shared.setItemSeq(status.itemSeq)
+          homeLog.info("runDeltaSync: item sync complete — \(pageCount) page(s)")
+        } else {
+          homeLog.info("runDeltaSync: item sync complete (cursor NOT advanced — deletion pending) — \(pageCount) page(s)")
+        }
       }
 
       // Step 4: Fetch progress if server has updates, or if we have no local progress

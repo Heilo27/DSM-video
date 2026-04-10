@@ -802,13 +802,11 @@ private struct TVShowMetadataFixerSheet: View {
               Task { await apply(candidate) }
             } label: {
               HStack(spacing: 12) {
-                AsyncImage(url: candidate.posterURL) { img in
-                  img.resizable().scaledToFill()
-                } placeholder: {
-                  Color(white: 0.15)
-                }
-                .frame(width: 50, height: 75)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                AuthenticatedImage(url: candidate.posterURL, token: nil)
+                  .scaledToFill()
+                  .frame(width: 50, height: 75)
+                  .clipShape(RoundedRectangle(cornerRadius: 6))
+                  .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {
                   Text(candidate.title)
@@ -828,6 +826,7 @@ private struct TVShowMetadataFixerSheet: View {
                 }
               }
             }
+            .accessibilityLabel("\(candidate.title)\(candidate.year.map { ", \($0)" } ?? "")")
             .buttonStyle(.plain)
             .disabled(isApplying)
             .listRowBackground(Color(white: 0.1))
