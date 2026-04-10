@@ -375,16 +375,34 @@ final class DownloadManager: NSObject {
 
   /// Persist minimal metadata for a paused download so it can be displayed and resumed after app relaunch.
   /// Stores the video URL so resumeDownload can fall back to a fresh startDownload if resume data is lost.
+  /// The `_sid=` session token query parameter is stripped before persisting — it is a short-lived
+  /// credential and UserDefaults is not encrypted at rest. The current session token will be
+  /// re-attached by startDownload when the download is resumed.
   private func persistPausedMeta(for itemId: String) {
     guard let info = pendingDownloadInfo[itemId] else { return }
     var store = (UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]]) ?? [:]
     var meta: [String: String] = ["title": info.title]
     if let year = info.year { meta["year"] = "\(year)" }
     if let posterURL = info.posterURL { meta["posterURL"] = posterURL.absoluteString }
-    if let videoURL = info.videoURL { meta["videoURL"] = videoURL.absoluteString }
+    if let videoURL = info.videoURL {
+      // Strip _sid= before persisting — it is a session credential and must not be
+      // stored unprotected in UserDefaults. startDownload re-attaches auth on resume.
+      meta["videoURL"] = strippingSid(from: videoURL).absoluteString
+    }
     meta["durationSeconds"] = "\(info.durationSeconds)"
     store[itemId] = meta
     UserDefaults.standard.set(store, forKey: pausedMetaKey)
+  }
+
+  /// Returns a copy of `url` with the `_sid` query parameter removed.
+  private func strippingSid(from url: URL) -> URL {
+    guard url.absoluteString.contains("_sid="),
+          var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+      return url
+    }
+    components.queryItems = components.queryItems?.filter { $0.name != "_sid" }
+    if components.queryItems?.isEmpty == true { components.queryItems = nil }
+    return components.url ?? url
   }
 
   /// Remove a single item's resume data file and paused metadata from UserDefaults.

@@ -68,6 +68,7 @@ struct GestureVideoPlayer: View {
     @State private var cancellables = Set<AnyCancellable>()
     @State private var hasResumedPosition: Bool = false
     @State private var showCaptionsPicker: Bool = false
+    @State private var didSetupPlayer: Bool = false
 
     private let skipSeconds: Double = 30
 
@@ -602,6 +603,7 @@ struct GestureVideoPlayer: View {
         .foregroundStyle(.white)
         .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityHidden(true)
     }
 
 
@@ -699,6 +701,7 @@ struct GestureVideoPlayer: View {
     // MARK: - Player Controls
 
     private func setupPlayer() {
+        didSetupPlayer = true
         let playerItem = AVPlayerItem(url: url)
         player = AVPlayer(playerItem: playerItem)
 
@@ -771,7 +774,10 @@ struct GestureVideoPlayer: View {
         player?.pause()
         player = nil
         cancellables.removeAll()
-        NotificationCenter.default.post(name: .playerDidDismiss, object: nil)
+        // Only post playerDidDismiss if setupPlayer actually ran (TASK-430).
+        if didSetupPlayer {
+          NotificationCenter.default.post(name: .playerDidDismiss, object: nil)
+        }
     }
 
     private func togglePlayPause() {

@@ -48,7 +48,7 @@ struct PairingCodeView: View {
           Task { await submit() }
         } label: {
           if isSubmitting {
-            ProgressView()
+            ProgressView("Pairing")
               .tint(.white)
           } else {
             Text("Pair")

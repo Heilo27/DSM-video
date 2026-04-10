@@ -34,7 +34,15 @@ actor LocalStore {
   }()
 
   private var db: OpaquePointer?
+  private var isReady: Bool = false
+  private var readyContinuations: [CheckedContinuation<Void, Never>] = []
   private let log = Logger(subsystem: "com.dsm.dsvideo", category: "LocalStore")
+  // Shared formatter — ISO8601DateFormatter is expensive to allocate; reuse per instance (TASK-427).
+  private let iso8601Formatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+  }()
 
   private init() {}
 
@@ -46,6 +54,20 @@ actor LocalStore {
       try setup()
     } catch {
       log.error("LocalStore.setup failed: \(error.localizedDescription)")
+    }
+    // Signal all callers that are waiting on ensureReady().
+    isReady = true
+    for cont in readyContinuations { cont.resume() }
+    readyContinuations.removeAll()
+  }
+
+  /// Await this before performing any store operations when there is a risk
+  /// of calling before the async setup Task has completed (TASK-420).
+  /// No-ops instantly if setup is already done.
+  func ensureReady() async {
+    guard !isReady else { return }
+    await withCheckedContinuation { cont in
+      readyContinuations.append(cont)
     }
   }
 
@@ -168,7 +190,11 @@ actor LocalStore {
         change_seq=excluded.change_seq
     """
     var stmt: OpaquePointer?
-    sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      exec("ROLLBACK")
+      log.error("upsertItems: sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
+      return
+    }
     defer { sqlite3_finalize(stmt) }
 
     for item in items {
@@ -196,7 +222,11 @@ actor LocalStore {
     guard !ids.isEmpty, let db else { return }
     exec("BEGIN TRANSACTION")
     var stmt: OpaquePointer?
-    sqlite3_prepare_v2(db, "DELETE FROM items WHERE id = ?", -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, "DELETE FROM items WHERE id = ?", -1, &stmt, nil) == SQLITE_OK else {
+      exec("ROLLBACK")
+      log.error("deleteItems: sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
+      return
+    }
     defer { sqlite3_finalize(stmt) }
     for id in ids {
       sqlite3_reset(stmt)
@@ -220,7 +250,11 @@ actor LocalStore {
         updated_at=excluded.updated_at
     """
     var stmt: OpaquePointer?
-    sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      exec("ROLLBACK")
+      log.error("upsertProgress: sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
+      return
+    }
     defer { sqlite3_finalize(stmt) }
     for (itemId, p) in progress {
       sqlite3_reset(stmt)
@@ -246,7 +280,7 @@ actor LocalStore {
     """
     sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
     defer { sqlite3_finalize(stmt) }
-    let now = ISO8601DateFormatter().string(from: Date())
+    let now = iso8601Formatter.string(from: Date())
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
     sqlite3_bind_int(stmt, 2, Int32(positionSeconds))
     sqlite3_bind_int(stmt, 3, Int32(durationSeconds))
@@ -328,12 +362,36 @@ actor LocalStore {
       let item = itemFromStatement(stmt)
 
       if deduplicateByShow, let show = item.showName {
-        if seenShows.contains(show) { continue }
-        seenShows.insert(show)
+        // Normalize to lowercase to match computeHomeRails deduplication behavior (TASK-402).
+        let key = show.lowercased()
+        if seenShows.contains(key) { continue }
+        seenShows.insert(key)
       }
 
       results.append(item)
       if results.count >= maxCount { break }
+    }
+    return results
+  }
+
+  func fetchItems(forLibraryId libraryId: String, limit: Int = 50) -> [ItemSummary] {
+    guard let db else { return [] }
+    let sql = """
+      SELECT \(Self.itemSelectColumns)
+      FROM items i
+      LEFT JOIN progress p ON p.item_id = i.id
+      WHERE i.library_id = ?
+      ORDER BY i.added_at DESC
+      LIMIT ?
+    """
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, libraryId, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int(stmt, 2, Int32(limit))
+    var results: [ItemSummary] = []
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      results.append(itemFromStatement(stmt))
     }
     return results
   }
@@ -383,13 +441,21 @@ actor LocalStore {
   }
 
   func setItemSeq(_ seq: Int) {
-    guard db != nil else { return }
-    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', \(seq))")
+    guard let db else { return }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', ?)", -1, &stmt, nil) == SQLITE_OK else { return }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_int64(stmt, 1, Int64(seq))
+    sqlite3_step(stmt)
   }
 
   func setProgressSeq(_ seq: Int) {
-    guard db != nil else { return }
-    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('progress_seq', \(seq))")
+    guard let db else { return }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('progress_seq', ?)", -1, &stmt, nil) == SQLITE_OK else { return }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_int64(stmt, 1, Int64(seq))
+    sqlite3_step(stmt)
   }
 
   // MARK: - Clear

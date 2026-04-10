@@ -57,6 +57,11 @@ struct LibrariesView: View {
       libraries = DemoData.libraries
       return
     }
+    // Use already-fetched libraries from AppState to avoid redundant network call (TASK-410).
+    if !appState.homeLibraries.isEmpty {
+      libraries = appState.homeLibraries
+      return
+    }
     error = nil
     isLoading = true
     defer { isLoading = false }

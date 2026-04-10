@@ -433,8 +433,10 @@ struct ItemDetailView: View {
   // MARK: - Data
 
   private func load() async {
-    detail = nil
     guard !isLoading else { return }
+    // Clear detail only after confirming we will actually start a load — avoids
+    // a blank header flash when the guard exits early (TASK-425).
+    detail = nil
     if appState.isDemoMode {
       detail = DemoData.detail(for: itemID)
       return
@@ -524,7 +526,7 @@ private struct MetadataFixerSheet: View {
         if isSearching {
           HStack {
             Spacer()
-            ProgressView().tint(.white)
+            ProgressView("Searching").tint(.white)
             Spacer()
           }
           .listRowBackground(Color(white: 0.08))
@@ -646,7 +648,6 @@ private struct MetadataPill: View {
 private struct PlayerSheet: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
-  @Environment(\.scenePhase) private var scenePhase
   let itemID: String
   let title: String
 
@@ -765,22 +766,13 @@ private struct PlayerSheet: View {
       }
     }
     .task { await start() }
-    .onChange(of: scenePhase) { _, newPhase in
-      if newPhase == .background, lastSyncedPosition > 0 {
-        let pos = lastSyncedPosition
-        let dur = lastKnownDuration
-        Task {
-          try? await appState.api.setProgress(
-            id: itemID,
-            positionSeconds: pos,
-            durationSeconds: dur
-          )
-        }
-      }
-    }
   }
 
   private func start() async {
+    // Reset state for retry — ensures stale duration/position from a prior attempt
+    // can't suppress the final progress write on the next dismiss (TASK-401).
+    lastKnownDuration = 0
+    lastSyncedPosition = 0
     // Check if we have a downloaded version first
     if let downloaded = DownloadManager.shared.getDownloadedItem(itemId: itemID) {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)

@@ -26,6 +26,7 @@ import json
 import os
 import re
 import io
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -141,6 +142,7 @@ class Config:
     movies_path: str
     tv_path: str
     home_path: str
+    image_cache_path: str  # Optional separate image cache dir (e.g. TMDb posters). Empty = unused.
 
     @staticmethod
     def load() -> "Config":
@@ -169,6 +171,7 @@ class Config:
             movies_path=get("DSVIDEO_MOVIES_PATH", ""),
             tv_path=get("DSVIDEO_TV_PATH", ""),
             home_path=get("DSVIDEO_HOME_PATH", ""),
+            image_cache_path=get("DSVIDEO_IMAGE_CACHE_PATH", ""),
         )
 
         if jwt_secret_generated:
@@ -592,18 +595,22 @@ class App:
         self.playback_sessions: Dict[str, PlaybackSession] = {}
         self._pb_lock = threading.Lock()
         self.last_scan_at: float = 0.0
-        # In-memory revocation set: jti values revoked on logout.
-        # Values are (jti, exp) tuples; entries are pruned when exp has passed.
-        self._revoked_jtis: set = set()
+        # In-memory revocation store: maps jti → exp (Unix timestamp).
+        # Entries are pruned when their token expiry has passed (they would be
+        # rejected by verify_token's exp check anyway, so pruning is safe).
+        self._revoked_jtis: Dict[str, int] = {}
         self._revoked_lock = threading.Lock()
 
     def _revoke_token(self, jti: str, exp: int) -> None:
+        now = int(time.time())
         with self._revoked_lock:
-            self._revoked_jtis.add(jti)
-            # Prune expired entries so the set doesn't grow unbounded.
-            now = int(time.time())
-            # Re-use exp stored inline: we store (jti, exp) pairs but simplify to
-            # just jti strings here since logout is infrequent and set stays small.
+            self._revoked_jtis[jti] = exp
+            # Prune entries whose token has already expired — they are no longer
+            # replayable (verify_token rejects them on the exp check), so keeping
+            # them in the revocation map wastes memory.
+            expired = [j for j, e in self._revoked_jtis.items() if e < now]
+            for j in expired:
+                del self._revoked_jtis[j]
 
     def _is_revoked(self, jti: str) -> bool:
         with self._revoked_lock:
@@ -734,7 +741,7 @@ class App:
 
     def generate_pairing_code(self, user_id: str, username: str) -> str:
         """Generate a 6-digit pairing code valid for 10 minutes."""
-        code = "".join(str(os.urandom(1)[0] % 10) for _ in range(6))
+        code = "".join(str(secrets.randbelow(10)) for _ in range(6))
         expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)
         self.store.create_pairing_code(code, user_id, username, expires_at.isoformat().replace("+00:00", "Z"))
         # Cleanup expired codes periodically
@@ -1254,9 +1261,11 @@ class Handler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
     def _serve_image(self, img: Dict[str, Any]) -> None:
-        # Security: verify path is within allowed directories
+        # Security: verify path is within allowed directories.
+        # image_cache_path covers a separate poster/artwork cache dir (e.g. TMDb images)
+        # that lives outside the media roots — include it so future cached images are served.
         img_path = str(img["path"])
-        allowed_roots = [self.app.cfg.movies_path, self.app.cfg.tv_path, self.app.cfg.home_path]
+        allowed_roots = [self.app.cfg.movies_path, self.app.cfg.tv_path, self.app.cfg.home_path, self.app.cfg.image_cache_path]
         if not _is_path_within_allowed(img_path, allowed_roots):
             return _write_error(self, HTTPStatus.FORBIDDEN, "access_denied")
 

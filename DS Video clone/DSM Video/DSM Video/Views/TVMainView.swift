@@ -78,6 +78,7 @@ struct TVLoginView: View {
               Text("Sign In")
                 .font(.system(size: 36, weight: .semibold))
                 .foregroundStyle(.white)
+                .accessibilityAddTraits(.isHeader)
 
               VStack(spacing: 16) {
                 TextField("Server Address", text: $server)
@@ -344,6 +345,15 @@ private struct TVLibraryRail: View {
     isLoading = true
     defer { isLoading = false }
 
+    // Prefer LocalStore (already populated by delta sync) to avoid a redundant
+    // network call on every TVHomeView appear (TASK-415).
+    let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
+    if !cached.isEmpty {
+      items = cached
+      return
+    }
+
+    // LocalStore empty (first launch before sync completes) — fall back to API.
     do {
       items = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
     } catch {
@@ -696,6 +706,7 @@ private struct TVSearchView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+                .accessibilityHint("Opens video details")
                 Divider().background(Color(white: 0.2)).padding(.horizontal, 60)
               }
             }

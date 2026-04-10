@@ -11,7 +11,9 @@ struct LoginView: View {
   #endif
   @State private var showQuickConnect: Bool = false
   @State private var showOfflineDownloads: Bool = false
-  @State private var hasDownloads: Bool = false
+  // Tracked so SwiftUI observes DownloadManager changes; hasDownloads reads from it (TASK-431).
+  @State private var downloadManager = DownloadManager.shared
+  private var hasDownloads: Bool { !downloadManager.getDownloadedItems().isEmpty }
 
   var body: some View {
     @Bindable var appState = appState
@@ -129,7 +131,7 @@ struct LoginView: View {
           Task { await appState.login() }
         } label: {
           if appState.isLoggingIn {
-            ProgressView()
+            ProgressView("Connecting")
               .tint(DSReelBrandColor.background)
               .frame(maxWidth: .infinity, minHeight: 52)
           } else {
@@ -249,9 +251,6 @@ struct LoginView: View {
           appState.baseURL = quickConnectID
         }
       }
-    }
-    .onAppear {
-      hasDownloads = !DownloadManager.shared.getDownloadedItems().isEmpty
     }
   }
 }

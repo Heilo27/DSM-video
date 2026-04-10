@@ -514,6 +514,7 @@ private struct TVShowDetailScrollView: View {
             .font(.subheadline).foregroundStyle(.white.opacity(0.75))
         }
       }
+      .accessibilityElement(children: .combine)
       .padding(.horizontal, 16)
       .padding(.bottom, 14)
     }

@@ -235,12 +235,18 @@ final class AppState {
             // Success — set token BEFORE baseURL so the first updateAPI() call has
             // the correct token and no brief nil-token APIClient is created.
             sessionToken = resp.token
-            baseURL = urlStr
             if rememberMe {
+              // Persist the resolved IP so future launches reconnect directly.
+              baseURL = urlStr
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             } else {
+              // Don't persist the resolved IP — keep the original QuickConnect ID
+              // in baseURL so it re-resolves on the next login (TASK-404).
               Self.deleteFromKeychain(account: Keys.keychainAccount)
               Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+              // Update the api client directly to use the resolved URL for this session
+              // without persisting it to UserDefaults.
+              api = APIClient(baseURL: url, token: resp.token)
               username = ""; savedPassword = ""
             }
             return
@@ -285,6 +291,7 @@ final class AppState {
     pairingCode = nil
     isDemoMode = false
     loginError = nil
+    stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
   }
 
@@ -555,6 +562,8 @@ final class AppState {
 
     // Cold start — load SQLite first (fast), then sync from network
     homeIsCacheDecoding = true
+    // Ensure setup has completed before any store access (TASK-420).
+    await LocalStore.shared.ensureReady()
     let hasLocal = await Task.detached(priority: .userInitiated) {
       await LocalStore.shared.hasItems()
     }.value

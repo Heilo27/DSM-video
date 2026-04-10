@@ -50,7 +50,7 @@ struct TVPairingView: View {
 
         // Content
         if isGenerating && pairingCode == nil {
-          ProgressView()
+          ProgressView("Generating pairing code")
             .tint(.white)
             .scaleEffect(2.0)
             .padding(.vertical, 40)

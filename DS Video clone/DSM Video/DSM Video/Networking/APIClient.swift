@@ -220,8 +220,9 @@ struct APIClient {
   }
 
   func syncHeartbeat() async throws -> SyncHeartbeatResponse {
+    // authorized: true — heartbeat is user-scoped; Bearer token required (TASK-429).
     try await request(path: "/api/v1/sync/heartbeat", method: "GET", body: Optional<Int>.none,
-                      response: SyncHeartbeatResponse.self, authorized: false, timeoutInterval: 5)
+                      response: SyncHeartbeatResponse.self, authorized: true, timeoutInterval: 5)
   }
 
   func syncItems(since: Int, limit: Int = 500, afterRowid: Int? = nil) async throws -> SyncItemsResponse {
