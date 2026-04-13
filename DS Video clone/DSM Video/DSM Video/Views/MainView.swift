@@ -208,6 +208,7 @@ private struct SearchView: View {
   @State private var hasSearched: Bool = false
   @State private var searchError: String?
   @State private var debounceTask: Task<Void, Never>?
+  @State private var searchTask: Task<Void, Never>?
   @AppStorage("dsReel.recentSearches") private var recentSearchesRaw: String = ""
 
   private var recentSearches: [String] {
@@ -291,11 +292,13 @@ private struct SearchView: View {
     .navigationTitle("Search")
     .searchable(text: $searchText, prompt: "Search videos")
     .onSubmit(of: .search) {
-      Task { await search() }
+      searchTask?.cancel()
+      searchTask = Task { await search() }
     }
     .onChange(of: searchText) { _, newValue in
       if newValue.isEmpty {
         debounceTask?.cancel()
+        searchTask?.cancel()
         results = []
         hasSearched = false
         searchError = nil
@@ -303,7 +306,8 @@ private struct SearchView: View {
         debounceTask?.cancel()
         debounceTask = Task {
           if (try? await Task.sleep(for: .milliseconds(400))) != nil {
-            await search()
+            searchTask?.cancel()
+            searchTask = Task { await search() }
           }
         }
       }
@@ -508,7 +512,7 @@ private struct SearchResultCell: View {
           Image(systemName: "film.fill")
             .font(.system(size: 36))
             .foregroundStyle(.white.opacity(0.25))
-            .accessibilityLabel("No poster available")
+            .accessibilityHidden(true)
         )
     }
   }
@@ -741,7 +745,9 @@ struct DownloadsView: View {
   }
 
   private nonisolated func computeStorageInfo(downloads: [DownloadedItem]) async -> (Int64, Int64, Int64) {
-    let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    guard let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+      return (0, 0, 0)
+    }
     let total: Int64
     let available: Int64
     #if !os(tvOS)
@@ -842,11 +848,11 @@ private struct ActiveDownloadCell: View {
       .frame(width: 44, height: 44)
       .accessibilityLabel("Cancel download")
     }
-    .accessibilityElement(children: .combine)
     .accessibilityLabel(isPaused
       ? "\(title), paused at \(Int(progress * 100)) percent"
       : "\(title), downloading, \(Int(progress * 100)) percent complete"
     )
+    .accessibilityAction(named: "Cancel download") { onCancel() }
   }
 }
 

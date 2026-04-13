@@ -65,6 +65,10 @@ struct GestureVideoPlayer: View {
     @State private var hideVolumeIndicatorTask: Task<Void, Never>?
     @State private var skipHideTask: Task<Void, Never>?
     @State private var timeObserver: Any?
+    // MARK: ACKNOWLEDGED (TASK-199): Set<AnyCancellable> in @State is a known pattern limitation
+    // for struct-based SwiftUI views. The subscriptions established in setupPlayer() are stored
+    // here and manually cleared in cleanup(). Moving to @StateObject would require a class wrapper
+    // and is deferred — the current lifecycle (onAppear/onDisappear) is correct.
     @State private var cancellables = Set<AnyCancellable>()
     @State private var hasResumedPosition: Bool = false
     @State private var showCaptionsPicker: Bool = false
@@ -820,19 +824,22 @@ struct GestureVideoPlayer: View {
         }
     }
 
+    /// Seek to a time position.
+    /// - tight: uses .zero tolerance (frame-accurate) for scrub-end seeks.
+    /// - fast (default): uses .positiveInfinity tolerance for quick skip-button seeks.
     private func seek(to time: Double, tight: Bool = false) {
         let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         if tight {
             player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         } else {
-            let tolerance = CMTime(seconds: 0.5, preferredTimescale: 600)
-            player?.seek(to: cmTime, toleranceBefore: tolerance, toleranceAfter: tolerance)
+            // .positiveInfinity tolerance = fast seek (decoder finds nearest key frame immediately)
+            player?.seek(to: cmTime, toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
         }
     }
 
     private func skipForward() {
         let newTime = min(duration, currentTime + skipSeconds)
-        seek(to: newTime)
+        seek(to: newTime)  // fast seek (positiveInfinity tolerance)
         currentTime = newTime
         showSkipAnimation(direction: .forward)
         if isPlaying { scheduleHideControls() }
@@ -840,7 +847,7 @@ struct GestureVideoPlayer: View {
 
     private func skipBackward() {
         let newTime = max(0, currentTime - skipSeconds)
-        seek(to: newTime)
+        seek(to: newTime)  // fast seek (positiveInfinity tolerance)
         currentTime = newTime
         showSkipAnimation(direction: .backward)
         if isPlaying { scheduleHideControls() }

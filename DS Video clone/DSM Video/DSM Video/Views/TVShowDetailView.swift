@@ -76,7 +76,7 @@ private struct TVShowDetailSplitView: View {
           Image(systemName: "tv.fill")
             .font(.system(size: 80))
             .foregroundStyle(.white.opacity(0.12))
-            .accessibilityLabel("No poster available")
+            .accessibilityHidden(true)
         )
       }
 
@@ -494,7 +494,7 @@ private struct TVShowDetailScrollView: View {
             Image(systemName: "tv.fill")
               .font(.system(size: 48))
               .foregroundStyle(.white.opacity(0.2))
-              .accessibilityLabel("No poster available")
+              .accessibilityHidden(true)
           )
       }
 
@@ -885,6 +885,9 @@ private struct TVShowMetadataFixerSheet: View {
       .task { await search() }
       .scrollContentBackground(.hidden)
       .background(Color.black)
+      .onChange(of: error) { _, msg in
+        if let msg { AccessibilityNotification.Announcement(msg).post() }
+      }
     }
   }
 
@@ -906,6 +909,7 @@ private struct TVShowMetadataFixerSheet: View {
     defer { isApplying = false }
     do {
       try await appState.api.tvShowTMDbFix(showId: showId, tmdbId: candidate.tmdbId)
+      AccessibilityNotification.Announcement("Metadata updated successfully.").post()
       onApplied?()
       dismiss()
     } catch {

@@ -66,6 +66,7 @@ struct TVShowsView: View {
     let raw = UserDefaults.standard.string(forKey: "dsReel.tvSortOption") ?? ""
     return TVShowSortOption(rawValue: raw) ?? .recentlyWatched
   }()
+  @State private var sortedShows: [TVShow] = []
 
   #if os(tvOS)
   private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 28)] }
@@ -76,7 +77,7 @@ struct TVShowsView: View {
   }
   #endif
 
-  private var sortedShows: [TVShow] {
+  private func computeSortedShows() -> [TVShow] {
     switch sortOption {
     case .recentlyWatched:
       shows.sorted { a, b in
@@ -186,6 +187,13 @@ struct TVShowsView: View {
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
+      sortedShows = computeSortedShows()
+    }
+    .onChange(of: shows) { _, _ in
+      sortedShows = computeSortedShows()
+    }
+    .onAppear {
+      sortedShows = computeSortedShows()
     }
     #else
     .toolbar {
@@ -203,6 +211,13 @@ struct TVShowsView: View {
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
+      sortedShows = computeSortedShows()
+    }
+    .onChange(of: shows) { _, _ in
+      sortedShows = computeSortedShows()
+    }
+    .onAppear {
+      sortedShows = computeSortedShows()
     }
     #endif
   }
@@ -251,8 +266,8 @@ private struct TVShowSortChipBar: View {
             Text(label)
               .font(.subheadline.weight(.medium))
               .foregroundStyle(isActive ? Color.white : Color.dsTextSecondary)
+              .frame(minHeight: 44)
               .padding(.horizontal, 12)
-              .padding(.vertical, 7)
               .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                   .fill(isActive ? Color.dsAccent : Color.dsSurface)
@@ -305,7 +320,7 @@ private struct TVShowPosterCell: View {
               Image(systemName: "tv.fill")
                 .font(.system(size: 36))
                 .foregroundStyle(.white.opacity(0.25))
-                .accessibilityLabel("No poster available")
+                .accessibilityHidden(true)
             )
         }
 

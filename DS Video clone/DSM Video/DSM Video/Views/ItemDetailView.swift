@@ -233,8 +233,8 @@ struct ItemDetailView: View {
                   .background(Color.black.opacity(0.7))
                   .clipShape(Capsule())
               }
-              .accessibilityLabel("No metadata. Fix metadata")
-              .accessibilityHint("Opens metadata search to correct this item")
+              .accessibilityLabel("Fix missing metadata for \(fallbackTitle)")
+              .accessibilityHint("Opens metadata search")
               .padding(10)
             }
           }
@@ -427,6 +427,8 @@ struct ItemDetailView: View {
           }
         }
         .font(.footnote)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
       }
     }
   }

@@ -60,6 +60,10 @@ final class AppState {
   var sessionToken: String? {
     didSet {
       if rememberMe {
+        guard !isDemoMode else {
+          updateAPI()
+          return
+        }
         if let token = sessionToken {
           Self.saveToKeychain(token, account: Keys.keychainAccountToken)
         } else {
