@@ -6,6 +6,18 @@ import Security
 import SwiftUI
 import os.log
 
+// TASK-363: file-scope (nonisolated) so computeHomeRails can access from a nonisolated context.
+private let homeRailsFormatterFrac: ISO8601DateFormatter = {
+  let f = ISO8601DateFormatter()
+  f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return f
+}()
+private let homeRailsFormatter: ISO8601DateFormatter = {
+  let f = ISO8601DateFormatter()
+  f.formatOptions = [.withInternetDateTime]
+  return f
+}()
+
 @MainActor
 @Observable
 final class AppState {
@@ -475,17 +487,6 @@ final class AppState {
     }
   }
 
-  // TASK-363: static lets so these are allocated once per process, not per computeHomeRails call.
-  private static let homeRailsFormatterFrac: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f
-  }()
-  private static let homeRailsFormatter: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime]
-    return f
-  }()
 
   nonisolated static func computeHomeRails(_ allItems: [ItemSummary])
     -> (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary])
