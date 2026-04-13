@@ -2648,12 +2648,16 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 			"ON CONFLICT(item_id, user_id) DO UPDATE SET position_seconds=excluded.position_seconds, duration_seconds=excluded.duration_seconds, updated_at=excluded.updated_at",
 		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now,
 	)
+	if err == nil {
+		// Increment progress_seq inside the mutex so it serializes with the DB write
+		// and avoids SQLITE_BUSY contention from concurrent callers.
+		s.incrementSeq("progress_seq")
+	}
 	s.progressMu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	s.incrementSeq("progress_seq")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -3756,10 +3760,15 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			staleTx, err := s.db.BeginTx(ctx, nil)
 			if err == nil {
 				for _, sid := range staleIDs {
+					// Assign a real change_seq so clients can detect the deletion via delta sync.
+					var seq int64
+					_ = staleTx.QueryRowContext(ctx,
+						`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+					).Scan(&seq)
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx,
 						`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,?)`,
-						sid, 0, now)
+						sid, seq, now)
 				}
 				_ = staleTx.Commit()
 			}
