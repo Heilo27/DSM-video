@@ -51,6 +51,7 @@ struct LibrariesView: View {
     .onChange(of: appState.sessionToken) { _, token in
       if token == nil {
         libraries = []
+        error = nil
       }
     }
 

@@ -4239,6 +4239,10 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_show_id")
 		return
 	}
+	// Escape SQL LIKE wildcards so a showID containing '%' or '_' doesn't match unintended rows.
+	escapedShowID := strings.ReplaceAll(showID, `\`, `\\`)
+	escapedShowID = strings.ReplaceAll(escapedShowID, "%", `\%`)
+	escapedShowID = strings.ReplaceAll(escapedShowID, "_", `\_`)
 
 	var body struct {
 		TMDbID int `json:"tmdbId"`
@@ -4277,7 +4281,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + showID + "/"
+	folderPrefix := tvRoot + escapedShowID + "/"
 
 	result, err := s.db.Exec(`
 		UPDATE items SET
@@ -4291,7 +4295,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 			genres = ?,
 			cast_names = ?,
 			metadata_fetched_at = ?
-		WHERE path LIKE ? AND library_id = 'lib_tv'`,
+		WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`,
 		details.ID, details.Name, details.Overview,
 		yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
 		genres, cast, now,
@@ -4596,14 +4600,21 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		showID = decoded
 	}
+	if strings.Contains(showID, "/") || strings.Contains(showID, "..") {
+		writeErr(w, http.StatusBadRequest, "invalid_show_id")
+		return
+	}
+	escapedID := strings.ReplaceAll(showID, `\`, `\\`)
+	escapedID = strings.ReplaceAll(escapedID, "%", `\%`)
+	escapedID = strings.ReplaceAll(escapedID, "_", `\_`)
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + showID + "/"
+	folderPrefix := tvRoot + escapedID + "/"
 
 	rows, err := s.db.Query(`
 		SELECT COALESCE(season_number, 1), COUNT(*)
 		FROM items
-		WHERE (path LIKE ? OR show_name = ?) AND library_id = 'lib_tv'
+		WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'
 		GROUP BY COALESCE(season_number, 1)
 		ORDER BY COALESCE(season_number, 1)`,
 		folderPrefix+"%", showID)
@@ -4643,14 +4654,21 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		showID = decoded
 	}
+	if strings.Contains(showID, "/") || strings.Contains(showID, "..") {
+		writeErr(w, http.StatusBadRequest, "invalid_show_id")
+		return
+	}
+	escapedID := strings.ReplaceAll(showID, `\`, `\\`)
+	escapedID = strings.ReplaceAll(escapedID, "%", `\%`)
+	escapedID = strings.ReplaceAll(escapedID, "_", `\_`)
 
 	seasonStr := r.URL.Query().Get("season")
 	u := userFromCtx(r.Context())
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + showID + "/"
+	folderPrefix := tvRoot + escapedID + "/"
 
-	where := "(path LIKE ? OR show_name = ?) AND library_id = 'lib_tv'"
+	where := `(path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`
 	args := []any{folderPrefix + "%", showID}
 
 	if seasonStr != "" {
