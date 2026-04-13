@@ -15,20 +15,21 @@ struct MainView: View {
       case .tabs:
         TabView {
           LibraryHomeView()
-            .tabItem { Label("Home", systemImage: "play.rectangle") }
+            .tabItem { Label("HOME", systemImage: "play.rectangle") }
 
           LibrariesView()
-            .tabItem { Label("Libraries", systemImage: "square.grid.2x2") }
+            .tabItem { Label("LIBRARIES", systemImage: "square.grid.2x2") }
 
           SearchView()
-            .tabItem { Label("Search", systemImage: "magnifyingglass") }
+            .tabItem { Label("SEARCH", systemImage: "magnifyingglass") }
 
           DownloadsView()
-            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
+            .tabItem { Label("DOWNLOADS", systemImage: "arrow.down.circle") }
 
           SettingsView()
-            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tabItem { Label("SETTINGS", systemImage: "gearshape") }
         }
+        .tint(Color.dsAccent)
       case .split:
         SplitView()
       }
@@ -240,8 +241,33 @@ private struct SearchView: View {
         ProgressView("Searching for videos")
           .padding(.top, 60)
       } else if let searchError {
-        ContentUnavailableView("Search Failed", systemImage: "wifi.slash", description: Text(searchError))
-          .padding(.top, 60)
+        VStack(spacing: 16) {
+          Image(systemName: "wifi.slash")
+            .font(.system(size: 44))
+            .foregroundStyle(Color.dsError)
+            .accessibilityHidden(true)
+          Text("Search Failed")
+            .font(.headline)
+            .foregroundStyle(Color.dsError)
+          Text(searchError)
+            .font(.subheadline)
+            .foregroundStyle(.white.opacity(0.75))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 32)
+          Button {
+            Task { await search() }
+          } label: {
+            Text("Retry")
+              .font(.subheadline.weight(.semibold))
+              .foregroundStyle(.white)
+              .padding(.horizontal, 24)
+              .padding(.vertical, 10)
+              .background(Color.dsError)
+              .clipShape(Capsule())
+          }
+          .buttonStyle(.plain)
+        }
+        .padding(.top, 60)
       } else if hasSearched && results.isEmpty {
         ContentUnavailableView("No Results", systemImage: "magnifyingglass", description: Text("No videos match \"\(searchText)\""))
           .padding(.top, 60)
@@ -615,22 +641,22 @@ struct DownloadsView: View {
       }
       GeometryReader { geo in
         ZStack(alignment: .leading) {
-          RoundedRectangle(cornerRadius: 4)
+          RoundedRectangle(cornerRadius: 5)
             .fill(Color.dsSurface)
-            .frame(height: 8)
-          RoundedRectangle(cornerRadius: 4)
+            .frame(height: 10)
+          RoundedRectangle(cornerRadius: 5)
             .fill(Color.dsAccent)
             .frame(
               width: totalBytes > 0
                 ? geo.size.width * CGFloat(Double(usedByAppBytes) / Double(totalBytes))
                 : 0,
-              height: 8
+              height: 10
             )
         }
       }
-      .frame(height: 8)
-      Text("\(formatBytes(availableBytes)) available")
-        .font(.caption2)
+      .frame(height: 10)
+      Text("\(formatBytes(availableBytes)) of \(formatBytes(totalBytes)) available")
+        .font(.caption)
         .foregroundStyle(Color.dsTextSecondary)
     }
     .padding()
@@ -639,7 +665,7 @@ struct DownloadsView: View {
     .padding(.horizontal)
     .padding(.top, 8)
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("Storage: \(formatBytes(usedByAppBytes)) used by downloads, \(formatBytes(availableBytes)) available")
+    .accessibilityLabel("Storage: \(formatBytes(usedByAppBytes)) used by downloads, \(formatBytes(availableBytes)) of \(formatBytes(totalBytes)) available")
   }
 
   // MARK: - Active Downloads Section

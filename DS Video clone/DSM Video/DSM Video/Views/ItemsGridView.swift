@@ -1,21 +1,25 @@
 import SwiftUI
 
 enum SortOption: String, CaseIterable {
+  case all          = "All"
   case addedNewest  = "Recently Added"
   case addedOldest  = "Oldest Added"
   case nameAsc      = "Name A–Z"
   case nameDesc     = "Name Z–A"
   case releaseNewest = "Release Year ↓"
   case releaseOldest = "Release Year ↑"
+  case rating       = "Rating"
 
   var chipLabel: String {
     switch self {
+    case .all:          return "All"
     case .addedNewest:  return "Added ↓"
     case .addedOldest:  return "Added ↑"
     case .nameAsc:      return "A → Z"
     case .nameDesc:     return "Z → A"
     case .releaseNewest: return "Year ↓"
     case .releaseOldest: return "Year ↑"
+    case .rating:       return "Rating"
     }
   }
 }
@@ -36,12 +40,14 @@ struct ItemsGridView: View {
 
   private func sorted(_ list: [ItemSummary], by option: SortOption) -> [ItemSummary] {
     switch option {
+    case .all:           return list
     case .addedNewest:   return list.sorted { $0.addedAt > $1.addedAt }
     case .addedOldest:   return list.sorted { $0.addedAt < $1.addedAt }
     case .nameAsc:       return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     case .nameDesc:      return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
     case .releaseNewest: return list.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
     case .releaseOldest: return list.sorted { ($0.year ?? Int.max) < ($1.year ?? Int.max) }
+    case .rating:        return list.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }
     }
   }
 
@@ -91,6 +97,15 @@ struct ItemsGridView: View {
           }
         }
         .padding(gridPadding)
+
+        if !sortedItems.isEmpty {
+          Text("\(sortedItems.count) item\(sortedItems.count == 1 ? "" : "s")")
+            .font(.caption)
+            .foregroundStyle(Color.dsTextTertiary)
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, 16)
+            .accessibilityHidden(true)
+        }
       }
     }
     .background(Color.black.ignoresSafeArea())

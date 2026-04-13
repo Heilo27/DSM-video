@@ -43,6 +43,11 @@ struct LibrariesView: View {
     .navigationTitle("Libraries")
     .task { await load() }
     .refreshable { await load() }
+    .onChange(of: appState.homeLibraries) { _, libs in
+      if !libs.isEmpty {
+        libraries = libs
+      }
+    }
 
     if isEmbedded {
       content
@@ -131,7 +136,8 @@ struct LibraryHomeView: View {
               HomeRail(
                 title: "Continue Watching",
                 items: appState.homeContinueWatching,
-                seeAllLibrary: appState.homeFirstMovieLibrary
+                seeAllLibrary: appState.homeFirstMovieLibrary,
+                useLandscapeCards: true
               )
             }
             if !appState.homeJustAdded.isEmpty {
@@ -185,6 +191,74 @@ struct LibraryHomeView: View {
   }
 }
 
+// MARK: - ContinueWatchingCard (landscape 200×120)
+
+private struct ContinueWatchingCard: View {
+  @Environment(AppState.self) private var appState
+  let item: ItemSummary
+
+  var body: some View {
+    ZStack(alignment: .bottomLeading) {
+      Group {
+        if appState.isDemoMode, let assetName = DemoData.posterAssetNames[item.id] {
+          Image(assetName)
+            .resizable()
+            .scaledToFill()
+        } else if let backdropId = item.backdropImageId ?? item.posterImageId {
+          AuthenticatedImage(
+            url: appState.api.imageURL(id: backdropId, width: 400),
+            token: appState.sessionToken
+          )
+          .scaledToFill()
+        } else {
+          Rectangle()
+            .fill(Color(white: 0.1))
+            .overlay(
+              Image(systemName: "play.rectangle.fill")
+                .font(.system(size: 28))
+                .foregroundStyle(.white.opacity(0.3))
+                .accessibilityHidden(true)
+            )
+        }
+      }
+      .frame(width: 200, height: 120)
+      .clipped()
+
+      // Gradient + title overlay
+      LinearGradient(
+        stops: [.init(color: .clear, location: 0.4), .init(color: .black.opacity(0.8), location: 1.0)],
+        startPoint: .top, endPoint: .bottom
+      )
+      .frame(width: 200, height: 120)
+
+      Text(item.title)
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.white)
+        .lineLimit(2)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 6)
+        .frame(width: 200, alignment: .leading)
+
+      // Progress bar
+      if let progress = item.progress, progress.durationSeconds > 0 {
+        let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
+        if frac < 1.0 {
+          GeometryReader { geo in
+            ZStack(alignment: .leading) {
+              Rectangle().fill(Color.dsBorderStrong).frame(height: 3)
+              Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 3)
+            }
+          }
+          .frame(height: 3)
+          .accessibilityHidden(true)
+        }
+      }
+    }
+    .frame(width: 200, height: 120)
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+  }
+}
+
 // MARK: - HomeRail
 
 private struct HomeRail: View {
@@ -192,6 +266,7 @@ private struct HomeRail: View {
   let title: String
   let items: [ItemSummary]
   let seeAllLibrary: Library?
+  var useLandscapeCards: Bool = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -215,11 +290,31 @@ private struct HomeRail: View {
       }
       .padding(.horizontal, 16)
 
-      // Horizontal scroll of poster cards
+      // Horizontal scroll of poster/landscape cards
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(spacing: 10) {
           ForEach(items) { item in
-            if let showName = item.showName, !showName.isEmpty,
+            if useLandscapeCards {
+              // Continue Watching — landscape 200x120 card
+              NavigationLink {
+                if let showName = item.showName, !showName.isEmpty,
+                   let tvLibrary = appState.homeFirstTVLibrary {
+                  let stub = TVShow(
+                    id: showName, title: showName, year: item.year,
+                    seasonCount: 0, episodeCount: 0,
+                    posterImageId: item.posterImageId, lastWatchedAt: nil, addedAt: nil
+                  )
+                  TVShowDetailView(show: stub, library: tvLibrary)
+                } else {
+                  ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                }
+              } label: {
+                ContinueWatchingCard(item: item)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+              .accessibilityHint(item.showName != nil ? "Opens TV show" : "Opens video details")
+            } else if let showName = item.showName, !showName.isEmpty,
                let tvLibrary = appState.homeFirstTVLibrary {
               // Episode → navigate to the show page so the user picks an episode.
               // Use a display item with showName as the title so the poster cell

@@ -405,6 +405,7 @@ private struct TVShowDetailScrollView: View {
   @State private var isLoading = false
   @State private var error: String?
   @State private var showMetadataFixer = false
+  @State private var metadataFixApplied = false
 
   private var headerHeight: CGFloat {
     horizontalSizeClass == .regular ? 320 : 220
@@ -454,9 +455,16 @@ private struct TVShowDetailScrollView: View {
         }
       }
     }
-    .sheet(isPresented: $showMetadataFixer) {
-      TVShowMetadataFixerSheet(showId: show.id, initialQuery: show.title)
-        .environment(appState)
+    .sheet(isPresented: $showMetadataFixer, onDismiss: {
+      if metadataFixApplied {
+        metadataFixApplied = false
+        Task { await load() }
+      }
+    }) {
+      TVShowMetadataFixerSheet(showId: show.id, initialQuery: show.title, onApplied: {
+        metadataFixApplied = true
+      })
+      .environment(appState)
     }
     #endif
   }
@@ -765,17 +773,18 @@ private struct TVShowMetadataFixerSheet: View {
 
   let showId: String
   let initialQuery: String
+  var onApplied: (() -> Void)?
 
   @State private var searchQuery: String
   @State private var results: [TMDbCandidate] = []
   @State private var isSearching = false
   @State private var isApplying = false
   @State private var error: String?
-  @State private var applied = false
 
-  init(showId: String, initialQuery: String) {
+  init(showId: String, initialQuery: String, onApplied: (() -> Void)? = nil) {
     self.showId = showId
     self.initialQuery = initialQuery
+    self.onApplied = onApplied
     _searchQuery = State(initialValue: initialQuery)
   }
 
@@ -792,12 +801,23 @@ private struct TVShowMetadataFixerSheet: View {
         if isSearching {
           HStack {
             Spacer()
-            ProgressView().tint(.white)
+            ProgressView("Searching").tint(.white)
             Spacer()
           }
           .listRowBackground(Color(white: 0.08))
         } else {
+          // Pre-compute which title+year keys appear more than once so the
+          // ForEach body avoids an O(n²) filter on every render pass.
+          let duplicateKeys: Set<String> = {
+            var counts: [String: Int] = [:]
+            for r in results {
+              let key = "\(r.title)|\(r.year.map(String.init) ?? "")"
+              counts[key, default: 0] += 1
+            }
+            return Set(counts.filter { $0.value > 1 }.keys)
+          }()
           ForEach(results) { candidate in
+            let isDuplicate = duplicateKeys.contains("\(candidate.title)|\(candidate.year.map(String.init) ?? "")")
             Button {
               Task { await apply(candidate) }
             } label: {
@@ -818,7 +838,7 @@ private struct TVShowMetadataFixerSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
-                    if results.filter({ $0.title == candidate.title && $0.year == candidate.year }).count > 1 {
+                    if isDuplicate {
                       Text("ID \(candidate.tmdbId)")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -833,7 +853,10 @@ private struct TVShowMetadataFixerSheet: View {
                 }
               }
             }
-            .accessibilityLabel("\(candidate.title)\(candidate.year.map { ", \($0)" } ?? "")")
+            .accessibilityLabel({
+              let base = "\(candidate.title)\(candidate.year.map { ", \($0)" } ?? "")"
+              return isDuplicate ? "\(base), TMDb ID \(candidate.tmdbId)" : base
+            }())
             .buttonStyle(.plain)
             .disabled(isApplying)
             .listRowBackground(Color(white: 0.1))
@@ -843,12 +866,6 @@ private struct TVShowMetadataFixerSheet: View {
         if let error {
           Text(error)
             .foregroundStyle(.red)
-            .font(.caption)
-            .listRowBackground(Color(white: 0.08))
-        }
-        if applied {
-          Text("Metadata updated! Pull to refresh.")
-            .foregroundStyle(.green)
             .font(.caption)
             .listRowBackground(Color(white: 0.08))
         }
@@ -888,7 +905,7 @@ private struct TVShowMetadataFixerSheet: View {
     defer { isApplying = false }
     do {
       try await appState.api.tvShowTMDbFix(showId: showId, tmdbId: candidate.tmdbId)
-      applied = true
+      onApplied?()
       dismiss()
     } catch {
       self.error = (error as? APIError)?.userMessage ?? "Failed to apply."

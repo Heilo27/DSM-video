@@ -70,7 +70,7 @@ struct GestureVideoPlayer: View {
     @State private var showCaptionsPicker: Bool = false
     @State private var didSetupPlayer: Bool = false
 
-    private let skipSeconds: Double = 30
+    private let skipSeconds: Double = 15
 
     enum SkipDirection {
         case backward, forward
@@ -194,13 +194,6 @@ struct GestureVideoPlayer: View {
             controlsOverlay(geometry: geometry)
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(controlsInteractive)
-
-            // Center play/pause button — positioned midway between screen top and progress bar
-            #if os(iOS)
-            centerPlayPauseButton(geometry: geometry)
-                .opacity(showControls ? 1 : 0)
-                .allowsHitTesting(controlsInteractive)
-            #endif
 
             // Scrub preview
             if showScrubPreview {
@@ -336,65 +329,6 @@ struct GestureVideoPlayer: View {
     #endif
 
 
-    // MARK: - Center Play/Pause Button
-
-    #if os(iOS)
-    @ViewBuilder
-    private func centerPlayPauseButton(geometry: GeometryProxy) -> some View {
-        // Bottom controls height: 40pt bottom pad + ~20pt progress bar = ~60pt
-        // Top bar height: ~80pt
-        // Center of the open space between them:
-        let bottomControlsHeight: CGFloat = 60
-        let topBarHeight: CGFloat = 80
-        let openSpaceCenter = topBarHeight + (geometry.size.height - topBarHeight - bottomControlsHeight) / 2
-
-        HStack(spacing: 48) {
-            // Skip backward
-            Button {
-                skipBackward()
-                scheduleHideControls()
-            } label: {
-                Image(systemName: "gobackward.30")
-                    .font(.system(size: 32, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 56, height: 56)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Skip backward 30 seconds")
-
-            // Play/pause
-            Button {
-                togglePlayPause()
-                scheduleHideControls()
-            } label: {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 64, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 88, height: 88)
-                    .background(.ultraThinMaterial, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isPlaying ? "Pause" : "Play")
-
-            // Skip forward
-            Button {
-                skipForward()
-                scheduleHideControls()
-            } label: {
-                Image(systemName: "goforward.30")
-                    .font(.system(size: 32, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 56, height: 56)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Skip forward 30 seconds")
-        }
-        .position(x: geometry.size.width / 2, y: openSpaceCenter)
-    }
-    #endif
-
     // MARK: - Controls Overlay
 
     @ViewBuilder
@@ -508,55 +442,148 @@ struct GestureVideoPlayer: View {
 
             Spacer()
 
-            // Bottom controls — progress bar only
-            HStack(spacing: 12) {
-                Text(formatTime(isScrubbing ? scrubTime : currentTime))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .frame(width: 50, alignment: .leading)
-                    .accessibilityHidden(true)
+            // Bottom controls — scrub bar + playback control row
+            VStack(spacing: 4) {
+                // Progress / scrub bar
+                HStack(spacing: 12) {
+                    Text(formatTime(isScrubbing ? scrubTime : currentTime))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(width: 50, alignment: .leading)
+                        .accessibilityHidden(true)
 
-                #if os(iOS)
-                Slider(
-                    value: Binding(
-                        get: { isScrubbing ? scrubTime : currentTime },
-                        set: { newValue in
-                            scrubTime = newValue
-                            if !isScrubbing {
-                                seek(to: newValue)
+                    #if os(iOS)
+                    Slider(
+                        value: Binding(
+                            get: { isScrubbing ? scrubTime : currentTime },
+                            set: { newValue in
+                                scrubTime = newValue
+                                if !isScrubbing {
+                                    seek(to: newValue)
+                                }
                             }
+                        ),
+                        in: 0...max(duration, 1)
+                    ) { editing in
+                        isScrubbing = editing
+                        if !editing {
+                            seek(to: scrubTime, tight: true)
                         }
-                    ),
-                    in: 0...max(duration, 1)
-                ) { editing in
-                    isScrubbing = editing
-                    if !editing {
-                        seek(to: scrubTime, tight: true)
                     }
-                }
-                .tint(.white)
-                .scaleEffect(y: 1.3)
-                .accessibilityLabel("Playback position")
-                .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
-                #else
-                // tvOS: progress bar only (no interactive Slider)
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.3)).frame(height: 4)
-                        Capsule().fill(Color.white)
-                            .frame(width: geo.size.width * (duration > 0 ? (isScrubbing ? scrubTime : currentTime) / max(duration, 1) : 0), height: 4)
+                    .tint(.white)
+                    .scaleEffect(y: 1.3)
+                    .accessibilityLabel("Playback position")
+                    .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
+                    #else
+                    // tvOS: progress bar only (no interactive Slider)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.3)).frame(height: 4)
+                            Capsule().fill(Color.white)
+                                .frame(width: geo.size.width * (duration > 0 ? (isScrubbing ? scrubTime : currentTime) / max(duration, 1) : 0), height: 4)
+                        }
                     }
-                }
-                .frame(height: 4)
-                .accessibilityLabel("Playback position")
-                .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
-                #endif
+                    .frame(height: 4)
+                    .accessibilityLabel("Playback position")
+                    .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
+                    #endif
 
-                Text("-\(formatTime(duration - (isScrubbing ? scrubTime : currentTime)))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
-                    .accessibilityHidden(true)
+                    Text("-\(formatTime(duration - (isScrubbing ? scrubTime : currentTime)))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
+                        .accessibilityHidden(true)
+                }
+
+                // Playback control strip: skip-to-start | rewind-15s | play/pause | forward-15s | skip-to-end
+                HStack(spacing: 0) {
+                    Spacer()
+
+                    // Skip to start
+                    Button {
+                        seek(to: 0, tight: true)
+                        currentTime = 0
+                        scheduleHideControls()
+                    } label: {
+                        Image(systemName: "gobackward")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Skip to start")
+
+                    Spacer()
+
+                    // Rewind 15s
+                    Button {
+                        let t = max(0, currentTime - 15)
+                        seek(to: t)
+                        currentTime = t
+                        showSkipAnimation(direction: .backward)
+                        if isPlaying { scheduleHideControls() }
+                    } label: {
+                        Image(systemName: "gobackward.15")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Rewind 15 seconds")
+
+                    Spacer()
+
+                    // Play / Pause
+                    Button {
+                        togglePlayPause()
+                        scheduleHideControls()
+                    } label: {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
+
+                    Spacer()
+
+                    // Forward 15s
+                    Button {
+                        let t = min(duration, currentTime + 15)
+                        seek(to: t)
+                        currentTime = t
+                        showSkipAnimation(direction: .forward)
+                        if isPlaying { scheduleHideControls() }
+                    } label: {
+                        Image(systemName: "goforward.15")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Forward 15 seconds")
+
+                    Spacer()
+
+                    // Skip to end
+                    Button {
+                        if duration > 0 {
+                            seek(to: duration, tight: true)
+                            currentTime = duration
+                        }
+                        scheduleHideControls()
+                    } label: {
+                        Image(systemName: "goforward")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Skip to end")
+
+                    Spacer()
+                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 40)
@@ -623,7 +650,7 @@ struct GestureVideoPlayer: View {
 
     private func skipBubble(direction: SkipDirection) -> some View {
         VStack(spacing: 4) {
-            Image(systemName: direction == .backward ? "gobackward.30" : "goforward.30")
+            Image(systemName: direction == .backward ? "gobackward.15" : "goforward.15")
                 .font(.title)
                 .accessibilityLabel(direction == .backward ? "Skip backward" : "Skip forward")
             Text("\(Int(skipSeconds)) sec")

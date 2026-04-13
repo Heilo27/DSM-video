@@ -80,6 +80,8 @@ struct TVShowsView: View {
     switch sortOption {
     case .recentlyWatched:
       shows.sorted { a, b in
+        // ISO8601 strings (yyyy-MM-ddTHH:mm:ssZ) sort correctly with lexicographic >.
+        // Nil/empty sorts to the bottom (unwatched shows appear last).
         let aDate = a.lastWatchedAt ?? ""
         let bDate = b.lastWatchedAt ?? ""
         if aDate.isEmpty && bDate.isEmpty {
@@ -90,8 +92,10 @@ struct TVShowsView: View {
         return aDate > bDate
       }
     case .addedNewest:
+      // ISO8601 strings sort correctly with lexicographic >. Nil sorts to the bottom.
       shows.sorted { ($0.addedAt ?? "") > ($1.addedAt ?? "") }
     case .addedOldest:
+      // ISO8601 strings sort correctly with lexicographic <. Nil sorts to the bottom.
       shows.sorted { ($0.addedAt ?? "") < ($1.addedAt ?? "") }
     case .nameAsc:
       shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
@@ -209,7 +213,7 @@ struct TVShowsView: View {
       shows = DemoData.tvShows
       return
     }
-    tvLog.info("TVShowsView.load: libraryId=\(library.id) baseURL=\(appState.api.baseURL.absoluteString)")
+    tvLog.info("TVShowsView.load: libraryId=\(library.id) baseURL=[server]")
     isLoading = true
     defer { isLoading = false }
     do {
@@ -255,8 +259,8 @@ private struct TVShowSortChipBar: View {
               )
           }
           .buttonStyle(.plain)
-          .accessibilityLabel("Sort by \(selection.rawValue)")
-          .accessibilityAddTraits(isActive ? .isSelected : [])
+          .accessibilityLabel("Sort by \(chip.rawValue)")
+          .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
         }
       }
       .padding(.horizontal, 16)

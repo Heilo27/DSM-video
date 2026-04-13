@@ -2700,35 +2700,61 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 
 	u := userFromCtx(r.Context())
 
-	// When since=0 the client wants everything — use >= so items with the
-	// default change_seq=0 (pre-existing rows not yet rescanned) are included.
-	op := ">"
-	if since == 0 {
-		op = ">="
-	}
-	// When afterRowid is provided, add a secondary rowid filter to page through
-	// items that all share the same change_seq (avoids infinite loop at seq=0).
-	rowidClause := ""
-	if afterRowid > 0 {
-		rowidClause = "AND i.rowid > ?"
-	}
-	query := fmt.Sprintf(`
+	// Select the right query variant based on since/afterRowid:
+	//   since=0 → use >= so pre-scan rows with change_seq=0 are included
+	//   afterRowid > 0 → add rowid page filter to avoid re-fetching rows at the same seq
+	const queryGTWithRowid = `
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
 		       p.position_seconds, p.duration_seconds, p.updated_at
 		FROM items i
 		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
-		WHERE i.change_seq %s ? %s
+		WHERE i.change_seq > ? AND i.rowid > ?
 		ORDER BY i.change_seq ASC, i.rowid ASC
-		LIMIT ?`, op, rowidClause)
+		LIMIT ?`
+	const queryGT = `
+		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
+		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
+		       i.show_name, i.season_number, i.episode_number, i.change_seq,
+		       p.position_seconds, p.duration_seconds, p.updated_at
+		FROM items i
+		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		WHERE i.change_seq > ?
+		ORDER BY i.change_seq ASC, i.rowid ASC
+		LIMIT ?`
+	const queryGTEWithRowid = `
+		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
+		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
+		       i.show_name, i.season_number, i.episode_number, i.change_seq,
+		       p.position_seconds, p.duration_seconds, p.updated_at
+		FROM items i
+		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		WHERE i.change_seq >= ? AND i.rowid > ?
+		ORDER BY i.change_seq ASC, i.rowid ASC
+		LIMIT ?`
+	const queryGTE = `
+		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
+		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
+		       i.show_name, i.season_number, i.episode_number, i.change_seq,
+		       p.position_seconds, p.duration_seconds, p.updated_at
+		FROM items i
+		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		WHERE i.change_seq >= ?
+		ORDER BY i.change_seq ASC, i.rowid ASC
+		LIMIT ?`
 
 	var rows *sql.Rows
 	var err error
-	if afterRowid > 0 {
-		rows, err = s.db.Query(query, u.ID, since, afterRowid, limit+1)
-	} else {
-		rows, err = s.db.Query(query, u.ID, since, limit+1)
+	switch {
+	case since == 0 && afterRowid > 0:
+		rows, err = s.db.Query(queryGTEWithRowid, u.ID, since, afterRowid, limit+1)
+	case since == 0:
+		rows, err = s.db.Query(queryGTE, u.ID, since, limit+1)
+	case afterRowid > 0:
+		rows, err = s.db.Query(queryGTWithRowid, u.ID, since, afterRowid, limit+1)
+	default:
+		rows, err = s.db.Query(queryGT, u.ID, since, limit+1)
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -3018,6 +3044,13 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// User-specific settings override global
 		settings[key] = value
+	}
+
+	// Never expose server-side secrets to clients.
+	for k := range settings {
+		if strings.HasSuffix(k, "_key") || strings.HasSuffix(k, "_secret") {
+			delete(settings, k)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
@@ -4249,11 +4282,11 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 			genres = ?,
 			cast_names = ?,
 			metadata_fetched_at = ?
-		WHERE (path LIKE ? OR show_name = ?) AND library_id = 'lib_tv'`,
+		WHERE path LIKE ? AND library_id = 'lib_tv'`,
 		details.ID, details.Name, details.Overview,
 		yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
 		genres, cast, now,
-		folderPrefix+"%", showID,
+		folderPrefix+"%",
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")

@@ -32,7 +32,7 @@ struct LoginView: View {
         // Logomark — red circle with play triangle
         ZStack {
           Circle()
-            .fill(Color.white.opacity(0.15))
+            .fill(Color.dsAccent)
             .frame(width: 80, height: 80)
           Image(systemName: "play.fill")
             .font(.system(size: 32))
@@ -80,33 +80,45 @@ struct LoginView: View {
 
           Divider()
 
-          TextField("Username", text: $appState.username)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .textContentType(.username)
-            .padding(.horizontal, 12)
-            #if os(tvOS)
-            .frame(height: 66)
-            #else
-            .frame(height: 44)
-            #endif
+          HStack(spacing: 10) {
+            Image(systemName: "person.fill")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+              .accessibilityHidden(true)
+            TextField("USERNAME", text: $appState.username)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .textContentType(.username)
+          }
+          .padding(.horizontal, 12)
+          #if os(tvOS)
+          .frame(height: 66)
+          #else
+          .frame(height: 44)
+          #endif
 
           Divider()
 
-          SecureField("Password", text: passwordBinding)
-            .textContentType(.password)
-            .padding(.horizontal, 12)
-            #if os(tvOS)
-            .frame(height: 66)
-            #else
-            .frame(height: 44)
-            #endif
-            .privacySensitive()
+          HStack(spacing: 10) {
+            Image(systemName: "lock.fill")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+              .accessibilityHidden(true)
+            SecureField("PASSWORD", text: passwordBinding)
+              .textContentType(.password)
+              .privacySensitive()
+          }
+          .padding(.horizontal, 12)
+          #if os(tvOS)
+          .frame(height: 66)
+          #else
+          .frame(height: 44)
+          #endif
         }
         #if os(tvOS)
         .background(Color.white)
         #else
-        .background(Color(.systemBackground))
+        .background(Color.dsSurface)
         #endif
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         #if os(tvOS)
@@ -167,6 +179,18 @@ struct LoginView: View {
             .foregroundStyle(.white.opacity(0.95))
             .padding(.horizontal, 24)
         }
+
+        #if !os(tvOS)
+        Button {
+          showQuickConnect = true
+        } label: {
+          Text("Or connect via QuickConnect")
+            .font(.subheadline)
+            .foregroundStyle(.white.opacity(0.75))
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 4)
+        #endif
 
         #if !os(tvOS)
         Button {
