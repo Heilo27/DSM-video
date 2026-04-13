@@ -124,9 +124,11 @@ func main() {
 
 	// Use WAL mode for concurrent reads during writes, and busy timeout
 	// WAL mode: readers never block writers, writers only block other writers.
-	// busy_timeout lets writers wait for the lock instead of failing immediately.
-	// Do NOT use _txlock=immediate — it prevents concurrent write transactions in WAL mode.
-	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)"
+	// WAL mode: concurrent readers are allowed even during writes.
+	// busy_timeout lets writers wait up to 30s instead of failing immediately.
+	// wal_autocheckpoint=500: checkpoint WAL after ~2MB of writes to prevent bloat.
+	// synchronous=NORMAL: safe with WAL — only full fsync on checkpoint, not every commit.
+	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=synchronous(1)&_pragma=wal_autocheckpoint(500)"
 	log.Printf("Opening database: %s", cfg.DBPath)
 	db, err := sql.Open("sqlite", dbConnStr)
 	if err != nil {
@@ -134,25 +136,15 @@ func main() {
 	}
 	defer db.Close()
 
-	// WAL mode allows concurrent readers, so we can have multiple connections.
-	// Single writer connection is required for WAL autocheckpoint to work reliably —
-	// with multiple connections the checkpoint pragma may not apply to all of them.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// Multiple read connections for concurrent HTTP handlers; WAL allows concurrent reads
+	// even while the scanner holds the write lock.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 
-	// Apply PRAGMAs explicitly after open — DSN _pragma= is unreliable with modernc/sqlite
-	// when multiple connections are pooled (each connection gets its own pragma state).
-	// wal_autocheckpoint=500: checkpoint after ~2MB of WAL writes. Without this, scanner
-	// batch writes balloon the WAL to tens of MB, causing read timeouts on every query.
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=30000",
-		"PRAGMA wal_autocheckpoint=500",
-		"PRAGMA synchronous=NORMAL",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			log.Fatalf("pragma %q: %v", pragma, err)
-		}
+	// Verify PRAGMAs applied — modernc DSN params apply per-connection on first use,
+	// so ping to force a connection open and confirm WAL mode is active.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=500; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000"); err != nil {
+		log.Fatalf("db pragma setup: %v", err)
 	}
 
 	if err := migrate(db); err != nil {
@@ -263,8 +255,11 @@ func main() {
 		}
 	}()
 
-	// Best-effort initial scan (non-blocking).
+	// Best-effort initial scan — delayed 5s so the HTTP server is ready to serve
+	// requests before the scanner holds the write lock. WAL mode allows concurrent
+	// reads during the scan, but a short delay avoids startup contention.
 	go func() {
+		time.Sleep(5 * time.Second)
 		if err := s.scanAll(context.Background()); err != nil {
 			log.Printf("initial scan failed: %v", err)
 		}
