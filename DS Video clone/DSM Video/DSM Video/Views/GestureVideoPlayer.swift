@@ -444,9 +444,99 @@ struct GestureVideoPlayer: View {
                 )
             )
 
+            // Center transport controls — play/pause + skip buttons float in the middle
+            Spacer()
+            HStack(spacing: 0) {
+                Spacer()
+
+                // Skip to start
+                Button {
+                    seek(to: 0, tight: true)
+                    currentTime = 0
+                    scheduleHideControls()
+                } label: {
+                    Image(systemName: "gobackward")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Skip to start")
+
+                Spacer()
+
+                // Rewind 15s
+                Button {
+                    let t = max(0, currentTime - 15)
+                    seek(to: t)
+                    currentTime = t
+                    showSkipAnimation(direction: .backward)
+                    if isPlaying { scheduleHideControls() }
+                } label: {
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rewind 15 seconds")
+
+                Spacer()
+
+                // Play / Pause
+                Button {
+                    togglePlayPause()
+                    scheduleHideControls()
+                } label: {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 60, minHeight: 60)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isPlaying ? "Pause" : "Play")
+
+                Spacer()
+
+                // Forward 15s
+                Button {
+                    let t = min(duration, currentTime + 15)
+                    seek(to: t)
+                    currentTime = t
+                    showSkipAnimation(direction: .forward)
+                    if isPlaying { scheduleHideControls() }
+                } label: {
+                    Image(systemName: "goforward.15")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Forward 15 seconds")
+
+                Spacer()
+
+                // Skip to end
+                Button {
+                    if duration > 0 {
+                        seek(to: duration, tight: true)
+                        currentTime = duration
+                    }
+                    scheduleHideControls()
+                } label: {
+                    Image(systemName: "goforward")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Skip to end")
+
+                Spacer()
+            }
             Spacer()
 
-            // Bottom controls — scrub bar + playback control row
+            // Bottom controls — scrub bar only
             // contentShape(Rectangle()) ensures taps on gradient background/dead-zone
             // are consumed here and don't bleed through to the gesture overlay below.
             VStack(spacing: 4) {
@@ -501,95 +591,6 @@ struct GestureVideoPlayer: View {
                         .accessibilityHidden(true)
                 }
 
-                // Playback control strip: skip-to-start | rewind-15s | play/pause | forward-15s | skip-to-end
-                HStack(spacing: 0) {
-                    Spacer()
-
-                    // Skip to start
-                    Button {
-                        seek(to: 0, tight: true)
-                        currentTime = 0
-                        scheduleHideControls()
-                    } label: {
-                        Image(systemName: "gobackward")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.white)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Skip to start")
-
-                    Spacer()
-
-                    // Rewind 15s
-                    Button {
-                        let t = max(0, currentTime - 15)
-                        seek(to: t)
-                        currentTime = t
-                        showSkipAnimation(direction: .backward)
-                        if isPlaying { scheduleHideControls() }
-                    } label: {
-                        Image(systemName: "gobackward.15")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.white)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Rewind 15 seconds")
-
-                    Spacer()
-
-                    // Play / Pause
-                    Button {
-                        togglePlayPause()
-                        scheduleHideControls()
-                    } label: {
-                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.white)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
-
-                    Spacer()
-
-                    // Forward 15s
-                    Button {
-                        let t = min(duration, currentTime + 15)
-                        seek(to: t)
-                        currentTime = t
-                        showSkipAnimation(direction: .forward)
-                        if isPlaying { scheduleHideControls() }
-                    } label: {
-                        Image(systemName: "goforward.15")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.white)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Forward 15 seconds")
-
-                    Spacer()
-
-                    // Skip to end
-                    Button {
-                        if duration > 0 {
-                            seek(to: duration, tight: true)
-                            currentTime = duration
-                        }
-                        scheduleHideControls()
-                    } label: {
-                        Image(systemName: "goforward")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.white)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Skip to end")
-
-                    Spacer()
-                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 40)
