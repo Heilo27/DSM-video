@@ -126,10 +126,7 @@ func main() {
 	// WAL mode: readers never block writers, writers only block other writers.
 	// busy_timeout lets writers wait for the lock instead of failing immediately.
 	// Do NOT use _txlock=immediate — it prevents concurrent write transactions in WAL mode.
-	// wal_autocheckpoint=1000: checkpoint WAL after every ~1000 pages (~4MB) to prevent
-	// WAL bloat. Without this, large batch writes (e.g. scanner runs) can balloon the WAL
-	// to tens of MB, causing read timeouts as SQLite merges the WAL on every query.
-	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=wal_autocheckpoint(1000)"
+	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)"
 	log.Printf("Opening database: %s", cfg.DBPath)
 	db, err := sql.Open("sqlite", dbConnStr)
 	if err != nil {
@@ -137,9 +134,26 @@ func main() {
 	}
 	defer db.Close()
 
-	// WAL mode allows concurrent readers, so we can have multiple connections
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
+	// WAL mode allows concurrent readers, so we can have multiple connections.
+	// Single writer connection is required for WAL autocheckpoint to work reliably —
+	// with multiple connections the checkpoint pragma may not apply to all of them.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	// Apply PRAGMAs explicitly after open — DSN _pragma= is unreliable with modernc/sqlite
+	// when multiple connections are pooled (each connection gets its own pragma state).
+	// wal_autocheckpoint=500: checkpoint after ~2MB of WAL writes. Without this, scanner
+	// batch writes balloon the WAL to tens of MB, causing read timeouts on every query.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=30000",
+		"PRAGMA wal_autocheckpoint=500",
+		"PRAGMA synchronous=NORMAL",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			log.Fatalf("pragma %q: %v", pragma, err)
+		}
+	}
 
 	if err := migrate(db); err != nil {
 		log.Fatalf("migrate: %v", err)
@@ -3560,6 +3574,13 @@ func (s *Server) scanAllWithClient(ctx context.Context, tmdbClient *metadata.TMD
 	s.mu.Lock()
 	s.lastScanAt = time.Now()
 	s.mu.Unlock()
+
+	// Force WAL checkpoint after scan — scanner batch-writes many rows which can bloat
+	// the WAL and cause read timeouts. PASSIVE mode checkpoints without blocking readers.
+	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+		log.Printf("post-scan checkpoint: %v", err)
+	}
+
 	return nil
 }
 
