@@ -446,25 +446,7 @@ struct GestureVideoPlayer: View {
 
             // Center transport controls — play/pause + skip buttons float in the middle
             Spacer()
-            HStack(spacing: 0) {
-                Spacer()
-
-                // Skip to start
-                Button {
-                    seek(to: 0, tight: true)
-                    currentTime = 0
-                    scheduleHideControls()
-                } label: {
-                    Image(systemName: "gobackward")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Skip to start")
-
-                Spacer()
-
+            HStack(spacing: 40) {
                 // Rewind 15s
                 Button {
                     let t = max(0, currentTime - 15)
@@ -481,8 +463,6 @@ struct GestureVideoPlayer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Rewind 15 seconds")
 
-                Spacer()
-
                 // Play / Pause
                 Button {
                     togglePlayPause()
@@ -495,8 +475,6 @@ struct GestureVideoPlayer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
-
-                Spacer()
 
                 // Forward 15s
                 Button {
@@ -513,26 +491,6 @@ struct GestureVideoPlayer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Forward 15 seconds")
-
-                Spacer()
-
-                // Skip to end
-                Button {
-                    if duration > 0 {
-                        seek(to: duration, tight: true)
-                        currentTime = duration
-                    }
-                    scheduleHideControls()
-                } label: {
-                    Image(systemName: "goforward")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Skip to end")
-
-                Spacer()
             }
             Spacer()
 
