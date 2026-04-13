@@ -253,6 +253,7 @@ final class AppState {
             // Success — set token BEFORE baseURL so the first updateAPI() call has
             // the correct token and no brief nil-token APIClient is created.
             sessionToken = resp.token
+            clearNetworkError()  // login succeeded — reset any stale serverUnreachable flag
             if rememberMe {
               // Persist the resolved IP so future launches reconnect directly.
               baseURL = urlStr
@@ -287,6 +288,7 @@ final class AppState {
 
       // Store session token (didSet persists to Keychain when rememberMe is on)
       sessionToken = resp.token
+      clearNetworkError()  // login succeeded — reset any stale serverUnreachable flag
 
       if rememberMe {
         Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
