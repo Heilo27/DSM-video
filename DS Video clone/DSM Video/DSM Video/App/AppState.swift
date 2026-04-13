@@ -476,12 +476,12 @@ final class AppState {
   }
 
   // TASK-363: static lets so these are allocated once per process, not per computeHomeRails call.
-  private nonisolated static let homeRailsFormatterFrac: ISO8601DateFormatter = {
+  private static let homeRailsFormatterFrac: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return f
   }()
-  private nonisolated static let homeRailsFormatter: ISO8601DateFormatter = {
+  private static let homeRailsFormatter: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime]
     return f
