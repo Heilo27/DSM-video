@@ -176,6 +176,11 @@ private struct SidebarView: View {
       libraries = DemoData.libraries
       return
     }
+    // Use AppState's already-populated homeLibraries to avoid a duplicate API call (TASK-256).
+    if !appState.homeLibraries.isEmpty {
+      libraries = appState.homeLibraries
+      return
+    }
     isLoading = true
     defer { isLoading = false }
     if let response = try? await appState.api.libraries() {

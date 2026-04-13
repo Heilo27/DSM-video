@@ -130,7 +130,13 @@ struct LoginView: View {
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
         #endif
 
-        #if !os(tvOS)
+        #if os(tvOS)
+        // tvOS: show Remember me toggle (HTTPS toggle not applicable on tvOS login flow)
+        Toggle("Remember me", isOn: $appState.rememberMe)
+          .tint(Color.dsAccent)
+          .foregroundStyle(.white.opacity(0.85))
+          .frame(maxWidth: 600)
+        #else
         VStack(alignment: .leading, spacing: 12) {
           Toggle("HTTPS", isOn: $appState.useHTTPS)
           Toggle("Remember me", isOn: $appState.rememberMe)
