@@ -413,6 +413,7 @@ private struct RecentSearchesView: View {
                   .foregroundStyle(Color.dsTextPrimary)
               }
               .buttonStyle(.plain)
+              .accessibilityLabel("Search for \(query)")
 
               Button {
                 onRemove(query)
@@ -432,9 +433,6 @@ private struct RecentSearchesView: View {
               RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color.dsSurface)
             )
-            .accessibilityLabel(query)
-            .accessibilityHint("Double-tap to search, swipe up for more actions")
-            .accessibilityAction(named: "Remove") { onRemove(query) }
           }
         }
         .padding(.horizontal, 16)
