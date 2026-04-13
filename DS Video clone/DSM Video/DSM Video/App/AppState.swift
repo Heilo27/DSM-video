@@ -6,13 +6,15 @@ import Security
 import SwiftUI
 import os.log
 
-// TASK-363: file-scope (nonisolated) so computeHomeRails can access from a nonisolated context.
-private let homeRailsFormatterFrac: ISO8601DateFormatter = {
+// TASK-363: nonisolated(unsafe) so computeHomeRails (nonisolated) can access these without
+// MainActor isolation. Safe: both are immutable after init and ISO8601DateFormatter is
+// read-only once configured.
+private nonisolated(unsafe) let homeRailsFormatterFrac: ISO8601DateFormatter = {
   let f = ISO8601DateFormatter()
   f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
   return f
 }()
-private let homeRailsFormatter: ISO8601DateFormatter = {
+private nonisolated(unsafe) let homeRailsFormatter: ISO8601DateFormatter = {
   let f = ISO8601DateFormatter()
   f.formatOptions = [.withInternetDateTime]
   return f
