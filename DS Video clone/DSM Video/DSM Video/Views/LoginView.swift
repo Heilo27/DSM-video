@@ -400,14 +400,13 @@ private struct QuickConnectSheet: View {
     defer { isResolving = false }
 
     do {
-      // Verify the ID resolves before accepting it — but pass back the bare ID,
-      // not the resolved URL. The address field shows the QuickConnect name and
-      // login() resolves it again at login time.
-      guard let _ = try await QuickConnectResolver.resolveWAN(id: id, useHTTPS: useHTTPS) else {
+      // Resolve the WAN address now and pass it directly to the address field so
+      // login() can connect immediately without a second QuickConnect lookup (TASK-422).
+      guard let resolvedURL = try await QuickConnectResolver.resolveWAN(id: id, useHTTPS: useHTTPS) else {
         error = "Couldn't find \"\(id)\". Check the ID and try again."
         return
       }
-      onSelect(id)
+      onSelect(resolvedURL)
       dismiss()
     } catch {
       self.error = "Network error. Check your connection and try again."

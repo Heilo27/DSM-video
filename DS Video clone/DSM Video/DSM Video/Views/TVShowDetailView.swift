@@ -124,9 +124,11 @@ private struct TVShowDetailSplitView: View {
               .frame(width: 4, height: 4)
               .accessibilityHidden(true)
           }
-          Text("\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
-            .font(.system(size: 20))
-            .foregroundStyle(Color.dsTextSecondary)
+          if let sc = show.seasonCount {
+            Text("\(sc) season\(sc == 1 ? "" : "s")")
+              .font(.system(size: 20))
+              .foregroundStyle(Color.dsTextSecondary)
+          }
         }
       }
       .accessibilityElement(children: .combine)
@@ -520,8 +522,10 @@ private struct TVShowDetailScrollView: View {
             Text(String(year)).font(.subheadline).foregroundStyle(.white.opacity(0.75))
           }
           if show.year != nil { Text("·").foregroundStyle(.white.opacity(0.5)).accessibilityHidden(true) }
-          Text("\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
-            .font(.subheadline).foregroundStyle(.white.opacity(0.75))
+          if let sc = show.seasonCount {
+            Text("\(sc) season\(sc == 1 ? "" : "s")")
+              .font(.subheadline).foregroundStyle(.white.opacity(0.75))
+          }
         }
       }
       .accessibilityElement(children: .combine)

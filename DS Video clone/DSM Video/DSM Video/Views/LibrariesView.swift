@@ -307,7 +307,7 @@ private struct HomeRail: View {
                    let tvLibrary = appState.homeFirstTVLibrary {
                   let stub = TVShow(
                     id: showName, title: showName, year: item.year,
-                    seasonCount: 0, episodeCount: 0,
+                    seasonCount: nil, episodeCount: nil,
                     posterImageId: item.posterImageId, lastWatchedAt: nil, addedAt: nil
                   )
                   TVShowDetailView(show: stub, library: tvLibrary)
@@ -335,8 +335,8 @@ private struct HomeRail: View {
                 id: showName,
                 title: showName,
                 year: item.year,
-                seasonCount: 0,
-                episodeCount: 0,
+                seasonCount: nil,
+                episodeCount: nil,
                 posterImageId: item.posterImageId,
                 lastWatchedAt: nil,
                 addedAt: nil

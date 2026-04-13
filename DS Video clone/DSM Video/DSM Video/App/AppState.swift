@@ -465,13 +465,13 @@ final class AppState {
       // Guard after the off-actor compute: if self was deallocated (e.g. logout)
       // during the heavy lift, silently drop the result (TASK-434).
       guard let self else { return }
-      await Task { @MainActor [weak self] in
+      await MainActor.run { [weak self] in
         guard let self else { return }
         self.homeContinueWatching = cont
         self.homeJustAdded = added
         self.homeRecentlyWatched = watched
         self.homeLog.info("recomputeHomeRails: done in \(elapsed)s — cont=\(cont.count) added=\(added.count) watched=\(watched.count)")
-      }.value
+      }
     }
   }
 

@@ -118,19 +118,8 @@ struct APIClient {
     guard let url = comps.url else { throw APIError.invalidURL }
     // Short timeout: progress data is non-critical. Fail fast so cached content
     // shows immediately rather than blocking for the default 60-second timeout.
-    var req = URLRequest(url: url, timeoutInterval: 8)
-    req.httpMethod = "GET"
-    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-    let (data, httpResp) = try await URLSession.shared.data(for: req)
-    guard let httpResp = httpResp as? HTTPURLResponse else { throw APIError.network }
-    if !(200...299).contains(httpResp.statusCode) {
-      if let apiErr = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
-        throw APIError.server(apiErr.error)
-      }
-      throw APIError.http(httpResp.statusCode)
-    }
-    return try Self.decoder.decode(ProgressBatchResponse.self, from: data)
+    return try await request(url: url, method: "GET", body: Optional<Int>.none,
+                             response: ProgressBatchResponse.self, timeoutInterval: 8)
   }
 
   /// Fetches all progress rows for the authenticated user in a single request.

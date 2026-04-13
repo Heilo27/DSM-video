@@ -278,7 +278,7 @@ private struct SearchView: View {
         ContentUnavailableView("No Results", systemImage: "magnifyingglass", description: Text("No videos match \"\(searchText)\""))
           .padding(.top, 60)
       } else if !results.isEmpty {
-        LazyVGrid(columns: columns, spacing: 12) {
+        LazyVStack(spacing: 0) {
           ForEach(results) { item in
             NavigationLink {
               ItemDetailView(itemID: item.id, fallbackTitle: item.title)
@@ -288,9 +288,13 @@ private struct SearchView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? ""), \(item.type)")
             .accessibilityHint("Opens video details")
+
+            Divider()
+              .background(Color(white: 0.18))
+              .padding(.leading, 12 + 60 + 12)
           }
         }
-        .padding(horizontalSizeClass == .regular ? 20 : 12)
+        .padding(.vertical, 8)
       }
     }
     .background(Color.black.ignoresSafeArea())
@@ -450,72 +454,87 @@ private struct SearchResultCell: View {
   @Environment(AppState.self) private var appState
   let item: ItemSummary
 
-  var body: some View {
-    GeometryReader { geo in
-      let width = geo.size.width
-      let height = width * (3.0 / 2.0)
-
-      ZStack(alignment: .bottom) {
-        posterImage(width: width, height: height)
-
-        LinearGradient(
-          stops: [
-            .init(color: .clear, location: 0.45),
-            .init(color: .black.opacity(0.85), location: 1.0)
-          ],
-          startPoint: .top,
-          endPoint: .bottom
-        )
-
-        VStack(alignment: .leading, spacing: 2) {
-          Text(item.title)
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(.white)
-            .lineLimit(2)
-            .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
-
-          if let year = item.year {
-            Text(String(year))
-              .font(.caption2)
-              .foregroundStyle(.white.opacity(0.75))
-          }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
-      }
-      .frame(width: width, height: height)
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+  private var typeLabel: String {
+    switch item.type {
+    case "movie": return "Movie"
+    case "episode": return "Episode"
+    case "tvshow": return "TV Show"
+    default: return item.type.capitalized
     }
-    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-    .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? ""), \(item.type)")
+  }
+
+  private var metaSubtitle: String {
+    var parts: [String] = []
+    if let year = item.year { parts.append(String(year)) }
+    if let secs = item.durationSeconds, secs > 0 {
+      let h = secs / 3600
+      let m = (secs % 3600) / 60
+      parts.append(h > 0 ? "\(h)h \(m)m" : "\(m)m")
+    }
+    return parts.joined(separator: " · ")
+  }
+
+  var body: some View {
+    HStack(spacing: 12) {
+      // Thumbnail: 60x90pt
+      posterThumbnail
+        .frame(width: 60, height: 90)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityHidden(true)
+
+      // Metadata
+      VStack(alignment: .leading, spacing: 4) {
+        Text(item.title)
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundStyle(Color.dsTextPrimary)
+          .lineLimit(2)
+
+        if !metaSubtitle.isEmpty {
+          Text(metaSubtitle)
+            .font(.system(size: 12))
+            .foregroundStyle(Color.dsTextMuted)
+        }
+
+        Text(typeLabel)
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(Color.dsAccent)
+          .padding(.horizontal, 7)
+          .padding(.vertical, 2)
+          .background(Color.dsAccent.opacity(0.15))
+          .clipShape(Capsule())
+      }
+
+      Spacer(minLength: 0)
+
+      Image(systemName: "chevron.right")
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(.secondary)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 10)
+    .frame(minHeight: 100)
+    .contentShape(Rectangle())
   }
 
   @ViewBuilder
-  private func posterImage(width: CGFloat, height: CGFloat) -> some View {
+  private var posterThumbnail: some View {
     if appState.isDemoMode, let assetName = DemoData.posterAssetNames[item.id] {
       Image(assetName)
         .resizable()
         .scaledToFill()
-        .frame(width: width, height: height)
-        .clipped()
     } else if item.posterImageId != nil {
       AuthenticatedImage(
-        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400),
+        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 200),
         token: appState.sessionToken
       )
       .scaledToFill()
-      .frame(width: width, height: height)
-      .clipped()
     } else {
       Rectangle()
-        .fill(Color(white: 0.06))
-        .frame(width: width, height: height)
+        .fill(Color(white: 0.10))
         .overlay(
           Image(systemName: "film.fill")
-            .font(.system(size: 36))
+            .font(.system(size: 20))
             .foregroundStyle(.white.opacity(0.25))
-            .accessibilityHidden(true)
         )
     }
   }

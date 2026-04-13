@@ -29,26 +29,29 @@ enum TVShowSortOption: String, CaseIterable {
   /// The option to toggle to when this option is tapped while already selected.
   var toggled: TVShowSortOption? {
     switch self {
-    case .addedNewest:  return .addedOldest
-    case .addedOldest:  return .addedNewest
-    case .nameAsc:      return .nameDesc
-    case .nameDesc:     return .nameAsc
-    default:            return nil
+    case .addedNewest:    return .addedOldest
+    case .addedOldest:    return .addedNewest
+    case .nameAsc:        return .nameDesc
+    case .nameDesc:       return .nameAsc
+    case .releaseNewest:  return .releaseOldest
+    case .releaseOldest:  return .releaseNewest
+    default:              return nil
     }
   }
 
   /// The canonical "primary" of a toggle pair — used to decide which chip to show.
   var primaryOfPair: TVShowSortOption {
     switch self {
-    case .addedOldest: return .addedNewest
-    case .nameDesc:    return .nameAsc
-    default:           return self
+    case .addedOldest:   return .addedNewest
+    case .nameDesc:      return .nameAsc
+    case .releaseOldest: return .releaseNewest
+    default:             return self
     }
   }
 
   /// Chips to display (de-duplicated: show primary of each pair, hide the secondary).
   static var displayedChips: [TVShowSortOption] {
-    [.recentlyWatched, .addedNewest, .nameAsc]
+    [.recentlyWatched, .addedNewest, .nameAsc, .releaseNewest]
   }
 }
 
@@ -150,7 +153,7 @@ struct TVShowsView: View {
               TVShowPosterCell(show: show)
             }
             .buttonStyle(.card)
-            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? ""), \(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")")
+            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")\(show.seasonCount.map { ", \($0) season\($0 == 1 ? "" : "s")" } ?? "")")
             .accessibilityHint("Opens show details")
           }
         }
@@ -358,9 +361,10 @@ private struct TVShowPosterCell: View {
   }
 
   private func seasonLabel(_ show: TVShow) -> String {
-    if show.seasonCount == 1 {
-      return "\(show.episodeCount) episode\(show.episodeCount == 1 ? "" : "s")"
+    guard let sc = show.seasonCount else { return "" }
+    if sc == 1, let ec = show.episodeCount {
+      return "\(ec) episode\(ec == 1 ? "" : "s")"
     }
-    return "\(show.seasonCount) season\(show.seasonCount == 1 ? "" : "s")"
+    return "\(sc) season\(sc == 1 ? "" : "s")"
   }
 }

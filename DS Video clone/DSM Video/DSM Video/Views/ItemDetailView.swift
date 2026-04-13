@@ -436,14 +436,24 @@ struct ItemDetailView: View {
         HStack(alignment: .top, spacing: 14) {
           ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
             VStack(spacing: 6) {
-              // 56pt circle avatar — initial letter on colored background
+              // 56pt circle avatar — photo if available, else initial on colored background
               ZStack {
-                Circle()
-                  .fill(avatarColor(for: person.name))
+                if let imageId = person.imageId {
+                  AuthenticatedImage(
+                    url: appState.api.imageURL(id: imageId, width: 120),
+                    token: appState.sessionToken
+                  )
+                  .scaledToFill()
                   .frame(width: 56, height: 56)
-                Text(String(person.name.prefix(1)).uppercased())
-                  .font(.system(size: 22, weight: .semibold))
-                  .foregroundStyle(.white)
+                  .clipShape(Circle())
+                } else {
+                  Circle()
+                    .fill(avatarColor(for: person.name))
+                    .frame(width: 56, height: 56)
+                  Text(String(person.name.prefix(1)).uppercased())
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                }
               }
 
               // Name

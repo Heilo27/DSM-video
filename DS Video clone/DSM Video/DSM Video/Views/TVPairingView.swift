@@ -148,6 +148,7 @@ struct TVPairingView: View {
         .font(.system(size: 19))
         .foregroundStyle(Color.dsTextSecondary)
         .padding(.top, 40)
+        .accessibilityHint("Opens manual login form")
       }
       .padding(60)
     }
