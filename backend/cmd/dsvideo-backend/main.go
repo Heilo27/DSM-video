@@ -255,15 +255,10 @@ func main() {
 		}
 	}()
 
-	// Best-effort initial scan — delayed 5s so the HTTP server is ready to serve
-	// requests before the scanner holds the write lock. WAL mode allows concurrent
-	// reads during the scan, but a short delay avoids startup contention.
-	go func() {
-		time.Sleep(5 * time.Second)
-		if err := s.scanAll(context.Background()); err != nil {
-			log.Printf("initial scan failed: %v", err)
-		}
-	}()
+	// No startup scan — DB already has data from prior runs. The periodic scan in
+	// handleLibraries fires after the first API call if lastScanAt is zero (i.e. fresh
+	// install with no prior scan). This avoids holding a write lock at startup which
+	// blocks all HTTP readers until the scan completes (can take 30-60s on large libraries).
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -3619,18 +3614,71 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		rows.Close()
 	}
 
-	// Open a single write transaction for all item upserts during the walk.
-	// This avoids the per-file lock acquire/release that causes SQLITE_BUSY for
-	// concurrent writers (e.g. the session persist goroutine).
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("scan: begin tx: %w", err)
-	}
-
 	now := time.Now().UTC().Format(time.RFC3339)
 	var metaPending []metaPendingItem
 	// Track every path seen during the walk so we can remove stale DB entries afterward.
 	seenPaths := make(map[string]struct{})
+
+	// Batch upserts into transactions of batchSize files. This keeps write lock
+	// duration short so concurrent HTTP readers are not blocked during a full scan.
+	const batchSize = 50
+	type pendingRow struct {
+		id, libraryID, typ, title, addedAt string
+		year, duration                      sql.NullInt64
+		videoCodec, audioCodec, container   sql.NullString
+		needsTranscode                      sql.NullBool
+		path                                string
+		parsed                              metadata.ParsedFilename
+	}
+	var batch []pendingRow
+
+	flushBatch := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("scan: begin tx: %w", err)
+		}
+		for _, row := range batch {
+			var seq int64
+			_ = tx.QueryRowContext(ctx,
+				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+			).Scan(&seq)
+			if _, err := tx.Exec(
+				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET
+				   library_id=excluded.library_id,
+				   type=excluded.type,
+				   path=excluded.path,
+				   added_at=excluded.added_at,
+				   updated_at=excluded.updated_at,
+				   video_codec=COALESCE(excluded.video_codec, items.video_codec),
+				   audio_codec=COALESCE(excluded.audio_codec, items.audio_codec),
+				   container=COALESCE(excluded.container, items.container),
+				   needs_transcode=COALESCE(excluded.needs_transcode, items.needs_transcode),
+				   duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
+				   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
+				   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
+				   change_seq=excluded.change_seq`,
+				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
+				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq,
+			); err != nil {
+				log.Printf("scan: upsert failed for %s: %v", row.path, err)
+			}
+			st := existing[row.id]
+			if tmdbClient != nil && !st.metadataFetched && row.typ != "homeVideo" {
+				metaPending = append(metaPending, metaPendingItem{id: row.id, parsed: row.parsed, typ: row.typ})
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("scan: commit: %w", err)
+		}
+		batch = batch[:0]
+		return nil
+	}
 
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -3656,7 +3704,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		}
 
 		id := itemIDFromPath(path)
-		addedAt := info.ModTime().UTC().Format(time.RFC3339) // used only on first insert; preserved on rescan
+		addedAt := info.ModTime().UTC().Format(time.RFC3339)
 
 		typ := "video"
 		switch kind {
@@ -3668,14 +3716,12 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			typ = "homeVideo"
 		}
 
-		// Parse filename to extract title, year, and episode info
 		parsed := metadata.ParseFilename(d.Name())
 		title := parsed.Title
 		if title == "" {
 			title = titleFromFilename(d.Name())
 		}
 
-		// Probe for codec info
 		var videoCodec, audioCodec, container sql.NullString
 		var duration sql.NullInt64
 		var needsTranscode sql.NullBool
@@ -3684,7 +3730,6 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			probe, probeErr := s.prober.Probe(probeCtx, path)
 			cancel()
-
 			if probeErr == nil && probe != nil {
 				videoCodec = sql.NullString{String: probe.VideoCodec, Valid: true}
 				audioCodec = sql.NullString{String: probe.AudioCodec, Valid: true}
@@ -3695,7 +3740,6 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				}
 			}
 		}
-
 		if !videoCodec.Valid {
 			quickProbe := transcode.ProbeQuick(path)
 			videoCodec = sql.NullString{String: quickProbe.VideoCodec, Valid: true}
@@ -3704,60 +3748,30 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			needsTranscode = sql.NullBool{Bool: quickProbe.NeedsTranscode, Valid: true}
 		}
 
-		// Prepare year from parsed filename
 		var year sql.NullInt64
 		if parsed.Year > 0 {
 			year = sql.NullInt64{Int64: int64(parsed.Year), Valid: true}
 		}
 
 		seenPaths[path] = struct{}{}
+		batch = append(batch, pendingRow{
+			id: id, libraryID: libraryID, typ: typ, title: title, addedAt: addedAt,
+			year: year, duration: duration, path: path, parsed: parsed,
+			videoCodec: videoCodec, audioCodec: audioCodec, container: container,
+			needsTranscode: needsTranscode,
+		})
 
-		// Increment item_seq inside the transaction to avoid a separate DB write
-		// that would compete with the open transaction for the write lock.
-		var seq int64
-		_ = tx.QueryRowContext(ctx,
-			`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
-		).Scan(&seq)
-		if _, err := tx.Exec(
-			`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET
-			   library_id=excluded.library_id,
-			   type=excluded.type,
-			   path=excluded.path,
-			   added_at=excluded.added_at,
-			   updated_at=excluded.updated_at,
-			   video_codec=COALESCE(excluded.video_codec, items.video_codec),
-			   audio_codec=COALESCE(excluded.audio_codec, items.audio_codec),
-			   container=COALESCE(excluded.container, items.container),
-			   needs_transcode=COALESCE(excluded.needs_transcode, items.needs_transcode),
-			   duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
-			   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
-			   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
-			   change_seq=excluded.change_seq`,
-			id, libraryID, typ, title, year, path, duration, addedAt, now,
-			videoCodec, audioCodec, container, needsTranscode, seq,
-		); err != nil {
-			log.Printf("scan: upsert failed for %s: %v", path, err)
+		if len(batch) >= batchSize {
+			return flushBatch()
 		}
-
-		// Collect items that need metadata — dispatch goroutines after commit so
-		// TMDb writes don't race with the scan transaction.
-		st := existing[id]
-		if tmdbClient != nil && !st.metadataFetched && typ != "homeVideo" {
-			metaPending = append(metaPending, metaPendingItem{id: id, parsed: parsed, typ: typ})
-		}
-
 		return nil
 	})
 
 	if walkErr != nil {
-		_ = tx.Rollback()
 		return walkErr
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("scan: commit: %w", err)
+	if err := flushBatch(); err != nil {
+		return err
 	}
 
 	// Remove stale DB entries whose files no longer exist on disk.
