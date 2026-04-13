@@ -18,10 +18,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dsvideo/backend/internal/metadata"
@@ -64,9 +65,10 @@ type Server struct {
 	cfg Config
 	db  *sql.DB
 
-	mu           sync.RWMutex
-	playSessions map[string]PlaySession
-	lastScanAt   time.Time
+	mu             sync.RWMutex
+	playSessions   map[string]PlaySession
+	lastScanAt     time.Time
+	scanInProgress atomic.Bool // guards against concurrent background scans
 
 	// Transcode components
 	prober         *transcode.Prober
@@ -306,130 +308,11 @@ func main() {
 	})
 	r.Get("/dsvideo/", serveIndex)
 	r.Route("/dsvideo/api/v1", func(sub chi.Router) {
-		sub.Post("/auth/quickconnect/resolve", s.handleQuickConnectResolve)
-		sub.Post("/auth/login", s.handleLogin)
-		sub.Post("/auth/logout", s.handleLogout)
-		sub.Post("/auth/pairing/exchange", s.handlePairingExchange)
-		sub.Get("/playback/{sessionId}/stream", s.handlePlaybackStream)
-		sub.Get("/playback/{sessionId}/master.m3u8", s.handleHLSFile("master.m3u8"))
-		sub.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
-		sub.Get("/playback/{sessionId}/segments/{name}", s.handleHLSSegment)
-		sub.Get("/images/{id}", s.handleImage)
-		sub.Get("/version", s.handleVersion)
-		sub.Get("/sync/heartbeat", s.handleSyncHeartbeat)
-		sub.Group(func(sub chi.Router) {
-			sub.Use(s.authMiddleware)
-			sub.Post("/auth/pairing/generate", s.handlePairingGenerate)
-			sub.Post("/auth/refresh", s.handleTokenRefresh)
-			sub.Get("/sync/status", s.handleSyncStatus)
-			sub.Get("/sync/items", s.handleSyncItems)
-			sub.Get("/sync/deleted", s.handleSyncDeleted)
-			sub.Get("/libraries", s.handleLibraries)
-			sub.Get("/items", s.handleItems)
-			sub.Get("/items/{id}", s.handleItemDetail)
-			sub.Get("/items/{id}/playback", s.handlePlayback)
-			sub.Get("/progress/all", s.handleProgressAll)
-			sub.Get("/progress", s.handleProgressBatch)
-			sub.Post("/items/{id}/progress", s.handleProgress)
-			sub.Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
-			sub.Post("/items/{id}/tmdb-fix", s.handleItemTMDbFix)
-			sub.Get("/shows", s.handleShowsList)
-			sub.Get("/shows/{showName}", s.handleShowDetail)
-			sub.Get("/tv/shows", s.handleTVShowsList)
-			sub.Get("/tv/shows/{showId}/seasons", s.handleTVShowSeasons)
-			sub.Get("/tv/shows/{showId}/episodes", s.handleTVShowEpisodes)
-			sub.Get("/tv/shows/{showId}/tmdb-search", s.handleTVShowTMDbSearch)
-			sub.Post("/tv/shows/{showId}/tmdb-fix", s.handleTVShowTMDbFix)
-			sub.Get("/settings", s.handleGetSettings)
-			sub.Put("/settings", s.handlePutSettings)
-			sub.Get("/playlists", s.handleListPlaylists)
-			sub.Post("/playlists", s.handleCreatePlaylist)
-			sub.Get("/playlists/{id}", s.handleGetPlaylist)
-			sub.Delete("/playlists/{id}", s.handleDeletePlaylist)
-			sub.Post("/playlists/{id}/items", s.handleAddPlaylistItem)
-			sub.Delete("/playlists/{id}/items/{itemId}", s.handleRemovePlaylistItem)
-			sub.Get("/downloads", s.handleListDownloads)
-			sub.Post("/downloads/{itemId}", s.handleAddDownload)
-			sub.Delete("/downloads/{itemId}", s.handleRemoveDownload)
-			sub.Get("/admin/status", s.handleAdminStatus)
-			sub.Post("/admin/scan", s.handleAdminScan)
-			sub.Get("/search", s.handleSearch)
-		})
+		registerAPIRoutes(sub, s)
 	})
 
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Post("/auth/quickconnect/resolve", s.handleQuickConnectResolve)
-		r.Post("/auth/login", s.handleLogin)
-		r.Post("/auth/logout", s.handleLogout)
-
-		// Pairing exchange is unauthenticated — the code itself is the credential
-		r.Post("/auth/pairing/exchange", s.handlePairingExchange)
-
-		// Playback streams don't require auth - the session ID is the security
-		// (random, temporary, created by authenticated request)
-		r.Get("/playback/{sessionId}/stream", s.handlePlaybackStream)
-		r.Get("/playback/{sessionId}/master.m3u8", s.handleHLSFile("master.m3u8"))
-		r.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
-		r.Get("/playback/{sessionId}/segments/{name}", s.handleHLSSegment)
-
-		// Images don't require auth - accessed via <img> tags which can't send headers
-		r.Get("/images/{id}", s.handleImage)
-		r.Get("/version", s.handleVersion)
-		r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
-
-		r.Group(func(r chi.Router) {
-			r.Use(s.authMiddleware)
-
-			// Pairing generate requires auth — the caller's identity seeds the tvOS token
-			r.Post("/auth/pairing/generate", s.handlePairingGenerate)
-			r.Post("/auth/refresh", s.handleTokenRefresh)
-
-			// Delta sync endpoints
-			r.Get("/sync/status", s.handleSyncStatus)
-			r.Get("/sync/items", s.handleSyncItems)
-			r.Get("/sync/deleted", s.handleSyncDeleted)
-
-			r.Get("/libraries", s.handleLibraries)
-			r.Get("/libraries/summary", s.handleLibrariesSummary)
-			r.Get("/items", s.handleItems)
-			r.Get("/items/{id}", s.handleItemDetail)
-			r.Get("/items/{id}/playback", s.handlePlayback)
-			r.Get("/progress/all", s.handleProgressAll)
-			r.Get("/progress", s.handleProgressBatch)
-			r.Post("/items/{id}/progress", s.handleProgress)
-			r.Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
-			r.Post("/items/{id}/tmdb-fix", s.handleItemTMDbFix)
-
-			// TV Shows
-			r.Get("/shows", s.handleShowsList)
-			r.Get("/shows/{showName}", s.handleShowDetail)
-			r.Get("/tv/shows", s.handleTVShowsList)
-			r.Get("/tv/shows/{showId}/seasons", s.handleTVShowSeasons)
-			r.Get("/tv/shows/{showId}/episodes", s.handleTVShowEpisodes)
-			r.Get("/tv/shows/{showId}/tmdb-search", s.handleTVShowTMDbSearch)
-			r.Post("/tv/shows/{showId}/tmdb-fix", s.handleTVShowTMDbFix)
-
-			// Settings
-			r.Get("/settings", s.handleGetSettings)
-			r.Put("/settings", s.handlePutSettings)
-
-			// Playlists
-			r.Get("/playlists", s.handleListPlaylists)
-			r.Post("/playlists", s.handleCreatePlaylist)
-			r.Get("/playlists/{id}", s.handleGetPlaylist)
-			r.Delete("/playlists/{id}", s.handleDeletePlaylist)
-			r.Post("/playlists/{id}/items", s.handleAddPlaylistItem)
-			r.Delete("/playlists/{id}/items/{itemId}", s.handleRemovePlaylistItem)
-
-			// Downloads (bookmarks)
-			r.Get("/downloads", s.handleListDownloads)
-			r.Post("/downloads/{itemId}", s.handleAddDownload)
-			r.Delete("/downloads/{itemId}", s.handleRemoveDownload)
-
-			r.Get("/admin/status", s.handleAdminStatus)
-			r.Post("/admin/scan", s.handleAdminScan)
-			r.Get("/search", s.handleSearch)
-		})
+	r.Route("/api/v1", func(sub chi.Router) {
+		registerAPIRoutes(sub, s)
 	})
 
 	// Catch-all: log any request that doesn't match defined routes.
@@ -444,6 +327,85 @@ func main() {
 	if err := http.ListenAndServe(cfg.ListenAddr, r); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// registerAPIRoutes mounts all /api/v1 routes onto r.
+// Called for both the /api/v1 and /dsvideo/api/v1 prefixes so that route
+// definitions are never duplicated.
+func registerAPIRoutes(r chi.Router, s *Server) {
+	// Unauthenticated routes
+	r.Post("/auth/quickconnect/resolve", s.handleQuickConnectResolve)
+	r.Post("/auth/login", s.handleLogin)
+	r.Post("/auth/logout", s.handleLogout)
+
+	// Pairing exchange is unauthenticated — the code itself is the credential
+	r.Post("/auth/pairing/exchange", s.handlePairingExchange)
+
+	// Playback streams don't require auth — session ID is the security token
+	r.Get("/playback/{sessionId}/stream", s.handlePlaybackStream)
+	r.Get("/playback/{sessionId}/master.m3u8", s.handleHLSFile("master.m3u8"))
+	r.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
+	r.Get("/playback/{sessionId}/segments/{name}", s.handleHLSSegment)
+
+	// Images and TMDb proxy don't require auth — accessed via <img> tags / media players
+	r.Get("/images/{id}", s.handleImage)
+	r.Get("/tmdb/image", s.handleTMDbImageProxy)
+	r.Get("/version", s.handleVersion)
+	r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
+
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMiddleware)
+
+		// Pairing generate requires auth — caller's identity seeds the tvOS token
+		r.Post("/auth/pairing/generate", s.handlePairingGenerate)
+		r.Post("/auth/refresh", s.handleTokenRefresh)
+
+		// Delta sync endpoints
+		r.Get("/sync/status", s.handleSyncStatus)
+		r.Get("/sync/items", s.handleSyncItems)
+		r.Get("/sync/deleted", s.handleSyncDeleted)
+
+		r.Get("/libraries", s.handleLibraries)
+		r.Get("/libraries/summary", s.handleLibrariesSummary)
+		r.Get("/items", s.handleItems)
+		r.Get("/items/{id}", s.handleItemDetail)
+		r.Get("/items/{id}/playback", s.handlePlayback)
+		r.Get("/progress/all", s.handleProgressAll)
+		r.Get("/progress", s.handleProgressBatch)
+		r.Post("/items/{id}/progress", s.handleProgress)
+		r.Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
+		r.Post("/items/{id}/tmdb-fix", s.handleItemTMDbFix)
+
+		// TV Shows
+		r.Get("/shows", s.handleShowsList)
+		r.Get("/shows/{showName}", s.handleShowDetail)
+		r.Get("/tv/shows", s.handleTVShowsList)
+		r.Get("/tv/shows/{showId}/seasons", s.handleTVShowSeasons)
+		r.Get("/tv/shows/{showId}/episodes", s.handleTVShowEpisodes)
+		r.Get("/tv/shows/{showId}/tmdb-search", s.handleTVShowTMDbSearch)
+		r.Post("/tv/shows/{showId}/tmdb-fix", s.handleTVShowTMDbFix)
+
+		// Settings
+		r.Get("/settings", s.handleGetSettings)
+		r.Put("/settings", s.handlePutSettings)
+
+		// Playlists
+		r.Get("/playlists", s.handleListPlaylists)
+		r.Post("/playlists", s.handleCreatePlaylist)
+		r.Get("/playlists/{id}", s.handleGetPlaylist)
+		r.Delete("/playlists/{id}", s.handleDeletePlaylist)
+		r.Post("/playlists/{id}/items", s.handleAddPlaylistItem)
+		r.Delete("/playlists/{id}/items/{itemId}", s.handleRemovePlaylistItem)
+
+		// Downloads (bookmarks)
+		r.Get("/downloads", s.handleListDownloads)
+		r.Post("/downloads/{itemId}", s.handleAddDownload)
+		r.Delete("/downloads/{itemId}", s.handleRemoveDownload)
+
+		r.Get("/admin/status", s.handleAdminStatus)
+		r.Post("/admin/scan", s.handleAdminScan)
+		r.Get("/search", s.handleSearch)
+	})
 }
 
 func loadConfig() Config {
@@ -1241,6 +1203,20 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
 		{"id": "lib_tv", "title": "TV Shows", "kind": "tv"},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"libraries": libs})
+
+	// Trigger a background rescan if the last scan was more than 5 minutes ago.
+	// CAS on scanInProgress prevents launching duplicate concurrent scans.
+	s.mu.RLock()
+	staleScan := time.Since(s.lastScanAt) > 5*time.Minute
+	s.mu.RUnlock()
+	if staleScan && s.scanInProgress.CompareAndSwap(false, true) {
+		go func() {
+			defer s.scanInProgress.Store(false)
+			if err := s.scanAll(context.Background()); err != nil {
+				log.Printf("background scan failed: %v", err)
+			}
+		}()
+	}
 }
 
 // handleLibrariesSummary returns per-library item count and latest updated_at in a single
@@ -2160,6 +2136,39 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
 	http.ServeFile(w, r, cached)
+}
+
+// handleTMDbImageProxy proxies a TMDb poster image through the backend so the
+// iOS app never constructs direct cdn.tmdb.org URLs.
+// GET /api/v1/tmdb/image?path=/abc.jpg
+func (s *Server) handleTMDbImageProxy(w http.ResponseWriter, r *http.Request) {
+	tmdbPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if tmdbPath == "" {
+		writeErr(w, http.StatusBadRequest, "missing_path")
+		return
+	}
+	// Ensure path starts with / and contains no traversal sequences.
+	if !strings.HasPrefix(tmdbPath, "/") || strings.Contains(tmdbPath, "..") {
+		writeErr(w, http.StatusBadRequest, "invalid_path")
+		return
+	}
+
+	if s.imageCache == nil {
+		writeErr(w, http.StatusServiceUnavailable, "image_cache_unavailable")
+		return
+	}
+
+	width := r.URL.Query().Get("w")
+	size := metadata.ParseImageSize(width)
+	cachedPath, err := s.imageCache.GetOrCacheTMDbImage(r.Context(), tmdbPath, metadata.ImageTypePoster, size)
+	if err != nil {
+		log.Printf("[TMDbProxy] failed to proxy %s: %v", tmdbPath, err)
+		writeErr(w, http.StatusBadGateway, "image_fetch_failed")
+		return
+	}
+
+	w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
+	http.ServeFile(w, r, cachedPath)
 }
 
 // -------------------------
@@ -3934,7 +3943,15 @@ func (s *Server) handleItemTMDbSearch(w http.ResponseWriter, r *http.Request) {
 		Year       *int   `json:"year"`
 		Overview   string `json:"overview"`
 		PosterPath string `json:"posterPath"`
+		PosterURL  string `json:"posterURL,omitempty"`
 		Type       string `json:"type"`
+	}
+
+	tmdbProxyURL := func(path string) string {
+		if path == "" {
+			return ""
+		}
+		return "/api/v1/tmdb/image?path=" + url.QueryEscape(path)
 	}
 
 	var results []candidate
@@ -3963,6 +3980,7 @@ func (s *Server) handleItemTMDbSearch(w http.ResponseWriter, r *http.Request) {
 				Year:       yr,
 				Overview:   res.Overview,
 				PosterPath: res.PosterPath,
+				PosterURL:  tmdbProxyURL(res.PosterPath),
 				Type:       "tv",
 			})
 		}
@@ -3989,6 +4007,7 @@ func (s *Server) handleItemTMDbSearch(w http.ResponseWriter, r *http.Request) {
 				Year:       yr,
 				Overview:   res.Overview,
 				PosterPath: res.PosterPath,
+				PosterURL:  tmdbProxyURL(res.PosterPath),
 				Type:       "movie",
 			})
 		}
@@ -4182,6 +4201,7 @@ func (s *Server) handleTVShowTMDbSearch(w http.ResponseWriter, r *http.Request) 
 		Year       *int   `json:"year"`
 		Overview   string `json:"overview"`
 		PosterPath string `json:"posterPath"`
+		PosterURL  string `json:"posterURL,omitempty"`
 		Type       string `json:"type"`
 	}
 
@@ -4204,12 +4224,17 @@ func (s *Server) handleTVShowTMDbSearch(w http.ResponseWriter, r *http.Request) 
 				yr = &y
 			}
 		}
+		posterURL := ""
+		if res.PosterPath != "" {
+			posterURL = "/api/v1/tmdb/image?path=" + url.QueryEscape(res.PosterPath)
+		}
 		results = append(results, candidate{
 			TMDbID:     res.ID,
 			Title:      res.Name,
 			Year:       yr,
 			Overview:   res.Overview,
 			PosterPath: res.PosterPath,
+			PosterURL:  posterURL,
 			Type:       "tv",
 		})
 	}
@@ -4442,7 +4467,8 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT id, path, show_name, year, poster_path, season_number, added_at
-		FROM items WHERE library_id = 'lib_tv'`)
+		FROM items WHERE library_id = 'lib_tv'
+		ORDER BY season_number ASC, path ASC`)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -4545,16 +4571,12 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sort alphabetically
+	// Sort alphabetically by display name.
 	sortedKeys := make([]string, len(showOrder))
 	copy(sortedKeys, showOrder)
-	for i := 0; i < len(sortedKeys); i++ {
-		for j := i + 1; j < len(sortedKeys); j++ {
-			if strings.ToLower(showMap[sortedKeys[i]].displayName) > strings.ToLower(showMap[sortedKeys[j]].displayName) {
-				sortedKeys[i], sortedKeys[j] = sortedKeys[j], sortedKeys[i]
-			}
-		}
-	}
+	sort.Slice(sortedKeys, func(i, j int) bool {
+		return strings.ToLower(showMap[sortedKeys[i]].displayName) < strings.ToLower(showMap[sortedKeys[j]].displayName)
+	})
 
 	shows := make([]map[string]any, 0, len(sortedKeys))
 	for _, key := range sortedKeys {
