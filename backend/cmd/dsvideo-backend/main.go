@@ -126,7 +126,10 @@ func main() {
 	// WAL mode: readers never block writers, writers only block other writers.
 	// busy_timeout lets writers wait for the lock instead of failing immediately.
 	// Do NOT use _txlock=immediate — it prevents concurrent write transactions in WAL mode.
-	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)"
+	// wal_autocheckpoint=1000: checkpoint WAL after every ~1000 pages (~4MB) to prevent
+	// WAL bloat. Without this, large batch writes (e.g. scanner runs) can balloon the WAL
+	// to tens of MB, causing read timeouts as SQLite merges the WAL on every query.
+	dbConnStr := cfg.DBPath + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=wal_autocheckpoint(1000)"
 	log.Printf("Opening database: %s", cfg.DBPath)
 	db, err := sql.Open("sqlite", dbConnStr)
 	if err != nil {
