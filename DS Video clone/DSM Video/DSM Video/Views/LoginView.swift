@@ -66,6 +66,8 @@ struct LoginView: View {
             } label: {
               Image(systemName: "arrow.right.circle.fill")
                 .font(.title3)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("QuickConnect lookup")

@@ -48,6 +48,11 @@ struct LibrariesView: View {
         libraries = libs
       }
     }
+    .onChange(of: appState.sessionToken) { _, token in
+      if token == nil {
+        libraries = []
+      }
+    }
 
     if isEmbedded {
       content

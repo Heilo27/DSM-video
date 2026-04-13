@@ -443,6 +443,8 @@ struct GestureVideoPlayer: View {
             Spacer()
 
             // Bottom controls — scrub bar + playback control row
+            // contentShape(Rectangle()) ensures taps on gradient background/dead-zone
+            // are consumed here and don't bleed through to the gesture overlay below.
             VStack(spacing: 4) {
                 // Progress / scrub bar
                 HStack(spacing: 12) {
@@ -594,6 +596,7 @@ struct GestureVideoPlayer: View {
                     endPoint: .bottom
                 )
             )
+            .contentShape(Rectangle())
         }
     }
 

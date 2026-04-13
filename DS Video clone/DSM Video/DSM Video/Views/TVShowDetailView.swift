@@ -456,8 +456,9 @@ private struct TVShowDetailScrollView: View {
       }
     }
     .sheet(isPresented: $showMetadataFixer, onDismiss: {
-      if metadataFixApplied {
-        metadataFixApplied = false
+      let shouldReload = metadataFixApplied
+      metadataFixApplied = false
+      if shouldReload {
         Task { await load() }
       }
     }) {

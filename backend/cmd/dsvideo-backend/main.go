@@ -3047,8 +3047,12 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Never expose server-side secrets to clients.
+	// Use an explicit denylist of known secret keys rather than a suffix heuristic.
+	secretKeys := map[string]bool{
+		"tmdb_api_key": true,
+	}
 	for k := range settings {
-		if strings.HasSuffix(k, "_key") || strings.HasSuffix(k, "_secret") {
+		if secretKeys[k] || strings.HasSuffix(k, "_key") || strings.HasSuffix(k, "_secret") || strings.HasSuffix(k, "_token") || strings.HasSuffix(k, "_password") {
 			delete(settings, k)
 		}
 	}
@@ -4230,6 +4234,11 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	if decoded, err := url.PathUnescape(showID); err == nil {
 		showID = decoded
 	}
+	// Reject path traversal: showID must not contain path separators.
+	if strings.Contains(showID, "/") || strings.Contains(showID, "..") {
+		writeErr(w, http.StatusBadRequest, "invalid_show_id")
+		return
+	}
 
 	var body struct {
 		TMDbID int `json:"tmdbId"`
@@ -4270,7 +4279,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + showID + "/"
 
-	_, err = s.db.Exec(`
+	result, err := s.db.Exec(`
 		UPDATE items SET
 			tmdb_id = ?,
 			show_name = ?,
@@ -4290,6 +4299,11 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		writeErr(w, http.StatusNotFound, "show_not_found")
 		return
 	}
 
