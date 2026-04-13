@@ -237,7 +237,8 @@ private struct HomeRail: View {
                 seasonCount: 0,
                 episodeCount: 0,
                 posterImageId: item.posterImageId,
-                lastWatchedAt: nil
+                lastWatchedAt: nil,
+                addedAt: nil
               )
               NavigationLink {
                 TVShowDetailView(show: stub, library: tvLibrary)

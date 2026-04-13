@@ -812,10 +812,17 @@ private struct TVShowMetadataFixerSheet: View {
                   Text(candidate.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                  if let year = candidate.year {
-                    Text(String(year))
-                      .font(.caption)
-                      .foregroundStyle(.secondary)
+                  HStack(spacing: 6) {
+                    if let year = candidate.year {
+                      Text(String(year))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    if results.filter({ $0.title == candidate.title && $0.year == candidate.year }).count > 1 {
+                      Text("ID \(candidate.tmdbId)")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
                   }
                   if let overview = candidate.overview, !overview.isEmpty {
                     Text(overview)

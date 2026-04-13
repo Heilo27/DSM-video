@@ -4157,7 +4157,7 @@ func (s *Server) handleTVShowTMDbSearch(w http.ResponseWriter, r *http.Request) 
 
 	var results []candidate
 	for i, res := range tvResults {
-		if i >= 5 {
+		if i >= 10 {
 			break
 		}
 		var yr *int
@@ -4390,7 +4390,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
 	rows, err := s.db.Query(`
-		SELECT id, path, show_name, year, poster_path, season_number
+		SELECT id, path, show_name, year, poster_path, season_number, added_at
 		FROM items WHERE library_id = 'lib_tv'`)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -4406,6 +4406,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		firstID     string
 		count       int
 		seasons     map[int]bool
+		newestAdded string // ISO8601 — MAX(added_at) across episodes
 	}
 
 	showMap := map[string]*showInfo{}
@@ -4417,8 +4418,9 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		var year sql.NullInt64
 		var posterPath sql.NullString
 		var seasonNum sql.NullInt64
+		var addedAt sql.NullString
 
-		if err := rows.Scan(&id, &path, &showName, &year, &posterPath, &seasonNum); err != nil {
+		if err := rows.Scan(&id, &path, &showName, &year, &posterPath, &seasonNum, &addedAt); err != nil {
 			continue
 		}
 
@@ -4450,6 +4452,9 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		}
 		if posterPath.Valid && posterPath.String != "" && info.firstID == "" {
 			info.firstID = id
+		}
+		if addedAt.Valid && addedAt.String > info.newestAdded {
+			info.newestAdded = addedAt.String
 		}
 		sn := 1
 		if seasonNum.Valid && seasonNum.Int64 > 0 {
@@ -4511,12 +4516,16 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			"episodeCount":  info.count,
 			"posterImageId": nil,
 			"lastWatchedAt": nil,
+			"addedAt":       nil,
 		}
 		if info.firstID != "" {
 			show["posterImageId"] = info.firstID
 		}
 		if ts, ok := showLastWatched[info.folderName]; ok && ts != "" {
 			show["lastWatchedAt"] = ts
+		}
+		if info.newestAdded != "" {
+			show["addedAt"] = info.newestAdded
 		}
 		shows = append(shows, show)
 	}

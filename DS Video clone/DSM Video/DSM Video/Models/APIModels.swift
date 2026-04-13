@@ -108,6 +108,7 @@ struct TVShow: Decodable, Identifiable, Hashable {
   let episodeCount: Int
   let posterImageId: String?
   let lastWatchedAt: String?
+  let addedAt: String?
 }
 
 struct TVShowsResponse: Decodable {

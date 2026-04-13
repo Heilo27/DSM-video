@@ -61,9 +61,9 @@ enum DemoData {
 
   static let tvShows: [TVShow] = [
     TVShow(id: "ds-1", title: "The Signal", year: 2022,
-           seasonCount: 1, episodeCount: 3, posterImageId: nil, lastWatchedAt: nil),
+           seasonCount: 1, episodeCount: 3, posterImageId: nil, lastWatchedAt: nil, addedAt: nil),
     TVShow(id: "ds-2", title: "Meridian Cross", year: 2023,
-           seasonCount: 2, episodeCount: 10, posterImageId: nil, lastWatchedAt: nil),
+           seasonCount: 2, episodeCount: 10, posterImageId: nil, lastWatchedAt: nil, addedAt: nil),
   ]
 
   static let tvSeasons: [String: [TVSeason]] = [

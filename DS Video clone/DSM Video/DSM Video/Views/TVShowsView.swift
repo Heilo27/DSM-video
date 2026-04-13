@@ -25,6 +25,31 @@ enum TVShowSortOption: String, CaseIterable {
     case .releaseOldest:   return "Year ↑"
     }
   }
+
+  /// The option to toggle to when this option is tapped while already selected.
+  var toggled: TVShowSortOption? {
+    switch self {
+    case .addedNewest:  return .addedOldest
+    case .addedOldest:  return .addedNewest
+    case .nameAsc:      return .nameDesc
+    case .nameDesc:     return .nameAsc
+    default:            return nil
+    }
+  }
+
+  /// The canonical "primary" of a toggle pair — used to decide which chip to show.
+  var primaryOfPair: TVShowSortOption {
+    switch self {
+    case .addedOldest: return .addedNewest
+    case .nameDesc:    return .nameAsc
+    default:           return self
+    }
+  }
+
+  /// Chips to display (de-duplicated: show primary of each pair, hide the secondary).
+  static var displayedChips: [TVShowSortOption] {
+    [.recentlyWatched, .addedNewest, .nameAsc]
+  }
 }
 
 // MARK: - TVShowsView
@@ -65,9 +90,9 @@ struct TVShowsView: View {
         return aDate > bDate
       }
     case .addedNewest:
-      shows
+      shows.sorted { ($0.addedAt ?? "") > ($1.addedAt ?? "") }
     case .addedOldest:
-      shows.reversed()
+      shows.sorted { ($0.addedAt ?? "") < ($1.addedAt ?? "") }
     case .nameAsc:
       shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     case .nameDesc:
@@ -209,24 +234,29 @@ private struct TVShowSortChipBar: View {
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
-        ForEach(TVShowSortOption.allCases, id: \.self) { option in
+        ForEach(TVShowSortOption.displayedChips, id: \.self) { chip in
+          let isActive = selection.primaryOfPair == chip
+          let label = isActive ? selection.chipLabel : chip.chipLabel
           Button {
-            selection = option
+            if isActive, let next = selection.toggled {
+              selection = next
+            } else {
+              selection = chip
+            }
           } label: {
-            Text(option.chipLabel)
+            Text(label)
               .font(.subheadline.weight(.medium))
-              .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
-              .frame(minHeight: 44)
+              .foregroundStyle(isActive ? Color.white : Color.dsTextSecondary)
               .padding(.horizontal, 12)
-              .padding(.vertical, 14)
+              .padding(.vertical, 7)
               .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                  .fill(selection == option ? Color.dsAccent : Color.dsSurface)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                  .fill(isActive ? Color.dsAccent : Color.dsSurface)
               )
           }
           .buttonStyle(.plain)
-          .accessibilityLabel("Sort by \(option.rawValue)")
-          .accessibilityAddTraits(selection == option ? .isSelected : [])
+          .accessibilityLabel("Sort by \(selection.rawValue)")
+          .accessibilityAddTraits(isActive ? .isSelected : [])
         }
       }
       .padding(.horizontal, 16)

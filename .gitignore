@@ -21,8 +21,8 @@ __pycache__/
 
 # Go build outputs
 backend/dsvideo-backend
-dsvideo-backend-new
-dsvideo-backend
+/dsvideo-backend-new
+/dsvideo-backend
 
 # Synology package binaries (build artifacts)
 *.spk
