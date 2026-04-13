@@ -72,6 +72,7 @@ struct TVPairingView: View {
                 )
                 .speechSpellsOutCharacters(true)
                 .privacySensitive()
+                .accessibilityLabel("Pairing code: \(code.map { String($0) }.joined(separator: " "))")
 
               if countdown > 0 {
                 HStack(spacing: 8) {
@@ -162,6 +163,21 @@ struct TVPairingView: View {
     }
     .onDisappear {
       countdownTask?.cancel()
+    }
+    .onChange(of: pairingCode) { _, newCode in
+      // TASK-406: stop the countdown whenever pairingCode is cleared (e.g. from outside)
+      if newCode == nil {
+        countdownTask?.cancel()
+        countdownTask = nil
+        countdown = 0
+      }
+    }
+    .onChange(of: appState.pairingCode) { _, appCode in
+      // Keep local state in sync: if AppState clears pairingCode (e.g. logout),
+      // clear the local display and stop the countdown.
+      if appCode == nil && pairingCode != nil {
+        pairingCode = nil
+      }
     }
   }
 

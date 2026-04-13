@@ -475,19 +475,23 @@ final class AppState {
     }
   }
 
+  // TASK-363: static lets so these are allocated once per process, not per computeHomeRails call.
+  private nonisolated static let homeRailsFormatterFrac: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+  }()
+  private nonisolated static let homeRailsFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+  }()
+
   nonisolated static func computeHomeRails(_ allItems: [ItemSummary])
     -> (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary])
   {
-    let formatterFrac: ISO8601DateFormatter = {
-      let f = ISO8601DateFormatter()
-      f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-      return f
-    }()
-    let formatter: ISO8601DateFormatter = {
-      let f = ISO8601DateFormatter()
-      f.formatOptions = [.withInternetDateTime]
-      return f
-    }()
+    let formatterFrac = homeRailsFormatterFrac
+    let formatter = homeRailsFormatter
     func parseDate(_ iso: String) -> Date {
       formatterFrac.date(from: iso) ?? formatter.date(from: iso) ?? .distantPast
     }
@@ -584,12 +588,25 @@ final class AppState {
       homeJustAdded = rails.justAdded
       homeRecentlyWatched = rails.recentlyWatched
       homeIsCacheDecoding = false
+      // Skip background network sync when offline — cached content is already shown
+      // and network calls will fail anyway (TASK-291).
+      guard !isOffline && !serverUnreachable else {
+        homeLog.info("homeLoad[\(callID)]: offline — showing cached content, skipping network sync")
+        return
+      }
       // Sync in background — may update rails once complete
       homeLog.info("homeLoad[\(callID)]: starting background delta sync")
       homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
     } else {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
       homeIsCacheDecoding = false
+      // When offline with no local data, skip the network attempt and surface an
+      // appropriate error — avoids a loud failure on every network call (TASK-291).
+      guard !isOffline && !serverUnreachable else {
+        homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
+        homeError = isOffline ? "No internet connection." : "Can't reach your server."
+        return
+      }
       homeIsLoading = true
       homeError = nil
       await runDeltaSync(background: false)

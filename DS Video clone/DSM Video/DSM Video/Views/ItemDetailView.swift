@@ -199,7 +199,7 @@ struct ItemDetailView: View {
     if isLoading && detail == nil {
       Color.black
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
-        .overlay(ProgressView("Loading").tint(.white))
+        .overlay(ProgressView("Loading").tint(.white).accessibilityLabel("Loading, please wait"))
     } else if let error {
       Color.black
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
@@ -259,7 +259,7 @@ struct ItemDetailView: View {
             .font(.title2.weight(.bold))
             .foregroundStyle(.white)
             .lineLimit(2)
-            .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 1)
+            .shadow(color: .black.opacity(0.8), radius: 6, x: 0, y: 2)
 
           if let year = detail?.year {
             Text(String(year))
@@ -409,26 +409,65 @@ struct ItemDetailView: View {
 
   // MARK: - Cast Section
 
+  /// Returns a deterministic accent color from a person's name for their avatar chip.
+  private func avatarColor(for name: String) -> Color {
+    let palette: [Color] = [
+      Color(red: 0.55, green: 0.25, blue: 0.75),  // purple
+      Color(red: 0.20, green: 0.55, blue: 0.85),  // blue
+      Color(red: 0.20, green: 0.65, blue: 0.50),  // teal
+      Color(red: 0.80, green: 0.45, blue: 0.20),  // orange
+      Color(red: 0.75, green: 0.25, blue: 0.35),  // rose
+      Color(red: 0.45, green: 0.60, blue: 0.25),  // green
+    ]
+    let index = abs(name.hashValue) % palette.count
+    return palette[index]
+  }
+
   @ViewBuilder
   private func castSection(cast: [ItemDetail.Person]) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: 10) {
       Text("Cast")
         .font(.headline)
         .foregroundStyle(.white)
         .accessibilityAddTraits(.isHeader)
-      ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
-        HStack {
-          Text(person.name)
-            .foregroundStyle(.white)
-          Spacer()
-          if let role = person.role, !role.isEmpty {
-            Text(role)
-              .foregroundStyle(.white.opacity(0.7))
+
+      // Horizontal avatar chip scroll (TASK-289)
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(alignment: .top, spacing: 14) {
+          ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
+            VStack(spacing: 6) {
+              // 56pt circle avatar — initial letter on colored background
+              ZStack {
+                Circle()
+                  .fill(avatarColor(for: person.name))
+                  .frame(width: 56, height: 56)
+                Text(String(person.name.prefix(1)).uppercased())
+                  .font(.system(size: 22, weight: .semibold))
+                  .foregroundStyle(.white)
+              }
+
+              // Name
+              Text(person.name)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(width: 68)
+
+              // Role
+              if let role = person.role, !role.isEmpty {
+                Text(role)
+                  .font(.caption2)
+                  .foregroundStyle(.white.opacity(0.6))
+                  .lineLimit(1)
+                  .frame(width: 68)
+              }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
           }
         }
-        .font(.footnote)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
+        .padding(.vertical, 4)
       }
     }
   }
@@ -651,6 +690,7 @@ private struct MetadataPill: View {
 private struct PlayerSheet: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
   let itemID: String
   let title: String
 
@@ -689,32 +729,17 @@ private struct PlayerSheet: View {
                 itemId: itemID,
                 positionSeconds: lastSyncedPosition
               )
-              // Also sync to server so home rails (Continue Watching) reflect progress
-              let positionAtDismiss = lastSyncedPosition
-              let durationAtDismiss = lastKnownDuration
-              Task {
-                try? await appState.api.setProgress(
-                  id: itemID,
-                  positionSeconds: positionAtDismiss,
-                  durationSeconds: durationAtDismiss
-                )
-              }
-            } else {
-              // Save final position to the server for online items.
-              // Task is unavoidable here since onDismiss is a sync closure.
-              // dismiss() has already been called by GestureVideoPlayer before this fires,
-              // so we do NOT call dismiss() inside the Task.
-              let positionAtDismiss = lastSyncedPosition
-              let durationAtDismiss = lastKnownDuration
-              Task {
-                do {
-                  try await appState.api.setProgress(
-                    id: itemID,
-                    positionSeconds: positionAtDismiss,
-                    durationSeconds: durationAtDismiss
-                  )
-                } catch { }
-              }
+            }
+            // Route through appState.recordProgress so LocalStore is updated (TASK-361).
+            // Task is unavoidable here since onDismiss is a sync closure.
+            let positionAtDismiss = lastSyncedPosition
+            let durationAtDismiss = lastKnownDuration
+            Task {
+              await appState.recordProgress(
+                itemId: itemID,
+                positionSeconds: positionAtDismiss,
+                durationSeconds: durationAtDismiss
+              )
             }
             dismiss()
           },
@@ -743,10 +768,10 @@ private struct PlayerSheet: View {
                 positionSeconds: positionInt
               )
             }
-            // Always sync to server (online or offline) so home rails stay current
+            // Route through appState.recordProgress so LocalStore is updated (TASK-361).
             Task {
-              try? await appState.api.setProgress(
-                id: itemID,
+              await appState.recordProgress(
+                itemId: itemID,
                 positionSeconds: positionInt,
                 durationSeconds: durationInt
               )
@@ -769,6 +794,20 @@ private struct PlayerSheet: View {
       }
     }
     .task { await start() }
+    .onChange(of: scenePhase) { _, newPhase in
+      // TASK-270: flush pending progress when app goes to background so force-kill
+      // doesn't lose the last known position.
+      if newPhase == .background, lastSyncedPosition > 0, lastKnownDuration > 0 {
+        let pos = lastSyncedPosition
+        let dur = lastKnownDuration
+        if isOffline {
+          DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos)
+        }
+        Task {
+          await appState.recordProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
+        }
+      }
+    }
   }
 
   private func start() async {

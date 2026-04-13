@@ -108,6 +108,11 @@ nonisolated enum HomeCache {
     writeData(data)
   }
 
+  // P3 deferred (TASK-229): touch() performs a full decode+encode to update savedAt.
+  // A lighter alternative would be FileManager.setAttributes(.modificationDate:) to update
+  // the file timestamp without touching the payload, but HomeCacheEntry.savedAt is embedded in
+  // the JSON body, not derived from file metadata — so a re-encode is currently unavoidable.
+  // Future: extract savedAt to a sidecar file or use file mtime as the staleness signal.
   static func touch(serverURL: String) {
     guard let existing = load(serverURL: serverURL) else { return }
     log.info("touch: bumping savedAt")

@@ -754,7 +754,7 @@ struct GestureVideoPlayer: View {
             .receive(on: DispatchQueue.main)
             .sink { status in
                 if status == .failed {
-                    let msg = playerItem.error?.localizedDescription ?? "Unable to play this video."
+                    let msg = playerItem.error.map { GestureVideoPlayer.friendlyPlayerError($0) } ?? "Unable to play this video."
                     playerError = msg
                     isBuffering = false
                 }
@@ -802,7 +802,7 @@ struct GestureVideoPlayer: View {
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         } catch {
-            print("[GestureVideoPlayer] Failed to deactivate audio session: \(error)")
+            orientLog.warning("Failed to deactivate audio session: \(error.localizedDescription)")
         }
         #endif
         player?.pause()
@@ -1000,6 +1000,24 @@ private extension GestureVideoPlayer {
         } else {
             return String(format: "%d:%02d", minutes, secs)
         }
+    }
+
+    /// TASK-375: Maps common AVFoundation error codes to user-friendly messages.
+    /// Falls back to the system localizedDescription for unrecognised codes.
+    private static func friendlyPlayerError(_ error: Error) -> String {
+        let nsError = error as NSError
+        if nsError.domain == AVFoundationErrorDomain {
+            switch nsError.code {
+            case -11800: return "Playback failed. The file may be corrupted."
+            case -11828: return "Format not supported."
+            case -11849: return "Could not load media."
+            case -11850: return "Playback failed. The media is not accessible."
+            case -11819: return "The operation was cancelled."
+            case -11821: return "Cannot connect to the server."
+            default: break
+            }
+        }
+        return error.localizedDescription
     }
 }
 

@@ -419,6 +419,7 @@ private struct TVShowDetailScrollView: View {
         VStack(alignment: .leading, spacing: 0) {
           if isLoading && seasons.isEmpty {
             ProgressView("Loading").padding(.top, 32).frame(maxWidth: .infinity)
+              .accessibilityLabel("Loading seasons, please wait")
           } else if let error {
             ContentUnavailableView(
               "Couldn't load seasons",
@@ -594,6 +595,7 @@ private struct iOSSeasonSection: View {
       if isExpanded {
         if isLoading && episodes.isEmpty {
           ProgressView("Loading").padding(.vertical, 16).frame(maxWidth: .infinity)
+            .accessibilityLabel("Loading episodes, please wait")
         } else {
           if let error, episodes.isEmpty {
             HStack {
