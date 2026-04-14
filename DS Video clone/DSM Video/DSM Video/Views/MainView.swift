@@ -99,7 +99,11 @@ private struct SplitView: View {
       DownloadsView(isEmbedded: true)
     case .settings:
       SettingsView(isEmbedded: true)
-    case .library(let lib):
+    case .library(let selectedLib):
+      // Re-resolve from libraries binding by ID so an update to the libraries list
+      // (e.g. from a delta sync populating homeLibraries) doesn't create a new Library
+      // value and tear down TVShowsView mid-load, cancelling its .task.
+      let lib = libraries.first(where: { $0.id == selectedLib.id }) ?? selectedLib
       if lib.kind == "tv" {
         TVShowsView(library: lib)
       } else {
@@ -524,7 +528,7 @@ private struct SearchResultCell: View {
         .scaledToFill()
     } else if item.posterImageId != nil {
       AuthenticatedImage(
-        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 200),
+        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 200, version: item.changeSeq),
         token: appState.sessionToken
       )
       .scaledToFill()

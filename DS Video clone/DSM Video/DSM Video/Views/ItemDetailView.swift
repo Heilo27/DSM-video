@@ -7,6 +7,7 @@ struct ItemDetailView: View {
   @State private var downloadManager = DownloadManager.shared
   let itemID: String
   let fallbackTitle: String
+  var autoPlay: Bool = false
   var nextEpisode: ItemSummary? = nil
   var onNextEpisode: (() -> Void)? = nil
 
@@ -154,6 +155,7 @@ struct ItemDetailView: View {
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
     .task(id: itemID) { await load() }
+    .onAppear { if autoPlay { showPlayer = true } }
     .fullScreenCover(isPresented: $showPlayer) {
       PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
         .environment(appState)

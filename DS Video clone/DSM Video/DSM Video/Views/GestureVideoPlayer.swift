@@ -456,9 +456,9 @@ struct GestureVideoPlayer: View {
                     if isPlaying { scheduleHideControls() }
                 } label: {
                     Image(systemName: "gobackward.15")
-                        .font(.system(size: 28))
+                        .font(.system(size: 35))
                         .foregroundStyle(.white)
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 55, minHeight: 55)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Rewind 15 seconds")
@@ -469,9 +469,9 @@ struct GestureVideoPlayer: View {
                     scheduleHideControls()
                 } label: {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 40))
+                        .font(.system(size: 50))
                         .foregroundStyle(.white)
-                        .frame(minWidth: 60, minHeight: 60)
+                        .frame(minWidth: 75, minHeight: 75)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
@@ -485,9 +485,9 @@ struct GestureVideoPlayer: View {
                     if isPlaying { scheduleHideControls() }
                 } label: {
                     Image(systemName: "goforward.15")
-                        .font(.system(size: 28))
+                        .font(.system(size: 35))
                         .foregroundStyle(.white)
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 55, minHeight: 55)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Forward 15 seconds")

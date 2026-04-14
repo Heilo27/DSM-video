@@ -324,7 +324,7 @@ struct ItemPosterCell: View {
         .clipped()
     } else if item.posterImageId != nil {
       AuthenticatedImage(
-        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400),
+        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400, version: item.changeSeq),
         token: appState.sessionToken
       )
       .scaledToFill()

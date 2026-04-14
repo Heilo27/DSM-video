@@ -186,13 +186,14 @@ struct APIClient {
     _ = try await request(url: url, method: "POST", body: Body(tmdbId: tmdbId), response: EmptyDecodable.self)
   }
 
-  func imageURL(id: String, width: Int? = nil) -> URL? {
+  func imageURL(id: String, width: Int? = nil, version: Int? = nil) -> URL? {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/images/\(id)"), resolvingAgainstBaseURL: false) else {
       return nil
     }
-    if let width {
-      comps.queryItems = [URLQueryItem(name: "w", value: String(width))]
-    }
+    var items: [URLQueryItem] = []
+    if let width { items.append(URLQueryItem(name: "w", value: String(width))) }
+    if let version { items.append(URLQueryItem(name: "v", value: String(version))) }
+    if !items.isEmpty { comps.queryItems = items }
     return comps.url
   }
 

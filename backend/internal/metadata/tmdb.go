@@ -356,13 +356,13 @@ func ParseFilename(filename string) ParsedFilename {
 	name = strings.ReplaceAll(name, "_", " ")
 	name = strings.ReplaceAll(name, "-", " ")
 
-	// Check for TV show patterns: S01E02, 1x02, Season 1 Episode 2
+	// Check for TV show patterns: S01E02, S01 E02, 1x02, Season 1 Episode 2
 	tvPatterns := []struct {
 		pattern *regexp.Regexp
 		extract func([]string) (int, int)
 	}{
 		{
-			regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,2})`),
+			regexp.MustCompile(`(?i)S(\d{1,2})\s*E(\d{1,2})`),
 			func(m []string) (int, int) {
 				s, _ := strconv.Atoi(m[1])
 				e, _ := strconv.Atoi(m[2])

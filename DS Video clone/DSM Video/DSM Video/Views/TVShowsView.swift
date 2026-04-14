@@ -197,6 +197,10 @@ struct TVShowsView: View {
     }
     .onAppear {
       sortedShows = computeSortedShows()
+      // Retry load if a prior .task was cancelled before completing (e.g. during launch animation)
+      if shows.isEmpty && !isLoading && error == nil {
+        Task { await load() }
+      }
     }
     #else
     .toolbar {
@@ -221,6 +225,9 @@ struct TVShowsView: View {
     }
     .onAppear {
       sortedShows = computeSortedShows()
+      if shows.isEmpty && !isLoading && error == nil {
+        Task { await load() }
+      }
     }
     #endif
   }
@@ -239,7 +246,16 @@ struct TVShowsView: View {
       tvLog.info("TVShowsView.load: success — \(response.shows.count) shows")
       shows = response.shows
       error = nil
+    } catch is CancellationError {
+      // View disappeared before load completed — not an error, task will retry on re-appear.
+      tvLog.debug("TVShowsView.load: cancelled (view disappeared)")
     } catch {
+      // Also swallow URLSession cancellation (-999) which fires when SwiftUI cancels a .task
+      let nsErr = error as NSError
+      if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled {
+        tvLog.debug("TVShowsView.load: URLSession cancelled (view disappeared)")
+        return
+      }
       tvLog.error("TVShowsView.load: FAILED — \(String(describing: error))")
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       if shows.isEmpty { self.error = msg }
@@ -310,7 +326,7 @@ private struct TVShowPosterCell: View {
             .clipped()
         } else if let id = show.posterImageId {
           AuthenticatedImage(
-            url: appState.api.imageURL(id: id, width: 400),
+            url: appState.api.imageURL(id: id, width: 400, version: show.metadataVersion),
             token: appState.sessionToken
           )
           .scaledToFill()

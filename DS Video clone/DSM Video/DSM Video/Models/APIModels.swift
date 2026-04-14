@@ -109,6 +109,14 @@ struct TVShow: Decodable, Identifiable, Hashable {
   let posterImageId: String?
   let lastWatchedAt: String?
   let addedAt: String?
+  let metadataVersion: Int?
+
+  init(id: String, title: String, year: Int?, seasonCount: Int?, episodeCount: Int?,
+       posterImageId: String?, lastWatchedAt: String?, addedAt: String?, metadataVersion: Int? = nil) {
+    self.id = id; self.title = title; self.year = year; self.seasonCount = seasonCount
+    self.episodeCount = episodeCount; self.posterImageId = posterImageId
+    self.lastWatchedAt = lastWatchedAt; self.addedAt = addedAt; self.metadataVersion = metadataVersion
+  }
 }
 
 struct TVShowsResponse: Decodable {

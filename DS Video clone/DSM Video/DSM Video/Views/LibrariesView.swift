@@ -44,7 +44,10 @@ struct LibrariesView: View {
     .task { await load() }
     .refreshable { await load() }
     .onChange(of: appState.homeLibraries) { _, libs in
-      if !libs.isEmpty {
+      // Only update if the set of library IDs changed — updating when content is
+      // already loaded pops any pushed NavigationLink destination (e.g. TVShowsView)
+      // and cancels its in-flight .task, preventing TV shows from loading.
+      if !libs.isEmpty && libs.map(\.id) != libraries.map(\.id) {
         libraries = libs
       }
     }
@@ -301,25 +304,15 @@ private struct HomeRail: View {
         LazyHStack(spacing: 10) {
           ForEach(items) { item in
             if useLandscapeCards {
-              // Continue Watching — landscape 200x120 card
+              // Continue Watching — tap goes directly to playback for both movies and episodes
               NavigationLink {
-                if let showName = item.showName, !showName.isEmpty,
-                   let tvLibrary = appState.homeFirstTVLibrary {
-                  let stub = TVShow(
-                    id: showName, title: showName, year: item.year,
-                    seasonCount: nil, episodeCount: nil,
-                    posterImageId: item.posterImageId, lastWatchedAt: nil, addedAt: nil
-                  )
-                  TVShowDetailView(show: stub, library: tvLibrary)
-                } else {
-                  ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-                }
+                ItemDetailView(itemID: item.id, fallbackTitle: item.title, autoPlay: true)
               } label: {
                 ContinueWatchingCard(item: item)
               }
               .buttonStyle(.plain)
               .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
-              .accessibilityHint(item.showName != nil ? "Opens TV show" : "Opens video details")
+              .accessibilityHint("Plays video")
             } else if let showName = item.showName, !showName.isEmpty,
                let tvLibrary = appState.homeFirstTVLibrary {
               // Episode → navigate to the show page so the user picks an episode.

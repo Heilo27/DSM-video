@@ -568,6 +568,10 @@ CREATE TABLE IF NOT EXISTS webapi_sessions (
 		"CREATE INDEX IF NOT EXISTS idx_items_library_added ON items(library_id, added_at)",
 		"CREATE INDEX IF NOT EXISTS idx_items_tmdb_id ON items(tmdb_id)",
 		"CREATE INDEX IF NOT EXISTS idx_items_change_seq ON items(change_seq)",
+		// Episode query indexes — prevent full table scans under concurrent load
+		"CREATE INDEX IF NOT EXISTS idx_items_path ON items(path)",
+		"CREATE INDEX IF NOT EXISTS idx_items_library_show ON items(library_id, show_name)",
+		"CREATE INDEX IF NOT EXISTS idx_items_library_season ON items(library_id, show_name, season_number)",
 	}
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
@@ -1866,9 +1870,10 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + showName + "/"
 
-	// Match items by folder path (primary) or by show_name (fallback)
-	matchWhere := "(path LIKE ? OR show_name = ?)"
-	matchArgs := []any{folderPrefix + "%", showName}
+	// Match items by folder path only — show_name is not unique across folders
+	// (e.g. two folders named "MacGyver 1985" and "MacGyver" can both have show_name="MacGyver")
+	matchWhere := "path LIKE ?"
+	matchArgs := []any{folderPrefix + "%"}
 
 	// Get show-level metadata from first episode with data
 	var year sql.NullInt64
@@ -4350,35 +4355,130 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + escapedShowID + "/"
 
-	result, err := s.db.Exec(`
-		UPDATE items SET
-			tmdb_id = ?,
-			show_name = ?,
-			overview = ?,
-			year = ?,
-			poster_path = ?,
-			backdrop_path = ?,
-			rating = ?,
-			genres = ?,
-			cast_names = ?,
-			metadata_fetched_at = ?
-		WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`,
-		details.ID, details.Name, details.Overview,
-		yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
-		genres, cast, now,
-		folderPrefix+"%",
-	)
+	// Update all episodes in a transaction, bumping change_seq on each row so
+	// the delta sync delivers the new metadata (and new image cache-buster) to clients.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
+	defer tx.Rollback()
+
+	// Collect affected item IDs first.
+	idRows, err := tx.QueryContext(ctx, `SELECT id FROM items WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`, folderPrefix+"%")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	var affectedIDs []string
+	for idRows.Next() {
+		var id string
+		if idRows.Scan(&id) == nil {
+			affectedIDs = append(affectedIDs, id)
+		}
+	}
+	idRows.Close()
+	if len(affectedIDs) == 0 {
 		writeErr(w, http.StatusNotFound, "show_not_found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+	for _, id := range affectedIDs {
+		var seq int64
+		_ = tx.QueryRowContext(ctx,
+			`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+		).Scan(&seq)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE items SET
+				tmdb_id = ?,
+				show_name = ?,
+				overview = ?,
+				year = ?,
+				poster_path = ?,
+				backdrop_path = ?,
+				rating = ?,
+				genres = ?,
+				cast_names = ?,
+				metadata_fetched_at = ?,
+				change_seq = ?
+			WHERE id = ?`,
+			details.ID, details.Name, details.Overview,
+			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
+			genres, cast, now, seq, id,
+		); err != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+
+	// Background: re-fetch per-episode TMDb metadata (titles, episode numbers, thumbnails)
+	// using the newly assigned tmdbID. This runs asynchronously so the HTTP response is fast.
+	tmdbID := details.ID
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		type epRow struct {
+			id            string
+			path          string
+			seasonNumber  sql.NullInt64
+			episodeNumber sql.NullInt64
+		}
+		epRows, err := s.db.QueryContext(bgCtx,
+			`SELECT id, path, season_number, episode_number FROM items WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`,
+			folderPrefix+"%")
+		if err != nil {
+			return
+		}
+		var episodes []epRow
+		for epRows.Next() {
+			var ep epRow
+			if epRows.Scan(&ep.id, &ep.path, &ep.seasonNumber, &ep.episodeNumber) == nil {
+				episodes = append(episodes, ep)
+			}
+		}
+		epRows.Close()
+
+		for _, ep := range episodes {
+			sn := int(ep.seasonNumber.Int64)
+			en := int(ep.episodeNumber.Int64)
+			// Fall back to filename parsing when DB season/episode are NULL (e.g. space-separated S01 E01 format).
+			if sn <= 0 || en <= 0 {
+				parsed := metadata.ParseFilename(filepath.Base(ep.path))
+				sn = parsed.Season
+				en = parsed.Episode
+			}
+			if sn <= 0 || en <= 0 {
+				continue
+			}
+			epDetails, err := client.GetTVEpisode(bgCtx, tmdbID, sn, en)
+			if err != nil {
+				continue
+			}
+			var seq int64
+			_ = s.db.QueryRowContext(bgCtx,
+				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+			).Scan(&seq)
+			_, _ = s.db.ExecContext(bgCtx, `
+				UPDATE items SET
+					episode_title = ?,
+					episode_number = ?,
+					season_number = ?,
+					poster_path = COALESCE(NULLIF(?, ''), poster_path),
+					change_seq = ?
+				WHERE id = ?`,
+				epDetails.Name, epDetails.EpisodeNumber, epDetails.SeasonNumber,
+				epDetails.StillPath, seq, ep.id,
+			)
+		}
+		log.Printf("tmdb-fix: re-fetched episode metadata for %d episodes (show tmdb_id=%d)", len(episodes), tmdbID)
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "updatedCount": len(affectedIDs)})
 }
 
 // -------------------------
@@ -4508,7 +4608,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
 	rows, err := s.db.Query(`
-		SELECT id, path, show_name, year, poster_path, season_number, added_at
+		SELECT id, path, show_name, year, poster_path, season_number, added_at, change_seq
 		FROM items WHERE library_id = 'lib_tv'
 		ORDER BY season_number ASC, path ASC`)
 	if err != nil {
@@ -4518,14 +4618,15 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type showInfo struct {
-		folderName  string
-		displayName string
-		year        sql.NullInt64
-		poster      string
-		firstID     string
-		count       int
-		seasons     map[int]bool
-		newestAdded string // ISO8601 — MAX(added_at) across episodes
+		folderName      string
+		displayName     string
+		year            sql.NullInt64
+		poster          string
+		firstID         string
+		count           int
+		seasons         map[int]bool
+		newestAdded     string // ISO8601 — MAX(added_at) across episodes
+		maxChangeSeq    int64  // max change_seq across episodes — used as image cache-buster
 	}
 
 	showMap := map[string]*showInfo{}
@@ -4538,8 +4639,9 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		var posterPath sql.NullString
 		var seasonNum sql.NullInt64
 		var addedAt sql.NullString
+		var changeSeq sql.NullInt64
 
-		if err := rows.Scan(&id, &path, &showName, &year, &posterPath, &seasonNum, &addedAt); err != nil {
+		if err := rows.Scan(&id, &path, &showName, &year, &posterPath, &seasonNum, &addedAt, &changeSeq); err != nil {
 			continue
 		}
 
@@ -4574,6 +4676,9 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		}
 		if addedAt.Valid && addedAt.String > info.newestAdded {
 			info.newestAdded = addedAt.String
+		}
+		if changeSeq.Valid && changeSeq.Int64 > info.maxChangeSeq {
+			info.maxChangeSeq = changeSeq.Int64
 		}
 		sn := 1
 		if seasonNum.Valid && seasonNum.Int64 > 0 {
@@ -4624,14 +4729,15 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	for _, key := range sortedKeys {
 		info := showMap[key]
 		show := map[string]any{
-			"id":            info.folderName,
-			"title":         info.displayName,
-			"year":          nullIntToAny(info.year),
-			"seasonCount":   len(info.seasons),
-			"episodeCount":  info.count,
-			"posterImageId": nil,
-			"lastWatchedAt": nil,
-			"addedAt":       nil,
+			"id":              info.folderName,
+			"title":           info.displayName,
+			"year":            nullIntToAny(info.year),
+			"seasonCount":     len(info.seasons),
+			"episodeCount":    info.count,
+			"posterImageId":   nil,
+			"lastWatchedAt":   nil,
+			"addedAt":         nil,
+			"metadataVersion": info.maxChangeSeq,
 		}
 		if info.firstID != "" {
 			show["posterImageId"] = info.firstID
@@ -4678,10 +4784,10 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT COALESCE(season_number, 1), COUNT(*)
 		FROM items
-		WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'
+		WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'
 		GROUP BY COALESCE(season_number, 1)
 		ORDER BY COALESCE(season_number, 1)`,
-		folderPrefix+"%", showID)
+		folderPrefix+"%")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -4732,8 +4838,8 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + escapedID + "/"
 
-	where := `(path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`
-	args := []any{folderPrefix + "%", showID}
+	where := `path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`
+	args := []any{folderPrefix + "%"}
 
 	if seasonStr != "" {
 		if sn, err := strconv.Atoi(seasonStr); err == nil {
@@ -4755,47 +4861,89 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	defer rows.Close()
 
-	items := make([]map[string]any, 0)
+	// Collect rows into memory first so we release the DB connection before
+	// making additional queries (getProgress). Holding a rows cursor open while
+	// issuing nested QueryRow calls exhausts the connection pool under concurrent
+	// season requests, causing all requests to deadlock.
+	type episodeRow struct {
+		id, typ, title, addedAt string
+		year, duration, seasonNum, episodeNum sql.NullInt64
+		rating                                sql.NullFloat64
+		posterPath, backdropPath, episodeTitle sql.NullString
+	}
+	var rawRows []episodeRow
 	for rows.Next() {
-		var id, typ, title, addedAt string
-		var year, duration, seasonNum, episodeNum sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, episodeTitle sql.NullString
-
-		if err := rows.Scan(&id, &typ, &title, &episodeTitle, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath, &seasonNum, &episodeNum); err != nil {
+		var r episodeRow
+		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.episodeTitle, &r.year, &r.duration, &r.addedAt, &r.rating,
+			&r.posterPath, &r.backdropPath, &r.seasonNum, &r.episodeNum); err != nil {
 			continue
 		}
+		rawRows = append(rawRows, r)
+	}
+	rows.Close() // release connection before any further DB calls
 
+	// Batch-fetch progress for all episodes in one query.
+	progressMap := map[string]map[string]any{}
+	if u.ID != "" && len(rawRows) > 0 {
+		ids := make([]string, len(rawRows))
+		for i, r := range rawRows {
+			ids[i] = r.id
+		}
+		placeholders := strings.Repeat("?,", len(ids))
+		placeholders = placeholders[:len(placeholders)-1]
+		pArgs := make([]any, len(ids)+1)
+		pArgs[0] = u.ID
+		for i, id := range ids {
+			pArgs[i+1] = id
+		}
+		pRows, pErr := s.db.Query(
+			"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ? AND item_id IN ("+placeholders+")",
+			pArgs...)
+		if pErr == nil {
+			defer pRows.Close()
+			for pRows.Next() {
+				var itemID, updatedAt string
+				var pos, dur int
+				if pRows.Scan(&itemID, &pos, &dur, &updatedAt) == nil {
+					progressMap[itemID] = map[string]any{
+						"positionSeconds": pos,
+						"durationSeconds": dur,
+						"updatedAt":       updatedAt,
+					}
+				}
+			}
+		}
+	}
+
+	items := make([]map[string]any, 0, len(rawRows))
+	for _, r := range rawRows {
 		// Use episode_title (from TMDb) when available; fall back to filename-parsed title
-		displayTitle := title
-		if episodeTitle.Valid && episodeTitle.String != "" {
-			displayTitle = episodeTitle.String
+		displayTitle := r.title
+		if r.episodeTitle.Valid && r.episodeTitle.String != "" {
+			displayTitle = r.episodeTitle.String
 		}
 
-		p, _ := s.getProgress(u.ID, id)
 		item := map[string]any{
-			"id":              id,
-			"type":            typ,
+			"id":              r.id,
+			"type":            r.typ,
 			"title":           displayTitle,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
+			"year":            nullIntToAny(r.year),
+			"durationSeconds": nullIntToAny(r.duration),
+			"addedAt":         r.addedAt,
+			"rating":          nullFloatToAny(r.rating),
 			"posterImageId":   nil,
 			"backdropImageId": nil,
-			"seasonNumber":    nullIntToAny(seasonNum),
-			"episodeNumber":   nullIntToAny(episodeNum),
+			"seasonNumber":    nullIntToAny(r.seasonNum),
+			"episodeNumber":   nullIntToAny(r.episodeNum),
 		}
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
+		if r.posterPath.Valid && r.posterPath.String != "" {
+			item["posterImageId"] = r.id
 		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
+		if r.backdropPath.Valid && r.backdropPath.String != "" {
+			item["backdropImageId"] = r.id
 		}
-		if p != nil {
+		if p, ok := progressMap[r.id]; ok {
 			item["progress"] = p
 		}
 		items = append(items, item)
