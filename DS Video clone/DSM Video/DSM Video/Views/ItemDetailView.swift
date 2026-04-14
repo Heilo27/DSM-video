@@ -19,6 +19,7 @@ struct ItemDetailView: View {
   @State private var showPlayer: Bool = false
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
+  @State private var autoPlayFired: Bool = false
 
   private var isDownloaded: Bool {
     downloadManager.isDownloaded(itemId: itemID)
@@ -155,7 +156,12 @@ struct ItemDetailView: View {
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
     .task(id: itemID) { await load() }
-    .onAppear { if autoPlay { showPlayer = true } }
+    .onAppear {
+      if autoPlay && !autoPlayFired {
+        autoPlayFired = true
+        showPlayer = true
+      }
+    }
     .fullScreenCover(isPresented: $showPlayer) {
       PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
         .environment(appState)
@@ -192,7 +198,7 @@ struct ItemDetailView: View {
     #if os(tvOS)
     return 450
     #else
-    return horizontalSizeClass == .regular ? 420 : 300
+    return horizontalSizeClass == .regular ? 420 : min(300, UIScreen.main.bounds.height * 0.35)
     #endif
   }
 
@@ -279,7 +285,7 @@ struct ItemDetailView: View {
   private var backdropImage: some View {
     if let backdropId = detail?.images.backdrop.id ?? detail?.images.backdrop.mapperId {
       AuthenticatedImage(
-        url: appState.api.imageURL(id: backdropId, width: 1200),
+        url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq),
         token: appState.sessionToken
       )
       .scaledToFill()
@@ -827,6 +833,7 @@ private struct PlayerSheet: View {
     // can't suppress the final progress write on the next dismiss (TASK-401).
     lastKnownDuration = 0
     lastSyncedPosition = 0
+    isOffline = false
     // Check if we have a downloaded version first
     if let downloaded = DownloadManager.shared.getDownloadedItem(itemId: itemID) {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)

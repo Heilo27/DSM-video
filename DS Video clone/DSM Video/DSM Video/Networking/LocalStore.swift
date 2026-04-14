@@ -49,9 +49,18 @@ actor LocalStore {
   // Called once at startup. Using a separate async method avoids the actor-isolation
   // restriction on calling isolated methods from a synchronous init.
   // setupLogged wraps setup() so errors are logged rather than silently swallowed.
-  func setupLogged() {
+  func setupLogged() async {
+    // Read the legacy JSON cache file off-actor before acquiring the actor for setup
+    // so the blocking Data(contentsOf:) call doesn't hold the actor thread (TASK-506).
+    let jsonCacheData: (url: URL, data: Data)? = await Task.detached(priority: .utility) {
+      guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+      let jsonURL = docs.appendingPathComponent("dsReel-homeCache.json")
+      guard FileManager.default.fileExists(atPath: jsonURL.path),
+            let data = try? Data(contentsOf: jsonURL) else { return nil }
+      return (url: jsonURL, data: data)
+    }.value
     do {
-      try setup()
+      try setup(jsonCacheData: jsonCacheData)
     } catch {
       log.error("LocalStore.setup failed: \(error.localizedDescription)")
     }
@@ -71,10 +80,10 @@ actor LocalStore {
     }
   }
 
-  private func setup() throws {
+  private func setup(jsonCacheData: (url: URL, data: Data)? = nil) throws {
     try openDatabase()
     try migrate()
-    migrateFromJSONCache()
+    migrateFromJSONCache(preloadedData: jsonCacheData)
   }
 
   // MARK: - Schema
@@ -150,17 +159,15 @@ actor LocalStore {
 
   // MARK: - JSON Cache Migration
 
-  private func migrateFromJSONCache() {
-    guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
-    let jsonURL = docs.appendingPathComponent("dsReel-homeCache.json")
-    guard FileManager.default.fileExists(atPath: jsonURL.path),
-          let data = try? Data(contentsOf: jsonURL),
-          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: data) else { return }
+  // File I/O is done off-actor by setupLogged() before calling here (TASK-506).
+  private func migrateFromJSONCache(preloadedData: (url: URL, data: Data)? = nil) {
+    guard let loaded = preloadedData,
+          let entry = try? JSONDecoder().decode(HomeCacheEntry.self, from: loaded.data) else { return }
 
     log.info("Migrating JSON cache (\(entry.items.count) items) to SQLite")
     upsertItems(entry.items)
     // We don't know the old seq values, leave at 0 to force a full sync on next launch
-    try? FileManager.default.removeItem(at: jsonURL)
+    try? FileManager.default.removeItem(at: loaded.url)
     log.info("JSON cache migration complete — file deleted")
   }
 

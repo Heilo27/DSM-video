@@ -59,7 +59,7 @@ private struct TVShowDetailSplitView: View {
           .clipped()
       } else if let posterId = show.posterImageId {
         AuthenticatedImage(
-          url: appState.api.imageURL(id: posterId, width: 1400),
+          url: appState.api.imageURL(id: posterId, width: 1400, version: show.metadataVersion),
           token: appState.sessionToken
         )
         .scaledToFill()
@@ -354,7 +354,7 @@ private struct TVEpisodeRow: View {
 
       Spacer()
 
-      // Progress indicator
+      // Progress indicator (tvOS)
       if let prog = ep.progress, prog.durationSeconds > 0 {
         let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
         if frac >= 0.95 {
@@ -382,13 +382,6 @@ private struct TVEpisodeRow: View {
       }
     }
     .padding(.vertical, 16)
-  }
-
-  private func formatDuration(_ seconds: Int) -> String {
-    let h = seconds / 3600
-    let m = (seconds % 3600) / 60
-    if h > 0 { return "\(h)h \(m)m" }
-    return "\(m)m"
   }
 }
 
@@ -484,7 +477,7 @@ private struct TVShowDetailScrollView: View {
           .clipped()
       } else if let posterId = show.posterImageId {
         AuthenticatedImage(
-          url: appState.api.imageURL(id: posterId, width: 1200),
+          url: appState.api.imageURL(id: posterId, width: 1200, version: show.metadataVersion),
           token: appState.sessionToken
         )
         .scaledToFill()
@@ -705,16 +698,10 @@ private struct iOSEpisodeRow: View {
         .foregroundStyle(.white.opacity(0.3))
         .accessibilityHidden(true)
     }
+    .frame(minHeight: 44)
     .accessibilityElement(children: .combine)
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
-  }
-
-  private func formatDuration(_ seconds: Int) -> String {
-    let h = seconds / 3600
-    let m = (seconds % 3600) / 60
-    if h > 0 { return "\(h)h \(m)m" }
-    return "\(m)m"
   }
 }
 #endif  // !os(tvOS)
@@ -756,6 +743,14 @@ private struct EpisodeDetailView: View {
   }
 }
 #endif
+
+// Shared duration formatter used by episode row views in this file (TASK-507).
+private func formatDuration(_ seconds: Int) -> String {
+  let h = seconds / 3600
+  let m = (seconds % 3600) / 60
+  if h > 0 { return "\(h)h \(m)m" }
+  return "\(m)m"
+}
 
 private struct iOSCircularProgress: View {
   let fraction: Double

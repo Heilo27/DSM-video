@@ -198,7 +198,7 @@ struct TVShowsView: View {
     .onAppear {
       sortedShows = computeSortedShows()
       // Retry load if a prior .task was cancelled before completing (e.g. during launch animation)
-      if shows.isEmpty && !isLoading && error == nil {
+      if shows.isEmpty && !isLoading {
         Task { await load() }
       }
     }
@@ -225,7 +225,7 @@ struct TVShowsView: View {
     }
     .onAppear {
       sortedShows = computeSortedShows()
-      if shows.isEmpty && !isLoading && error == nil {
+      if shows.isEmpty && !isLoading {
         Task { await load() }
       }
     }

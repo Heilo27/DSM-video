@@ -42,7 +42,7 @@ struct LibrariesView: View {
     }
     .navigationTitle("Libraries")
     .task { await load() }
-    .refreshable { await load() }
+    .refreshable { await load(force: true) }
     .onChange(of: appState.homeLibraries) { _, libs in
       // Only update if the set of library IDs changed — updating when content is
       // already loaded pops any pushed NavigationLink destination (e.g. TVShowsView)
@@ -65,14 +65,15 @@ struct LibrariesView: View {
     }
   }
 
-  private func load() async {
+  private func load(force: Bool = false) async {
     guard !isLoading else { return }
     if appState.isDemoMode {
       libraries = DemoData.libraries
       return
     }
     // Use already-fetched libraries from AppState to avoid redundant network call (TASK-410).
-    if !appState.homeLibraries.isEmpty {
+    // Skip the cache when force=true (e.g. pull-to-refresh — TASK-518).
+    if !force && !appState.homeLibraries.isEmpty {
       libraries = appState.homeLibraries
       return
     }
@@ -282,7 +283,7 @@ private struct HomeRail: View {
       // Header row
       HStack {
         Text(title)
-          .font(.system(size: 18, weight: .bold))
+          .font(.title3.weight(.bold))
           .foregroundStyle(.white)
           .accessibilityAddTraits(.isHeader)
         Spacer()
@@ -290,10 +291,11 @@ private struct HomeRail: View {
           NavigationLink("See All") {
             ItemsGridView(library: lib)
           }
-          .font(.system(size: 14))
+          .font(.subheadline)
           .foregroundStyle(Color.dsAccent)
           .padding(.vertical, 12)
           .padding(.horizontal, 8)
+          .contentShape(Rectangle())
           .accessibilityLabel("See all in \(title)")
         }
       }

@@ -86,12 +86,27 @@ type Server struct {
 	// Serializes progress writes to avoid SQLite busy-timeout under concurrent playback.
 	progressMu sync.Mutex
 
-	// Token revocation list: jti → expiry unix timestamp
+	// Token revocation list: jti → expiry unix timestamp.
+	// KNOWN LIMITATION: this list is in-memory only and is cleared on server restart.
+	// Any tokens revoked before a restart (e.g. via logout) will be re-accepted by a
+	// freshly started server until their natural JWT expiry. A persistent fix requires
+	// a SQLite revocation table — deferred to the TASK-309 database rebuild.
 	revokedTokens sync.Map
 
 	// Pairing codes: code → pairingEntry (tvOS ↔ iOS device pairing)
 	pairingMu    sync.Mutex
 	pairingCodes map[string]pairingEntry
+
+	// Rate limiter for unauthenticated auth endpoints (login, pairing exchange).
+	// Keyed by remote IP; value is *authRateEntry.
+	authRateMu    sync.Mutex
+	authRateLimit sync.Map
+}
+
+// authRateEntry tracks per-IP attempt counts for auth endpoints.
+type authRateEntry struct {
+	count     int
+	windowEnd time.Time
 }
 
 // pairingEntry stores the state for a single pending tvOS pairing code.
@@ -358,10 +373,10 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	r.Get("/images/{id}", s.handleImage)
 	r.Get("/tmdb/image", s.handleTMDbImageProxy)
 	r.Get("/version", s.handleVersion)
-	r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
+		r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
 
 		// Pairing generate requires auth — caller's identity seeds the tvOS token
 		r.Post("/auth/pairing/generate", s.handlePairingGenerate)
@@ -674,7 +689,46 @@ type loginResponse struct {
 	} `json:"user"`
 }
 
+// checkAuthRateLimit enforces a fixed-window rate limit on auth endpoints.
+// Allows up to 10 attempts per 60-second window per IP.
+// Returns true (and writes a 429 response) when the limit is exceeded.
+// Stale windows are cleaned up on each call for that IP.
+func (s *Server) checkAuthRateLimit(w http.ResponseWriter, r *http.Request) bool {
+	const maxAttempts = 10
+	const windowSeconds = 60
+
+	ip := r.RemoteAddr
+	// Strip port from "host:port" format
+	if colon := strings.LastIndex(ip, ":"); colon >= 0 {
+		ip = ip[:colon]
+	}
+
+	now := time.Now()
+	raw, _ := s.authRateLimit.LoadOrStore(ip, &authRateEntry{count: 0, windowEnd: now.Add(windowSeconds * time.Second)})
+	entry := raw.(*authRateEntry)
+
+	s.authRateMu.Lock()
+	// If the window has expired, reset it
+	if now.After(entry.windowEnd) {
+		entry.count = 0
+		entry.windowEnd = now.Add(windowSeconds * time.Second)
+	}
+	entry.count++
+	exceeded := entry.count > maxAttempts
+	s.authRateMu.Unlock()
+
+	if exceeded {
+		w.Header().Set("Retry-After", "60")
+		writeErr(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.checkAuthRateLimit(w, r) {
+		return
+	}
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
@@ -688,7 +742,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Authenticate against Synology DSM WebAPI
 	dsmUser, err := s.authenticateDSM(r.Context(), req.Username, req.Password, req.OTP, "")
 	if err != nil {
-		log.Printf("DSM auth failed for %s: %v", req.Username, err)
+		log.Printf("DSM auth failed (username redacted): %v", err)
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials")
 		return
 	}
@@ -1020,6 +1074,9 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 // JWT session token that the tvOS device (or iOS app acting on its behalf) can
 // use from this point forward.
 func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
+	if s.checkAuthRateLimit(w, r) {
+		return
+	}
 	var req struct {
 		Code string `json:"code"`
 	}
@@ -1593,42 +1650,55 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	defer rows.Close()
 
-	items := make([]map[string]any, 0)
+	// Drain rows to a slice first so the cursor is closed before the batch progress query.
+	type jwRow struct {
+		id, typ, title, addedAt         string
+		year, duration                  sql.NullInt64
+		rating                          sql.NullFloat64
+		posterPath, backdropPath, overview sql.NullString
+	}
+	var rawRows []jwRow
 	for rows.Next() {
-		var id, typ, title, addedAt string
-		var year, duration sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, overview sql.NullString
-
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath, &overview); err != nil {
+		var r jwRow
+		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.year, &r.duration, &r.addedAt, &r.rating, &r.posterPath, &r.backdropPath, &r.overview); err != nil {
+			rows.Close()
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
+		rawRows = append(rawRows, r)
+	}
+	rows.Close()
 
-		p, _ := s.getProgress(u.ID, id)
+	// Batch-fetch progress for all returned items in a single query.
+	ids := make([]string, len(rawRows))
+	for i, r := range rawRows {
+		ids[i] = r.id
+	}
+	progressMap := s.getProgressBatch(u.ID, ids)
 
+	items := make([]map[string]any, 0, len(rawRows))
+	for _, r := range rawRows {
 		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           title,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
+			"id":              r.id,
+			"type":            r.typ,
+			"title":           r.title,
+			"year":            nullIntToAny(r.year),
+			"durationSeconds": nullIntToAny(r.duration),
+			"addedAt":         r.addedAt,
+			"rating":          nullFloatToAny(r.rating),
 			"posterImageId":   nil,
 			"backdropImageId": nil,
 		}
 
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
+		if r.posterPath.Valid && r.posterPath.String != "" {
+			item["posterImageId"] = r.id
 		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
+		if r.backdropPath.Valid && r.backdropPath.String != "" {
+			item["backdropImageId"] = r.id
 		}
 
-		if p != nil {
+		if p, ok := progressMap[r.id]; ok {
 			item["progress"] = p
 		}
 		items = append(items, item)
@@ -1642,11 +1712,11 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		SELECT id, library_id, type, title, year, duration_seconds,
 		       original_title, overview, rating, genres, director, cast_names,
 		       content_rating, poster_path, backdrop_path, tmdb_id, imdb_id,
-		       show_name, season_number, episode_number, episode_title
+		       show_name, season_number, episode_number, episode_title, change_seq
 		FROM items WHERE id = ?`, id)
 
 	var itemID, libraryID, typ, title string
-	var year, duration, tmdbID, seasonNum, episodeNum sql.NullInt64
+	var year, duration, tmdbID, seasonNum, episodeNum, changeSeq sql.NullInt64
 	var originalTitle, overview, genres, director, castNames sql.NullString
 	var contentRating, posterPath, backdropPath, imdbID sql.NullString
 	var showName, episodeTitle sql.NullString
@@ -1655,7 +1725,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 	if err := row.Scan(&itemID, &libraryID, &typ, &title, &year, &duration,
 		&originalTitle, &overview, &rating, &genres, &director, &castNames,
 		&contentRating, &posterPath, &backdropPath, &tmdbID, &imdbID,
-		&showName, &seasonNum, &episodeNum, &episodeTitle); err != nil {
+		&showName, &seasonNum, &episodeNum, &episodeTitle, &changeSeq); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "not_found")
 			return
@@ -1706,6 +1776,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		"images":          images,
 		"tmdbId":          nullIntToAny(tmdbID),
 		"imdbId":          nullStringToAny(imdbID),
+		"changeSeq":       nullIntToAny(changeSeq),
 	}
 
 	// Add TV-specific fields
@@ -1864,6 +1935,10 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	decoded, err := url.PathUnescape(showName)
 	if err == nil {
 		showName = decoded
+	}
+	if strings.Contains(showName, "/") || strings.Contains(showName, "..") {
+		writeErr(w, http.StatusBadRequest, "invalid_show_id")
+		return
 	}
 
 	u := userFromCtx(r.Context())
@@ -2698,7 +2773,7 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSyncHeartbeat — GET /api/v1/sync/heartbeat (no auth required — token via query param)
+// handleSyncHeartbeat — GET /api/v1/sync/heartbeat (auth required — TASK-515)
 func (s *Server) handleSyncHeartbeat(w http.ResponseWriter, r *http.Request) {
 	itemSeq, progressSeq := s.getSyncSeqs()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -2926,6 +3001,10 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		"usr": u.Username,
 		"jti": hex.EncodeToString(jtiBytes),
 		"iat": time.Now().Unix(),
+		// 90-day expiry for refreshed tokens: tvOS devices pair infrequently and a
+		// shorter TTL (e.g. 30 days) would force re-pairing on devices that are powered
+		// off or unused for weeks, creating a frustrating loop. 90 days balances
+		// security with usability for living-room appliances.
 		"exp": time.Now().Add(90 * 24 * time.Hour).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -2989,6 +3068,10 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"progress": map[string]any{}})
 		return
 	}
+	if len(ids) > 500 {
+		writeErr(w, http.StatusBadRequest, "too_many_ids")
+		return
+	}
 	placeholders := strings.Repeat("?,", len(ids))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(ids)+1)
@@ -3041,6 +3124,39 @@ func (s *Server) getProgress(userID, itemID string) (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{"positionSeconds": pos, "durationSeconds": dur, "updatedAt": updatedAt}, nil
+}
+
+// getProgressBatch returns progress for a slice of itemIDs in a single query.
+// Returns a map of itemID → progress map; missing items are absent from the map.
+func (s *Server) getProgressBatch(userID string, itemIDs []string) map[string]map[string]any {
+	result := make(map[string]map[string]any, len(itemIDs))
+	if len(itemIDs) == 0 {
+		return result
+	}
+	placeholders := strings.Repeat("?,", len(itemIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(itemIDs)+1)
+	args = append(args, userID)
+	for _, id := range itemIDs {
+		args = append(args, id)
+	}
+	rows, err := s.db.Query(
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ? AND item_id IN ("+placeholders+")",
+		args...,
+	)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var itemID, updatedAt string
+		var pos, dur int
+		if err := rows.Scan(&itemID, &pos, &dur, &updatedAt); err != nil {
+			continue
+		}
+		result[itemID] = map[string]any{"positionSeconds": pos, "durationSeconds": dur, "updatedAt": updatedAt}
+	}
+	return result
 }
 
 // -------------------------
@@ -3148,8 +3264,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 
-	rows, err := s.db.Query(
-		"SELECT id, title, created_at, updated_at FROM playlists WHERE user_id = ? ORDER BY updated_at DESC",
+	// Single query with LEFT JOIN COUNT to avoid N+1 per-playlist count query (TASK-528).
+	rows, err := s.db.Query(`
+		SELECT p.id, p.title, p.created_at, p.updated_at, COUNT(pi.playlist_id) AS item_count
+		FROM playlists p
+		LEFT JOIN playlist_items pi ON pi.playlist_id = p.id
+		WHERE p.user_id = ?
+		GROUP BY p.id, p.title, p.created_at, p.updated_at
+		ORDER BY p.updated_at DESC`,
 		u.ID,
 	)
 	if err != nil {
@@ -3161,12 +3283,10 @@ func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
 	playlists := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, title, createdAt, updatedAt string
-		if err := rows.Scan(&id, &title, &createdAt, &updatedAt); err != nil {
+		var count int
+		if err := rows.Scan(&id, &title, &createdAt, &updatedAt, &count); err != nil {
 			continue
 		}
-		// Get item count
-		var count int
-		s.db.QueryRow("SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?", id).Scan(&count)
 
 		playlists = append(playlists, map[string]any{
 			"id":        id,

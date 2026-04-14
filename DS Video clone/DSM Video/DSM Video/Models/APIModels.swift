@@ -162,6 +162,17 @@ struct ItemDetail: Decodable, Identifiable {
   let genres: [String]?
   let cast: [Person]?
   let images: Images
+  let changeSeq: Int?
+
+  init(id: String, type: String, title: String, originalTitle: String? = nil,
+       year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
+       rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
+       cast: [Person]? = nil, images: Images, changeSeq: Int? = nil) {
+    self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
+    self.year = year; self.durationSeconds = durationSeconds; self.contentRating = contentRating
+    self.rating = rating; self.summary = summary; self.genres = genres
+    self.cast = cast; self.images = images; self.changeSeq = changeSeq
+  }
 }
 
 // MARK: - Playback

@@ -250,7 +250,26 @@ final class DownloadManager: NSObject {
   func getDownloadedItems() -> [DownloadedItem] {
     if let cached = cachedDownloadedItems { return cached }
 
-    guard let data = UserDefaults.standard.data(forKey: storageKey),
+    // Read from Application Support JSON file (canonical storage).
+    // Migrate from UserDefaults on first launch after upgrade: copy data to file, then remove key.
+    let fileURL = downloadsMetadataFileURL
+    var rawData: Data?
+    if let fileData = try? Data(contentsOf: fileURL) {
+      rawData = fileData
+    } else if let udData = UserDefaults.standard.data(forKey: storageKey) {
+      // Migration path: write to Application Support, then remove from UserDefaults
+      rawData = udData
+      let dir = fileURL.deletingLastPathComponent()
+      try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      try? udData.write(to: fileURL, options: .atomic)
+      try? FileManager.default.setAttributes(
+        [.protectionKey: FileProtectionType.complete],
+        ofItemAtPath: fileURL.path
+      )
+      UserDefaults.standard.removeObject(forKey: storageKey)
+    }
+
+    guard let data = rawData,
           let items = try? JSONDecoder().decode([DownloadedItem].self, from: data) else {
       return []
     }
@@ -312,9 +331,9 @@ final class DownloadManager: NSObject {
   /// Called periodically during playback (same debounce cadence as the online API sync)
   /// and once more on player dismiss.
   func updateResumePosition(itemId: String, positionSeconds: Int) {
-    // Read raw items directly from UserDefaults to preserve the filename-only storage invariant.
+    // Read raw items directly from the metadata file to preserve the filename-only storage invariant.
     // Using getDownloadedItems() would resolve absolute paths and write them back, undoing the fix.
-    guard let rawData = UserDefaults.standard.data(forKey: storageKey),
+    guard let rawData = try? Data(contentsOf: downloadsMetadataFileURL),
           var rawItems = try? JSONDecoder().decode([DownloadedItem].self, from: rawData),
           let index = rawItems.firstIndex(where: { $0.id == itemId }) else { return }
     rawItems[index].resumePositionSeconds = positionSeconds
@@ -414,9 +433,25 @@ final class DownloadManager: NSObject {
     }
   }
 
+  /// URL for the downloads metadata JSON file in Application Support.
+  /// This is the canonical storage location; UserDefaults is only consulted for migration.
+  private var downloadsMetadataFileURL: URL {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return appSupport.appendingPathComponent("downloads.json")
+  }
+
   private func saveDownloadedItems(_ items: [DownloadedItem]) {
     guard let data = try? JSONEncoder().encode(items) else { return }
-    UserDefaults.standard.set(data, forKey: storageKey)
+    let fileURL = downloadsMetadataFileURL
+    // Ensure the Application Support directory exists
+    let dir = fileURL.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try? data.write(to: fileURL, options: .atomic)
+    // Apply complete file protection to the metadata file
+    try? FileManager.default.setAttributes(
+      [.protectionKey: FileProtectionType.complete],
+      ofItemAtPath: fileURL.path
+    )
   }
 
   private func downloadsDirectory() -> URL {
@@ -447,6 +482,12 @@ final class DownloadManager: NSObject {
       return
     }
 
+    // Apply complete file protection so the video is inaccessible when the device is locked.
+    try? fm.setAttributes(
+      [.protectionKey: FileProtectionType.complete],
+      ofItemAtPath: videoPath.path
+    )
+
     let fileSize = (try? fm.attributesOfItem(atPath: videoPath.path)[.size] as? Int64) ?? 0
 
     // Save the item immediately with no poster; the async poster fetch below will update it.
@@ -461,10 +502,10 @@ final class DownloadManager: NSObject {
       durationSeconds: info.durationSeconds
     )
 
-    // Read raw items from UserDefaults to preserve filename-only storage invariant,
+    // Read raw items from the metadata file to preserve filename-only storage invariant,
     // then insert the new item (which already uses filename-only videoPath).
     let rawItems: [DownloadedItem]
-    if let rawData = UserDefaults.standard.data(forKey: storageKey),
+    if let rawData = try? Data(contentsOf: downloadsMetadataFileURL),
        let decoded = try? JSONDecoder().decode([DownloadedItem].self, from: rawData) {
       rawItems = decoded
     } else {
@@ -503,10 +544,10 @@ final class DownloadManager: NSObject {
         try data.write(to: posterDestination, options: .atomic)
 
         // Update the persisted item with the poster path (filename only).
-        // Read raw from UserDefaults to preserve the filename-only videoPath invariant.
+        // Read raw from the metadata file to preserve the filename-only videoPath invariant.
         await MainActor.run {
-          let key = self.storageKey
-          guard let rawData = UserDefaults.standard.data(forKey: key),
+          let metaURL = self.downloadsMetadataFileURL
+          guard let rawData = try? Data(contentsOf: metaURL),
                 var rawItems = try? JSONDecoder().decode([DownloadedItem].self, from: rawData),
                 let idx = rawItems.firstIndex(where: { $0.id == itemId }) else { return }
           rawItems[idx] = DownloadedItem(
@@ -520,9 +561,7 @@ final class DownloadManager: NSObject {
             resumePositionSeconds: rawItems[idx].resumePositionSeconds,
             durationSeconds: rawItems[idx].durationSeconds
           )
-          if let updated = try? JSONEncoder().encode(rawItems) {
-            UserDefaults.standard.set(updated, forKey: key)
-          }
+          self.saveDownloadedItems(rawItems)
           // Invalidate in-memory cache so next read resolves fresh from disk.
           self.cachedDownloadedItems = nil
         }

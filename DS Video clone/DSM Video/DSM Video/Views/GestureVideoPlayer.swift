@@ -135,8 +135,8 @@ struct GestureVideoPlayer: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Play/Pause") { togglePlayPause() }
-        .accessibilityAction(named: "Skip forward 30 seconds") { skipForward() }
-        .accessibilityAction(named: "Skip backward 30 seconds") { skipBackward() }
+        .accessibilityAction(named: "Skip forward \(Int(skipSeconds)) seconds") { skipForward() }
+        .accessibilityAction(named: "Skip backward \(Int(skipSeconds)) seconds") { skipBackward() }
         #if os(iOS)
         return base
             .accessibilityAction(named: "Increase volume") {
@@ -198,6 +198,7 @@ struct GestureVideoPlayer: View {
             controlsOverlay(geometry: geometry)
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(controlsInteractive)
+                .accessibilityHidden(!showControls)
 
             // Scrub preview
             if showScrubPreview {

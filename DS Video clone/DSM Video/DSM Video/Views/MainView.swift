@@ -290,7 +290,7 @@ private struct SearchView: View {
               SearchResultCell(item: item)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? ""), \(item.type)")
+            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? ""), \(readableType(item.type))")
             .accessibilityHint("Opens video details")
 
             Divider()
@@ -375,6 +375,15 @@ private struct SearchView: View {
       results = []
       let msg = (error as? APIError)?.userMessage ?? error.localizedDescription
       searchError = msg
+    }
+  }
+
+  private func readableType(_ type: String) -> String {
+    switch type {
+    case "movie": return "Movie"
+    case "tvshow": return "TV Show"
+    case "episode": return "Episode"
+    default: return type.capitalized
     }
   }
 
@@ -894,6 +903,22 @@ private struct DownloadedItemCell: View {
       ZStack(alignment: .bottom) {
         posterImage(width: width, height: height)
 
+        // Visible delete button in top-right corner
+        Button {
+          onDelete()
+        } label: {
+          Image(systemName: "trash")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(6)
+            .background(Color.black.opacity(0.55), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, maxHeight: height, alignment: .topTrailing)
+        .padding(.top, 6)
+        .padding(.trailing, 6)
+        .accessibilityLabel("Delete \(item.title)")
+
         LinearGradient(
           stops: [
             .init(color: .clear, location: 0.45),
@@ -1011,7 +1036,7 @@ struct SettingsView: View {
             .keyboardType(.numberPad)
             #endif
             .multilineTextAlignment(.trailing)
-            .frame(width: 70)
+            .frame(minWidth: 70, maxWidth: 120)
         }
       } header: {
         Text("Server")
