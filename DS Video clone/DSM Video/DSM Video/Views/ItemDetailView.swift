@@ -20,6 +20,7 @@ struct ItemDetailView: View {
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
   @State private var autoPlayFired: Bool = false
+  @State private var viewHeight: CGFloat = 852  // sensible default (iPhone 15 Pro)
 
   private var isDownloaded: Bool {
     downloadManager.isDownloaded(itemId: itemID)
@@ -151,7 +152,13 @@ struct ItemDetailView: View {
       // fullScreenCover dismissal (shows content shifted left, clipping leading edge).
       .id(showPlayer)
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(
+      GeometryReader { geo in
+        Color.black.ignoresSafeArea()
+          .onAppear { viewHeight = geo.size.height }
+          .onChange(of: geo.size.height) { _, h in viewHeight = h }
+      }
+    )
     .navigationTitle(detail?.title ?? fallbackTitle)
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
@@ -205,7 +212,7 @@ struct ItemDetailView: View {
     #if os(tvOS)
     return 450
     #else
-    return horizontalSizeClass == .regular ? 420 : min(300, UIScreen.main.bounds.height * 0.35)
+    return horizontalSizeClass == .regular ? 420 : min(300, viewHeight * 0.35)
     #endif
   }
 
