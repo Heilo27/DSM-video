@@ -257,16 +257,22 @@ final class DownloadManager: NSObject {
     if let fileData = try? Data(contentsOf: fileURL) {
       rawData = fileData
     } else if let udData = UserDefaults.standard.data(forKey: storageKey) {
-      // Migration path: write to Application Support, then remove from UserDefaults
+      // Migration path: write to Application Support, then remove from UserDefaults.
+      // Only remove from UserDefaults after confirming the write succeeded — preserves
+      // data if the write fails (e.g. disk full) so the next launch can retry (TASK-549).
       rawData = udData
       let dir = fileURL.deletingLastPathComponent()
       try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-      try? udData.write(to: fileURL, options: .atomic)
-      try? FileManager.default.setAttributes(
-        [.protectionKey: FileProtectionType.complete],
-        ofItemAtPath: fileURL.path
-      )
-      UserDefaults.standard.removeObject(forKey: storageKey)
+      do {
+        try udData.write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+          [.protectionKey: FileProtectionType.complete],
+          ofItemAtPath: fileURL.path
+        )
+        UserDefaults.standard.removeObject(forKey: storageKey) // only remove after successful write
+      } catch {
+        // Write failed — keep UserDefaults intact for next launch
+      }
     }
 
     guard let data = rawData,
@@ -542,6 +548,10 @@ final class DownloadManager: NSObject {
         }
 
         try data.write(to: posterDestination, options: .atomic)
+        try? FileManager.default.setAttributes(
+          [.protectionKey: FileProtectionType.complete],
+          ofItemAtPath: posterDestination.path
+        )
 
         // Update the persisted item with the poster path (filename only).
         // Read raw from the metadata file to preserve the filename-only videoPath invariant.

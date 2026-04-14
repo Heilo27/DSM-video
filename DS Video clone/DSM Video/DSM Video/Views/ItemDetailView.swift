@@ -155,7 +155,10 @@ struct ItemDetailView: View {
     .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
-    .task(id: itemID) { await load() }
+    .task(id: itemID) {
+      autoPlayFired = false
+      await load()
+    }
     .onAppear {
       if autoPlay && !autoPlayFired {
         autoPlayFired = true

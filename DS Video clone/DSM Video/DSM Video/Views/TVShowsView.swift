@@ -99,8 +99,15 @@ struct TVShowsView: View {
       // ISO8601 strings sort correctly with lexicographic >. Nil sorts to the bottom.
       shows.sorted { ($0.addedAt ?? "") > ($1.addedAt ?? "") }
     case .addedOldest:
-      // ISO8601 strings sort correctly with lexicographic <. Nil sorts to the bottom.
-      shows.sorted { ($0.addedAt ?? "") < ($1.addedAt ?? "") }
+      // ISO8601 strings sort correctly with lexicographic <. Nil/empty sorts to the BOTTOM.
+      shows.sorted {
+        let a = $0.addedAt ?? ""
+        let b = $1.addedAt ?? ""
+        if a.isEmpty && b.isEmpty { return false }
+        if a.isEmpty { return false }  // nil sorts last
+        if b.isEmpty { return true }
+        return a < b
+      }
     case .nameAsc:
       shows.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     case .nameDesc:

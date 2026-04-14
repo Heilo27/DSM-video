@@ -383,6 +383,8 @@ private struct SearchView: View {
     case "movie": return "Movie"
     case "tvshow": return "TV Show"
     case "episode": return "Episode"
+    case "homeVideo": return "Home Video"
+    case "video": return "Video"
     default: return type.capitalized
     }
   }
@@ -472,6 +474,8 @@ private struct SearchResultCell: View {
     case "movie": return "Movie"
     case "episode": return "Episode"
     case "tvshow": return "TV Show"
+    case "homeVideo": return "Home Video"
+    case "video": return "Video"
     default: return item.type.capitalized
     }
   }
@@ -927,6 +931,7 @@ private struct DownloadedItemCell: View {
           startPoint: .top,
           endPoint: .bottom
         )
+        .allowsHitTesting(false)
 
         VStack(alignment: .leading, spacing: 2) {
           Text(item.title)

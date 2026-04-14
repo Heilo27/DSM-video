@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -235,6 +236,7 @@ func main() {
 	//   - revokedTokens: entries past their JWT exp timestamp
 	//   - webAPISessions: sessions older than 24 hours (also removed from SQLite)
 	//   - idMappings: per-session ID caches not accessed in 7 days
+	//   - authRateLimit: per-IP rate limit entries whose window has expired
 	go func() {
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
@@ -244,6 +246,16 @@ func main() {
 			s.revokedTokens.Range(func(k, v any) bool {
 				if exp, ok := v.(int64); ok && now > exp {
 					s.revokedTokens.Delete(k)
+				}
+				return true
+			})
+
+			// Auth rate limit entries — delete entries whose window has expired.
+			// sync.Map Range+Delete is safe without an external mutex.
+			nowT := time.Now()
+			s.authRateLimit.Range(func(k, v any) bool {
+				if entry, ok := v.(*authRateEntry); ok && nowT.After(entry.windowEnd) {
+					s.authRateLimit.Delete(k)
 				}
 				return true
 			})
@@ -697,10 +709,12 @@ func (s *Server) checkAuthRateLimit(w http.ResponseWriter, r *http.Request) bool
 	const maxAttempts = 10
 	const windowSeconds = 60
 
+	// Use net.SplitHostPort to correctly parse the host from RemoteAddr.
+	// This handles both IPv4 ("1.2.3.4:port") and IPv6 ("[::1]:port") correctly.
+	// strings.LastIndex would corrupt IPv6 keys by truncating at the last colon.
 	ip := r.RemoteAddr
-	// Strip port from "host:port" format
-	if colon := strings.LastIndex(ip, ":"); colon >= 0 {
-		ip = ip[:colon]
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
 	}
 
 	now := time.Now()
