@@ -146,6 +146,10 @@ struct ItemDetailView: View {
         #endif
         .padding(.top, 16)
       }
+      // Rebuild layout content when player dismisses — prevents horizontal
+      // offset corruption that SwiftUI applies to ScrollView content after
+      // fullScreenCover dismissal (shows content shifted left, clipping leading edge).
+      .id(showPlayer)
     }
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(detail?.title ?? fallbackTitle)
