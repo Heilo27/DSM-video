@@ -590,9 +590,9 @@ enum QuickConnectResolver {
       if let p = httpPort  { addDirect("http://\(ip):\(p)") }
       if let p = httpsPort { addDirect("https://\(ip):\(p)") }
     }
-    // WAN: HTTPS first (cert is valid for DDNS hostname), HTTP fallback for ATS-exempt setups.
+    // WAN: HTTPS only — cert is valid for the DDNS hostname assigned by Synology.
+    // HTTP to a public IP is blocked by ATS (-1022) and would send credentials in plaintext.
     if let p = httpsPort { addDirect("https://\(wanIP):\(p)") }
-    if let p = httpPort  { addDirect("http://\(wanIP):\(p)") }
 
     // Relay candidates — Synology's tunnel infrastructure, no port forwarding needed.
     // Appended last; only tried when all direct connections fail.
@@ -637,8 +637,9 @@ enum QuickConnectResolver {
     guard let relayHost, !relayHost.isEmpty else { return nil }
 
     let relayPort = intValue(service["relay_port"]) ?? intValue(service["https_port"]) ?? 443
-    let scheme = httpsPort != nil ? "https" : "http"
-    guard let url = URL(string: "\(scheme)://\(relayHost):\(relayPort)") else { return nil }
+    // Synology relay tunnels speak plain HTTP — the relay handles TLS at its outer edge.
+    // Sending HTTPS produces WRONG_VERSION_NUMBER. Always use http for relay candidates.
+    guard let url = URL(string: "http://\(relayHost):\(relayPort)") else { return nil }
     return Candidate(url: url, requiresTunnelCookie: true)
   }
 
