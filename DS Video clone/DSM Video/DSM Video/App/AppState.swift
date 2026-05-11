@@ -196,10 +196,14 @@ final class AppState {
     }
     let twentyFourHours: TimeInterval = 24 * 60 * 60
     if expiry.timeIntervalSince(now) < twentyFourHours {
-      // Expiring soon — attempt silent refresh.
-      // Re-login with saved password if rememberMe is on.
+      // Expiring soon — schedule a silent refresh after the home screen has loaded
+      // to avoid racing with homeLoad()'s own QC resolution and api mutation.
       if rememberMe && !savedPassword.isEmpty {
-        await login()
+        Task { @MainActor [weak self] in
+          // Brief yield so init's Task and homeLoad() settle first.
+          try? await Task.sleep(nanoseconds: 2_000_000_000)
+          await self?.login()
+        }
       }
     }
   }
@@ -751,16 +755,15 @@ final class AppState {
   /// mid-sync ~30s after backgrounding, leaving the database in an inconsistent state.
   private func runDeltaSyncWithBackgroundTask() async {
     #if canImport(UIKit)
-    var bgTaskID = UIBackgroundTaskIdentifier.invalid
-    bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
-      // Expiry handler — iOS calls this when time budget is almost exhausted.
-      UIApplication.shared.endBackgroundTask(bgTaskID)
-      bgTaskID = .invalid
+    // Capture the task ID as a local let so the expiry closure doesn't race
+    // with the MainActor continuation that reads it after the await.
+    let bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
+      // Expiry handler — endBackgroundTask(.invalid) is a documented no-op, safe to call.
+      UIApplication.shared.endBackgroundTask(.invalid)
     }
     await runDeltaSync(background: true)
     if bgTaskID != .invalid {
       UIApplication.shared.endBackgroundTask(bgTaskID)
-      bgTaskID = .invalid
     }
     #else
     await runDeltaSync(background: true)

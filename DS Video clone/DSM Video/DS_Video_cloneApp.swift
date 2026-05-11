@@ -37,6 +37,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
+        guard identifier == "com.heiloprojects.dsreel.downloads" else {
+            completionHandler()
+            return
+        }
         DownloadManager.shared.backgroundCompletionHandler = completionHandler
     }
 
