@@ -305,45 +305,67 @@ private struct HomeRail: View {
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(spacing: 10) {
           ForEach(items) { item in
+            // Determine whether this item is a TV episode
+            let showId = item.showFolderId ?? item.showName
+            let isEpisode = showId != nil && !showId!.isEmpty
+            let tvLibrary = appState.homeFirstTVLibrary
+
             if useLandscapeCards {
-              // Continue Watching — tap goes directly to playback for both movies and episodes
-              NavigationLink {
-                ItemDetailView(itemID: item.id, fallbackTitle: item.title, autoPlay: true)
-              } label: {
-                ContinueWatchingCard(item: item)
+              if isEpisode, let showId, let tvLibrary {
+                // Continue Watching — TV episode: go to show detail page with the episode's
+                // season pre-selected so the user can play the next episode or browse.
+                let displayTitle = item.showName ?? showId
+                let stub = TVShow(
+                  id: showId, title: displayTitle, year: item.year,
+                  seasonCount: nil, episodeCount: nil,
+                  posterImageId: item.posterImageId,
+                  lastWatchedAt: nil, addedAt: nil
+                )
+                NavigationLink {
+                  TVShowDetailView(show: stub, library: tvLibrary,
+                                   highlightEpisodeID: item.id,
+                                   highlightSeason: item.seasonNumber)
+                } label: {
+                  ContinueWatchingCard(item: item)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel((item.showName ?? showId) + (item.year.map { ", \($0)" } ?? ""))
+                .accessibilityHint("Opens TV show")
+              } else {
+                // Continue Watching — movie: go directly to playback
+                NavigationLink {
+                  ItemDetailView(itemID: item.id, fallbackTitle: item.title, autoPlay: true)
+                } label: {
+                  ContinueWatchingCard(item: item)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+                .accessibilityHint("Plays video")
               }
-              .buttonStyle(.plain)
-              .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
-              .accessibilityHint("Plays video")
-            } else if let showName = item.showName, !showName.isEmpty,
-               let tvLibrary = appState.homeFirstTVLibrary {
-              // Episode → navigate to the show page so the user picks an episode.
-              // Use a display item with showName as the title so the poster cell
-              // label reads the show name rather than the episode title.
+            } else if isEpisode, let showId, let tvLibrary {
+              // Recently Watched / Just Added rail — episode: navigate to show page
+              let displayTitle = item.showName ?? showId
               let displayItem = ItemSummary(
-                id: item.id, type: item.type, title: showName, year: item.year,
+                id: item.id, type: item.type, title: displayTitle, year: item.year,
                 durationSeconds: item.durationSeconds, addedAt: item.addedAt,
                 rating: item.rating, posterImageId: item.posterImageId,
                 backdropImageId: item.backdropImageId
               )
               let stub = TVShow(
-                id: showName,
-                title: showName,
-                year: item.year,
-                seasonCount: nil,
-                episodeCount: nil,
+                id: showId, title: displayTitle, year: item.year,
+                seasonCount: nil, episodeCount: nil,
                 posterImageId: item.posterImageId,
-                lastWatchedAt: nil,
-                addedAt: nil
+                lastWatchedAt: nil, addedAt: nil
               )
               NavigationLink {
                 TVShowDetailView(show: stub, library: tvLibrary)
               } label: {
                 ItemPosterCell(item: displayItem)
                   .frame(width: 110)
+                  .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
               }
               .buttonStyle(.plain)
-              .accessibilityLabel(showName + (item.year.map { ", \($0)" } ?? ""))
+              .accessibilityLabel(displayTitle + (item.year.map { ", \($0)" } ?? ""))
               .accessibilityHint("Opens TV show")
             } else {
               NavigationLink {
@@ -351,6 +373,7 @@ private struct HomeRail: View {
               } label: {
                 ItemPosterCell(item: item)
                   .frame(width: 110)
+                  .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))

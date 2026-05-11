@@ -161,12 +161,25 @@ private struct TVHomeView: View {
         ScrollView(.vertical, showsIndicators: false) {
           VStack(alignment: .leading, spacing: 56) {
             if let loadError = appState.homeError, appState.homeAllRailsEmpty {
-              ContentUnavailableView(
-                "Unable to Load",
-                systemImage: "exclamationmark.triangle",
-                description: Text(loadError)
-              )
-              .foregroundStyle(.white)
+              VStack(spacing: 32) {
+                ContentUnavailableView(
+                  "Unable to Load",
+                  systemImage: "exclamationmark.triangle",
+                  description: Text(loadError)
+                )
+                .foregroundStyle(.white)
+
+                Button {
+                  appState.logout()
+                } label: {
+                  Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 48)
+                    .padding(.vertical, 20)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color(white: 0.2))
+              }
               .padding(.top, 60)
             } else {
               // Continue Watching rail

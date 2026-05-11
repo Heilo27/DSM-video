@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ticketmaster": {
+      "command": "/opt/homebrew/bin/bun",
+      "args": ["/Users/ryan/Documents/Development/TicketMaster/src/mcp-server.ts"],
+      "type": "stdio"
+    }
+  }
+}

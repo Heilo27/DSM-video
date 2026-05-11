@@ -1,14 +1,23 @@
 import SwiftUI
+import os.log
+
+private let showLog = Logger(subsystem: "com.dsm.dsvideo", category: "TVShowDetail")
 
 struct TVShowDetailView: View {
   let show: TVShow
   let library: Library
+  var highlightEpisodeID: String? = nil
+  var highlightSeason: Int? = nil
 
   var body: some View {
     #if os(tvOS)
-    TVShowDetailSplitView(show: show, library: library)
+    TVShowDetailSplitView(show: show, library: library,
+                          highlightEpisodeID: highlightEpisodeID,
+                          highlightSeason: highlightSeason)
     #else
-    TVShowDetailScrollView(show: show, library: library)
+    TVShowDetailScrollView(show: show, library: library,
+                           highlightEpisodeID: highlightEpisodeID,
+                           highlightSeason: highlightSeason)
     #endif
   }
 }
@@ -20,6 +29,8 @@ private struct TVShowDetailSplitView: View {
   @Environment(AppState.self) private var appState
   let show: TVShow
   let library: Library
+  var highlightEpisodeID: String? = nil
+  var highlightSeason: Int? = nil
 
   @State private var seasons: [TVSeason] = []
   @State private var isLoading = false
@@ -163,7 +174,9 @@ private struct TVShowDetailSplitView: View {
           .padding(.top, 60)
         } else {
           ForEach(seasons, id: \.seasonNumber) { season in
-            TVSeasonSection(show: show, season: season, library: library)
+            TVSeasonSection(show: show, season: season, library: library,
+                            highlightEpisodeID: highlightEpisodeID,
+                            highlightSeason: highlightSeason)
           }
         }
 
@@ -200,6 +213,8 @@ private struct TVSeasonSection: View {
   let show: TVShow
   let season: TVSeason
   let library: Library
+  var highlightEpisodeID: String? = nil
+  var highlightSeason: Int? = nil
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
@@ -262,9 +277,10 @@ private struct TVSeasonSection: View {
           }
           ForEach(episodes) { ep in
             NavigationLink {
-              ItemDetailView(itemID: ep.id, fallbackTitle: ep.title)
+              ItemDetailView(itemID: ep.id, fallbackTitle: ep.title,
+                             autoPlay: ep.id == highlightEpisodeID)
             } label: {
-              TVEpisodeRow(ep: ep)
+              TVEpisodeRow(ep: ep, isHighlighted: ep.id == highlightEpisodeID)
             }
             .buttonStyle(.card)
 
@@ -302,6 +318,7 @@ private struct TVSeasonSection: View {
 private struct TVEpisodeRow: View {
   @Environment(AppState.self) private var appState
   let ep: ItemSummary
+  var isHighlighted: Bool = false
 
   var body: some View {
     HStack(spacing: 20) {
@@ -340,10 +357,18 @@ private struct TVEpisodeRow: View {
 
       // Title + duration
       VStack(alignment: .leading, spacing: 6) {
-        Text(ep.title)
-          .font(.system(size: 19, weight: .medium))
-          .foregroundStyle(.white)
-          .lineLimit(2)
+        HStack(spacing: 8) {
+          Text(ep.title)
+            .font(.system(size: 19, weight: .medium))
+            .foregroundStyle(.white)
+            .lineLimit(2)
+          if isHighlighted {
+            Image(systemName: "play.circle.fill")
+              .font(.system(size: 18))
+              .foregroundStyle(Color.dsAccent)
+              .accessibilityLabel("Resume here")
+          }
+        }
 
         if let dur = ep.durationSeconds, dur > 0 {
           Text(formatDuration(dur))
@@ -395,6 +420,8 @@ private struct TVShowDetailScrollView: View {
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   let show: TVShow
   let library: Library
+  var highlightEpisodeID: String? = nil
+  var highlightSeason: Int? = nil
 
   @State private var seasons: [TVSeason] = []
   @State private var isLoading = false
@@ -422,9 +449,23 @@ private struct TVShowDetailScrollView: View {
               description: Text(error)
             )
             .padding(.top, 32)
+          } else if seasons.isEmpty {
+            VStack(spacing: 16) {
+              ContentUnavailableView(
+                "No seasons found",
+                systemImage: "exclamationmark.triangle",
+                description: Text("Couldn't load episodes for this show.")
+              )
+              Button("Retry") { isLoading = false; Task { await load() } }
+                .buttonStyle(.bordered)
+            }
+            .padding(.top, 32)
+            .frame(maxWidth: .infinity)
           } else {
             ForEach(seasons, id: \.seasonNumber) { season in
-              iOSSeasonSection(show: show, season: season, library: library)
+              iOSSeasonSection(show: show, season: season, library: library,
+                               highlightEpisodeID: highlightEpisodeID,
+                               highlightSeason: highlightSeason)
             }
           }
         }
@@ -536,11 +577,14 @@ private struct TVShowDetailScrollView: View {
     isLoading = true
     defer { isLoading = false }
     do {
+      showLog.info("load: showId=\(show.id, privacy: .public) libraryId=\(library.id, privacy: .public)")
       let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
+      showLog.info("load: got \(resp.seasons.count) seasons")
       seasons = resp.seasons
       error = nil
     } catch {
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
+      showLog.error("load: failed — \(msg, privacy: .public)")
       if seasons.isEmpty { self.error = msg }
     }
   }
@@ -555,11 +599,24 @@ private struct iOSSeasonSection: View {
   let show: TVShow
   let season: TVSeason
   let library: Library
+  var highlightEpisodeID: String? = nil
+  var highlightSeason: Int? = nil
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
-  @State private var isExpanded = true
+  @State private var isExpanded: Bool
   @State private var error: String?
+
+  init(show: TVShow, season: TVSeason, library: Library,
+       highlightEpisodeID: String? = nil, highlightSeason: Int? = nil) {
+    self.show = show
+    self.season = season
+    self.library = library
+    self.highlightEpisodeID = highlightEpisodeID
+    self.highlightSeason = highlightSeason
+    // Auto-expand the season that contains the highlighted episode
+    self._isExpanded = State(initialValue: highlightSeason == nil || highlightSeason == season.seasonNumber)
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -610,15 +667,17 @@ private struct iOSSeasonSection: View {
             .padding(.vertical, 12)
           }
           ForEach(Array(episodes.enumerated()), id: \.element.id) { index, ep in
+            let isHighlighted = ep.id == highlightEpisodeID
             NavigationLink {
               EpisodeDetailView(
                 episodes: episodes,
                 initialIndex: index,
                 show: show,
-                library: library
+                library: library,
+                autoPlay: isHighlighted
               )
             } label: {
-              iOSEpisodeRow(ep: ep)
+              iOSEpisodeRow(ep: ep, isHighlighted: isHighlighted)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -654,20 +713,29 @@ private struct iOSSeasonSection: View {
 #if !os(tvOS)
 private struct iOSEpisodeRow: View {
   let ep: ItemSummary
+  var isHighlighted: Bool = false
 
   var body: some View {
     HStack(spacing: 12) {
       Text(ep.episodeNumber.map { "E\($0)" } ?? "–")
         .font(.caption.weight(.semibold).monospacedDigit())
-        .foregroundStyle(.white.opacity(0.75))
+        .foregroundStyle(isHighlighted ? Color.dsAccent : .white.opacity(0.75))
         .frame(width: 32, alignment: .center)
         .accessibilityHidden(true)
 
       VStack(alignment: .leading, spacing: 3) {
-        Text(ep.title)
-          .font(.subheadline.weight(.medium))
-          .foregroundStyle(.white)
-          .lineLimit(2)
+        HStack(spacing: 6) {
+          Text(ep.title)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.white)
+            .lineLimit(2)
+          if isHighlighted {
+            Image(systemName: "play.circle.fill")
+              .font(.caption)
+              .foregroundStyle(Color.dsAccent)
+              .accessibilityLabel("Resume here")
+          }
+        }
 
         if let dur = ep.durationSeconds, dur > 0 {
           Text(formatDuration(dur))
@@ -710,14 +778,18 @@ private struct iOSEpisodeRow: View {
 
 #if !os(tvOS)
 private struct EpisodeDetailView: View {
+  @Environment(\.dismiss) private var dismiss
   let episodes: [ItemSummary]
   @State private var currentIndex: Int
+  @State private var autoPlayCurrent: Bool
   let show: TVShow
   let library: Library
 
-  init(episodes: [ItemSummary], initialIndex: Int, show: TVShow, library: Library) {
+  init(episodes: [ItemSummary], initialIndex: Int, show: TVShow, library: Library,
+       autoPlay: Bool = false) {
     self.episodes = episodes
     self._currentIndex = State(initialValue: initialIndex)
+    self._autoPlayCurrent = State(initialValue: autoPlay)
     self.show = show
     self.library = library
   }
@@ -728,17 +800,23 @@ private struct EpisodeDetailView: View {
     return episodes[index]
   }
   private var hasNext: Bool { episodes.count > 0 && currentIndex + 1 < episodes.count }
+  private var isLastOfSeason: Bool { !episodes.isEmpty && currentIndex == episodes.count - 1 }
 
   var body: some View {
     if let current {
       ItemDetailView(
         itemID: current.id,
         fallbackTitle: current.title,
+        autoPlay: autoPlayCurrent,
         nextEpisode: hasNext ? episodes[currentIndex + 1] : nil,
         onNextEpisode: hasNext ? {
           currentIndex += 1
-        } : nil
+          autoPlayCurrent = true  // next episode always auto-plays
+        } : nil,
+        onGoToShow: { dismiss() },
+        isLastOfSeason: isLastOfSeason
       )
+      .id(current.id)  // force view recreation when episode changes
     }
   }
 }

@@ -13,25 +13,34 @@ import (
 	"time"
 )
 
+// Chapter represents a single chapter entry from a video file.
+type Chapter struct {
+	ID        int     `json:"id"`
+	Title     string  `json:"title"`
+	StartSecs float64 `json:"startSecs"`
+	EndSecs   float64 `json:"endSecs"`
+}
+
 // ProbeResult contains the codec and container information for a video file.
 type ProbeResult struct {
-	Container      string  // e.g., "mp4", "mkv", "webm", "mov"
-	VideoCodec     string  // e.g., "h264", "hevc", "vp9", "av1"
-	AudioCodec     string  // e.g., "aac", "ac3", "dts", "eac3", "flac", "opus"
-	DurationSecs   float64 // Duration in seconds
-	Width          int     // Video width
-	Height         int     // Video height
-	Bitrate        int64   // Overall bitrate in bps
-	NeedsTranscode bool    // Pre-computed flag for whether transcoding is needed
+	Container      string    // e.g., "mp4", "mkv", "webm", "mov"
+	VideoCodec     string    // e.g., "h264", "hevc", "vp9", "av1"
+	AudioCodec     string    // e.g., "aac", "ac3", "dts", "eac3", "flac", "opus"
+	DurationSecs   float64   // Duration in seconds
+	Width          int       // Video width
+	Height         int       // Video height
+	Bitrate        int64     // Overall bitrate in bps
+	NeedsTranscode bool      // Pre-computed flag for whether transcoding is needed
+	Chapters       []Chapter // Chapter list (may be empty)
 }
 
 // ffprobeOutput represents the JSON output from ffprobe.
 type ffprobeOutput struct {
 	Format struct {
-		FormatName   string `json:"format_name"`
-		Duration     string `json:"duration"`
-		BitRate      string `json:"bit_rate"`
-		FormatLong   string `json:"format_long_name"`
+		FormatName string `json:"format_name"`
+		Duration   string `json:"duration"`
+		BitRate    string `json:"bit_rate"`
+		FormatLong string `json:"format_long_name"`
 	} `json:"format"`
 	Streams []struct {
 		CodecType  string `json:"codec_type"`
@@ -41,6 +50,12 @@ type ffprobeOutput struct {
 		Channels   int    `json:"channels,omitempty"`
 		SampleRate string `json:"sample_rate,omitempty"`
 	} `json:"streams"`
+	Chapters []struct {
+		ID        int               `json:"id"`
+		StartTime string            `json:"start_time"`
+		EndTime   string            `json:"end_time"`
+		Tags      map[string]string `json:"tags"`
+	} `json:"chapters"`
 }
 
 // Prober handles video probing with configurable ffprobe path.
@@ -88,6 +103,7 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
+		"-show_chapters",
 		path,
 	)
 
@@ -130,6 +146,19 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 				result.AudioCodec = normalizeAudioCodec(stream.CodecName)
 			}
 		}
+	}
+
+	// Parse chapters
+	for i, ch := range probeData.Chapters {
+		c := Chapter{ID: ch.ID}
+		if title, ok := ch.Tags["title"]; ok && title != "" {
+			c.Title = title
+		} else {
+			c.Title = fmt.Sprintf("Chapter %d", i+1)
+		}
+		fmt.Sscanf(ch.StartTime, "%f", &c.StartSecs)
+		fmt.Sscanf(ch.EndTime, "%f", &c.EndSecs)
+		result.Chapters = append(result.Chapters, c)
 	}
 
 	// Pre-compute whether transcoding is needed

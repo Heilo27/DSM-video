@@ -26,6 +26,9 @@ struct MainView: View {
           DownloadsView()
             .tabItem { Label("DOWNLOADS", systemImage: "arrow.down.circle") }
 
+          WatchlistView()
+            .tabItem { Label("WATCHLIST", systemImage: "bookmark") }
+
           SettingsView()
             .tabItem { Label("SETTINGS", systemImage: "gearshape") }
         }
@@ -557,6 +560,52 @@ private struct SearchResultCell: View {
   }
 }
 
+// MARK: - Watchlist View
+
+struct WatchlistView: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+  private var columns: [GridItem] {
+    let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
+    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+  }
+
+  var body: some View {
+    NavigationStack {
+      Group {
+        if appState.watchlistItems.isEmpty {
+          ContentUnavailableView(
+            "No Watchlist Items",
+            systemImage: "bookmark",
+            description: Text("Tap the bookmark button on any video to save it here.")
+          )
+          .foregroundStyle(.white)
+        } else {
+          ScrollView {
+            LazyVGrid(columns: columns, spacing: 12) {
+              ForEach(appState.watchlistItems) { item in
+                NavigationLink {
+                  ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                } label: {
+                  ItemPosterCell(item: item)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+                .accessibilityHint("Opens video details")
+              }
+            }
+            .padding(12)
+          }
+        }
+      }
+      .background(Color.black.ignoresSafeArea())
+      .navigationTitle("Watchlist")
+      .task { await appState.loadWatchlist() }
+    }
+  }
+}
+
 struct DownloadsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1047,6 +1096,19 @@ struct SettingsView: View {
         Text("Server")
       } footer: {
         Text("DSVideoServer listens on port 8090 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
+      }
+
+      Section {
+        Picker("Video Quality", selection: $appState.qualityCap) {
+          Text("Auto").tag("auto")
+          Text("1080p").tag("1080p")
+          Text("720p").tag("720p")
+          Text("480p").tag("480p")
+        }
+      } header: {
+        Text("Playback")
+      } footer: {
+        Text("Caps transcoded video resolution. Useful on slower connections. Direct-play streams are not affected.")
       }
 
       Section("Help") {

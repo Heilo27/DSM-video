@@ -74,9 +74,10 @@ final class DownloadManager: NSObject {
   /// In-memory map of itemId → resume data blob for paused downloads.
   private(set) var pausedDownloads: [String: Data] = [:]
 
-  private var backgroundSession: URLSession!
+  private var backgroundSession: URLSession
   private var downloadTasks: [URLSessionDownloadTask: String] = [:]
   private var pendingDownloadInfo: [String: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?, videoURL: URL?)] = [:]
+  private var lastProgressUpdate: [String: Date] = [:]
 
   private let storageKey = "dsReel.downloadedItems"
   private let resumeDataKey = "dsReel.resumeData"
@@ -85,10 +86,12 @@ final class DownloadManager: NSObject {
   private var cachedDownloadedItems: [DownloadedItem]?
 
   override private init() {
-    super.init()
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
     config.isDiscretionary = false
     config.sessionSendsLaunchEvents = true
+    backgroundSession = URLSession(configuration: config, delegate: nil, delegateQueue: OperationQueue())
+    super.init()
+    // Re-assign with self as delegate now that super.init() has completed.
     backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
     loadPersistedResumeData()
   }
@@ -603,16 +606,20 @@ extension DownloadManager: URLSessionDownloadDelegate {
         return
       }
       downloadTasks.removeValue(forKey: downloadTask)
+      lastProgressUpdate.removeValue(forKey: itemId)
       completeDownload(itemId: itemId, tempURL: stableCopy)
     }
   }
 
   nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+    let writtenSnapshot = totalBytesWritten
+    let expectedSnapshot = totalBytesExpectedToWrite
     Task { @MainActor in
       guard let itemId = downloadTasks[downloadTask] else { return }
-      let progress = totalBytesExpectedToWrite > 0
-        ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        : 0
+      let now = Date()
+      if let last = lastProgressUpdate[itemId], now.timeIntervalSince(last) < 0.1 { return }
+      lastProgressUpdate[itemId] = now
+      let progress = expectedSnapshot > 0 ? Double(writtenSnapshot) / Double(expectedSnapshot) : 0
       downloadProgress[itemId] = progress
     }
   }
@@ -634,6 +641,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
         // Always clean up active state on any error/cancellation
         activeDownloads.removeValue(forKey: itemId)
         downloadProgress.removeValue(forKey: itemId)
+        lastProgressUpdate.removeValue(forKey: itemId)
         downloadTasks.removeValue(forKey: downloadTask)
         // Note: pendingDownloadInfo is intentionally kept when pausing so resumeDownload can access it
         if nsError.code != NSURLErrorCancelled || resumeData == nil {

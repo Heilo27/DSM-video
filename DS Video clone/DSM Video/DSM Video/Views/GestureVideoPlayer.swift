@@ -25,11 +25,23 @@ struct GestureVideoPlayer: View {
     let url: URL
     let title: String
     var resumePosition: Double = 0
+    var chapters: [Chapter] = []
+    var itemID: String = ""
+    var itemTitle: String = ""
+    var itemYear: Int? = nil
     var onDismiss: (() -> Void)?
     var onProgressUpdate: ((Double, Double) -> Void)?
     /// Called when AVPlayer reports a fatal playback error. The caller can use
     /// this to reset state and re-fetch a fresh playback URL (e.g. stale session).
     var onPlaybackFailed: (() -> Void)?
+    /// Called when the current item plays to the end of its timeline.
+    var onPlaybackFinished: (() -> Void)?
+    /// Called when the user changes the subtitle offset. The caller should restart
+    /// playback with the new offset so the server can bake it into the HLS stream.
+    var onSubtitleOffsetChange: ((Double) -> Void)?
+    /// Called when the user taps "Go to Show" in the controls overlay.
+    /// Only set for TV episode playback.
+    var onGoToShow: (() -> Void)?
 
     @State private var player: AVPlayer?
     @State private var isPlaying: Bool = false
@@ -73,6 +85,7 @@ struct GestureVideoPlayer: View {
     @State private var hasResumedPosition: Bool = false
     @State private var showCaptionsPicker: Bool = false
     @State private var didSetupPlayer: Bool = false
+    @State private var subtitleOffsetSeconds: Double = 0
 
     private let skipSeconds: Double = 15
 
@@ -81,6 +94,19 @@ struct GestureVideoPlayer: View {
     }
 
     @Environment(\.scenePhase) private var scenePhase
+
+    private var introChapter: Chapter? {
+        guard !chapters.isEmpty else { return nil }
+        let introKeywords = ["intro", "opening", "cold open"]
+        return chapters.first { ch in
+            let lower = ch.title.lowercased()
+            let matchesKeyword = introKeywords.contains(where: { lower.contains($0) })
+                || lower == "op"
+                || lower.hasPrefix("op ")
+                || lower.hasSuffix(" op")
+            return matchesKeyword && ch.startSecs < 300
+        }
+    }
 
     var body: some View {
         playerContent
@@ -159,18 +185,44 @@ struct GestureVideoPlayer: View {
             }
             .sheet(isPresented: $showCaptionsPicker) {
                 if let player {
-                    SubtitleAudioPickerView(player: player)
+                    SubtitleAudioPickerView(
+                        player: player,
+                        chapters: chapters,
+                        itemTitle: itemTitle,
+                        itemYear: itemYear,
+                        onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
+                        onSeekToChapter: { t in seek(to: t) }
+                    )
                 }
             }
         #elseif os(macOS)
         return base
             .sheet(isPresented: $showCaptionsPicker) {
                 if let player {
-                    SubtitleAudioPickerView(player: player)
+                    SubtitleAudioPickerView(
+                        player: player,
+                        chapters: chapters,
+                        itemTitle: itemTitle,
+                        itemYear: itemYear,
+                        onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
+                        onSeekToChapter: { t in seek(to: t) }
+                    )
                 }
             }
         #else
         return base
+            .sheet(isPresented: $showCaptionsPicker) {
+                if let player {
+                    SubtitleAudioPickerView(
+                        player: player,
+                        chapters: chapters,
+                        itemTitle: itemTitle,
+                        itemYear: itemYear,
+                        onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
+                        onSeekToChapter: { t in seek(to: t) }
+                    )
+                }
+            }
         #endif
     }
 
@@ -360,6 +412,36 @@ struct GestureVideoPlayer: View {
                 }
                 .accessibilityLabel("Close")
 
+                if let goToShow = onGoToShow {
+                    Button {
+                        onProgressUpdate?(currentTime, duration)
+                        #if os(iOS)
+                        unlockOrientation()
+                        #endif
+                        onDismiss?()
+                        // Delay the NavigationLink pop until the fullScreenCover dismiss
+                        // animation completes — firing both dismisses synchronously on the
+                        // same runloop pass corrupts SwiftUI navigation state, leaving the
+                        // show's NavigationLink stuck until other links are pushed/popped.
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(400))
+                            goToShow()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "tv")
+                                .font(.caption.weight(.semibold))
+                            Text("Show")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.12), in: Capsule())
+                    }
+                    .accessibilityLabel("Go to TV show")
+                }
+
                 Spacer()
 
                 Text(title)
@@ -378,8 +460,7 @@ struct GestureVideoPlayer: View {
                         .frame(width: 44, height: 44)
                     #endif
 
-                    // Captions / subtitle picker (iOS/macOS only)
-                    #if !os(tvOS)
+                    // Captions / subtitle picker
                     Button {
                         showCaptionsPicker = true
                         hideControlsTask?.cancel()
@@ -390,7 +471,6 @@ struct GestureVideoPlayer: View {
                             .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Subtitles and Audio")
-                    #endif
 
                     // Fill mode toggle (iOS only — Dynamic Island concern)
                     #if os(iOS)
@@ -499,6 +579,32 @@ struct GestureVideoPlayer: View {
             // contentShape(Rectangle()) ensures taps on gradient background/dead-zone
             // are consumed here and don't bleed through to the gesture overlay below.
             VStack(spacing: 4) {
+                // Skip intro button — shown when inside intro chapter bounds
+                let showSkipIntro: Bool = {
+                    guard let intro = introChapter else { return false }
+                    let t = isScrubbing ? scrubTime : currentTime
+                    return t >= intro.startSecs && t < intro.endSecs
+                }()
+                if showSkipIntro, let intro = introChapter {
+                    HStack {
+                        Spacer()
+                        Button {
+                            seek(to: intro.endSecs, tight: true)
+                        } label: {
+                            Text("Skip Intro")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 9)
+                                .background(Color.black.opacity(0.65), in: Capsule())
+                                .overlay(Capsule().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Skip intro")
+                        .padding(.trailing, 4)
+                    }
+                }
+
                 // Progress / scrub bar
                 HStack(spacing: 12) {
                     Text(formatTime(isScrubbing ? scrubTime : currentTime))
@@ -508,27 +614,45 @@ struct GestureVideoPlayer: View {
                         .accessibilityHidden(true)
 
                     #if os(iOS)
-                    Slider(
-                        value: Binding(
-                            get: { isScrubbing ? scrubTime : currentTime },
-                            set: { newValue in
-                                scrubTime = newValue
-                                if !isScrubbing {
-                                    seek(to: newValue)
+                    ZStack(alignment: .bottom) {
+                        // Chapter tick marks
+                        if !chapters.isEmpty && duration > 0 {
+                            GeometryReader { sliderGeo in
+                                ForEach(chapters.dropFirst(), id: \.id) { ch in
+                                    let frac = ch.startSecs / max(duration, 1)
+                                    let x = sliderGeo.size.width * frac
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.55))
+                                        .frame(width: 2, height: 8)
+                                        .position(x: x, y: sliderGeo.size.height / 2)
                                 }
                             }
-                        ),
-                        in: 0...max(duration, 1)
-                    ) { editing in
-                        isScrubbing = editing
-                        if !editing {
-                            seek(to: scrubTime, tight: true)
+                            .frame(height: 8)
+                            .allowsHitTesting(false)
                         }
+                        Slider(
+                            value: Binding(
+                                get: { isScrubbing ? scrubTime : currentTime },
+                                set: { newValue in
+                                    // Only update scrubTime during drag — never seek mid-drag.
+                                    // Seeking on every tick hammers the server and causes
+                                    // stuttering; seek happens once on drag end below.
+                                    scrubTime = newValue
+                                    isScrubbing = true
+                                }
+                            ),
+                            in: 0...max(duration, 1)
+                        ) { editing in
+                            if !editing {
+                                isScrubbing = false
+                                seek(to: scrubTime, tight: true)
+                            }
+                        }
+                        .tint(.white)
+                        .scaleEffect(y: 1.3)
+                        .accessibilityLabel("Playback position")
+                        .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
                     }
-                    .tint(.white)
-                    .scaleEffect(y: 1.3)
-                    .accessibilityLabel("Playback position")
-                    .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
                     #else
                     // tvOS: progress bar only (no interactive Slider)
                     GeometryReader { geo in
@@ -536,9 +660,18 @@ struct GestureVideoPlayer: View {
                             Capsule().fill(Color.white.opacity(0.3)).frame(height: 4)
                             Capsule().fill(Color.white)
                                 .frame(width: geo.size.width * (duration > 0 ? (isScrubbing ? scrubTime : currentTime) / max(duration, 1) : 0), height: 4)
+                            if !chapters.isEmpty && duration > 0 {
+                                ForEach(chapters.dropFirst(), id: \.id) { ch in
+                                    let frac = ch.startSecs / max(duration, 1)
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.55))
+                                        .frame(width: 2, height: 8)
+                                        .position(x: geo.size.width * frac, y: 2)
+                                }
+                            }
                         }
                     }
-                    .frame(height: 4)
+                    .frame(height: 8)
                     .accessibilityLabel("Playback position")
                     .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
                     #endif
@@ -697,7 +830,15 @@ struct GestureVideoPlayer: View {
     private func setupPlayer() {
         didSetupPlayer = true
         let playerItem = AVPlayerItem(url: url)
-        player = AVPlayer(playerItem: playerItem)
+        // Buffer 10 seconds ahead — enough for smooth AirPlay without over-fetching.
+        // Default (0) lets AVPlayer decide, which can be too conservative on HLS and
+        // causes the periodic black-screen stalls seen during AirPlay sessions.
+        playerItem.preferredForwardBufferDuration = 10
+        let newPlayer = AVPlayer(playerItem: playerItem)
+        // Don't wait for the ideal stall-free moment to start — start as soon as
+        // the buffer is ready. This prevents the periodic "hold" gaps on AirPlay.
+        newPlayer.automaticallyWaitsToMinimizeStalling = false
+        player = newPlayer
 
         // Observe playback status
         player?.publisher(for: \.timeControlStatus)
@@ -747,6 +888,15 @@ struct GestureVideoPlayer: View {
             }
         }
 
+        // Observe playback end for autoplay-next support
+        NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: playerItem)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak playerItem] _ in
+                guard playerItem != nil else { return }
+                onPlaybackFinished?()
+            }
+            .store(in: &cancellables)
+
         player?.play()
         scheduleHideControls()
     }
@@ -785,15 +935,17 @@ struct GestureVideoPlayer: View {
     }
 
     /// Seek to a time position.
-    /// - tight: uses .zero tolerance (frame-accurate) for scrub-end seeks.
-    /// - fast (default): uses .positiveInfinity tolerance for quick skip-button seeks.
+    /// - tight: frame-accurate seek (zero tolerance) — used for scrub-end and chapter seeks.
+    /// - fast (default): seeks to nearest keyframe within ±2s — used for skip buttons.
+    ///   With 2s HLS segments keyframes are at most 2s away, so this lands accurately
+    ///   without the multi-segment overshoot that .positiveInfinity caused.
     private func seek(to time: Double, tight: Bool = false) {
         let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         if tight {
             player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         } else {
-            // .positiveInfinity tolerance = fast seek (decoder finds nearest key frame immediately)
-            player?.seek(to: cmTime, toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
+            let tol = CMTime(seconds: 2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            player?.seek(to: cmTime, toleranceBefore: tol, toleranceAfter: tol)
         }
     }
 
@@ -1075,38 +1227,62 @@ struct AirPlayButton: UIViewRepresentable {
 
 // MARK: - Subtitle & Audio Picker
 
-#if !os(tvOS)
 /// Half-sheet picker for subtitle and audio track selection.
 private struct SubtitleAudioPickerView: View {
     let player: AVPlayer
+    var chapters: [Chapter] = []
+    var itemTitle: String = ""
+    var itemYear: Int? = nil
+    var onOffsetChange: ((Double) -> Void)? = nil
+    var onSeekToChapter: ((Double) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
     @State private var subtitleGroup: AVMediaSelectionGroup? = nil
     @State private var audioGroup: AVMediaSelectionGroup? = nil
     @State private var isLoading: Bool = true
     @State private var currentSelection: AVMediaSelection? = nil
+    @State private var subtitleOffsetSeconds: Double = 0
+    @State private var showSubtitleDownload: Bool = false
+    @State private var subtitleSearchResults: [SubtitleResult] = []
+    @State private var isSearchingSubtitles: Bool = false
+    @State private var subtitleDownloadError: String? = nil
+    @State private var subtitleDownloadMessage: String? = nil
 
     var body: some View {
         NavigationStack {
             contentView
                 .navigationTitle("Subtitles & Audio")
+                #if !os(tvOS)
                 .navigationBarTitleDisplayMode(.inline)
+                #endif
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
                     }
                 }
         }
-        .presentationDetents([.medium])
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        #endif
         .task {
-            // Use async loading — sync mediaSelectionGroup may return nil for HLS
-            // until the asset's tracks are fully loaded.
             async let subtitle = player.currentItem?.asset.loadMediaSelectionGroup(for: .legible)
             async let audio = player.currentItem?.asset.loadMediaSelectionGroup(for: .audible)
             subtitleGroup = try? await subtitle
             audioGroup = try? await audio
             currentSelection = player.currentItem?.currentMediaSelection
             isLoading = false
+        }
+        .sheet(isPresented: $showSubtitleDownload) {
+            SubtitleDownloadSheet(
+                itemTitle: itemTitle,
+                itemYear: itemYear,
+                results: subtitleSearchResults,
+                isSearching: isSearchingSubtitles,
+                error: subtitleDownloadError,
+                onDownload: { result in
+                    Task { await downloadSubtitle(result) }
+                }
+            )
         }
     }
 
@@ -1121,9 +1297,16 @@ private struct SubtitleAudioPickerView: View {
             List {
                 Section("Subtitles") {
                     subtitleSection
+                    subtitleOffsetRow
+                    findSubtitlesButton
                 }
                 Section("Audio") {
                     audioSection
+                }
+                if !chapters.isEmpty {
+                    Section("Chapters") {
+                        chaptersSection
+                    }
                 }
             }
         }
@@ -1155,6 +1338,61 @@ private struct SubtitleAudioPickerView: View {
             Text("No subtitle tracks available")
                 .foregroundStyle(.secondary)
         }
+        if let msg = subtitleDownloadMessage {
+            Text(msg)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleOffsetRow: some View {
+        #if os(iOS)
+        Stepper(
+            value: $subtitleOffsetSeconds,
+            in: -10...10,
+            step: 0.1
+        ) {
+            HStack {
+                Text("Offset")
+                Spacer()
+                Text(subtitleOffsetSeconds == 0
+                     ? "0.0s"
+                     : String(format: "%+.1fs", subtitleOffsetSeconds))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .onChange(of: subtitleOffsetSeconds) { _, v in
+            onOffsetChange?(v)
+        }
+        .accessibilityLabel("Subtitle offset, \(String(format: "%.1f", subtitleOffsetSeconds)) seconds")
+        #else
+        HStack {
+            Text("Offset")
+            Spacer()
+            Button("-") { subtitleOffsetSeconds = max(-10, subtitleOffsetSeconds - 0.5); onOffsetChange?(subtitleOffsetSeconds) }
+            Text(subtitleOffsetSeconds == 0 ? "0.0s" : String(format: "%+.1fs", subtitleOffsetSeconds))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(minWidth: 50)
+            Button("+") { subtitleOffsetSeconds = min(10, subtitleOffsetSeconds + 0.5); onOffsetChange?(subtitleOffsetSeconds) }
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var findSubtitlesButton: some View {
+        if !OpenSubtitlesAPIKey.isEmpty {
+            Button {
+                subtitleDownloadError = nil
+                subtitleSearchResults = []
+                showSubtitleDownload = true
+                Task { await searchSubtitles() }
+            } label: {
+                Label("Find Subtitles Online", systemImage: "magnifyingglass.circle")
+            }
+        }
     }
 
     @ViewBuilder
@@ -1176,6 +1414,27 @@ private struct SubtitleAudioPickerView: View {
         }
     }
 
+    @ViewBuilder
+    private var chaptersSection: some View {
+        ForEach(chapters, id: \.id) { ch in
+            Button {
+                onSeekToChapter?(ch.startSecs)
+                dismiss()
+            } label: {
+                HStack {
+                    Text(ch.title)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Text(formatChapterTime(ch.startSecs))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     private func trackRow(name: String, isSelected: Bool) -> some View {
         HStack {
             Text(name)
@@ -1188,8 +1447,106 @@ private struct SubtitleAudioPickerView: View {
         }
         .contentShape(Rectangle())
     }
+
+    private func formatChapterTime(_ seconds: Double) -> String {
+        guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+        let total = Int(seconds)
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%d:%02d", m, s)
+    }
+
+    private func searchSubtitles() async {
+        guard !itemTitle.isEmpty else { return }
+        isSearchingSubtitles = true
+        defer { isSearchingSubtitles = false }
+        do {
+            let client = OpenSubtitlesClient()
+            subtitleSearchResults = try await client.searchSubtitles(query: itemTitle, year: itemYear)
+        } catch {
+            subtitleDownloadError = error.localizedDescription
+        }
+    }
+
+    private func downloadSubtitle(_ result: SubtitleResult) async {
+        do {
+            let client = OpenSubtitlesClient()
+            let localURL = try await client.downloadSubtitle(fileId: result.id)
+            let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let subtitlesDir = docsURL.appendingPathComponent("Subtitles", isDirectory: true)
+            try? FileManager.default.createDirectory(at: subtitlesDir, withIntermediateDirectories: true)
+            let destURL = subtitlesDir.appendingPathComponent("\(itemTitle).srt")
+            try? FileManager.default.removeItem(at: destURL)
+            try FileManager.default.moveItem(at: localURL, to: destURL)
+            showSubtitleDownload = false
+            subtitleDownloadMessage = "Subtitles saved — restart playback to apply."
+        } catch {
+            subtitleDownloadError = "Download failed: \(error.localizedDescription)"
+        }
+    }
 }
-#endif
+
+// MARK: - Subtitle Download Sheet
+
+private struct SubtitleDownloadSheet: View {
+    let itemTitle: String
+    let itemYear: Int?
+    let results: [SubtitleResult]
+    let isSearching: Bool
+    let error: String?
+    let onDownload: (SubtitleResult) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isSearching {
+                    ProgressView("Searching OpenSubtitles…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let err = error {
+                    ContentUnavailableView("Search Failed", systemImage: "exclamationmark.triangle", description: Text(err))
+                } else if results.isEmpty {
+                    ContentUnavailableView("No Results", systemImage: "captions.bubble", description: Text("No subtitles found for \"\(itemTitle)\""))
+                } else {
+                    List(results) { result in
+                        Button {
+                            onDownload(result)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(result.fileName)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                HStack(spacing: 8) {
+                                    Text(result.language.uppercased())
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(Color.accentColor)
+                                    Text("\(result.downloadCount) downloads")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .navigationTitle("Find Subtitles")
+            #if !os(tvOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        #endif
+    }
+}
 
 // MARK: - Preview
 

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,7 +29,7 @@ type HLSConfig struct {
 // DefaultHLSConfig returns sensible defaults for NAS transcoding.
 func DefaultHLSConfig() HLSConfig {
 	return HLSConfig{
-		SegmentSeconds: 6,
+		SegmentSeconds: 2,
 		VideoPreset:    "faster",
 		VideoCRF:       23,
 		AudioBitrate:   "192k",
@@ -46,19 +48,29 @@ type HLSGenerator struct {
 	sessions  map[string]*HLSSession  // Active HLS sessions
 }
 
+// SubtitleTrack describes an external subtitle file to include in HLS output.
+type SubtitleTrack struct {
+	Language string // BCP-47 language tag, e.g. "en", "fr"
+	Name     string // Display name, e.g. "English"
+	Path     string // Absolute path to source SRT/ASS/VTT file
+	Offset   float64 // Timing offset in seconds (positive = delay, negative = advance)
+}
+
 // HLSSession represents an active transcoding session.
 type HLSSession struct {
-	SessionID    string
-	VideoPath    string
-	OutputDir    string
-	Mode         PlaybackMode
-	StartedAt    time.Time
-	CompletedAt  *time.Time
-	LastAccess   time.Time
-	Error        error
-	cmd          *exec.Cmd
-	cancel       context.CancelFunc
-	stopped      bool // true when StopSession has already decremented g.active
+	SessionID     string
+	VideoPath     string
+	OutputDir     string
+	Mode          PlaybackMode
+	MaxHeight     int
+	SubtitleTracks []SubtitleTrack
+	StartedAt     time.Time
+	CompletedAt   *time.Time
+	LastAccess    time.Time
+	Error         error
+	cmd           *exec.Cmd
+	cancel        context.CancelFunc
+	stopped       bool // true when StopSession has already decremented g.active
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -99,7 +111,9 @@ func NewHLSGenerator(config HLSConfig) *HLSGenerator {
 
 // StartSession begins a new HLS transcoding session.
 // It returns immediately and generates HLS segments in the background.
-func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode) (*HLSSession, error) {
+// maxHeight caps the output resolution (0 = no cap; only applies to FullTranscode).
+// subtitles lists external subtitle files to convert and embed as HLS renditions.
+func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode, maxHeight int, subtitles []SubtitleTrack) (*HLSSession, error) {
 	g.mu.Lock()
 
 	// Check if we've hit the concurrent limit
@@ -128,13 +142,15 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 	// session.cancel below) provides explicit cleanup via StopSession.
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &HLSSession{
-		SessionID:  sessionID,
-		VideoPath:  videoPath,
-		OutputDir:  outputDir,
-		Mode:       mode,
-		StartedAt:  time.Now(),
-		LastAccess: time.Now(),
-		cancel:     cancel,
+		SessionID:      sessionID,
+		VideoPath:      videoPath,
+		OutputDir:      outputDir,
+		Mode:           mode,
+		MaxHeight:      maxHeight,
+		SubtitleTracks: subtitles,
+		StartedAt:      time.Now(),
+		LastAccess:     time.Now(),
+		cancel:         cancel,
 	}
 
 	g.sessions[sessionID] = session
@@ -200,19 +216,17 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 	return os.RemoveAll(session.OutputDir)
 }
 
-// runTranscode executes the FFmpeg command for transcoding.
+// runTranscode executes the FFmpeg command for transcoding, then converts any
+// subtitle tracks to WebVTT and rewrites the master playlist to reference them.
 func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) error {
 	if g.config.FFmpegPath == "" {
 		return fmt.Errorf("ffmpeg not found")
 	}
 
-	// Build FFmpeg arguments based on mode
 	args := g.buildFFmpegArgs(session)
 
-	// Create command with nice priority
 	var cmd *exec.Cmd
 	if g.config.NicePriority > 0 {
-		// Use nice for lower priority
 		niceArgs := []string{"-n", fmt.Sprintf("%d", g.config.NicePriority), g.config.FFmpegPath}
 		niceArgs = append(niceArgs, args...)
 		cmd = exec.CommandContext(ctx, "nice", niceArgs...)
@@ -221,11 +235,8 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 	}
 
 	session.cmd = cmd
-
-	// Capture stderr for logging
 	cmd.Stdout = io.Discard
 
-	// Create log file for FFmpeg output
 	logPath := filepath.Join(session.OutputDir, "ffmpeg.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -235,16 +246,103 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 		cmd.Stderr = logFile
 	}
 
-	// Run the command
 	if err := cmd.Run(); err != nil {
-		// Check if context was cancelled
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
+	// Convert subtitle tracks to WebVTT and patch the master playlist.
+	if len(session.SubtitleTracks) > 0 {
+		g.addSubtitleRenditions(ctx, session)
+	}
+
 	return nil
+}
+
+// addSubtitleRenditions converts each SubtitleTrack to a WebVTT HLS playlist
+// and rewrites master.m3u8 to include EXT-X-MEDIA subtitle renditions.
+func (g *HLSGenerator) addSubtitleRenditions(ctx context.Context, session *HLSSession) {
+	masterPath := filepath.Join(session.OutputDir, "master.m3u8")
+	master, err := os.ReadFile(masterPath)
+	if err != nil {
+		log.Printf("[HLS] addSubtitleRenditions: read master: %v", err)
+		return
+	}
+
+	var renditionLines []string
+	for i, sub := range session.SubtitleTracks {
+		vttName := fmt.Sprintf("subtitle_%d.m3u8", i)
+		vttPath := filepath.Join(session.OutputDir, vttName)
+		segPattern := filepath.Join(session.OutputDir, fmt.Sprintf("sub_%d_%%05d.vtt", i))
+
+		ffArgs := []string{
+			"-y",
+			"-i", sub.Path,
+		}
+		if sub.Offset != 0 {
+			ffArgs = append(ffArgs, "-itsoffset", fmt.Sprintf("%.3f", -sub.Offset))
+		}
+		ffArgs = append(ffArgs,
+			"-c:s", "webvtt",
+			"-f", "hls",
+			"-hls_time", fmt.Sprintf("%d", g.config.SegmentSeconds),
+			"-hls_list_size", "0",
+			"-hls_segment_filename", segPattern,
+			"-hls_playlist_type", "event",
+			vttPath,
+		)
+
+		subCmd := exec.CommandContext(ctx, g.config.FFmpegPath, ffArgs...)
+		subCmd.Stdout = io.Discard
+		subCmd.Stderr = io.Discard
+		if err := subCmd.Run(); err != nil {
+			log.Printf("[HLS] subtitle convert failed (track %d %s): %v", i, sub.Language, err)
+			continue
+		}
+
+		lang := sub.Language
+		if lang == "" {
+			lang = "und"
+		}
+		name := sub.Name
+		if name == "" {
+			name = lang
+		}
+		isDefault := "NO"
+		if i == 0 {
+			isDefault = "YES"
+		}
+		renditionLines = append(renditionLines,
+			fmt.Sprintf(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="%s",NAME="%s",DEFAULT=%s,FORCED=NO,URI="%s"`,
+				lang, name, isDefault, vttName),
+		)
+	}
+
+	if len(renditionLines) == 0 {
+		return
+	}
+
+	// Insert rendition tags before the first #EXT-X-STREAM-INF line and add
+	// SUBTITLES="subs" attribute to each stream line.
+	lines := strings.Split(string(master), "\n")
+	var out []string
+	injected := false
+	for _, line := range lines {
+		if !injected && strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+			out = append(out, renditionLines...)
+			injected = true
+		}
+		if strings.HasPrefix(line, "#EXT-X-STREAM-INF") && !strings.Contains(line, "SUBTITLES=") {
+			line = strings.TrimRight(line, "\r") + `,SUBTITLES="subs"`
+		}
+		out = append(out, line)
+	}
+
+	if err := os.WriteFile(masterPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
+		log.Printf("[HLS] addSubtitleRenditions: write master: %v", err)
+	}
 }
 
 // buildFFmpegArgs constructs the FFmpeg command line arguments.
@@ -266,6 +364,12 @@ func (g *HLSGenerator) buildFFmpegArgs(session *HLSSession) []string {
 			"-c:v", "copy",
 		)
 	case FullTranscode:
+		// Apply resolution cap before codec args when requested
+		if session.MaxHeight > 0 {
+			args = append(args,
+				"-vf", fmt.Sprintf("scale=-2:min(ih\\,%d)", session.MaxHeight),
+			)
+		}
 		// Full video transcode to H.264
 		args = append(args,
 			"-c:v", "libx264",
@@ -301,11 +405,14 @@ func (g *HLSGenerator) buildFFmpegArgs(session *HLSSession) []string {
 	args = append(args,
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", segmentDuration),
-		"-hls_list_size", "0",                    // Keep all segments in playlist
-		"-hls_segment_type", "fmp4",              // Fragmented MP4 (better compatibility)
+		"-hls_list_size", "0",       // Keep all segments in playlist
+		"-hls_segment_type", "fmp4", // Fragmented MP4 (better compatibility)
 		"-hls_fmp4_init_filename", filepath.Base(initPath),
 		"-hls_segment_filename", segmentPath,
-		"-hls_playlist_type", "event",            // Event: playlist updates as segments are produced
+		// No hls_playlist_type — defaults to live-window which AirPlay and AVPlayer
+		// handle correctly for in-progress transcodes. "event" causes the playlist to
+		// grow unboundedly and can confuse AirPlay's playlist parser on long content.
+		"-hls_flags", "independent_segments", // Each segment decodable independently (required for seeking)
 		outputPath,
 	)
 

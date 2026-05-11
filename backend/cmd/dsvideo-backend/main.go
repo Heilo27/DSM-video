@@ -152,10 +152,11 @@ func main() {
 	}
 	defer db.Close()
 
-	// Multiple read connections for concurrent HTTP handlers; WAL allows concurrent reads
-	// even while the scanner holds the write lock.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
+	// WAL mode allows concurrent readers alongside a single writer, so a higher
+	// connection limit reduces pool starvation under concurrent HTTP handlers
+	// (remux streams, progress writes, episode fetches, heartbeat).
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(4)
 
 	// Verify PRAGMAs applied — modernc DSN params apply per-connection on first use,
 	// so ping to force a connection open and confirm WAL mode is active.
@@ -165,6 +166,30 @@ func main() {
 
 	if err := migrate(db); err != nil {
 		log.Fatalf("migrate: %v", err)
+	}
+
+	// Purge expired revoked token rows from a previous run, then warm the in-memory
+	// revocation cache from any non-expired rows. This ensures tokens revoked before
+	// a restart are still rejected without requiring a SQLite lookup on every request.
+	now := time.Now().Unix()
+	if _, err := db.Exec(`DELETE FROM revoked_tokens WHERE expires_at < ?`, now); err != nil {
+		log.Printf("revoked_tokens cleanup: %v", err)
+	}
+	var warmRows *sql.Rows
+	// warmRevokedTokens is populated into s.revokedTokens after s is constructed below.
+	type revokedRow struct{ jti string; expiresAt int64 }
+	var revokedCache []revokedRow
+	if warmRows, err = db.Query(`SELECT jti, expires_at FROM revoked_tokens WHERE expires_at >= ?`, now); err != nil {
+		log.Printf("revoked_tokens warm load: %v", err)
+	} else {
+		for warmRows.Next() {
+			var row revokedRow
+			if warmRows.Scan(&row.jti, &row.expiresAt) == nil {
+				revokedCache = append(revokedCache, row)
+			}
+		}
+		warmRows.Close()
+		log.Printf("Loaded %d non-expired revoked token(s) from DB", len(revokedCache))
 	}
 
 	// Bootstrap seq counters if they are 0 but rows already exist.
@@ -225,6 +250,11 @@ func main() {
 		pairingCodes:   make(map[string]pairingEntry),
 	}
 
+	// Warm the in-memory revocation cache from rows loaded above.
+	for _, row := range revokedCache {
+		s.revokedTokens.Store(row.jti, row.expiresAt)
+	}
+
 	// Restore persisted WebAPI sessions (DS Video sessions survive backend restarts)
 	loadPersistedSessions(db)
 
@@ -241,7 +271,7 @@ func main() {
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			// Revoked token list
+			// Revoked token list — purge expired entries from both in-memory map and SQLite.
 			now := time.Now().Unix()
 			s.revokedTokens.Range(func(k, v any) bool {
 				if exp, ok := v.(int64); ok && now > exp {
@@ -249,6 +279,9 @@ func main() {
 				}
 				return true
 			})
+			if _, dbErr := s.db.Exec(`DELETE FROM revoked_tokens WHERE expires_at < ?`, now); dbErr != nil {
+				log.Printf("[purge] revoked_tokens cleanup: %v", dbErr)
+			}
 
 			// Auth rate limit entries — delete entries whose window has expired.
 			// sync.Map Range+Delete is safe without an external mutex.
@@ -282,14 +315,40 @@ func main() {
 		}
 	}()
 
-	// No startup scan — DB already has data from prior runs. The periodic scan in
-	// handleLibraries fires after the first API call if lastScanAt is zero (i.e. fresh
-	// install with no prior scan). This avoids holding a write lock at startup which
-	// blocks all HTTP readers until the scan completes (can take 30-60s on large libraries).
+	// Periodic background scanner — runs every 5 minutes regardless of client activity.
+	// This ensures the DB stays current when files are added/removed via the filesystem,
+	// regardless of whether the iOS app or browser player has made any API calls.
+	// The scanner is guarded by scanInProgress so concurrent runs can't stack up.
+	go func() {
+		// Kick off an initial scan shortly after startup (give the HTTP server a moment
+		// to start) so new installs populate the DB without waiting 5 minutes.
+		time.Sleep(5 * time.Second)
+		if s.scanInProgress.CompareAndSwap(false, true) {
+			go func() {
+				defer s.scanInProgress.Store(false)
+				if err := s.scanAll(context.Background()); err != nil {
+					log.Printf("startup scan failed: %v", err)
+				}
+			}()
+		}
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if s.scanInProgress.CompareAndSwap(false, true) {
+				go func() {
+					defer s.scanInProgress.Store(false)
+					if err := s.scanAll(context.Background()); err != nil {
+						log.Printf("periodic scan failed: %v", err)
+					}
+				}()
+			}
+		}
+	}()
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(redactSensitiveParams) // must run before Logger to prevent token leakage in logs
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
@@ -357,10 +416,74 @@ func main() {
 		http.NotFound(w, req)
 	})
 
+	// Advertise via Bonjour/mDNS so iOS and tvOS clients can discover this server
+	// without manual IP entry. Uses the OS dns-sd tool (available on both macOS and
+	// Synology DSM). Failures are non-fatal — server still works without it.
+	go advertiseMDNS(cfg.ListenAddr)
+
 	log.Printf("DS Video backend listening on %s", cfg.ListenAddr)
 	if err := http.ListenAndServe(cfg.ListenAddr, r); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// advertiseMDNS registers a _dsvideo._tcp Bonjour service so clients on the
+// local network can discover this server without manual IP configuration.
+// Uses dns-sd (available on macOS and Synology DSM) or avahi-publish (Linux NAS).
+// Both commands must run indefinitely to keep the service registered — we keep
+// them alive and restart on unexpected exit with a backoff loop.
+func advertiseMDNS(listenAddr string) {
+	_, portStr, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		log.Printf("[mDNS] Could not parse listen address %q: %v", listenAddr, err)
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "DSVideoServer"
+	}
+
+	// Prefer dns-sd (macOS / Synology DSM with Bonjour), fall back to avahi-publish.
+	binary, args := mdnsBinary(portStr, hostname)
+	if binary == "" {
+		log.Printf("[mDNS] Neither dns-sd nor avahi-publish found — mDNS advertisement unavailable")
+		return
+	}
+
+	log.Printf("[mDNS] Advertising _dsvideo._tcp on port %s via %s", portStr, binary)
+
+	backoff := time.Second
+	for {
+		cmd := exec.Command(binary, args...)
+		if err := cmd.Run(); err != nil {
+			log.Printf("[mDNS] %s exited (%v) — restarting in %s", binary, err, backoff)
+			time.Sleep(backoff)
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		} else {
+			// Clean exit — back off briefly then restart to maintain registration.
+			backoff = time.Second
+			time.Sleep(backoff)
+		}
+	}
+}
+
+func mdnsBinary(portStr, hostname string) (string, []string) {
+	if _, err := exec.LookPath("dns-sd"); err == nil {
+		return "dns-sd", []string{
+			"-R", "DSVideoServer", "_dsvideo._tcp", ".", portStr,
+			"version=1", "host=" + hostname,
+		}
+	}
+	if _, err := exec.LookPath("avahi-publish"); err == nil {
+		return "avahi-publish", []string{
+			"-s", "DSVideoServer", "_dsvideo._tcp", portStr,
+			"version=1", "host=" + hostname,
+		}
+	}
+	return "", nil
 }
 
 // registerAPIRoutes mounts all /api/v1 routes onto r.
@@ -435,6 +558,12 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Get("/downloads", s.handleListDownloads)
 		r.Post("/downloads/{itemId}", s.handleAddDownload)
 		r.Delete("/downloads/{itemId}", s.handleRemoveDownload)
+
+		// Watchlist
+		r.Get("/watchlist", s.handleWatchlistGet)
+		r.Get("/watchlist/{itemId}", s.handleWatchlistCheck)
+		r.Post("/watchlist/{itemId}", s.handleWatchlistAdd)
+		r.Delete("/watchlist/{itemId}", s.handleWatchlistRemove)
 
 		r.Get("/admin/status", s.handleAdminStatus)
 		r.Post("/admin/scan", s.handleAdminScan)
@@ -555,6 +684,13 @@ CREATE TABLE IF NOT EXISTS webapi_sessions (
   device_id  TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS watchlist (
+  item_id  TEXT NOT NULL,
+  user_id  TEXT NOT NULL,
+  added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  PRIMARY KEY (item_id, user_id)
+);
 `)
 	if err != nil {
 		return fmt.Errorf("create tables: %w", err)
@@ -584,6 +720,8 @@ CREATE TABLE IF NOT EXISTS webapi_sessions (
 		"ALTER TABLE items ADD COLUMN metadata_fetched_at TEXT",
 		// Delta sync support
 		"ALTER TABLE items ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0",
+		// TASK-571: store show_folder_id at scan time so it is stable across TVPath config changes
+		"ALTER TABLE items ADD COLUMN show_folder_id TEXT",
 	}
 	for _, m := range migrations {
 		// Ignore errors - column may already exist
@@ -624,6 +762,20 @@ CREATE INDEX IF NOT EXISTS idx_deleted_items_seq ON deleted_items(change_seq);
 `)
 	if err != nil {
 		return fmt.Errorf("create sync_state: %w", err)
+	}
+
+	// Step 5: Persistent JWT revocation table.
+	// Stores revoked JTIs so they survive server restarts.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+  jti        TEXT PRIMARY KEY,
+  revoked_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);
+`)
+	if err != nil {
+		return fmt.Errorf("create revoked_tokens: %w", err)
 	}
 
 	return nil
@@ -680,6 +832,36 @@ func (s *Server) getTMDbClient(r *http.Request) *metadata.TMDbClient {
 	client := s.tmdbClient
 	s.tmdbMu.RUnlock()
 	return client
+}
+
+// -------------------------
+// Logging Middleware
+// -------------------------
+
+// redactSensitiveParams replaces the values of sensitive query parameters with
+// "[REDACTED]" in the request URL before chi's Logger middleware sees it.
+// This prevents session tokens sent as _sid= or token= query params from
+// appearing verbatim in Synology package log files.
+// NOTE: only r.URL is modified — the actual query string seen by handlers is
+// unaffected because this runs before routing resolves to a handler.
+func redactSensitiveParams(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if q := r.URL.Query(); q.Has("_sid") || q.Has("token") {
+			if q.Has("_sid") {
+				q.Set("_sid", "[REDACTED]")
+			}
+			if q.Has("token") {
+				q.Set("token", "[REDACTED]")
+			}
+			sanitized := *r.URL
+			sanitized.RawQuery = q.Encode()
+			r2 := r.WithContext(r.Context())
+			r2.URL = &sanitized
+			next.ServeHTTP(w, r2)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // -------------------------
@@ -945,7 +1127,16 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 					jti, _ := claims["jti"].(string)
 					exp, _ := claims["exp"].(float64)
 					if jti != "" {
-						s.revokedTokens.Store(jti, int64(exp))
+						expUnix := int64(exp)
+						// Fast in-memory revocation (for requests already in-flight)
+						s.revokedTokens.Store(jti, expUnix)
+						// Persistent revocation (survives server restarts)
+						if _, dbErr := s.db.Exec(
+							`INSERT OR REPLACE INTO revoked_tokens(jti, revoked_at, expires_at) VALUES (?, ?, ?)`,
+							jti, time.Now().Unix(), expUnix,
+						); dbErr != nil {
+							log.Printf("[logout] failed to persist revoked token: %v", dbErr)
+						}
 					}
 				}
 			}
@@ -1009,9 +1200,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check revocation list
+		// Check revocation list: fast in-memory path first, then authoritative SQLite.
+		// The in-memory map is warmed on startup and updated on every logout, so the
+		// SQLite check is the safety net for any entries missed at startup.
 		if jti, _ := claims["jti"].(string); jti != "" {
 			if _, revoked := s.revokedTokens.Load(jti); revoked {
+				writeErr(w, http.StatusUnauthorized, "token_revoked")
+				return
+			}
+			// Authoritative SQLite check — handles entries not yet in the in-memory map.
+			var dbCount int
+			if dbErr := s.db.QueryRow(
+				`SELECT COUNT(*) FROM revoked_tokens WHERE jti = ? AND expires_at >= ?`,
+				jti, time.Now().Unix(),
+			).Scan(&dbCount); dbErr == nil && dbCount > 0 {
+				// Re-warm so subsequent requests for this jti skip SQLite.
+				if exp, ok := claims["exp"].(float64); ok {
+					s.revokedTokens.Store(jti, int64(exp))
+				}
 				writeErr(w, http.StatusUnauthorized, "token_revoked")
 				return
 			}
@@ -1409,7 +1615,8 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		        i.poster_path, i.backdrop_path, i.overview,
 		        i.show_name, i.season_number, i.episode_number,
-		        p.position_seconds, p.duration_seconds, p.updated_at
+		        p.position_seconds, p.duration_seconds, p.updated_at,
+		        i.show_folder_id
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		 `+where+` `+orderBy+` LIMIT ? OFFSET ?`,
@@ -1429,11 +1636,13 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		var posterPath, backdropPath, overview, showName sql.NullString
 		var progPos, progDur sql.NullInt64
 		var progUpdatedAt sql.NullString
+		var showFolderIDCol sql.NullString
 
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath, &overview,
 			&showName, &seasonNumber, &episodeNumber,
-			&progPos, &progDur, &progUpdatedAt); err != nil {
+			&progPos, &progDur, &progUpdatedAt,
+			&showFolderIDCol); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
@@ -1473,6 +1682,9 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		}
 		if episodeNumber.Valid {
 			item["episodeNumber"] = episodeNumber.Int64
+		}
+		if showFolderIDCol.Valid && showFolderIDCol.String != "" {
+			item["showFolderId"] = showFolderIDCol.String
 		}
 		if p != nil {
 			item["progress"] = p
@@ -2342,6 +2554,20 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Quality cap: map ?quality= param to a max height for transcoding
+	qualityParam := r.URL.Query().Get("quality")
+	var maxHeight int
+	switch qualityParam {
+	case "480p":
+		maxHeight = 480
+	case "720p":
+		maxHeight = 720
+	case "1080p":
+		maxHeight = 1080
+	default:
+		maxHeight = 0
+	}
+
 	// Web browser clients have stricter codec requirements than native Apple apps.
 	// Browsers only support MP4 + H.264 + AAC/MP3 for direct play.
 	// HEVC, MKV, AC3, DTS etc. all need transcoding for web playback.
@@ -2371,6 +2597,13 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := randID("sess_")
 
+	// Detect subtitle files alongside the video for HLS subtitle renditions.
+	subtitleOffset := 0.0
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("subtitleOffset"), 64); err == nil {
+		subtitleOffset = v
+	}
+	subtitleTracks := findSubtitleFiles(path, subtitleOffset)
+
 	ps := PlaySession{
 		ItemID:       itemID,
 		Path:         path,
@@ -2393,7 +2626,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 		// Start HLS transcoding session
 		if s.hlsGenerator != nil {
-			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode)
+			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode, maxHeight, subtitleTracks)
 			if err != nil {
 				log.Printf("Failed to start transcode session: %v", err)
 				writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
@@ -2438,14 +2671,61 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 	baseURL := requestBaseURL(r)
 
+	// Build chapter list for response
+	var chapterList []map[string]any
+	if probeResult != nil && len(probeResult.Chapters) > 0 {
+		for _, c := range probeResult.Chapters {
+			chapterList = append(chapterList, map[string]any{
+				"id":        c.ID,
+				"title":     c.Title,
+				"startSecs": c.StartSecs,
+				"endSecs":   c.EndSecs,
+			})
+		}
+	}
+	// For direct play, try a quick probe for chapters if we don't already have them
+	if chapterList == nil && (ps.Kind == "direct" || ps.Kind == "remux") && s.prober != nil {
+		ctx2, cancel2 := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancel2()
+		if pr, err := s.prober.Probe(ctx2, path); err == nil && len(pr.Chapters) > 0 {
+			for _, c := range pr.Chapters {
+				chapterList = append(chapterList, map[string]any{
+					"id":        c.ID,
+					"title":     c.Title,
+					"startSecs": c.StartSecs,
+					"endSecs":   c.EndSecs,
+				})
+			}
+		}
+	}
+	if chapterList == nil {
+		chapterList = []map[string]any{}
+	}
+
+	qualityOut := qualityParam
+	if qualityOut == "" {
+		qualityOut = "auto"
+	}
+
+	// Build subtitle info for the response so the client knows tracks are available.
+	subtitleInfo := make([]map[string]any, 0, len(subtitleTracks))
+	for _, s := range subtitleTracks {
+		subtitleInfo = append(subtitleInfo, map[string]any{
+			"language": s.Language,
+			"name":     s.Name,
+		})
+	}
+
 	if ps.Kind == "direct" || ps.Kind == "remux" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"kind":                  "direct",
 			"streamUrl":             baseURL + "/api/v1/playback/" + sessionID + "/stream",
-			"subtitles":             []any{},
+			"subtitles":             subtitleInfo,
 			"audioTracks":           []any{},
 			"resumePositionSeconds": resumePos,
 			"transcoding":           ps.Kind == "remux",
+			"chapters":              chapterList,
+			"quality":               qualityOut,
 		})
 		return
 	}
@@ -2453,12 +2733,103 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"kind":                  "hls",
 		"hlsMasterUrl":          baseURL + "/api/v1/playback/" + sessionID + "/master.m3u8",
-		"subtitles":             []any{},
+		"subtitles":             subtitleInfo,
 		"audioTracks":           []any{},
 		"resumePositionSeconds": resumePos,
 		"transcoding":           true,
 		"transcodeMode":         playbackMode.String(),
+		"chapters":              chapterList,
+		"quality":               qualityOut,
 	})
+}
+
+// findSubtitleFiles looks for subtitle files alongside videoPath and returns
+// SubtitleTrack entries for each found file. Supports .srt, .ass, .ssa, .vtt.
+// Language is inferred from filename suffixes like "movie.en.srt" or "movie.fr.srt".
+func findSubtitleFiles(videoPath string, offset float64) []transcode.SubtitleTrack {
+	dir := filepath.Dir(videoPath)
+	base := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
+
+	exts := []string{".srt", ".ass", ".ssa", ".vtt"}
+	langNames := map[string]string{
+		"en": "English", "fr": "French", "de": "German", "es": "Spanish",
+		"it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ru": "Russian",
+		"ja": "Japanese", "ko": "Korean", "zh": "Chinese", "ar": "Arabic",
+		"pl": "Polish", "sv": "Swedish", "da": "Danish", "fi": "Finnish",
+		"no": "Norwegian", "cs": "Czech", "hu": "Hungarian", "ro": "Romanian",
+		"tr": "Turkish", "he": "Hebrew", "th": "Thai", "vi": "Vietnamese",
+	}
+
+	seen := map[string]bool{}
+	var tracks []transcode.SubtitleTrack
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		nameNoExt := strings.TrimSuffix(name, filepath.Ext(name))
+		ext := strings.ToLower(filepath.Ext(name))
+
+		isSubExt := false
+		for _, e := range exts {
+			if ext == e {
+				isSubExt = true
+				break
+			}
+		}
+		if !isSubExt {
+			continue
+		}
+
+		// Must match the video base name exactly or as "base.lang" or "base.lang.forced"
+		if nameNoExt != base && !strings.HasPrefix(nameNoExt, base+".") {
+			continue
+		}
+
+		fullPath := filepath.Join(dir, name)
+		if seen[fullPath] {
+			continue
+		}
+		seen[fullPath] = true
+
+		// Infer language from suffix: "movie.en.srt" → "en"
+		lang := "und"
+		displayName := "Subtitles"
+		suffix := strings.TrimPrefix(nameNoExt, base)
+		if suffix != "" {
+			parts := strings.Split(strings.TrimPrefix(suffix, "."), ".")
+			for _, p := range parts {
+				p = strings.ToLower(p)
+				if p == "forced" || p == "sdh" || p == "cc" || p == "default" {
+					continue
+				}
+				if len(p) == 2 || len(p) == 3 {
+					lang = p
+					if n, ok := langNames[p]; ok {
+						displayName = n
+					} else {
+						displayName = strings.ToUpper(p)
+					}
+					break
+				}
+			}
+		}
+
+		tracks = append(tracks, transcode.SubtitleTrack{
+			Language: lang,
+			Name:     displayName,
+			Path:     fullPath,
+			Offset:   offset,
+		})
+	}
+
+	return tracks
 }
 
 // updateCodecInfo updates the codec info for an item in the database.
@@ -2821,7 +3192,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
 		FROM items i
 		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		WHERE i.change_seq > ? AND i.rowid > ?
@@ -2831,7 +3202,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
 		FROM items i
 		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		WHERE i.change_seq > ?
@@ -2841,7 +3212,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
 		FROM items i
 		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		WHERE i.change_seq >= ? AND i.rowid > ?
@@ -2851,7 +3222,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
 		FROM items i
 		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		WHERE i.change_seq >= ?
@@ -2888,6 +3259,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		PosterImageID   *string  `json:"posterImageId,omitempty"`
 		BackdropImageID *string  `json:"backdropImageId,omitempty"`
 		ShowName        *string  `json:"showName,omitempty"`
+		ShowFolderID    *string  `json:"showFolderId,omitempty"`
 		SeasonNumber    *int    `json:"seasonNumber,omitempty"`
 		EpisodeNumber   *int    `json:"episodeNumber,omitempty"`
 		ChangeSeq       int64   `json:"changeSeq"`
@@ -2901,7 +3273,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		var rowid int64
 		var year, dur, posSeconds, durSeconds sql.NullInt64
 		var rating sql.NullFloat64
-		var poster, backdrop, showName sql.NullString
+		var poster, backdrop, showName, showFolderIDCol sql.NullString
 		var seasonNum, episodeNum sql.NullInt64
 		var progUpdatedAt sql.NullString
 
@@ -2909,7 +3281,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 			&rowid, &item.ID, &item.LibraryID, &item.Type, &item.Title, &year, &dur,
 			&item.AddedAt, &rating, &poster, &backdrop,
 			&showName, &seasonNum, &episodeNum, &item.ChangeSeq,
-			&posSeconds, &durSeconds, &progUpdatedAt,
+			&posSeconds, &durSeconds, &progUpdatedAt, &showFolderIDCol,
 		); err != nil {
 			continue
 		}
@@ -2924,6 +3296,10 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		if showName.Valid { item.ShowName = &showName.String }
 		if seasonNum.Valid { v := int(seasonNum.Int64); item.SeasonNumber = &v }
 		if episodeNum.Valid { v := int(episodeNum.Int64); item.EpisodeNumber = &v }
+		if showFolderIDCol.Valid && showFolderIDCol.String != "" {
+			folderID := showFolderIDCol.String
+			item.ShowFolderID = &folderID
+		}
 		if posSeconds.Valid && durSeconds.Valid {
 			p := map[string]any{
 				"positionSeconds": posSeconds.Int64,
@@ -2941,6 +3317,47 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
+	}
+
+	// For TV episodes that have no poster_path of their own, fall back to the poster
+	// of any sibling episode in the same show that does have one. This lets the client
+	// display a show poster in the Just Added / Recently Watched rails even when
+	// individual episode images were never downloaded.
+	missingPosterFolders := map[string]bool{}
+	for _, it := range items {
+		if it.PosterImageID == nil && it.ShowFolderID != nil && *it.ShowFolderID != "" {
+			missingPosterFolders[*it.ShowFolderID] = true
+		}
+	}
+	if len(missingPosterFolders) > 0 {
+		tvRoot := ""
+		if s.cfg.TVPath != "" {
+			tvRoot = filepath.Clean(s.cfg.TVPath) + "/"
+		}
+		showPosterID := map[string]string{} // folderID → episode ID that has a poster
+		for folder := range missingPosterFolders {
+			if tvRoot == "" {
+				continue
+			}
+			esc := strings.ReplaceAll(folder, `\`, `\\`)
+			esc = strings.ReplaceAll(esc, "%", `\%`)
+			esc = strings.ReplaceAll(esc, "_", `\_`)
+			var epID string
+			s.db.QueryRow(
+				`SELECT id FROM items WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv' AND poster_path IS NOT NULL AND poster_path != '' LIMIT 1`,
+				tvRoot+esc+"/%",
+			).Scan(&epID)
+			if epID != "" {
+				showPosterID[folder] = epID
+			}
+		}
+		for i := range items {
+			if items[i].PosterImageID == nil && items[i].ShowFolderID != nil {
+				if epID, ok := showPosterID[*items[i].ShowFolderID]; ok {
+					items[i].PosterImageID = &epID
+				}
+			}
+		}
 	}
 
 	// nextSeq is the cursor the client should pass as `since` on the next call.
@@ -3602,6 +4019,121 @@ func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // -------------------------
+// Watchlist
+// -------------------------
+
+func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r.Context())
+
+	rows, err := s.db.Query(
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
+		        i.poster_path, i.backdrop_path, i.library_id,
+		        p.position_seconds, p.duration_seconds, p.updated_at
+		 FROM watchlist w
+		 JOIN items i ON i.id = w.item_id
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		 WHERE w.user_id = ?
+		 ORDER BY w.added_at DESC`,
+		u.ID, u.ID,
+	)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var id, typ, title, addedAt, libraryID string
+		var year, duration sql.NullInt64
+		var rating sql.NullFloat64
+		var posterPath, backdropPath sql.NullString
+		var progPos, progDur sql.NullInt64
+		var progUpdatedAt sql.NullString
+
+		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
+			&posterPath, &backdropPath, &libraryID,
+			&progPos, &progDur, &progUpdatedAt); err != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+
+		item := map[string]any{
+			"id":              id,
+			"type":            typ,
+			"title":           title,
+			"year":            nullIntToAny(year),
+			"durationSeconds": nullIntToAny(duration),
+			"addedAt":         addedAt,
+			"rating":          nullFloatToAny(rating),
+			"posterImageId":   nil,
+			"backdropImageId": nil,
+			"libraryId":       libraryID,
+		}
+		if posterPath.Valid && posterPath.String != "" {
+			item["posterImageId"] = id
+		}
+		if backdropPath.Valid && backdropPath.String != "" {
+			item["backdropImageId"] = id
+		}
+		if progPos.Valid {
+			item["progress"] = map[string]any{
+				"positionSeconds": progPos.Int64,
+				"durationSeconds": progDur.Int64,
+				"updatedAt":       progUpdatedAt.String,
+			}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleWatchlistCheck(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r.Context())
+	itemID := chi.URLParam(r, "itemId")
+
+	var count int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM watchlist WHERE item_id = ? AND user_id = ?", itemID, u.ID).Scan(&count)
+	writeJSON(w, http.StatusOK, map[string]any{"inWatchlist": count > 0})
+}
+
+func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r.Context())
+	itemID := chi.URLParam(r, "itemId")
+
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO watchlist(item_id, user_id) VALUES (?, ?)`,
+		itemID, u.ID,
+	)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleWatchlistRemove(w http.ResponseWriter, r *http.Request) {
+	u := userFromCtx(r.Context())
+	itemID := chi.URLParam(r, "itemId")
+
+	res, err := s.db.Exec("DELETE FROM watchlist WHERE item_id = ? AND user_id = ?", itemID, u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// -------------------------
 // Admin / Scanning
 // -------------------------
 
@@ -3768,6 +4300,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		needsTranscode                      sql.NullBool
 		path                                string
 		parsed                              metadata.ParsedFilename
+		showFolderID                        sql.NullString
 	}
 	var batch []pendingRow
 
@@ -3785,8 +4318,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
 			if _, err := tx.Exec(
-				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET
 				   library_id=excluded.library_id,
 				   type=excluded.type,
@@ -3800,9 +4333,10 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				   duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
 				   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
 				   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
+				   show_folder_id=COALESCE(excluded.show_folder_id, items.show_folder_id),
 				   change_seq=excluded.change_seq`,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
-				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq,
+				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
 			); err != nil {
 				log.Printf("scan: upsert failed for %s: %v", row.path, err)
 			}
@@ -3892,12 +4426,24 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			year = sql.NullInt64{Int64: int64(parsed.Year), Valid: true}
 		}
 
+		// TASK-571: compute showFolderID once at scan time and store it in the DB
+		// so it remains stable even if TVPath config changes later.
+		var showFolderID sql.NullString
+		if libraryID == "lib_tv" && s.cfg.TVPath != "" {
+			tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
+			rel := strings.TrimPrefix(path, tvRoot)
+			parts := strings.SplitN(rel, "/", 2)
+			if len(parts) > 1 && parts[0] != "" {
+				showFolderID = sql.NullString{String: parts[0], Valid: true}
+			}
+		}
+
 		seenPaths[path] = struct{}{}
 		batch = append(batch, pendingRow{
 			id: id, libraryID: libraryID, typ: typ, title: title, addedAt: addedAt,
 			year: year, duration: duration, path: path, parsed: parsed,
 			videoCodec: videoCodec, audioCodec: audioCodec, container: container,
-			needsTranscode: needsTranscode,
+			needsTranscode: needsTranscode, showFolderID: showFolderID,
 		})
 
 		if len(batch) >= batchSize {
@@ -4792,11 +5338,18 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		info, exists := showMap[folderName]
+		// Use TMDb show_name (lowercased) as the dedup key when available so that
+		// episodes split across differently-named folders for the same show merge correctly.
+		mapKey := folderName
+		if showName.Valid && showName.String != "" {
+			mapKey = strings.ToLower(showName.String)
+		}
+
+		info, exists := showMap[mapKey]
 		if !exists {
 			info = &showInfo{folderName: folderName, displayName: folderName, seasons: map[int]bool{}}
-			showMap[folderName] = info
-			showOrder = append(showOrder, folderName)
+			showMap[mapKey] = info
+			showOrder = append(showOrder, mapKey)
 		}
 		if showName.Valid && showName.String != "" && info.displayName == info.folderName {
 			info.displayName = showName.String
@@ -4915,29 +5468,39 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + escapedID + "/"
 
-	rows, err := s.db.Query(`
-		SELECT COALESCE(season_number, 1), COUNT(*)
-		FROM items
-		WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'
-		GROUP BY COALESCE(season_number, 1)
-		ORDER BY COALESCE(season_number, 1)`,
-		folderPrefix+"%")
+	querySeasons := func(where string, arg any) ([]map[string]any, error) {
+		r, e := s.db.Query(`
+			SELECT COALESCE(season_number, 1), COUNT(*)
+			FROM items
+			WHERE `+where+` AND library_id = 'lib_tv'
+			GROUP BY COALESCE(season_number, 1)
+			ORDER BY COALESCE(season_number, 1)`, arg)
+		if e != nil {
+			return nil, e
+		}
+		defer r.Close()
+		var out []map[string]any
+		for r.Next() {
+			var sn, count int
+			if e2 := r.Scan(&sn, &count); e2 == nil {
+				out = append(out, map[string]any{"seasonNumber": sn, "episodeCount": count})
+			}
+		}
+		return out, nil
+	}
+
+	seasons, err := querySeasons(`path LIKE ? ESCAPE '\'`, folderPrefix+"%")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	defer rows.Close()
-
-	seasons := make([]map[string]any, 0)
-	for rows.Next() {
-		var sn, count int
-		if err := rows.Scan(&sn, &count); err != nil {
-			continue
-		}
-		seasons = append(seasons, map[string]any{
-			"seasonNumber": sn,
-			"episodeCount": count,
-		})
+	// Fallback: if showID came from showName (TMDb title) rather than folder name,
+	// path LIKE won't match — retry by show_name column.
+	if len(seasons) == 0 {
+		seasons, _ = querySeasons("show_name = ?", showID)
+	}
+	if seasons == nil {
+		seasons = []map[string]any{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"seasons": seasons})
 }
@@ -4972,8 +5535,20 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + escapedID + "/"
 
-	where := `path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`
-	args := []any{folderPrefix + "%"}
+	baseWhere := `path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`
+	baseArgs := []any{folderPrefix + "%"}
+
+	// Check if the path-based match returns any rows; if not, fall back to show_name
+	// (handles the case where showID is the TMDb display name rather than the folder name).
+	var matchCount int
+	s.db.QueryRow("SELECT COUNT(*) FROM items WHERE "+baseWhere, baseArgs...).Scan(&matchCount)
+	if matchCount == 0 {
+		baseWhere = "show_name = ? AND library_id = 'lib_tv'"
+		baseArgs = []any{showID}
+	}
+
+	where := baseWhere
+	args := baseArgs
 
 	if seasonStr != "" {
 		if sn, err := strconv.Atoi(seasonStr); err == nil {
@@ -5050,8 +5625,19 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Deduplicate by (season, episode) — multiple files for the same episode
+	// (e.g. different formats) produce duplicate rows; keep the first seen.
+	seenEpisode := map[[2]int64]bool{}
 	items := make([]map[string]any, 0, len(rawRows))
 	for _, r := range rawRows {
+		if r.seasonNum.Valid && r.episodeNum.Valid {
+			key := [2]int64{r.seasonNum.Int64, r.episodeNum.Int64}
+			if seenEpisode[key] {
+				continue
+			}
+			seenEpisode[key] = true
+		}
+
 		// Use episode_title (from TMDb) when available; fall back to filename-parsed title
 		displayTitle := r.title
 		if r.episodeTitle.Valid && r.episodeTitle.String != "" {

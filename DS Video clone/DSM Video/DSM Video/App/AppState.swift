@@ -23,10 +23,12 @@ private nonisolated(unsafe) let homeRailsFormatter: ISO8601DateFormatter = {
 @MainActor
 @Observable
 final class AppState {
+  @ObservationIgnored
+  @AppStorage("dsReel.qualityCap") var qualityCap: String = "auto"
 
   /// Non-routable placeholder used when the stored URL is empty or malformed at init time.
-  /// login() validates the real URL before any request fires, so this is never actually reached.
-  private static let fallbackURL = URL(string: "http://0.0.0.0")!
+  /// Uses HTTPS so ATS doesn't block it; requests fail silently since 0.0.0.0 is unreachable.
+  static let fallbackURL = URL(string: "https://0.0.0.0")!
   private enum Keys {
     static let baseURL = "dsReel.baseURL"
     static let username = "dsReel.username"
@@ -101,8 +103,10 @@ final class AppState {
   private(set) var api: APIClient
 
   private func updateAPI() {
+    // If baseURL is a bare QuickConnect ID, we can't build a usable URL without
+    // resolving it first — leave api as-is. login() will resolve and set api correctly.
+    if QuickConnectResolver.extractBareID(from: baseURL) != nil { return }
     guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
-      // Invalid URL — leave api as-is; login() will catch this before any request is made.
       return
     }
     api = APIClient(
@@ -114,9 +118,9 @@ final class AppState {
   init() {
     let d = UserDefaults.standard
     let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:8090"
-    // useHTTPS defaults to false for local NAS compatibility (most home NAS setups use HTTP).
-    // TODO(security/TASK-392): Consider defaulting to true once self-signed cert UX is resolved,
-    // or surface a clear "Connection is not encrypted" warning in the UI when HTTP is active.
+    // useHTTPS defaults to false for local NAS compatibility — most home NAS setups use HTTP
+    // on LAN and handle HTTPS termination at the router level if at all. Users who need
+    // encrypted connections can enable HTTPS in Settings.
     let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
     let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 8090
@@ -136,10 +140,12 @@ final class AppState {
     sessionToken = storedToken
 
     // Initialize stored api client once with all resolved values.
+    // If baseURL is a bare QuickConnect ID, skip building a URL — login() resolves it.
     // normalizedBaseURL returns nil for invalid URLs (empty, malformed). In that case we
     // use a non-routable placeholder; login() validates the URL before any request fires.
-    let resolvedInitURL = normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS, defaultPort: storedDefaultPort)
-      ?? Self.fallbackURL
+    let isQCID = QuickConnectResolver.extractBareID(from: storedBaseURL) != nil
+    let resolvedInitURL = isQCID ? Self.fallbackURL
+      : (normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS, defaultPort: storedDefaultPort) ?? Self.fallbackURL)
     api = APIClient(
       baseURL: resolvedInitURL,
       token: storedToken
@@ -227,49 +233,36 @@ final class AppState {
       // LAN IPs are tried first to avoid NAT hairpinning and self-signed cert issues.
       let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
       if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-        let resolved = try await QuickConnectResolver.resolve(id: qcID)
-        guard !resolved.isEmpty else {
+        let candidates = try await QuickConnectResolver.resolveCandidates(id: qcID)
+        guard !candidates.isEmpty else {
           loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
           return
         }
-        // QuickConnect returns NAS IPs with Synology DSM ports (5000/5001).
-        // DSVideoServer runs on defaultPort (8090). Extract unique hosts in
-        // discovery order (LAN first, WAN last) and try each with our port.
-        let scheme = useHTTPS ? "https" : "http"
-        var seen = Set<String>()
-        var portedCandidates: [(urlStr: String, url: URL)] = []
-        for candidateURL in resolved {
-          guard let cURL = URL(string: candidateURL), let host = cURL.host else { continue }
-          guard seen.insert(host).inserted else { continue }
-          let urlStr = "\(scheme)://\(host):\(defaultPort)"
-          guard let url = URL(string: urlStr) else { continue }
-          portedCandidates.append((urlStr, url))
-        }
+        // Candidates are ordered: LAN direct → WAN direct → relay (tunnel).
+        // DSM nginx on 5000/5001 proxies /api/v1/ to the backend — no port forwarding needed.
         var lastError: Error?
-        for (urlStr, url) in portedCandidates {
+        for candidate in candidates {
           do {
-            let tempClient = APIClient(baseURL: url, token: nil)
-            let resp = try await tempClient.login(username: username, password: savedPassword)
-            // Success — set token BEFORE baseURL so the first updateAPI() call has
-            // the correct token and no brief nil-token APIClient is created.
+            var tempClient = APIClient(baseURL: candidate.url, token: nil)
+            tempClient.usesTunnelCookie = candidate.requiresTunnelCookie
+            // Relay gets more time (15s) — it's a real routable connection.
+            // LAN/WAN direct get 4s — if unreachable they fail fast so relay isn't delayed.
+            let timeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
+            homeLog.info("login: trying \(candidate.url) tunnel=\(candidate.requiresTunnelCookie) timeout=\(timeout)s")
+            let resp = try await tempClient.login(username: username, password: savedPassword, timeoutInterval: timeout)
             sessionToken = resp.token
-            clearNetworkError()  // login succeeded — reset any stale serverUnreachable flag
+            clearNetworkError()
+            api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
             if rememberMe {
-              // Persist the resolved IP so future launches reconnect directly.
-              baseURL = urlStr
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             } else {
-              // Don't persist the resolved IP — keep the original QuickConnect ID
-              // in baseURL so it re-resolves on the next login (TASK-404).
               Self.deleteFromKeychain(account: Keys.keychainAccount)
               Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-              // Update the api client directly to use the resolved URL for this session
-              // without persisting it to UserDefaults.
-              api = APIClient(baseURL: url, token: resp.token)
               username = ""; savedPassword = ""
             }
             return
           } catch {
+            homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
             lastError = error
           }
         }
@@ -356,6 +349,25 @@ final class AppState {
     isOffline = false
   }
 
+  /// Re-resolves QC candidates and updates api to the first reachable one.
+  /// Returns true if a working candidate was found. No-op for direct IP/hostname servers.
+  func reconnect() async -> Bool {
+    let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let qcID = QuickConnectResolver.extractBareID(from: raw) else { return false }
+    guard let token = sessionToken else { return false }
+    guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID),
+          !candidates.isEmpty else { return false }
+    for candidate in candidates {
+      let probe = APIClient(baseURL: candidate.url, token: token, usesTunnelCookie: candidate.requiresTunnelCookie)
+      if (try? await probe.syncStatus()) != nil {
+        api = probe
+        clearNetworkError()
+        return true
+      }
+    }
+    return false
+  }
+
   private func startHeartbeatTimer() {
     guard heartbeatTimer == nil else { return }  // guard against double-start
     heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -411,6 +423,32 @@ final class AppState {
     loginError = nil
     isLoggingIn = true
     defer { isLoggingIn = false }
+
+    let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // If baseURL is a QuickConnect ID, resolve candidates and try each with a
+    // short timeout — same strategy as login() so external networks work.
+    if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+      guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID), !candidates.isEmpty else {
+        loginError = "Couldn't reach \"\(qcID)\". Check your connection and try again."
+        return
+      }
+      var lastError: Error?
+      for candidate in candidates {
+        do {
+          var client = APIClient(baseURL: candidate.url, token: nil)
+          client.usesTunnelCookie = candidate.requiresTunnelCookie
+          let resp = try await client.exchangePairingCode(code: code, timeoutInterval: 7)
+          sessionToken = resp.token
+          api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+          return
+        } catch {
+          lastError = error
+        }
+      }
+      loginError = (lastError as? APIError)?.userMessage ?? "Invalid pairing code."
+      return
+    }
 
     guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
       loginError = "Invalid server address. Please check the URL."
@@ -601,6 +639,7 @@ final class AppState {
       }
       // Sync in background — may update rails once complete
       homeLog.info("homeLoad[\(callID)]: starting background delta sync")
+      homeBackgroundFetchTask?.cancel()
       homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
     } else {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
@@ -641,12 +680,12 @@ final class AppState {
       guard !homeIsBackgroundRefreshing else { return }
       homeIsBackgroundRefreshing = true
     }
+    defer { if background { homeIsBackgroundRefreshing = false } }
 
-    // Don't attempt sync without a session token — it will always 401.
-    // The login flow will trigger homeLoad() after setting a token.
-    guard sessionToken != nil else {
-      homeLog.info("runDeltaSync: no token — skipping sync")
-      if background { homeIsBackgroundRefreshing = false }
+    // Don't attempt sync without a session token or a real server URL.
+    // The login flow will trigger homeLoad() after resolving and setting both.
+    guard sessionToken != nil, api.baseURL != AppState.fallbackURL else {
+      homeLog.info("runDeltaSync: no token or unresolved server — skipping sync")
       return
     }
 
@@ -745,7 +784,6 @@ final class AppState {
       // even though they just successfully authenticated.
       guard apiSnapshot.token == sessionToken else {
         homeLog.info("runDeltaSync: token superseded — discarding stale error")
-        if background { homeIsBackgroundRefreshing = false }
         return
       }
       handleConnectionFailure(error)
@@ -753,7 +791,6 @@ final class AppState {
         homeError = (error as? APIError)?.userMessage ?? "Could not connect to server."
       }
     }
-    if background { homeIsBackgroundRefreshing = false }
   }
 
   // MARK: - Heartbeat
@@ -769,6 +806,7 @@ final class AppState {
       let progressChanged = beat.progressSeq > cursors.progressSeq
       if itemsChanged || progressChanged {
         homeLog.info("heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged)) — syncing")
+        homeBackgroundFetchTask?.cancel()
         homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
       }
     } catch {
@@ -801,6 +839,32 @@ final class AppState {
   // homeRefreshProgress kept for backwards compat with any view that calls it
   func homeRefreshProgress() async {
     await runHeartbeat()
+  }
+
+  // MARK: - Watchlist
+
+  var watchlistItems: [ItemSummary] = []
+
+  func loadWatchlist() async {
+    guard !isDemoMode, sessionToken != nil else { return }
+    do {
+      let resp = try await api.watchlist()
+      watchlistItems = resp.items
+    } catch {
+      // Non-fatal — watchlist is supplementary
+    }
+  }
+
+  func toggleWatchlist(item: ItemSummary) async {
+    guard !isDemoMode else { return }
+    let alreadyIn = watchlistItems.contains(where: { $0.id == item.id })
+    if alreadyIn {
+      watchlistItems.removeAll(where: { $0.id == item.id })
+      try? await api.removeFromWatchlist(id: item.id)
+    } else {
+      watchlistItems.insert(item, at: 0)
+      try? await api.addToWatchlist(id: item.id)
+    }
   }
 }
 

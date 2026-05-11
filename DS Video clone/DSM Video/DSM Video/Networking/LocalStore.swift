@@ -131,6 +131,7 @@ actor LocalStore {
         poster_image_id  TEXT,
         backdrop_image_id TEXT,
         show_name        TEXT,
+        show_folder_id   TEXT,
         season_number    INTEGER,
         episode_number   INTEGER,
         change_seq       INTEGER NOT NULL DEFAULT 0
@@ -155,6 +156,8 @@ actor LocalStore {
       CREATE INDEX IF NOT EXISTS idx_items_change_seq  ON items(change_seq);
       CREATE INDEX IF NOT EXISTS idx_progress_updated  ON progress(updated_at DESC);
     """)
+    // Additive migrations for existing databases (safe to run on any schema version)
+    execIgnoringErrors("ALTER TABLE items ADD COLUMN show_folder_id TEXT")
   }
 
   // MARK: - JSON Cache Migration
@@ -178,9 +181,9 @@ actor LocalStore {
     exec("BEGIN TRANSACTION")
     let sql = """
       INSERT INTO items(id, library_id, type, title, year, duration_seconds, added_at,
-                        rating, poster_image_id, backdrop_image_id, show_name,
+                        rating, poster_image_id, backdrop_image_id, show_name, show_folder_id,
                         season_number, episode_number, change_seq)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
         library_id=excluded.library_id,
         type=excluded.type,
@@ -192,6 +195,7 @@ actor LocalStore {
         poster_image_id=excluded.poster_image_id,
         backdrop_image_id=excluded.backdrop_image_id,
         show_name=excluded.show_name,
+        show_folder_id=excluded.show_folder_id,
         season_number=excluded.season_number,
         episode_number=excluded.episode_number,
         change_seq=excluded.change_seq
@@ -207,7 +211,13 @@ actor LocalStore {
     for item in items {
       sqlite3_reset(stmt)
       sqlite3_bind_text(stmt, 1, item.id, -1, SQLITE_TRANSIENT)
-      sqlite3_bind_text(stmt, 2, item.libraryId ?? "lib_unknown", -1, SQLITE_TRANSIENT)
+      // libraryId should always be present from the sync payload; "lib_unknown" is a
+      // last-resort fallback that indicates a sync bug and will be visible in logs.
+      let libId = item.libraryId ?? {
+        log.error("upsertItems: item \(item.id) has no libraryId — check sync payload")
+        return "lib_unknown"
+      }()
+      sqlite3_bind_text(stmt, 2, libId, -1, SQLITE_TRANSIENT)
       sqlite3_bind_text(stmt, 3, item.type, -1, SQLITE_TRANSIENT)
       sqlite3_bind_text(stmt, 4, item.title, -1, SQLITE_TRANSIENT)
       if let year = item.year { sqlite3_bind_int(stmt, 5, Int32(year)) } else { sqlite3_bind_null(stmt, 5) }
@@ -217,10 +227,16 @@ actor LocalStore {
       if let p = item.posterImageId { sqlite3_bind_text(stmt, 9, p, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 9) }
       if let b = item.backdropImageId { sqlite3_bind_text(stmt, 10, b, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 10) }
       if let s = item.showName { sqlite3_bind_text(stmt, 11, s, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 11) }
-      if let sn = item.seasonNumber { sqlite3_bind_int(stmt, 12, Int32(sn)) } else { sqlite3_bind_null(stmt, 12) }
-      if let en = item.episodeNumber { sqlite3_bind_int(stmt, 13, Int32(en)) } else { sqlite3_bind_null(stmt, 13) }
-      sqlite3_bind_int64(stmt, 14, Int64(item.changeSeq ?? 0))
-      sqlite3_step(stmt)
+      if let f = item.showFolderId { sqlite3_bind_text(stmt, 12, f, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 12) }
+      if let sn = item.seasonNumber { sqlite3_bind_int(stmt, 13, Int32(sn)) } else { sqlite3_bind_null(stmt, 13) }
+      if let en = item.episodeNumber { sqlite3_bind_int(stmt, 14, Int32(en)) } else { sqlite3_bind_null(stmt, 14) }
+      sqlite3_bind_int64(stmt, 15, Int64(item.changeSeq ?? 0))
+      let rc = sqlite3_step(stmt)
+      if rc != SQLITE_DONE {
+        let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+        log.error("upsertItems: step failed [\(rc)] for item \(item.id): \(msg)")
+      }
+      sqlite3_reset(stmt)
     }
     exec("COMMIT")
   }
@@ -300,11 +316,11 @@ actor LocalStore {
 
   // MARK: - Rails Queries
 
-  // Shared 17-column projection used by all three rail queries.
+  // Shared 18-column projection used by all three rail queries.
   private static let itemSelectColumns = """
     i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
     i.added_at, i.rating, i.poster_image_id, i.backdrop_image_id,
-    i.show_name, i.season_number, i.episode_number, i.change_seq,
+    i.show_name, i.show_folder_id, i.season_number, i.episode_number, i.change_seq,
     p.position_seconds, p.duration_seconds, p.updated_at
     """
 
@@ -343,7 +359,30 @@ actor LocalStore {
       ORDER BY i.added_at DESC
       LIMIT 20
     """
-    return fetchItems(sql: sql, deduplicateByShow: true, maxCount: 10)
+    var items = fetchItems(sql: sql, deduplicateByShow: true, maxCount: 10)
+    items = fillShowPosters(items)
+    return items
+  }
+
+  // For TV episodes missing a poster, substitute the poster ID from any sibling
+  // episode in the same show that has one. Covers the common case where individual
+  // episode artwork was never downloaded but a show-level poster exists.
+  private func fillShowPosters(_ items: [ItemSummary]) -> [ItemSummary] {
+    guard let db else { return items }
+    var result = items
+    for (idx, item) in items.enumerated() {
+      guard item.posterImageId == nil, let folder = item.showFolderId, !folder.isEmpty else { continue }
+      var stmt: OpaquePointer?
+      let sql = "SELECT id FROM items WHERE show_folder_id = ? AND poster_image_id IS NOT NULL LIMIT 1"
+      guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { continue }
+      defer { sqlite3_finalize(stmt) }
+      sqlite3_bind_text(stmt, 1, folder, -1, SQLITE_TRANSIENT)
+      if sqlite3_step(stmt) == SQLITE_ROW, let ptr = sqlite3_column_text(stmt, 0) {
+        let siblingId = String(cString: ptr)
+        result[idx] = item.withPosterImageId(siblingId)
+      }
+    }
+    return result
   }
 
   private func queryRecentlyWatched() -> [ItemSummary] {
@@ -371,11 +410,13 @@ actor LocalStore {
     while sqlite3_step(stmt) == SQLITE_ROW {
       let item = itemFromStatement(stmt)
 
-      if deduplicateByShow, let show = item.showName {
-        // Normalize to lowercase to match computeHomeRails deduplication behavior (TASK-402).
-        let key = show.lowercased()
-        if seenShows.contains(key) { continue }
-        seenShows.insert(key)
+      if deduplicateByShow {
+        // Deduplicate by show_name when available, fall back to show_folder_id.
+        // show_name may be null for shows where TMDb metadata was never fetched.
+        if let key = (item.showName ?? item.showFolderId).map({ $0.lowercased() }) {
+          if seenShows.contains(key) { continue }
+          seenShows.insert(key)
+        }
       }
 
       results.append(item)
@@ -409,7 +450,7 @@ actor LocalStore {
   func totalItemCount() -> Int {
     guard let db else { return 0 }
     var stmt: OpaquePointer?
-    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM items", -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM items", -1, &stmt, nil) == SQLITE_OK else { return 0 }
     defer { sqlite3_finalize(stmt) }
     guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
     return Int(sqlite3_column_int(stmt, 0))
@@ -424,7 +465,9 @@ actor LocalStore {
   func getSyncCursors() -> SyncCursors {
     guard let db else { return SyncCursors(itemSeq: 0, progressSeq: 0) }
     var stmt: OpaquePointer?
-    sqlite3_prepare_v2(db, "SELECT key, value FROM sync_cursors", -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, "SELECT key, value FROM sync_cursors", -1, &stmt, nil) == SQLITE_OK else {
+      return SyncCursors(itemSeq: 0, progressSeq: 0)
+    }
     defer { sqlite3_finalize(stmt) }
     var itemSeq = 0
     var progressSeq = 0
@@ -440,7 +483,7 @@ actor LocalStore {
   func setSyncCursors(_ cursors: SyncCursors) {
     guard let db else { return }
     var stmt: OpaquePointer?
-    sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES(?,?)", -1, &stmt, nil)
+    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES(?,?)", -1, &stmt, nil) == SQLITE_OK else { return }
     defer { sqlite3_finalize(stmt) }
     for (key, val) in [("item_seq", cursors.itemSeq), ("progress_seq", cursors.progressSeq)] {
       sqlite3_reset(stmt)
@@ -493,16 +536,17 @@ actor LocalStore {
     let rating   = sqlite3_column_type(stmt, 7) != SQLITE_NULL ? sqlite3_column_double(stmt, 7) : nil
     let poster   = colText(stmt, 8)
     let backdrop = colText(stmt, 9)
-    let showName = colText(stmt, 10)
-    let season   = colOptInt(stmt, 11)
-    let episode  = colOptInt(stmt, 12)
-    let changeSeq = Int(sqlite3_column_int64(stmt, 13))
+    let showName    = colText(stmt, 10)
+    let showFolderId = colText(stmt, 11)
+    let season      = colOptInt(stmt, 12)
+    let episode     = colOptInt(stmt, 13)
+    let changeSeq   = Int(sqlite3_column_int64(stmt, 14))
 
     var progress: ItemProgress? = nil
-    if sqlite3_column_type(stmt, 14) != SQLITE_NULL {
-      let pos = Int(sqlite3_column_int(stmt, 14))
-      let durP = Int(sqlite3_column_int(stmt, 15))
-      let updAt = colText(stmt, 16) ?? ""
+    if sqlite3_column_type(stmt, 15) != SQLITE_NULL {
+      let pos = Int(sqlite3_column_int(stmt, 15))
+      let durP = Int(sqlite3_column_int(stmt, 16))
+      let updAt = colText(stmt, 17) ?? ""
       progress = ItemProgress(positionSeconds: pos, durationSeconds: durP, updatedAt: updAt)
     }
 
@@ -510,7 +554,7 @@ actor LocalStore {
       id: id, type: type, title: title, year: year,
       durationSeconds: dur, addedAt: addedAt, rating: rating,
       posterImageId: poster, backdropImageId: backdrop,
-      progress: progress, showName: showName,
+      progress: progress, showName: showName, showFolderId: showFolderId,
       seasonNumber: season, episodeNumber: episode,
       libraryId: libId, changeSeq: changeSeq
     )
@@ -527,9 +571,20 @@ actor LocalStore {
   }
 
   @discardableResult
-  private func exec(_ sql: String) -> Bool {
+  private func execIgnoringErrors(_ sql: String) -> Bool {
     guard let db else { return false }
     return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
+  }
+
+  @discardableResult
+  private func exec(_ sql: String) -> Bool {
+    guard let db else { return false }
+    let rc = sqlite3_exec(db, sql, nil, nil, nil)
+    if rc != SQLITE_OK {
+      let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown error"
+      log.error("SQLite exec failed [\(rc)]: \(msg) — SQL: \(sql)")
+    }
+    return rc == SQLITE_OK
   }
 
   private func execThrows(_ sql: String) throws {

@@ -10,6 +10,8 @@ struct ItemDetailView: View {
   var autoPlay: Bool = false
   var nextEpisode: ItemSummary? = nil
   var onNextEpisode: (() -> Void)? = nil
+  var onGoToShow: (() -> Void)? = nil
+  var isLastOfSeason: Bool = false
 
   @State private var detail: ItemDetail?
   @State private var isLoading: Bool = false
@@ -67,6 +69,7 @@ struct ItemDetailView: View {
             // Download icon button (iOS only)
             #if !os(tvOS)
             downloadIconButton
+            watchlistIconButton
             #endif
           }
 
@@ -112,6 +115,21 @@ struct ItemDetailView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
+          } else if isLastOfSeason {
+            HStack(spacing: 8) {
+              Image(systemName: "flag.checkered")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.45))
+              Text("End of Season")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.45))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .background(Color(white: 0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityLabel("End of season — no more episodes in this season")
           }
           #endif
 
@@ -177,11 +195,18 @@ struct ItemDetailView: View {
       }
     }
     .fullScreenCover(isPresented: $showPlayer) {
-      PlayerSheet(itemID: itemID, title: detail?.title ?? fallbackTitle)
-        .environment(appState)
-        #if !os(tvOS)
-        .toolbarVisibility(.hidden, for: .tabBar)
-        #endif
+      PlayerSheet(
+        itemID: itemID,
+        title: detail?.title ?? fallbackTitle,
+        itemYear: detail?.year,
+        nextEpisode: nextEpisode,
+        onPlayNextEpisode: onNextEpisode,
+        onGoToShow: onGoToShow
+      )
+      .environment(appState)
+      #if !os(tvOS)
+      .toolbarVisibility(.hidden, for: .tabBar)
+      #endif
     }
     #if !os(tvOS)
     .toolbar {
@@ -427,6 +452,40 @@ struct ItemDetailView: View {
     .disabled(isStartingDownload && !isDownloading)
     .accessibilityLabel(isStartingDownload ? "Starting download" : (isDownloaded ? "Remove download" : (isDownloading ? "Cancel download" : "Download")))
     .accessibilityValue(isDownloading && downloadProgress > 0 && downloadProgress < 1 ? "\(Int(downloadProgress * 100)) percent downloaded" : "")
+  }
+
+  // MARK: - Watchlist Icon Button
+
+  private var isInWatchlist: Bool {
+    guard let d = detail else { return false }
+    return appState.watchlistItems.contains(where: { $0.id == d.id })
+  }
+
+  @ViewBuilder
+  private var watchlistIconButton: some View {
+    Button {
+      guard let d = detail else { return }
+      let summary = ItemSummary(
+        id: d.id,
+        type: d.type,
+        title: d.title,
+        year: d.year,
+        durationSeconds: d.durationSeconds,
+        addedAt: "",
+        rating: d.rating,
+        posterImageId: d.images.poster.id
+      )
+      Task { await appState.toggleWatchlist(item: summary) }
+    } label: {
+      Image(systemName: isInWatchlist ? "bookmark.fill" : "bookmark")
+        .font(.title3.weight(.semibold))
+        .foregroundStyle(isInWatchlist ? DSReelBrandColor.background : .white)
+        .frame(width: 52, height: 52)
+    }
+    .background(Color(white: 0.12))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .disabled(detail == nil)
+    .accessibilityLabel(isInWatchlist ? "Remove from Watchlist" : "Add to Watchlist")
   }
 
   // MARK: - Cast Section
@@ -725,11 +784,17 @@ private struct PlayerSheet: View {
   @Environment(\.scenePhase) private var scenePhase
   let itemID: String
   let title: String
+  var itemYear: Int? = nil
+  var nextEpisode: ItemSummary? = nil
+  var onPlayNextEpisode: (() -> Void)? = nil
+  var onGoToShow: (() -> Void)? = nil
 
   @State private var playbackURL: URL?
   @State private var error: String?
   @State private var resumePosition: Double = 0
   @State private var isOffline: Bool = false
+  @State private var chapters: [Chapter] = []
+  @State private var subtitleOffset: Double = 0
 
   // Progress sync debouncing
   @State private var lastSyncTime: Date = .distantPast
@@ -737,6 +802,11 @@ private struct PlayerSheet: View {
   @State private var lastKnownDuration: Int = 0
   private let syncInterval: TimeInterval = 10  // Sync at most every 10 seconds
   private let seekThreshold: Int = 15  // Or if position changes by 15+ seconds (seek)
+
+  // Autoplay next episode
+  @State private var showNextEpisodeOverlay: Bool = false
+  @State private var nextEpisodeCountdown: Int = 5
+  @State private var countdownTask: Task<Void, Never>?
 
   var body: some View {
     ZStack {
@@ -747,6 +817,10 @@ private struct PlayerSheet: View {
           url: url,
           title: title,
           resumePosition: resumePosition,
+          chapters: chapters,
+          itemID: itemID,
+          itemTitle: title,
+          itemYear: itemYear,
           onDismiss: {
             // Guard: if user dismissed before video started or position/duration are
             // unknown, skip setProgress entirely — must not overwrite real saved progress
@@ -814,15 +888,52 @@ private struct PlayerSheet: View {
             // (e.g. server restart clears in-memory sessions, causing 404 on stream).
             playbackURL = nil
             Task { await start() }
-          }
+          },
+          onPlaybackFinished: {
+            guard nextEpisode != nil, onPlayNextEpisode != nil else { return }
+            showNextEpisodeOverlay = true
+            nextEpisodeCountdown = 5
+            countdownTask?.cancel()
+            countdownTask = Task { @MainActor in
+              for remaining in stride(from: 5, through: 0, by: -1) {
+                guard !Task.isCancelled else { return }
+                nextEpisodeCountdown = remaining
+                if remaining == 0 {
+                  showNextEpisodeOverlay = false
+                  onPlayNextEpisode?()
+                  dismiss()
+                  return
+                }
+                try? await Task.sleep(for: .seconds(1))
+              }
+            }
+          },
+          onSubtitleOffsetChange: { offset in
+            subtitleOffset = offset
+            playbackURL = nil
+            Task { await start() }
+          },
+          onGoToShow: onGoToShow
         )
         .ignoresSafeArea()
+
+        if showNextEpisodeOverlay, let next = nextEpisode {
+          nextEpisodeOverlay(next: next)
+        }
       } else if let error {
-        ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(error))
-          .foregroundStyle(.white)
+        VStack(spacing: 20) {
+          ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(error))
+            .foregroundStyle(.white)
+          Button("Dismiss") { dismiss() }
+            .buttonStyle(.borderedProminent)
+        }
       } else {
-        ProgressView("Loading video")
-          .tint(.white)
+        VStack(spacing: 20) {
+          ProgressView("Loading video")
+            .tint(.white)
+          Button("Cancel") { dismiss() }
+            .foregroundStyle(.white.opacity(0.7))
+        }
       }
     }
     .task { await start() }
@@ -840,6 +951,64 @@ private struct PlayerSheet: View {
         }
       }
     }
+  }
+
+  @ViewBuilder
+  private func nextEpisodeOverlay(next: ItemSummary) -> some View {
+    VStack(spacing: 20) {
+      Spacer()
+      VStack(spacing: 12) {
+        Text("Up Next")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.white.opacity(0.7))
+          .textCase(.uppercase)
+        Text(next.title)
+          .font(.title3.weight(.semibold))
+          .foregroundStyle(.white)
+          .multilineTextAlignment(.center)
+          .lineLimit(2)
+        Text("Playing in \(nextEpisodeCountdown)s")
+          .font(.subheadline)
+          .foregroundStyle(.white.opacity(0.7))
+          .monospacedDigit()
+        HStack(spacing: 16) {
+          Button {
+            countdownTask?.cancel()
+            showNextEpisodeOverlay = false
+            onPlayNextEpisode?()
+            dismiss()
+          } label: {
+            Text("Play Now")
+              .font(.headline)
+              .foregroundStyle(.white)
+              .padding(.horizontal, 24)
+              .padding(.vertical, 10)
+              .background(Color.dsAccent, in: Capsule())
+          }
+          .buttonStyle(.plain)
+          Button {
+            countdownTask?.cancel()
+            showNextEpisodeOverlay = false
+          } label: {
+            Text("Cancel")
+              .font(.headline)
+              .foregroundStyle(.white)
+              .padding(.horizontal, 24)
+              .padding(.vertical, 10)
+              .background(Color.white.opacity(0.2), in: Capsule())
+          }
+          .buttonStyle(.plain)
+        }
+      }
+      .padding(28)
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+      .padding(.horizontal, 32)
+      .padding(.bottom, 60)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(Color.black.opacity(0.45).ignoresSafeArea())
+    .transition(.opacity)
+    .animation(.easeInOut(duration: 0.25), value: showNextEpisodeOverlay)
   }
 
   private func start() async {
@@ -861,17 +1030,34 @@ private struct PlayerSheet: View {
 
     // Fall back to streaming
     do {
-      let info = try await appState.api.playback(id: itemID)
+      let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
       let url = info.streamUrl ?? info.hlsMasterUrl
       guard let url else {
         error = "No playable URL."
         return
       }
       resumePosition = Double(info.resumePositionSeconds)
+      chapters = info.chapters ?? []
       playbackURL = url
     } catch {
       appState.handleConnectionFailure(error)
-      self.error = (error as? APIError)?.userMessage ?? "Unknown error."
+      // If this was a network failure and the server is a QuickConnect ID,
+      // try re-resolving candidates (network context may have changed since login).
+      if appState.serverUnreachable, await appState.reconnect() {
+        do {
+          let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
+          let url = info.streamUrl ?? info.hlsMasterUrl
+          guard let url else { self.error = "No playable URL."; return }
+          resumePosition = Double(info.resumePositionSeconds)
+          chapters = info.chapters ?? []
+          playbackURL = url
+          appState.clearNetworkError()
+          return
+        } catch {
+          appState.handleConnectionFailure(error)
+        }
+      }
+      self.error = (error as? APIError)?.userMessage ?? "Couldn't connect to server."
     }
   }
 }

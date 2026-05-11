@@ -312,6 +312,7 @@ struct ItemPosterCell: View {
       }
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
+    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
   }
 
   @ViewBuilder

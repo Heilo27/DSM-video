@@ -381,6 +381,7 @@ private struct TVShowPosterCell: View {
       .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
+    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }
 
   private func seasonLabel(_ show: TVShow) -> String {

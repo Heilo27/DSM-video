@@ -1,4 +1,7 @@
 import SwiftUI
+import os.log
+
+private let qcLog = Logger(subsystem: "com.dsm.qc", category: "resolver")
 
 struct LoginView: View {
   @Environment(AppState.self) private var appState
@@ -8,6 +11,7 @@ struct LoginView: View {
   @State private var showPairing: Bool = false
   @State private var showSettings: Bool = false
   @State private var showAbout: Bool = false
+  @State private var showBonjourScan: Bool = false
   #endif
   @State private var showQuickConnect: Bool = false
   @State private var showOfflineDownloads: Bool = false
@@ -138,8 +142,8 @@ struct LoginView: View {
           .frame(maxWidth: 600)
         #else
         VStack(alignment: .leading, spacing: 12) {
-          Toggle("HTTPS", isOn: $appState.useHTTPS)
-          Toggle("Remember me", isOn: $appState.rememberMe)
+          Toggle(appState.useHTTPS ? "HTTPS: On" : "HTTPS: Off", isOn: $appState.useHTTPS)
+          Toggle(appState.rememberMe ? "Remember me: On" : "Remember me: Off", isOn: $appState.rememberMe)
         }
         .tint(.white)
         .foregroundStyle(.white.opacity(0.75))
@@ -202,6 +206,16 @@ struct LoginView: View {
 
         #if !os(tvOS)
         Button {
+          showBonjourScan = true
+        } label: {
+          Label("Find Server on Network", systemImage: "network")
+            .font(.subheadline)
+            .foregroundStyle(.white.opacity(0.75))
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 4)
+
+        Button {
           showPairing = true
         } label: {
           Label("Pair with Apple TV", systemImage: "appletv")
@@ -210,6 +224,13 @@ struct LoginView: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 8)
+
+        Link(destination: URL(string: "https://heiloprojects.com/dsmvideo/#server") ?? URL(string: "https://heiloprojects.com")!) {
+          Label("Get DSVideoServer for your NAS", systemImage: "server.rack")
+            .font(.subheadline)
+            .foregroundStyle(.white.opacity(0.75))
+        }
+        .padding(.top, 4)
 
         if hasDownloads {
           Button {
@@ -265,6 +286,11 @@ struct LoginView: View {
       .sheet(isPresented: $showAbout) {
         AboutView()
       }
+      .sheet(isPresented: $showBonjourScan) {
+        BonjourScanSheet { selectedURL in
+          appState.baseURL = selectedURL
+        }
+      }
       #endif
       .fullScreenCover(isPresented: $showOfflineDownloads) {
         NavigationStack {
@@ -286,6 +312,73 @@ struct LoginView: View {
     }
   }
 }
+
+// MARK: - Bonjour Scan Sheet
+
+#if !os(tvOS)
+private struct BonjourScanSheet: View {
+  let onSelect: (String) -> Void
+
+  @Environment(\.dismiss) private var dismiss
+  @State private var discovery = BonjourDiscovery()
+
+  var body: some View {
+    NavigationStack {
+      Group {
+        if discovery.servers.isEmpty {
+          VStack(spacing: 20) {
+            Spacer()
+            if discovery.isScanning {
+              ProgressView("Scanning your network…")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            } else {
+              ContentUnavailableView(
+                "No Servers Found",
+                systemImage: "network.slash",
+                description: Text("Make sure DSVideoServer is running on your NAS and both devices are on the same network.")
+              )
+              Button("Scan Again") { discovery.startScan() }
+                .buttonStyle(.borderedProminent)
+            }
+            Spacer()
+          }
+        } else {
+          List(discovery.servers) { server in
+            Button {
+              onSelect(server.baseURL)
+              dismiss()
+            } label: {
+              VStack(alignment: .leading, spacing: 4) {
+                Label(server.name, systemImage: "server.rack")
+                  .font(.headline)
+                Text(server.baseURL)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            }
+            .foregroundStyle(.primary)
+          }
+        }
+      }
+      .navigationTitle("Find Server")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Cancel") { dismiss() }
+        }
+        if discovery.isScanning {
+          ToolbarItem(placement: .status) {
+            ProgressView().scaleEffect(0.8)
+          }
+        }
+      }
+      .onAppear { discovery.startScan() }
+      .onDisappear { discovery.stopScan() }
+    }
+  }
+}
+#endif
 
 // MARK: - About View
 
@@ -439,11 +532,18 @@ enum QuickConnectResolver {
     return nil
   }
 
+  /// A resolved candidate URL and whether it requires the QuickConnect tunnel cookie.
+  struct Candidate {
+    let url: URL
+    let requiresTunnelCookie: Bool
+  }
+
   /// Resolves a QuickConnect ID and returns all candidate base URLs ordered for login attempts.
-  /// LAN IPs first (faster on home network), WAN IP last. Each IP appears once per scheme.
-  static func resolve(id: String) async throws -> [String] {
+  /// LAN IPs first (faster on home network), WAN direct next, relay last.
+  /// Each URL uses the DSM port (5000/5001) so DSM nginx can proxy to the backend.
+  static func resolveCandidates(id: String) async throws -> [Candidate] {
     guard let bareID = extractBareID(from: id) else { return [] }
-    let json = try await queryRelay(host: "global.quickconnect.to", id: bareID)
+    let json = try await queryServerInfo(id: bareID)
 
     if let errno = json["errno"] as? Int, errno != 0 { return [] }
 
@@ -470,15 +570,34 @@ enum QuickConnectResolver {
       }
     }
 
-    var candidates: [String] = []
-    for ip in lanIPs {
-      if let p = httpsPort { candidates.append("https://\(ip):\(p)") }
-      if let p = httpPort  { candidates.append("http://\(ip):\(p)") }
+    var candidates: [Candidate] = []
+    func addDirect(_ urlStr: String) {
+      if let url = URL(string: urlStr) { candidates.append(Candidate(url: url, requiresTunnelCookie: false)) }
     }
-    if let p = httpsPort { candidates.append("https://\(wanIP):\(p)") }
-    if let p = httpPort  { candidates.append("http://\(wanIP):\(p)") }
 
+    // LAN IPs: HTTP first — TLS cert is issued for the DDNS name, not raw IPs,
+    // so HTTPS to a bare LAN IP will always fail cert validation.
+    for ip in lanIPs {
+      if let p = httpPort  { addDirect("http://\(ip):\(p)") }
+      if let p = httpsPort { addDirect("https://\(ip):\(p)") }
+    }
+    // WAN: HTTPS first (cert is valid for DDNS hostname), HTTP fallback for ATS-exempt setups.
+    if let p = httpsPort { addDirect("https://\(wanIP):\(p)") }
+    if let p = httpPort  { addDirect("http://\(wanIP):\(p)") }
+
+    // Relay candidates — Synology's tunnel infrastructure, no port forwarding needed.
+    // Appended last; only tried when all direct connections fail.
+    if let relayURL = try? await resolveRelay(id: bareID, httpsPort: httpsPort, httpPort: httpPort) {
+      candidates.append(relayURL)
+    }
+
+    qcLog.info("resolveCandidates: \(candidates.count) candidates: \(candidates.map { "\($0.url) tunnel=\($0.requiresTunnelCookie)" }.joined(separator: ", "))")
     return candidates
+  }
+
+  /// Compatibility shim — returns URL strings for callers that don't need relay.
+  static func resolve(id: String) async throws -> [String] {
+    return try await resolveCandidates(id: id).map { $0.url.absoluteString }
   }
 
   /// Returns a single WAN address for the QuickConnect sheet — one result, no picker.
@@ -496,14 +615,36 @@ enum QuickConnectResolver {
 
   // MARK: Private
 
-  private static func queryRelay(host: String, id: String) async throws -> [String: Any] {
-    let url = URL(string: "https://\(host)/Serv.php")!
+  /// Requests a relay tunnel from Synology's infrastructure and returns a tunnel candidate.
+  /// Uses the `request_tunnel` command; relay URL requires `Cookie: type=tunnel` on every request.
+  private static func resolveRelay(id: String, httpsPort: Int?, httpPort: Int?) async throws -> Candidate? {
+    let json = try await queryCommand("request_tunnel", id: id)
+    guard let service = json["service"] as? [String: Any] else { return nil }
+
+    // Prefer the relay domain name (relay_dn) over raw IP — required for TLS cert validation.
+    let relayHost = (service["relay_dualstack"] as? String)
+                 ?? (service["relay_dn"] as? String)
+                 ?? (service["relay_ip"] as? String)
+    guard let relayHost, !relayHost.isEmpty else { return nil }
+
+    let relayPort = intValue(service["relay_port"]) ?? intValue(service["https_port"]) ?? 443
+    let scheme = httpsPort != nil ? "https" : "http"
+    guard let url = URL(string: "\(scheme)://\(relayHost):\(relayPort)") else { return nil }
+    return Candidate(url: url, requiresTunnelCookie: true)
+  }
+
+  private static func queryServerInfo(id: String) async throws -> [String: Any] {
+    try await queryCommand("get_server_info", id: id)
+  }
+
+  private static func queryCommand(_ command: String, id: String) async throws -> [String: Any] {
+    let url = URL(string: "https://global.quickconnect.to/Serv.php")!
     var request = URLRequest(url: url, timeoutInterval: 12)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: [
       "version": 1,
-      "command": "get_server_info",
+      "command": command,
       "stop_when_error": false,
       "stop_when_success": false,
       "id": "dsm_portal",

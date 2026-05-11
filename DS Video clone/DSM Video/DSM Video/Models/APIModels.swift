@@ -56,6 +56,7 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
   let backdropImageId: String?
   let progress: ItemProgress?
   let showName: String?
+  let showFolderId: String?
   let seasonNumber: Int?
   let episodeNumber: Int?
   // Delta sync metadata — nil when decoded from legacy API responses
@@ -66,6 +67,7 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
                    durationSeconds: Int? = nil, addedAt: String, rating: Double? = nil,
                    posterImageId: String? = nil, backdropImageId: String? = nil,
                    progress: ItemProgress? = nil, showName: String? = nil,
+                   showFolderId: String? = nil,
                    seasonNumber: Int? = nil, episodeNumber: Int? = nil,
                    libraryId: String? = nil, changeSeq: Int? = nil) {
     self.id = id
@@ -79,6 +81,7 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
     self.backdropImageId = backdropImageId
     self.progress = progress
     self.showName = showName
+    self.showFolderId = showFolderId
     self.seasonNumber = seasonNumber
     self.episodeNumber = episodeNumber
     self.libraryId = libraryId
@@ -92,8 +95,18 @@ extension ItemSummary {
                 durationSeconds: durationSeconds, addedAt: addedAt,
                 rating: rating, posterImageId: posterImageId,
                 backdropImageId: backdropImageId, progress: nil,
-                showName: showName, seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber,
+                showName: showName, showFolderId: showFolderId,
+                seasonNumber: seasonNumber, episodeNumber: episodeNumber,
+                libraryId: libraryId, changeSeq: changeSeq)
+  }
+
+  nonisolated func withPosterImageId(_ newId: String) -> ItemSummary {
+    ItemSummary(id: id, type: type, title: title, year: year,
+                durationSeconds: durationSeconds, addedAt: addedAt,
+                rating: rating, posterImageId: newId,
+                backdropImageId: backdropImageId, progress: progress,
+                showName: showName, showFolderId: showFolderId,
+                seasonNumber: seasonNumber, episodeNumber: episodeNumber,
                 libraryId: libraryId, changeSeq: changeSeq)
   }
 }
@@ -177,11 +190,20 @@ struct ItemDetail: Decodable, Identifiable {
 
 // MARK: - Playback
 
+struct Chapter: Decodable, Sendable {
+  let id: Int
+  let title: String
+  let startSecs: Double
+  let endSecs: Double
+}
+
 struct PlaybackInfo: Decodable {
   let kind: String
   let streamUrl: URL?
   let hlsMasterUrl: URL?
   let resumePositionSeconds: Int
+  let chapters: [Chapter]?
+  let quality: String?
 }
 
 // MARK: - Progress

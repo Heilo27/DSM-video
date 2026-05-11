@@ -3,15 +3,18 @@ import Foundation
 struct APIClient {
   let baseURL: URL
   let token: String?
+  /// When true, adds `Cookie: type=tunnel` to every request — required for QuickConnect relay mode.
+  var usesTunnelCookie: Bool = false
 
-  func login(username: String, password: String) async throws -> LoginResponse {
+  func login(username: String, password: String, timeoutInterval: TimeInterval = 60) async throws -> LoginResponse {
     let req = LoginRequest(username: username, password: password, otp: nil)
     return try await request(
       path: "/api/v1/auth/login",
       method: "POST",
       body: req,
       response: LoginResponse.self,
-      authorized: false
+      authorized: false,
+      timeoutInterval: timeoutInterval
     )
   }
 
@@ -49,7 +52,7 @@ struct APIClient {
     return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self)
   }
 
-  func tvShows(libraryId: String = "lib_tv") async throws -> TVShowsResponse {
+  func tvShows(libraryId: String) async throws -> TVShowsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
     }
@@ -58,7 +61,7 @@ struct APIClient {
     return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TVShowsResponse.self)
   }
 
-  func tvShowSeasons(showId: String, libraryId: String = "lib_tv") async throws -> TVSeasonsResponse {
+  func tvShowSeasons(showId: String, libraryId: String) async throws -> TVSeasonsResponse {
     guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
       throw APIError.invalidURL
     }
@@ -72,7 +75,7 @@ struct APIClient {
     return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TVSeasonsResponse.self)
   }
 
-  func tvShowEpisodes(showId: String, season: Int, libraryId: String = "lib_tv") async throws -> ItemsResponse {
+  func tvShowEpisodes(showId: String, season: Int, libraryId: String) async throws -> ItemsResponse {
     guard let encodedId = showId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
       throw APIError.invalidURL
     }
@@ -94,9 +97,17 @@ struct APIClient {
     return try await request(path: "/api/v1/items/\(enc)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self)
   }
 
-  func playback(id: String) async throws -> PlaybackInfo {
+  func playback(id: String, quality: String = "auto", subtitleOffset: Double = 0) async throws -> PlaybackInfo {
     let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-    return try await request(path: "/api/v1/items/\(enc)/playback", method: "GET", body: Optional<Int>.none, response: PlaybackInfo.self)
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items/\(enc)/playback"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    var queryItems: [URLQueryItem] = []
+    if quality != "auto" { queryItems.append(URLQueryItem(name: "quality", value: quality)) }
+    if subtitleOffset != 0 { queryItems.append(URLQueryItem(name: "subtitleOffset", value: String(format: "%.3f", subtitleOffset))) }
+    if !queryItems.isEmpty { comps.queryItems = queryItems }
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: PlaybackInfo.self, timeoutInterval: 15)
   }
 
   func setProgress(id: String, positionSeconds: Int, durationSeconds: Int) async throws {
@@ -187,6 +198,7 @@ struct APIClient {
   }
 
   func imageURL(id: String, width: Int? = nil, version: Int? = nil) -> URL? {
+    guard baseURL != AppState.fallbackURL else { return nil }
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/images/\(id)"), resolvingAgainstBaseURL: false) else {
       return nil
     }
@@ -249,15 +261,43 @@ struct APIClient {
     try await request(path: "/api/v1/auth/pairing/generate", method: "POST", body: Optional<Int>.none, response: PairingCodeResponse.self)
   }
 
-  func exchangePairingCode(code: String) async throws -> LoginResponse {
+  func exchangePairingCode(code: String, timeoutInterval: TimeInterval = 60) async throws -> LoginResponse {
     let req = PairingCodeExchangeRequest(code: code)
     return try await request(
       path: "/api/v1/auth/pairing/exchange",
       method: "POST",
       body: req,
       response: LoginResponse.self,
-      authorized: false
+      authorized: false,
+      timeoutInterval: timeoutInterval
     )
+  }
+
+  // MARK: - Watchlist
+
+  func watchlist() async throws -> ItemsResponse {
+    try await request(path: "/api/v1/watchlist", method: "GET", body: Optional<Int>.none,
+                      response: ItemsResponse.self)
+  }
+
+  func addToWatchlist(id: String) async throws {
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    _ = try await request(path: "/api/v1/watchlist/\(enc)", method: "POST",
+                          body: Optional<Int>.none, response: EmptyDecodable.self)
+  }
+
+  func removeFromWatchlist(id: String) async throws {
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    _ = try await request(path: "/api/v1/watchlist/\(enc)", method: "DELETE",
+                          body: Optional<Int>.none, response: EmptyDecodable.self)
+  }
+
+  func isInWatchlist(id: String) async throws -> Bool {
+    struct Resp: Decodable { let inWatchlist: Bool }
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    let resp = try await request(path: "/api/v1/watchlist/\(enc)", method: "GET",
+                                 body: Optional<Int>.none, response: Resp.self)
+    return resp.inWatchlist
   }
 
   // MARK: - core
@@ -290,6 +330,9 @@ struct APIClient {
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if authorized, let token {
       req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    if usesTunnelCookie {
+      req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
     }
     if let body {
       req.httpBody = try Self.encoder.encode(body)

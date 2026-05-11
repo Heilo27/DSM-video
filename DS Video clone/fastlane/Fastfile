@@ -1,0 +1,109 @@
+require 'json'
+
+default_platform(:ios)
+
+# iOS bundle ID
+IOS_BUNDLE_ID  = "HeiloProjects.DSReel"
+# tvOS bundle ID
+TVOS_BUNDLE_ID = "HeiloProjects.DSReel.tvOS"
+
+def api_key
+  config = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
+  app_store_connect_api_key(
+    key_id:        config["keyId"],
+    issuer_id:     config["issuerId"],
+    key_filepath:  File.expand_path(config["privateKeyPath"])
+  )
+end
+
+# ──────────────────────────────────────────────────────
+# iOS lanes
+# ──────────────────────────────────────────────────────
+platform :ios do
+
+  # Upload iOS metadata only (no binary, no screenshots)
+  lane :upload_metadata do
+    deliver(
+      api_key:             api_key,
+      app_identifier:      IOS_BUNDLE_ID,
+      skip_binary_upload:  true,
+      skip_screenshots:    true,
+      force:               true,
+      run_precheck_before_submit: false,
+      app_review_information: {
+        first_name:    File.read("metadata/en-US/review_information/first_name.txt").strip,
+        last_name:     File.read("metadata/en-US/review_information/last_name.txt").strip,
+        phone_number:  File.read("metadata/en-US/review_information/phone_number.txt").strip,
+        email_address: File.read("metadata/en-US/review_information/email_address.txt").strip,
+        notes:         File.read("metadata/en-US/review_information/notes.txt").strip
+      }
+    )
+  end
+
+  # Submit existing iOS build for review
+  lane :submit do
+    deliver(
+      api_key:             api_key,
+      app_identifier:      IOS_BUNDLE_ID,
+      skip_binary_upload:  true,
+      skip_screenshots:    true,
+      skip_metadata:       true,
+      submit_for_review:   true,
+      automatic_release:   true,
+      force:               true,
+      run_precheck_before_submit: false,
+      submission_information: {
+        export_compliance_uses_encryption: false,
+        add_id_info_uses_idfa:             false
+      }
+    )
+  end
+
+end
+
+# ──────────────────────────────────────────────────────
+# tvOS lanes (run under ios platform — fastlane doesn't
+# officially support :appletvos; platform param on deliver
+# handles the distinction)
+# ──────────────────────────────────────────────────────
+platform :ios do
+
+  lane :upload_metadata_tvos do
+    deliver(
+      api_key:             api_key,
+      app_identifier:      TVOS_BUNDLE_ID,
+      platform:            "appletvos",
+      skip_binary_upload:  true,
+      skip_screenshots:    true,
+      force:               true,
+      run_precheck_before_submit: false,
+      app_review_information: {
+        first_name:    File.read("metadata/en-US/review_information/first_name.txt").strip,
+        last_name:     File.read("metadata/en-US/review_information/last_name.txt").strip,
+        phone_number:  File.read("metadata/en-US/review_information/phone_number.txt").strip,
+        email_address: File.read("metadata/en-US/review_information/email_address.txt").strip,
+        notes:         File.read("metadata/en-US/review_information/notes.txt").strip
+      }
+    )
+  end
+
+  lane :submit_tvos do
+    deliver(
+      api_key:             api_key,
+      app_identifier:      TVOS_BUNDLE_ID,
+      platform:            "appletvos",
+      skip_binary_upload:  true,
+      skip_screenshots:    true,
+      skip_metadata:       true,
+      submit_for_review:   true,
+      automatic_release:   true,
+      force:               true,
+      run_precheck_before_submit: false,
+      submission_information: {
+        export_compliance_uses_encryption: false,
+        add_id_info_uses_idfa:             false
+      }
+    )
+  end
+
+end

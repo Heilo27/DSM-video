@@ -1,0 +1,1 @@
+DSM Video connects to a Synology NAS on the local network. For review, the app can be tested without a NAS — the onboarding flow, server discovery screen, and all UI is accessible without a live server connection. A Synology NAS is required only to actually stream video content.
