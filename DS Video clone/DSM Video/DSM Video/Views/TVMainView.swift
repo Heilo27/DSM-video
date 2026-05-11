@@ -402,7 +402,8 @@ private struct TVLandscapeCard: View {
         if let imageID = item.backdropImageId ?? item.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: imageID, width: 760),
-            token: appState.sessionToken
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
           .frame(width: cardWidth, height: cardHeight)
@@ -495,7 +496,8 @@ private struct TVPortraitCard: View {
         if let posterID = item.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: posterID, width: 440),
-            token: appState.sessionToken
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
           .frame(width: cardWidth, height: cardHeight)
@@ -698,7 +700,8 @@ private struct TVSearchView: View {
                     if let posterID = item.posterImageId {
                       AuthenticatedImage(
                         url: appState.api.imageURL(id: posterID, width: 120),
-                        token: appState.sessionToken
+                        token: appState.sessionToken,
+                        usesTunnelCookie: appState.api.usesTunnelCookie
                       )
                       .scaledToFill()
                       .frame(width: 60, height: 90)

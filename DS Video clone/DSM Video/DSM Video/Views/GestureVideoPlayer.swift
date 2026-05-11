@@ -29,6 +29,8 @@ struct GestureVideoPlayer: View {
     var itemID: String = ""
     var itemTitle: String = ""
     var itemYear: Int? = nil
+    // FIX-5: When true, HLS segments are fetched with Cookie: type=tunnel for QC relay mode.
+    var usesTunnelCookie: Bool = false
     var onDismiss: (() -> Void)?
     var onProgressUpdate: ((Double, Double) -> Void)?
     /// Called when AVPlayer reports a fatal playback error. The caller can use
@@ -543,6 +545,7 @@ struct GestureVideoPlayer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Rewind 15 seconds")
+                .accessibilityAddTraits(.isButton)
 
                 // Play / Pause
                 Button {
@@ -556,6 +559,7 @@ struct GestureVideoPlayer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
+                .accessibilityAddTraits(.isButton)
 
                 // Forward 15s
                 Button {
@@ -572,6 +576,7 @@ struct GestureVideoPlayer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Forward 15 seconds")
+                .accessibilityAddTraits(.isButton)
             }
             Spacer()
 
@@ -601,6 +606,7 @@ struct GestureVideoPlayer: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Skip intro")
+                        .accessibilityAddTraits(.isButton)
                         .padding(.trailing, 4)
                     }
                 }
@@ -829,7 +835,16 @@ struct GestureVideoPlayer: View {
 
     private func setupPlayer() {
         didSetupPlayer = true
-        let playerItem = AVPlayerItem(url: url)
+        // FIX-5: When using QC relay, HLS segments must include Cookie: type=tunnel.
+        // AVPlayerItem(url:) can't set custom headers; use AVURLAsset instead.
+        let playerItem: AVPlayerItem
+        if usesTunnelCookie {
+            let headers = ["Cookie": "type=tunnel"]
+            let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+            playerItem = AVPlayerItem(asset: asset)
+        } else {
+            playerItem = AVPlayerItem(url: url)
+        }
         // Buffer 10 seconds ahead — enough for smooth AirPlay without over-fetching.
         // Default (0) lets AVPlayer decide, which can be too conservative on HLS and
         // causes the periodic black-screen stalls seen during AirPlay sessions.
@@ -850,12 +865,13 @@ struct GestureVideoPlayer: View {
             .store(in: &cancellables)
 
         // Observe player item status to surface errors (e.g. 404 on HLS playlist,
-        // unsupported codec, network failure)
+        // unsupported codec, network failure). Weak capture prevents a retain cycle
+        // between the Combine subscription and the AVPlayerItem.
         playerItem.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
-            .sink { status in
+            .sink { [weak playerItem] status in
                 if status == .failed {
-                    let msg = playerItem.error.map { GestureVideoPlayer.friendlyPlayerError($0) } ?? "Unable to play this video."
+                    let msg = playerItem?.error.map { GestureVideoPlayer.friendlyPlayerError($0) } ?? "Unable to play this video."
                     playerError = msg
                     isBuffering = false
                 }

@@ -334,7 +334,8 @@ private struct TVShowPosterCell: View {
         } else if let id = show.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: id, width: 400, version: show.metadataVersion),
-            token: appState.sessionToken
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
           .frame(width: width, height: height)

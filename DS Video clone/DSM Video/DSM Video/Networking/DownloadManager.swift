@@ -85,6 +85,10 @@ final class DownloadManager: NSObject {
   private let pausedMetaKey = "dsReel.pausedMeta"
   private var cachedDownloadedItems: [DownloadedItem]?
 
+  // FIX-7: Called by AppDelegate.handleEventsForBackgroundURLSession. Must be invoked
+  // in urlSessionDidFinishEvents(forBackgroundURLSession:) after all events are processed.
+  var backgroundCompletionHandler: (() -> Void)?
+
   override private init() {
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
     config.isDiscretionary = false
@@ -360,7 +364,34 @@ final class DownloadManager: NSObject {
     downloadsDirectory().appendingPathComponent("\(itemId).resumedata")
   }
 
-  /// Load persisted resume data blobs (from disk) and paused item metadata (from UserDefaults).
+  /// SEC-01: Paused download metadata stored in Application Support with NSFileProtectionComplete.
+  /// Replaces UserDefaults storage — metadata contains videoURLs that are user data.
+  private var pausedMetaFileURL: URL {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return appSupport.appendingPathComponent("pausedMeta.json")
+  }
+
+  private func loadPausedMetaFromDisk() -> [String: [String: String]] {
+    guard let data = try? Data(contentsOf: pausedMetaFileURL),
+          let decoded = try? JSONDecoder().decode([String: [String: String]].self, from: data) else {
+      return [:]
+    }
+    return decoded
+  }
+
+  private func savePausedMetaToDisk(_ store: [String: [String: String]]) {
+    let fileURL = pausedMetaFileURL
+    let dir = fileURL.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    guard let data = try? JSONEncoder().encode(store) else { return }
+    try? data.write(to: fileURL, options: .atomic)
+    try? FileManager.default.setAttributes(
+      [.protectionKey: FileProtectionType.complete],
+      ofItemAtPath: fileURL.path
+    )
+  }
+
+  /// Load persisted resume data blobs (from disk) and paused item metadata (from Application Support file).
   private func loadPersistedResumeData() {
     // Migrate legacy base64 blobs from UserDefaults to disk, then clear them.
     if let raw = UserDefaults.standard.dictionary(forKey: resumeDataKey) as? [String: String] {
@@ -372,26 +403,30 @@ final class DownloadManager: NSObject {
       }
       UserDefaults.standard.removeObject(forKey: resumeDataKey)
     }
-    // Load resume data from disk files tracked in pausedMeta
-    if let raw = UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]] {
-      for (itemId, _) in raw {
-        if let data = try? Data(contentsOf: resumeDataFileURL(for: itemId)) {
-          pausedDownloads[itemId] = data
-        }
+    // SEC-01: Migrate legacy paused metadata from UserDefaults to Application Support file.
+    if let legacy = UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]], !legacy.isEmpty {
+      let existing = loadPausedMetaFromDisk()
+      let merged = existing.merging(legacy) { file, _ in file }  // prefer already-migrated entries
+      savePausedMetaToDisk(merged)
+      UserDefaults.standard.removeObject(forKey: pausedMetaKey)
+    }
+    // Load resume data from disk files tracked in pausedMeta (Application Support file)
+    let raw = loadPausedMetaFromDisk()
+    for (itemId, _) in raw {
+      if let data = try? Data(contentsOf: resumeDataFileURL(for: itemId)) {
+        pausedDownloads[itemId] = data
       }
     }
     // Restore minimal pendingDownloadInfo so paused items remain resumable after app launch
-    if let raw = UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]] {
-      for (itemId, meta) in raw {
-        let title = meta["title"] ?? itemId
-        let year = meta["year"].flatMap { Int($0) }
-        let posterURL = meta["posterURL"].flatMap { URL(string: $0) }
-        let durationSeconds = meta["durationSeconds"].flatMap { Int($0) } ?? 0
-        let videoURL = meta["videoURL"].flatMap { URL(string: $0) }
-        // Restore if we have resume data OR a video URL (to allow fresh-start resume)
-        if pausedDownloads[itemId] != nil || videoURL != nil {
-          pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: nil, videoURL: videoURL)
-        }
+    for (itemId, meta) in raw {
+      let title = meta["title"] ?? itemId
+      let year = meta["year"].flatMap { Int($0) }
+      let posterURL = meta["posterURL"].flatMap { URL(string: $0) }
+      let durationSeconds = meta["durationSeconds"].flatMap { Int($0) } ?? 0
+      let videoURL = meta["videoURL"].flatMap { URL(string: $0) }
+      // Restore if we have resume data OR a video URL (to allow fresh-start resume)
+      if pausedDownloads[itemId] != nil || videoURL != nil {
+        pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: nil, videoURL: videoURL)
       }
     }
   }
@@ -404,22 +439,21 @@ final class DownloadManager: NSObject {
   /// Persist minimal metadata for a paused download so it can be displayed and resumed after app relaunch.
   /// Stores the video URL so resumeDownload can fall back to a fresh startDownload if resume data is lost.
   /// The `_sid=` session token query parameter is stripped before persisting — it is a short-lived
-  /// credential and UserDefaults is not encrypted at rest. The current session token will be
-  /// re-attached by startDownload when the download is resumed.
+  /// credential. Storage uses Application Support with NSFileProtectionComplete (SEC-01).
   private func persistPausedMeta(for itemId: String) {
     guard let info = pendingDownloadInfo[itemId] else { return }
-    var store = (UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]]) ?? [:]
+    var store = loadPausedMetaFromDisk()
     var meta: [String: String] = ["title": info.title]
     if let year = info.year { meta["year"] = "\(year)" }
     if let posterURL = info.posterURL { meta["posterURL"] = posterURL.absoluteString }
     if let videoURL = info.videoURL {
-      // Strip _sid= before persisting — it is a session credential and must not be
-      // stored unprotected in UserDefaults. startDownload re-attaches auth on resume.
+      // Strip _sid= before persisting — it is a session credential.
+      // startDownload re-attaches auth on resume.
       meta["videoURL"] = strippingSid(from: videoURL).absoluteString
     }
     meta["durationSeconds"] = "\(info.durationSeconds)"
     store[itemId] = meta
-    UserDefaults.standard.set(store, forKey: pausedMetaKey)
+    savePausedMetaToDisk(store)
   }
 
   /// Returns a copy of `url` with the `_sid` query parameter removed.
@@ -433,13 +467,12 @@ final class DownloadManager: NSObject {
     return components.url ?? url
   }
 
-  /// Remove a single item's resume data file and paused metadata from UserDefaults.
+  /// Remove a single item's resume data file and paused metadata from Application Support file.
   private func removePersistedResumeData(for itemId: String) {
     try? FileManager.default.removeItem(at: resumeDataFileURL(for: itemId))
-    if var store = UserDefaults.standard.dictionary(forKey: pausedMetaKey) as? [String: [String: String]] {
-      store.removeValue(forKey: itemId)
-      UserDefaults.standard.set(store, forKey: pausedMetaKey)
-    }
+    var store = loadPausedMetaFromDisk()
+    store.removeValue(forKey: itemId)
+    savePausedMetaToDisk(store)
   }
 
   /// URL for the downloads metadata JSON file in Application Support.
@@ -450,12 +483,24 @@ final class DownloadManager: NSObject {
   }
 
   private func saveDownloadedItems(_ items: [DownloadedItem]) {
-    guard let data = try? JSONEncoder().encode(items) else { return }
+    // FIX-9: Log encode/write failures instead of silently discarding download metadata.
+    let data: Data
+    do {
+      data = try JSONEncoder().encode(items)
+    } catch {
+      log.error("saveDownloadedItems: encode failed — \(error.localizedDescription)")
+      return
+    }
     let fileURL = downloadsMetadataFileURL
     // Ensure the Application Support directory exists
     let dir = fileURL.deletingLastPathComponent()
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    try? data.write(to: fileURL, options: .atomic)
+    do {
+      try data.write(to: fileURL, options: .atomic)
+    } catch {
+      log.error("saveDownloadedItems: write failed — \(error.localizedDescription)")
+      return
+    }
     // Apply complete file protection to the metadata file
     try? FileManager.default.setAttributes(
       [.protectionKey: FileProtectionType.complete],
@@ -649,6 +694,16 @@ extension DownloadManager: URLSessionDownloadDelegate {
           pendingDownloadInfo.removeValue(forKey: itemId)
         }
       }
+    }
+  }
+
+  // FIX-7: Called by URLSession after all background events for a session are delivered.
+  // Invoke the stored completion handler so iOS knows the app has finished processing,
+  // allowing the system to take a new snapshot and release the background runtime extension.
+  nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+    Task { @MainActor in
+      backgroundCompletionHandler?()
+      backgroundCompletionHandler = nil
     }
   }
 }

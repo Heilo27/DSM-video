@@ -71,7 +71,8 @@ private struct TVShowDetailSplitView: View {
       } else if let posterId = show.posterImageId {
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1400, version: show.metadataVersion),
-          token: appState.sessionToken
+          token: appState.sessionToken,
+          usesTunnelCookie: appState.api.usesTunnelCookie
         )
         .scaledToFill()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -343,7 +344,8 @@ private struct TVEpisodeRow: View {
         } else if let posterID = ep.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: posterID, width: 240),
-            token: appState.sessionToken
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
           .frame(width: 120, height: 68)
@@ -463,9 +465,11 @@ private struct TVShowDetailScrollView: View {
             .frame(maxWidth: .infinity)
           } else {
             ForEach(seasons, id: \.seasonNumber) { season in
+              // FIX-2: pass allSeasons so EpisodeDetailView can navigate cross-season
               iOSSeasonSection(show: show, season: season, library: library,
                                highlightEpisodeID: highlightEpisodeID,
-                               highlightSeason: highlightSeason)
+                               highlightSeason: highlightSeason,
+                               allSeasons: seasons)
             }
           }
         }
@@ -519,7 +523,8 @@ private struct TVShowDetailScrollView: View {
       } else if let posterId = show.posterImageId {
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1200, version: show.metadataVersion),
-          token: appState.sessionToken
+          token: appState.sessionToken,
+          usesTunnelCookie: appState.api.usesTunnelCookie
         )
         .scaledToFill()
         .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
@@ -601,19 +606,24 @@ private struct iOSSeasonSection: View {
   let library: Library
   var highlightEpisodeID: String? = nil
   var highlightSeason: Int? = nil
+  // FIX-2: pass full seasons list so EpisodeDetailView can navigate across seasons
+  var allSeasons: [TVSeason] = []
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
   @State private var isExpanded: Bool
   @State private var error: String?
+  @State private var episodeLoadTask: Task<Void, Never>?
 
   init(show: TVShow, season: TVSeason, library: Library,
-       highlightEpisodeID: String? = nil, highlightSeason: Int? = nil) {
+       highlightEpisodeID: String? = nil, highlightSeason: Int? = nil,
+       allSeasons: [TVSeason] = []) {
     self.show = show
     self.season = season
     self.library = library
     self.highlightEpisodeID = highlightEpisodeID
     self.highlightSeason = highlightSeason
+    self.allSeasons = allSeasons
     // Auto-expand the season that contains the highlighted episode
     self._isExpanded = State(initialValue: highlightSeason == nil || highlightSeason == season.seasonNumber)
   }
@@ -658,7 +668,8 @@ private struct iOSSeasonSection: View {
                 .foregroundStyle(Color.dsTextMuted)
               Spacer()
               Button("Retry") {
-                Task { await load() }
+                episodeLoadTask?.cancel()
+                episodeLoadTask = Task { await load() }
               }
               .font(.footnote)
               .foregroundStyle(Color.dsAccent)
@@ -668,12 +679,16 @@ private struct iOSSeasonSection: View {
           }
           ForEach(Array(episodes.enumerated()), id: \.element.id) { index, ep in
             let isHighlighted = ep.id == highlightEpisodeID
+            // FIX-2: compute season index so EpisodeDetailView can cross seasons
+            let seasonIdx = allSeasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
             NavigationLink {
               EpisodeDetailView(
                 episodes: episodes,
                 initialIndex: index,
                 show: show,
                 library: library,
+                allSeasons: allSeasons,
+                currentSeasonIndex: seasonIdx,
                 autoPlay: isHighlighted
               )
             } label: {
@@ -691,7 +706,10 @@ private struct iOSSeasonSection: View {
   }
 
   private func load() async {
-    guard !isLoading, episodes.isEmpty else { return }
+    // FIX-17: removed `episodes.isEmpty` guard — allows reload after metadata update.
+    // Previously, once episodes were loaded, retapping would no-op even after a metadata
+    // fix was applied. isLoading guard still prevents concurrent fetches.
+    guard !isLoading else { return }
     if appState.isDemoMode {
       episodes = DemoData.episodes(for: show.id, season: season.seasonNumber)
       return
@@ -721,7 +739,6 @@ private struct iOSEpisodeRow: View {
         .font(.caption.weight(.semibold).monospacedDigit())
         .foregroundStyle(isHighlighted ? Color.dsAccent : .white.opacity(0.75))
         .frame(width: 32, alignment: .center)
-        .accessibilityHidden(true)
 
       VStack(alignment: .leading, spacing: 3) {
         HStack(spacing: 6) {
@@ -779,28 +796,62 @@ private struct iOSEpisodeRow: View {
 #if !os(tvOS)
 private struct EpisodeDetailView: View {
   @Environment(\.dismiss) private var dismiss
-  let episodes: [ItemSummary]
+  @Environment(AppState.self) private var appState
+  // FIX-2: mutable episodes list — starts as the initial season, can be swapped when
+  // crossing into the next season.
+  @State private var currentEpisodes: [ItemSummary]
   @State private var currentIndex: Int
   @State private var autoPlayCurrent: Bool
   let show: TVShow
   let library: Library
+  // FIX-2: all seasons for this show so we can cross season boundaries
+  let allSeasons: [TVSeason]
+  // FIX-2: mutable season cursor — advances when crossing into the next season
+  @State private var currentSeasonIndex: Int
+
+  // FIX-2: next season's episodes, fetched lazily when approaching season boundary
+  @State private var nextSeasonEpisodes: [ItemSummary] = []
+  @State private var isFetchingNextSeason: Bool = false
 
   init(episodes: [ItemSummary], initialIndex: Int, show: TVShow, library: Library,
+       allSeasons: [TVSeason] = [], currentSeasonIndex: Int = 0,
        autoPlay: Bool = false) {
-    self.episodes = episodes
+    self._currentEpisodes = State(initialValue: episodes)
     self._currentIndex = State(initialValue: initialIndex)
     self._autoPlayCurrent = State(initialValue: autoPlay)
     self.show = show
     self.library = library
+    self.allSeasons = allSeasons
+    self._currentSeasonIndex = State(initialValue: currentSeasonIndex)
   }
 
   private var current: ItemSummary? {
-    guard !episodes.isEmpty else { return nil }
-    let index = min(currentIndex, episodes.count - 1)
-    return episodes[index]
+    guard !currentEpisodes.isEmpty else { return nil }
+    let index = min(currentIndex, currentEpisodes.count - 1)
+    return currentEpisodes[index]
   }
-  private var hasNext: Bool { episodes.count > 0 && currentIndex + 1 < episodes.count }
-  private var isLastOfSeason: Bool { !episodes.isEmpty && currentIndex == episodes.count - 1 }
+
+  // True if there is a same-season next episode
+  private var hasNextInSeason: Bool { currentEpisodes.count > 0 && currentIndex + 1 < currentEpisodes.count }
+  // True if we're on the last episode of this season AND there is a subsequent season
+  private var isAtSeasonBoundary: Bool {
+    !currentEpisodes.isEmpty
+      && currentIndex == currentEpisodes.count - 1
+      && currentSeasonIndex + 1 < allSeasons.count
+  }
+  // True if this is the last episode with no further seasons to cross into
+  private var isLastOfSeason: Bool {
+    !currentEpisodes.isEmpty
+      && currentIndex == currentEpisodes.count - 1
+      && currentSeasonIndex + 1 >= allSeasons.count
+  }
+
+  // The next episode: same-season takes priority, then first of next season
+  private var nextEpisode: ItemSummary? {
+    if hasNextInSeason { return currentEpisodes[currentIndex + 1] }
+    if isAtSeasonBoundary, let first = nextSeasonEpisodes.first { return first }
+    return nil
+  }
 
   var body: some View {
     if let current {
@@ -808,15 +859,49 @@ private struct EpisodeDetailView: View {
         itemID: current.id,
         fallbackTitle: current.title,
         autoPlay: autoPlayCurrent,
-        nextEpisode: hasNext ? episodes[currentIndex + 1] : nil,
-        onNextEpisode: hasNext ? {
-          currentIndex += 1
-          autoPlayCurrent = true  // next episode always auto-plays
+        nextEpisode: nextEpisode,
+        onNextEpisode: nextEpisode != nil ? {
+          if hasNextInSeason {
+            // Same season — simple index bump
+            currentIndex += 1
+            autoPlayCurrent = true
+          } else if isAtSeasonBoundary, !nextSeasonEpisodes.isEmpty {
+            // FIX-2: Cross-season — swap episodes list to next season, reset index.
+            // The .id(current.id) modifier forces ItemDetailView to fully recreate.
+            currentEpisodes = nextSeasonEpisodes
+            nextSeasonEpisodes = []
+            currentSeasonIndex += 1
+            currentIndex = 0
+            autoPlayCurrent = true
+          }
         } : nil,
         onGoToShow: { dismiss() },
         isLastOfSeason: isLastOfSeason
       )
       .id(current.id)  // force view recreation when episode changes
+      .task(id: currentIndex) {
+        // FIX-2: Prefetch next season's episodes when the user reaches the last episode
+        // of the current season, so the "Next Episode" button appears without delay.
+        guard isAtSeasonBoundary,
+              !isFetchingNextSeason,
+              nextSeasonEpisodes.isEmpty else { return }
+        await fetchNextSeasonIfNeeded()
+      }
+    }
+  }
+
+  private func fetchNextSeasonIfNeeded() async {
+    guard isAtSeasonBoundary, !isFetchingNextSeason, nextSeasonEpisodes.isEmpty else { return }
+    let nextSeasonNumber = allSeasons[currentSeasonIndex + 1].seasonNumber
+    isFetchingNextSeason = true
+    defer { isFetchingNextSeason = false }
+    do {
+      let resp = try await appState.api.tvShowEpisodes(
+        showId: show.id, season: nextSeasonNumber, libraryId: library.id)
+      nextSeasonEpisodes = resp.items
+    } catch {
+      // Non-fatal: "Next Episode" cross-season button simply won't appear if fetch fails.
+      // User can still navigate manually via the season list.
     }
   }
 }

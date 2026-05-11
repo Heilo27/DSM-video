@@ -254,7 +254,12 @@ actor LocalStore {
     for id in ids {
       sqlite3_reset(stmt)
       sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
-      sqlite3_step(stmt)
+      // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
+      let rc = sqlite3_step(stmt)
+      if rc != SQLITE_DONE {
+        let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+        log.error("deleteItems: step failed [\(rc)] for id \(id): \(msg)")
+      }
     }
     exec("COMMIT")
   }
@@ -264,13 +269,17 @@ actor LocalStore {
   func upsertProgress(_ progress: [String: ItemProgress]) {
     guard !progress.isEmpty, let db else { return }
     exec("BEGIN TRANSACTION")
+    // FIX-8: Only overwrite position if the incoming server timestamp is newer than what's
+    // stored locally. This prevents a reconnect sync from reverting offline-recorded progress.
+    // Strategy: INSERT new rows unconditionally; for conflicts, only update position/duration
+    // when the incoming updated_at is strictly newer than the stored value.
     let sql = """
       INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at)
       VALUES(?,?,?,?)
       ON CONFLICT(item_id) DO UPDATE SET
-        position_seconds=excluded.position_seconds,
-        duration_seconds=excluded.duration_seconds,
-        updated_at=excluded.updated_at
+        position_seconds=CASE WHEN excluded.updated_at > updated_at THEN excluded.position_seconds ELSE position_seconds END,
+        duration_seconds=CASE WHEN excluded.updated_at > updated_at THEN excluded.duration_seconds ELSE duration_seconds END,
+        updated_at=CASE WHEN excluded.updated_at > updated_at THEN excluded.updated_at ELSE updated_at END
     """
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -285,7 +294,12 @@ actor LocalStore {
       sqlite3_bind_int(stmt, 2, Int32(p.positionSeconds))
       sqlite3_bind_int(stmt, 3, Int32(p.durationSeconds))
       sqlite3_bind_text(stmt, 4, p.updatedAt, -1, SQLITE_TRANSIENT)
-      sqlite3_step(stmt)
+      // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
+      let rc = sqlite3_step(stmt)
+      if rc != SQLITE_DONE {
+        let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+        log.error("upsertProgress: step failed [\(rc)] for item \(itemId): \(msg)")
+      }
     }
     exec("COMMIT")
   }
@@ -311,7 +325,12 @@ actor LocalStore {
     sqlite3_bind_int(stmt, 2, Int32(positionSeconds))
     sqlite3_bind_int(stmt, 3, Int32(durationSeconds))
     sqlite3_bind_text(stmt, 4, now, -1, SQLITE_TRANSIENT)
-    sqlite3_step(stmt)
+    // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
+    let rc = sqlite3_step(stmt)
+    if rc != SQLITE_DONE {
+      let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+      log.error("upsertSingleProgress: step failed [\(rc)] for item \(itemId): \(msg)")
+    }
   }
 
   // MARK: - Rails Queries
@@ -338,7 +357,8 @@ actor LocalStore {
       FROM items i
       JOIN progress p ON p.item_id = i.id
       WHERE p.duration_seconds > 0
-        AND CAST(p.position_seconds AS REAL) / p.duration_seconds BETWEEN 0.02 AND 0.95
+        -- FIX-11: unified 5% lower threshold matches iOS computeHomeRails (was 0.02, tvOS diverged)
+        AND CAST(p.position_seconds AS REAL) / p.duration_seconds BETWEEN 0.05 AND 0.95
       ORDER BY p.updated_at DESC
       LIMIT 20
     """

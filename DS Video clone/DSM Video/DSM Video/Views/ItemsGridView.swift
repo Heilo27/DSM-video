@@ -66,8 +66,13 @@ struct ItemsGridView: View {
         ProgressView("Loading videos")
           .padding(.top, 24)
       } else if let error {
-        ContentUnavailableView("Couldn't load items", systemImage: "exclamationmark.triangle", description: Text(error))
-          .padding(.top, 24)
+        // FIX-18: retry button so users aren't stuck after a transient network error
+        VStack(spacing: 12) {
+          ContentUnavailableView("Couldn't load items", systemImage: "exclamationmark.triangle", description: Text(error))
+          Button("Retry") { Task { await load() } }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.top, 24)
       } else {
         #if os(tvOS)
         let gridSpacing: CGFloat = 24
@@ -214,7 +219,16 @@ struct ItemsGridView: View {
     } catch {
       let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
       if items.isEmpty {
-        self.error = errorMsg
+        // Network failed — try LocalStore as offline fallback before showing error.
+        let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 5000)
+        if !cached.isEmpty {
+          items = cached
+          sortedItems = sorted(cached, by: sortOption)
+          // Don't set error — the offline banner (via appState.isOffline / serverUnreachable)
+          // already communicates to the user that they're on cached content.
+        } else {
+          self.error = errorMsg
+        }
       }
     }
   }
@@ -246,7 +260,7 @@ private struct SortChipBar: View {
           }
           .buttonStyle(.plain)
           .accessibilityLabel("Sort by \(option.rawValue)")
-          .accessibilityAddTraits(selection == option ? .isSelected : [])
+          .accessibilityAddTraits(selection == option ? [.isButton, .isSelected] : .isButton)
         }
       }
       .padding(.horizontal, 16)
@@ -326,7 +340,8 @@ struct ItemPosterCell: View {
     } else if item.posterImageId != nil {
       AuthenticatedImage(
         url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400, version: item.changeSeq),
-        token: appState.sessionToken
+        token: appState.sessionToken,
+        usesTunnelCookie: appState.api.usesTunnelCookie
       )
       .scaledToFill()
       .frame(width: width, height: height)

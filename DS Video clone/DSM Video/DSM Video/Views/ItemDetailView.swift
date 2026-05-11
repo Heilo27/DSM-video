@@ -185,11 +185,15 @@ struct ItemDetailView: View {
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
     .task(id: itemID) {
-      autoPlayFired = false
       await load()
     }
     .onAppear {
-      if autoPlay && !autoPlayFired {
+      // Reset autoPlayFired here (synchronously, on MainActor) before checking autoPlay.
+      // Previously this reset lived in .task(id:) which could race with onAppear —
+      // the task body ran after onAppear had already set autoPlayFired=true, clearing
+      // the flag and preventing the player from ever opening on subsequent navigations.
+      autoPlayFired = false
+      if autoPlay {
         autoPlayFired = true
         showPlayer = true
       }
@@ -251,11 +255,16 @@ struct ItemDetailView: View {
       Color.black
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(
-          ContentUnavailableView(
-            "Couldn't load details",
-            systemImage: "exclamationmark.triangle",
-            description: Text(error)
-          )
+          VStack(spacing: 12) {
+            ContentUnavailableView(
+              "Couldn't load details",
+              systemImage: "exclamationmark.triangle",
+              description: Text(error)
+            )
+            // FIX-18: retry button so users aren't stuck on error without navigating away
+            Button("Retry") { Task { await load() } }
+              .buttonStyle(.borderedProminent)
+          }
         )
     } else {
       ZStack(alignment: .bottomLeading) {
@@ -300,7 +309,7 @@ struct ItemDetailView: View {
         .frame(maxWidth: .infinity)
         .frame(height: backdropHeight)
 
-        // Floating title/year on gradient
+        // Floating title/year on gradient — decorative duplicate of nav bar title
         VStack(alignment: .leading, spacing: 4) {
           Text(detail?.title ?? fallbackTitle)
             .font(.title2.weight(.bold))
@@ -314,6 +323,7 @@ struct ItemDetailView: View {
               .foregroundStyle(.white.opacity(0.75))
           }
         }
+        .accessibilityHidden(true)
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
       }
@@ -325,7 +335,8 @@ struct ItemDetailView: View {
     if let backdropId = detail?.images.backdrop.id ?? detail?.images.backdrop.mapperId {
       AuthenticatedImage(
         url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq),
-        token: appState.sessionToken
+        token: appState.sessionToken,
+        usesTunnelCookie: appState.api.usesTunnelCookie
       )
       .scaledToFill()
     } else {
@@ -522,7 +533,8 @@ struct ItemDetailView: View {
                 if let imageId = person.imageId {
                   AuthenticatedImage(
                     url: appState.api.imageURL(id: imageId, width: 120),
-                    token: appState.sessionToken
+                    token: appState.sessionToken,
+                    usesTunnelCookie: appState.api.usesTunnelCookie
                   )
                   .scaledToFill()
                   .frame(width: 56, height: 56)
@@ -821,6 +833,7 @@ private struct PlayerSheet: View {
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
+          usesTunnelCookie: appState.api.usesTunnelCookie,
           onDismiss: {
             // Guard: if user dismissed before video started or position/duration are
             // unknown, skip setProgress entirely — must not overwrite real saved progress
@@ -937,6 +950,13 @@ private struct PlayerSheet: View {
       }
     }
     .task { await start() }
+    .onDisappear {
+      // FIX-12: Cancel countdown when player is dismissed via system back gesture or swipe-to-dismiss.
+      // Without this, the Task continues running against a deallocated binding and fires
+      // onPlayNextEpisode into a dismissed view, causing a navigation no-op and potential crash.
+      countdownTask?.cancel()
+      countdownTask = nil
+    }
     .onChange(of: scenePhase) { _, newPhase in
       // TASK-270: flush pending progress when app goes to background so force-kill
       // doesn't lose the last known position.

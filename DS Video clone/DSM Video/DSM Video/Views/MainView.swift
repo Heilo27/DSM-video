@@ -205,6 +205,7 @@ private struct SidebarSectionHeader: View {
       .font(.system(.title3, design: .rounded, weight: .semibold))
       .foregroundStyle(.primary)
       .textCase(nil)
+      .lineLimit(2)
       .padding(.top, 6)
   }
 }
@@ -545,7 +546,8 @@ private struct SearchResultCell: View {
     } else if item.posterImageId != nil {
       AuthenticatedImage(
         url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 200, version: item.changeSeq),
-        token: appState.sessionToken
+        token: appState.sessionToken,
+        usesTunnelCookie: appState.api.usesTunnelCookie
       )
       .scaledToFill()
     } else {
@@ -602,6 +604,10 @@ struct WatchlistView: View {
       .background(Color.black.ignoresSafeArea())
       .navigationTitle("Watchlist")
       .task { await appState.loadWatchlist() }
+      // FIX-15: refresh watchlist when network reconnects after being offline
+      .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
+        Task { await appState.loadWatchlist() }
+      }
     }
   }
 }
@@ -679,6 +685,12 @@ struct DownloadsView: View {
     .background(Color.black.ignoresSafeArea())
     .navigationTitle("Downloads")
     .onAppear {
+      loadDownloads()
+      loadStorageInfo()
+    }
+    // FIX-15: refresh downloads list when network reconnects — picks up any
+    // active downloads that were interrupted and may have resumed on the server.
+    .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
       loadDownloads()
       loadStorageInfo()
     }

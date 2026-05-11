@@ -65,6 +65,7 @@ struct LoginView: View {
                 .keyboardType(.URL)
               #endif
               .submitLabel(.next)
+              .accessibilityLabel("Server address")
             Button {
               showQuickConnect = true
             } label: {
@@ -79,9 +80,9 @@ struct LoginView: View {
           }
           .padding(.horizontal, 12)
           #if os(tvOS)
-          .frame(height: 66)
+          .frame(minHeight: 66)
           #else
-          .frame(height: 44)
+          .frame(minHeight: 44)
           #endif
 
           Divider()
@@ -95,12 +96,13 @@ struct LoginView: View {
               .textInputAutocapitalization(.never)
               .autocorrectionDisabled()
               .textContentType(.username)
+              .accessibilityLabel("Username")
           }
           .padding(.horizontal, 12)
           #if os(tvOS)
-          .frame(height: 66)
+          .frame(minHeight: 66)
           #else
-          .frame(height: 44)
+          .frame(minHeight: 44)
           #endif
 
           Divider()
@@ -112,13 +114,13 @@ struct LoginView: View {
               .accessibilityHidden(true)
             SecureField("PASSWORD", text: passwordBinding)
               .textContentType(.password)
-              .privacySensitive()
+              .accessibilityLabel("Password")
           }
           .padding(.horizontal, 12)
           #if os(tvOS)
-          .frame(height: 66)
+          .frame(minHeight: 66)
           #else
-          .frame(height: 44)
+          .frame(minHeight: 44)
           #endif
         }
         #if os(tvOS)
@@ -133,6 +135,7 @@ struct LoginView: View {
         .padding(.horizontal, 24)
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
         #endif
+        .privacySensitive()  // SEC-07: redact entire login form (server, username, password) in App Switcher
 
         #if os(tvOS)
         // tvOS: show Remember me toggle (HTTPS toggle not applicable on tvOS login flow)
@@ -199,8 +202,10 @@ struct LoginView: View {
           Text("Or connect via QuickConnect")
             .font(.subheadline)
             .foregroundStyle(.white.opacity(0.75))
+            .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .padding(.top, 4)
         #endif
 
@@ -211,8 +216,10 @@ struct LoginView: View {
           Label("Find Server on Network", systemImage: "network")
             .font(.subheadline)
             .foregroundStyle(.white.opacity(0.75))
+            .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .padding(.top, 4)
 
         Button {
@@ -221,15 +228,19 @@ struct LoginView: View {
           Label("Pair with Apple TV", systemImage: "appletv")
             .font(.subheadline)
             .foregroundStyle(.white.opacity(0.75))
+            .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .padding(.top, 8)
 
         Link(destination: URL(string: "https://heiloprojects.com/dsmvideo/#server") ?? URL(string: "https://heiloprojects.com")!) {
           Label("Get DSVideoServer for your NAS", systemImage: "server.rack")
             .font(.subheadline)
             .foregroundStyle(.white.opacity(0.75))
+            .frame(minHeight: 44)
         }
+        .contentShape(Rectangle())
         .padding(.top, 4)
 
         if hasDownloads {
@@ -239,8 +250,10 @@ struct LoginView: View {
             Label("Watch Downloaded Videos", systemImage: "arrow.down.circle.fill")
               .font(.subheadline)
               .foregroundStyle(.white.opacity(0.75))
+              .frame(minHeight: 44)
           }
           .buttonStyle(.plain)
+          .contentShape(Rectangle())
           .padding(.top, 4)
           .accessibilityHint("Access videos saved to this device for offline viewing")
         }

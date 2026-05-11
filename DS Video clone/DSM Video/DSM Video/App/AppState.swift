@@ -5,6 +5,9 @@ import Observation
 import Security
 import SwiftUI
 import os.log
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // TASK-363: nonisolated(unsafe) so computeHomeRails (nonisolated) can access these without
 // MainActor isolation. Safe: both are immutable after init and ISO8601DateFormatter is
@@ -69,6 +72,8 @@ final class AppState {
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
+  // FIX-16: Guard flag so concurrent reconnect() calls don't race.
+  var isReconnecting: Bool = false
 
   private var networkMonitor: NWPathMonitor?
   private var heartbeatTimer: Timer?
@@ -118,10 +123,9 @@ final class AppState {
   init() {
     let d = UserDefaults.standard
     let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:8090"
-    // useHTTPS defaults to false for local NAS compatibility — most home NAS setups use HTTP
-    // on LAN and handle HTTPS termination at the router level if at all. Users who need
-    // encrypted connections can enable HTTPS in Settings.
-    let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
+    // useHTTPS defaults to true for security — new installs encrypt by default.
+    // Users on a plain-HTTP LAN can toggle HTTPS off in Settings.
+    let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? true
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
     let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 8090
 
@@ -152,6 +156,52 @@ final class AppState {
     )
     startNetworkMonitoring()
     startHeartbeatTimer()
+    // SEC-02: proactively check JWT expiry so users aren't surprised by mid-session logout.
+    if storedToken != nil {
+      Task { @MainActor [weak self] in await self?.checkTokenExpiryOnLaunch() }
+    }
+  }
+
+  // MARK: - JWT Expiry (SEC-02)
+
+  /// Decodes the `exp` claim from a JWT without validating the signature.
+  /// Returns nil if the token is malformed or has no exp claim.
+  private static func jwtExpiry(token: String) -> Date? {
+    let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 3 else { return nil }
+    var payload = String(parts[1])
+    // Base64url → base64 padding
+    let remainder = payload.count % 4
+    if remainder != 0 { payload += String(repeating: "=", count: 4 - remainder) }
+    payload = payload.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    guard let data = Data(base64Encoded: payload),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let exp = json["exp"] as? TimeInterval else { return nil }
+    return Date(timeIntervalSince1970: exp)
+  }
+
+  /// Called on app launch when a stored token exists. If the token is already expired,
+  /// clears state and forces re-login. If expiry is within 24 hours, attempts a proactive refresh.
+  @MainActor
+  private func checkTokenExpiryOnLaunch() async {
+    guard let token = sessionToken, !isDemoMode else { return }
+    guard let expiry = Self.jwtExpiry(token: token) else { return }
+    let now = Date()
+    if expiry <= now {
+      // Already expired — force re-login immediately.
+      Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+      sessionToken = nil
+      loginError = "Your session expired. Please sign in again."
+      return
+    }
+    let twentyFourHours: TimeInterval = 24 * 60 * 60
+    if expiry.timeIntervalSince(now) < twentyFourHours {
+      // Expiring soon — attempt silent refresh.
+      // Re-login with saved password if rememberMe is on.
+      if rememberMe && !savedPassword.isEmpty {
+        await login()
+      }
+    }
   }
 
   // MARK: - Keychain
@@ -253,6 +303,12 @@ final class AppState {
             sessionToken = resp.token
             clearNetworkError()
             api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+            // FIX-1: Update useHTTPS and defaultPort to match the winning candidate's scheme
+            // so normalizedBaseURL rebuilds correctly on the next cold launch.
+            self.useHTTPS = candidate.url.scheme == "https"
+            if let port = candidate.url.port {
+              self.defaultPort = port
+            }
             if rememberMe {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             } else {
@@ -304,6 +360,7 @@ final class AppState {
     pairingCode = nil
     isDemoMode = false
     loginError = nil
+    watchlistItems = []  // SEC-03: prevent cross-user watchlist leakage on shared devices
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
   }
@@ -323,6 +380,7 @@ final class AppState {
         Self.deleteFromKeychain(account: Keys.keychainAccountToken)
         sessionToken = nil
         isDemoMode = false
+        watchlistItems = []  // prevent stale watchlist briefly visible on the login screen
         loginError = "Your session expired. Please sign in again."
       case .network:
         serverUnreachable = true
@@ -350,10 +408,25 @@ final class AppState {
   }
 
   /// Re-resolves QC candidates and updates api to the first reachable one.
-  /// Returns true if a working candidate was found. No-op for direct IP/hostname servers.
+  /// For direct IP/hostname servers, probes the current api to verify connectivity.
+  /// Returns true if a working connection was found.
   func reconnect() async -> Bool {
+    // FIX-16: Prevent concurrent reconnect calls from racing.
+    guard !isReconnecting else { return false }
+    isReconnecting = true
+    defer { isReconnecting = false }
+
     let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let qcID = QuickConnectResolver.extractBareID(from: raw) else { return false }
+    // FIX-6: For direct-IP/hostname users, probe the current api instead of returning false.
+    guard let qcID = QuickConnectResolver.extractBareID(from: raw) else {
+      // Direct IP path: probe syncStatus; success = still reachable, clear error and return true.
+      guard sessionToken != nil else { return false }
+      if (try? await api.syncStatus()) != nil {
+        clearNetworkError()
+        return true
+      }
+      return false
+    }
     guard let token = sessionToken else { return false }
     guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID),
           !candidates.isEmpty else { return false }
@@ -640,7 +713,7 @@ final class AppState {
       // Sync in background — may update rails once complete
       homeLog.info("homeLoad[\(callID)]: starting background delta sync")
       homeBackgroundFetchTask?.cancel()
-      homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
+      homeBackgroundFetchTask = Task { await self.runDeltaSyncWithBackgroundTask() }
     } else {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
       homeIsCacheDecoding = false
@@ -672,6 +745,27 @@ final class AppState {
   }
 
   // MARK: - Delta Sync
+
+  /// FIX-10: Wraps a background delta sync in a UIApplication background task so iOS
+  /// grants up to 30s of extra runtime. Without this, iOS may suspend the process
+  /// mid-sync ~30s after backgrounding, leaving the database in an inconsistent state.
+  private func runDeltaSyncWithBackgroundTask() async {
+    #if canImport(UIKit)
+    var bgTaskID = UIBackgroundTaskIdentifier.invalid
+    bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
+      // Expiry handler — iOS calls this when time budget is almost exhausted.
+      UIApplication.shared.endBackgroundTask(bgTaskID)
+      bgTaskID = .invalid
+    }
+    await runDeltaSync(background: true)
+    if bgTaskID != .invalid {
+      UIApplication.shared.endBackgroundTask(bgTaskID)
+      bgTaskID = .invalid
+    }
+    #else
+    await runDeltaSync(background: true)
+    #endif
+  }
 
   /// Full delta sync: check heartbeat, fetch changed items, refresh progress.
   /// This is the single network path — replaces homeFetchFromNetwork + doHomeFetch.

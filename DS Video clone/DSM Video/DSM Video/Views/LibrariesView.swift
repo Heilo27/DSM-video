@@ -22,7 +22,13 @@ struct LibrariesView: View {
           .accessibilityLabel("Loading libraries, please wait")
           .accessibilityAddTraits(.updatesFrequently)
       } else if let error {
-        ContentUnavailableView("Couldn't load libraries", systemImage: "exclamationmark.triangle", description: Text(error))
+        // FIX-18: retry button for transient network failures on the libraries screen
+        VStack(spacing: 12) {
+          ContentUnavailableView("Couldn't load libraries", systemImage: "exclamationmark.triangle", description: Text(error))
+          Button("Retry") { Task { await load() } }
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel("Retry loading libraries")
+        }
       } else if libraries.isEmpty {
         ContentUnavailableView("No Libraries", systemImage: "square.grid.2x2", description: Text("No video libraries found on your server."))
       } else {
@@ -217,7 +223,8 @@ private struct ContinueWatchingCard: View {
         } else if let backdropId = item.backdropImageId ?? item.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: backdropId, width: 400),
-            token: appState.sessionToken
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
         } else {
@@ -291,8 +298,8 @@ private struct HomeRail: View {
           NavigationLink("See All") {
             ItemsGridView(library: lib)
           }
-          .font(.subheadline)
-          .foregroundStyle(Color.dsAccent)
+          .font(.subheadline.weight(.medium))
+          .foregroundStyle(Color.dsTextSecondary)
           .padding(.vertical, 12)
           .padding(.horizontal, 8)
           .contentShape(Rectangle())

@@ -125,6 +125,8 @@ private actor MacImageCache {
 struct AuthenticatedImage: View {
   let url: URL?
   let token: String?
+  // FIX-4: When true, adds Cookie: type=tunnel for QuickConnect relay image requests.
+  var usesTunnelCookie: Bool = false
 
   #if canImport(UIKit) || canImport(AppKit)
   @State private var image: Image?
@@ -190,6 +192,7 @@ struct AuthenticatedImage: View {
     // outcome.isNew == true: we are responsible for the fetch
     isLoading = true
 
+    let usesTunnel = usesTunnelCookie
     let fetchTask = Task<UIImage?, Never> {
       var req = URLRequest(url: url, timeoutInterval: 15)
 
@@ -199,6 +202,10 @@ struct AuthenticatedImage: View {
       } else if let token = token {
         // REST API: use Bearer token
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      }
+      // FIX-4: QuickConnect relay requires Cookie: type=tunnel on every request.
+      if usesTunnel {
+        req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
 
       do {
@@ -286,12 +293,17 @@ struct AuthenticatedImage: View {
     // outcome.isNew == true: we are responsible for the fetch
     isLoading = true
 
+    let usesTunnel = usesTunnelCookie
     let fetchTask = Task<NSImage?, Never> {
       var req = URLRequest(url: url, timeoutInterval: 15)
       if url.absoluteString.contains("_sid=") {
         // Video Station: session ID already in URL
       } else if let token {
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      }
+      // FIX-4: QuickConnect relay requires Cookie: type=tunnel on every request.
+      if usesTunnel {
+        req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
       do {
         let (data, response) = try await ImageSession.shared.data(for: req)

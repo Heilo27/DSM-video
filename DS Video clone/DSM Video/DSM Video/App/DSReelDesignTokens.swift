@@ -49,17 +49,20 @@ extension Color {
 }
 
 // MARK: - Typography Scale
+// Uses semantic TextStyle variants so the system scales with Dynamic Type.
+// Custom sizes (dsLargeTitle, dsScreenTitle) use system(size:) but are large enough
+// to qualify as "large text" (≥18pt) so WCAG AA requires only 3:1 contrast.
 
 extension Font {
-    static let dsLargeTitle    = Font.system(size: 34, weight: .bold)
-    static let dsTitle2        = Font.system(size: 22, weight: .bold)
-    static let dsHeadline      = Font.system(size: 17, weight: .semibold)
-    static let dsBody          = Font.system(size: 17, weight: .regular)
-    static let dsSubheadline   = Font.system(size: 15, weight: .regular)
-    static let dsSubheadlineSB = Font.system(size: 15, weight: .semibold)
-    static let dsFootnote      = Font.system(size: 13, weight: .regular)
-    static let dsCaption       = Font.system(size: 11, weight: .regular)
-    static let dsCaption2      = Font.system(size: 11, weight: .semibold)
+    static let dsLargeTitle    = Font.largeTitle.weight(.bold)
+    static let dsTitle2        = Font.title2.weight(.bold)
+    static let dsHeadline      = Font.headline
+    static let dsBody          = Font.body
+    static let dsSubheadline   = Font.subheadline
+    static let dsSubheadlineSB = Font.subheadline.weight(.semibold)
+    static let dsFootnote      = Font.footnote
+    static let dsCaption       = Font.caption
+    static let dsCaption2      = Font.caption.weight(.semibold)
 
     // Screen titles (used across all main views)
     static let dsScreenTitle   = Font.system(size: 26, weight: .bold)

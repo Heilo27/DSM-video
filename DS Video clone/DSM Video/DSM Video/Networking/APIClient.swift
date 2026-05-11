@@ -49,7 +49,7 @@ struct APIClient {
     guard let url = comps.url else {
       throw APIError.invalidURL
     }
-    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self)
+    return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self, timeoutInterval: 15)
   }
 
   func tvShows(libraryId: String) async throws -> TVShowsResponse {
@@ -58,7 +58,7 @@ struct APIClient {
     }
     comps.queryItems = [URLQueryItem(name: "libraryId", value: libraryId)]
     guard let url = comps.url else { throw APIError.invalidURL }
-    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TVShowsResponse.self)
+    return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none, response: TVShowsResponse.self, timeoutInterval: 15)
   }
 
   func tvShowSeasons(showId: String, libraryId: String) async throws -> TVSeasonsResponse {
@@ -94,7 +94,7 @@ struct APIClient {
 
   func itemDetail(id: String) async throws -> ItemDetail {
     let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-    return try await request(path: "/api/v1/items/\(enc)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self)
+    return try await requestWithRetry(path: "/api/v1/items/\(enc)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self, timeoutInterval: 15)
   }
 
   func playback(id: String, quality: String = "auto", subtitleOffset: Double = 0) async throws -> PlaybackInfo {
@@ -276,8 +276,8 @@ struct APIClient {
   // MARK: - Watchlist
 
   func watchlist() async throws -> ItemsResponse {
-    try await request(path: "/api/v1/watchlist", method: "GET", body: Optional<Int>.none,
-                      response: ItemsResponse.self)
+    try await requestWithRetry(path: "/api/v1/watchlist", method: "GET", body: Optional<Int>.none,
+                               response: ItemsResponse.self, timeoutInterval: 15)
   }
 
   func addToWatchlist(id: String) async throws {
@@ -301,6 +301,37 @@ struct APIClient {
   }
 
   // MARK: - core
+
+  /// Retry wrapper for transient network errors (timeout, connection lost).
+  /// Retries once after a 1-second delay. Does NOT retry on 4xx/5xx — those are
+  /// caller errors that won't improve with a retry.
+  private func requestWithRetry<T: Decodable, B: Encodable>(
+    path: String,
+    method: String,
+    body: B?,
+    response: T.Type,
+    authorized: Bool = true,
+    timeoutInterval: TimeInterval = 60
+  ) async throws -> T {
+    let url = baseURL.appendingPathComponent(path)
+    return try await requestWithRetry(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
+  }
+
+  private func requestWithRetry<T: Decodable, B: Encodable>(
+    url: URL,
+    method: String,
+    body: B?,
+    response: T.Type,
+    authorized: Bool = true,
+    timeoutInterval: TimeInterval = 60
+  ) async throws -> T {
+    do {
+      return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
+    } catch let urlError as URLError where [.timedOut, .networkConnectionLost, .notConnectedToInternet].contains(urlError.code) {
+      try await Task.sleep(nanoseconds: 1_000_000_000)
+      return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
+    }
+  }
 
   private func request<T: Decodable, B: Encodable>(
     path: String,

@@ -30,6 +30,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         return lock
     }
 
+    // FIX-7: Reconnect completed background downloads to DownloadManager so they finalize.
+    // Without this, downloads completing while the app is in the background are never saved.
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        DownloadManager.shared.backgroundCompletionHandler = completionHandler
+    }
+
     /// Update the orientation mask and signal UIKit to re-query on its next layout pass.
     /// - Never call requestGeometryUpdate — it competes with SwiftUI animations and
     ///   causes gesture-gate timeouts and touch freezes.

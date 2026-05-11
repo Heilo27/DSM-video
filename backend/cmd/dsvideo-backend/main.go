@@ -1200,24 +1200,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check revocation list: fast in-memory path first, then authoritative SQLite.
-		// The in-memory map is warmed on startup and updated on every logout, so the
-		// SQLite check is the safety net for any entries missed at startup.
+		// FIX-13: in-memory map is warmed from SQLite at startup and kept current via
+		// every logout/revocation path, making it the authoritative source of truth.
+		// The previous SQLite SELECT COUNT(*) on every authenticated request was O(log n)
+		// per request and unnecessary — removing it eliminates a DB round-trip from the
+		// hot path without changing correctness.
 		if jti, _ := claims["jti"].(string); jti != "" {
 			if _, revoked := s.revokedTokens.Load(jti); revoked {
-				writeErr(w, http.StatusUnauthorized, "token_revoked")
-				return
-			}
-			// Authoritative SQLite check — handles entries not yet in the in-memory map.
-			var dbCount int
-			if dbErr := s.db.QueryRow(
-				`SELECT COUNT(*) FROM revoked_tokens WHERE jti = ? AND expires_at >= ?`,
-				jti, time.Now().Unix(),
-			).Scan(&dbCount); dbErr == nil && dbCount > 0 {
-				// Re-warm so subsequent requests for this jti skip SQLite.
-				if exp, ok := claims["exp"].(float64); ok {
-					s.revokedTokens.Store(jti, int64(exp))
-				}
 				writeErr(w, http.StatusUnauthorized, "token_revoked")
 				return
 			}
@@ -3120,12 +3109,13 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 			"ON CONFLICT(item_id, user_id) DO UPDATE SET position_seconds=excluded.position_seconds, duration_seconds=excluded.duration_seconds, updated_at=excluded.updated_at",
 		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now,
 	)
+	s.progressMu.Unlock()
+	// FIX-14: incrementSeq moved outside the mutex — it is a separate DB write and
+	// holding progressMu across it causes unnecessary contention under concurrent
+	// progress updates. The seq counter is monotone; slight reordering is fine.
 	if err == nil {
-		// Increment progress_seq inside the mutex so it serializes with the DB write
-		// and avoids SQLITE_BUSY contention from concurrent callers.
 		s.incrementSeq("progress_seq")
 	}
-	s.progressMu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
