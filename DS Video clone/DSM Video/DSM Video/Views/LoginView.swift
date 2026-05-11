@@ -159,7 +159,7 @@ struct LoginView: View {
         } label: {
           if appState.isLoggingIn {
             ProgressView("Connecting")
-              .tint(DSReelBrandColor.background)
+              .tint(.white)
               .frame(maxWidth: .infinity, minHeight: 52)
           } else {
             Text("Connect")
@@ -167,12 +167,8 @@ struct LoginView: View {
               .frame(maxWidth: .infinity, minHeight: 52)
           }
         }
-        #if os(tvOS)
-        .background(Color.white)
-        #else
-        .background(Color(.systemBackground))
-        #endif
-        .foregroundStyle(DSReelBrandColor.background)
+        .background(Color.dsAccent)
+        .foregroundStyle(.white)
         .clipShape(Capsule())
         #if os(tvOS)
         .frame(maxWidth: 600)

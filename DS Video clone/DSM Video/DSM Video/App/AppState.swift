@@ -317,8 +317,8 @@ final class AppState {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             } else {
               Self.deleteFromKeychain(account: Keys.keychainAccount)
-              Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-              username = ""; savedPassword = ""
+              // Do NOT delete keychainAccountToken here — sessionToken.didSet already
+              // persisted it. Deleting it here would kill the session immediately after login.
             }
             return
           } catch {
@@ -347,9 +347,7 @@ final class AppState {
         Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
       } else {
         Self.deleteFromKeychain(account: Keys.keychainAccount)
-        Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-        username = ""
-        savedPassword = ""
+        // sessionToken.didSet handles token persistence — don't delete it here.
       }
     } catch {
       loginError = (error as? APIError)?.userMessage ?? "Login failed."
@@ -732,6 +730,11 @@ final class AppState {
       homeError = nil
       await runDeltaSync(background: false)
       homeIsLoading = false
+      // If sync completed but produced no items and no error, the library is either
+      // genuinely empty or the server rejected our state silently. Surface a hint.
+      if homeAllRailsEmpty && homeLibraries.isEmpty && homeError == nil {
+        homeError = "No content found. If your library has videos, try signing out and back in."
+      }
     }
   }
 
