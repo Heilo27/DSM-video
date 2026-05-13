@@ -77,6 +77,7 @@ final class AppState {
 
   private var networkMonitor: NWPathMonitor?
   private var heartbeatTimer: Timer?
+  private var reconnectRetryTask: Task<Void, Never>?
 
   var sessionToken: String? {
     didSet {
@@ -363,6 +364,8 @@ final class AppState {
     isDemoMode = false
     loginError = nil
     watchlistItems = []  // SEC-03: prevent cross-user watchlist leakage on shared devices
+    reconnectRetryTask?.cancel()
+    reconnectRetryTask = nil
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
   }
@@ -407,6 +410,8 @@ final class AppState {
   func clearNetworkError() {
     serverUnreachable = false
     isOffline = false
+    reconnectRetryTask?.cancel()
+    reconnectRetryTask = nil
   }
 
   /// Re-resolves QC candidates and updates api to the first reachable one.
@@ -441,6 +446,32 @@ final class AppState {
       }
     }
     return false
+  }
+
+  /// Retries QC resolution in the background every ~8s for up to 5 minutes.
+  /// On success: clears serverUnreachable and triggers a fresh homeLoad.
+  /// Called when homeLoad() can't reach the server on cold start.
+  private func startBackgroundReconnectRetry() {
+    reconnectRetryTask?.cancel()
+    reconnectRetryTask = Task { @MainActor in
+      let maxAttempts = 37  // 8s × 37 ≈ 5 minutes
+      for attempt in 1...maxAttempts {
+        guard !Task.isCancelled else { return }
+        try? await Task.sleep(for: .seconds(8))
+        guard !Task.isCancelled else { return }
+        guard sessionToken != nil else { return }  // logged out
+        homeLog.info("backgroundReconnect: attempt \(attempt)/\(maxAttempts)")
+        let ok = await reconnect()
+        if ok {
+          homeLog.info("backgroundReconnect: succeeded on attempt \(attempt) — url=\(self.api.baseURL)")
+          serverUnreachable = false
+          reconnectRetryTask = nil
+          await homeLoad()
+          return
+        }
+      }
+      homeLog.warning("backgroundReconnect: all attempts exhausted — server still unreachable")
+    }
   }
 
   private func startHeartbeatTimer() {
@@ -718,8 +749,8 @@ final class AppState {
         homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before background sync")
         let resolved = await reconnect()
         if !resolved {
-          homeLog.warning("homeLoad[\(callID)]: QC resolution failed — showing cached content")
-          serverUnreachable = true
+          homeLog.warning("homeLoad[\(callID)]: QC resolution failed — showing cached content, starting background retry")
+          startBackgroundReconnectRetry()
           return
         }
         homeLog.info("homeLoad[\(callID)]: QC resolved to \(self.api.baseURL)")
