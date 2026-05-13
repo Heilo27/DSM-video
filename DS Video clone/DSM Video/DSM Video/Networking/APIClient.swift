@@ -216,9 +216,9 @@ struct APIClient {
                       response: ServerVersion.self, authorized: false, timeoutInterval: 5)
   }
 
-  func syncStatus() async throws -> SyncStatusResponse {
+  func syncStatus(timeout: TimeInterval = 10) async throws -> SyncStatusResponse {
     try await request(path: "/api/v1/sync/status", method: "GET", body: Optional<Int>.none,
-                      response: SyncStatusResponse.self, timeoutInterval: 10)
+                      response: SyncStatusResponse.self, timeoutInterval: timeout)
   }
 
   func syncHeartbeat() async throws -> SyncHeartbeatResponse {

@@ -439,7 +439,9 @@ final class AppState {
           !candidates.isEmpty else { return false }
     for candidate in candidates {
       let probe = APIClient(baseURL: candidate.url, token: token, usesTunnelCookie: candidate.requiresTunnelCookie)
-      if (try? await probe.syncStatus()) != nil {
+      // Mirror login() timeouts: relay gets 15s (real routable tunnel), direct gets 4s (fail-fast).
+      let timeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
+      if (try? await probe.syncStatus(timeout: timeout)) != nil {
         api = probe
         clearNetworkError()
         return true
