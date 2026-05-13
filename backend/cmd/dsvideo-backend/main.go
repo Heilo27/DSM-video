@@ -421,6 +421,10 @@ func main() {
 	// Synology DSM). Failures are non-fatal — server still works without it.
 	go advertiseMDNS(cfg.ListenAddr)
 
+	// Warn if DSVIDEO_BASE_URL is not configured — relay/QC stream URLs will be wrong.
+	if strings.HasPrefix(cfg.BaseURL, "http://localhost") || strings.HasPrefix(cfg.BaseURL, "https://localhost") {
+		log.Printf("WARNING: DSVIDEO_BASE_URL not set — stream URLs will use Host header heuristic. Set DSVIDEO_BASE_URL to the public URL of this server for reliable QuickConnect/relay playback.")
+	}
 	log.Printf("DS Video backend listening on %s", cfg.ListenAddr)
 	if err := http.ListenAndServe(cfg.ListenAddr, r); err != nil {
 		log.Fatal(err)

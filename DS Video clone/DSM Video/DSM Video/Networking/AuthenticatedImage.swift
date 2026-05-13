@@ -276,6 +276,13 @@ struct AuthenticatedImage: View {
             }
           }
           .task { await loadIfNeeded() }
+          .onChange(of: url) { oldURL, newURL in
+            guard oldURL == nil, newURL != nil else { return }
+            image = nil
+            didFail = false
+            isLoading = false
+            Task { await loadIfNeeded() }
+          }
       }
     }
   }
