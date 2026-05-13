@@ -426,15 +426,18 @@ final class AppState {
     let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
     // FIX-6: For direct-IP/hostname users, probe the current api instead of returning false.
     guard let qcID = QuickConnectResolver.extractBareID(from: raw) else {
-      // Direct IP path: probe /version (no auth) then verify token.
+      // Direct IP path: probe /version then verify token.
       guard sessionToken != nil else { return false }
       guard (try? await api.serverVersion()) != nil else { return false }
       do {
-        _ = try await api.syncStatus(timeout: 5)
+        _ = try await api.syncStatus(timeout: 10)
+        clearNetworkError()
       } catch let err as APIError {
         if case .http(401) = err { handleConnectionFailure(err); return false }
-      } catch {}
-      clearNetworkError()
+        clearNetworkError()  // other API error — server reachable
+      } catch {
+        return false  // syncStatus timed out — don't claim success
+      }
       return true
     }
     guard sessionToken != nil else { return false }
@@ -442,32 +445,37 @@ final class AppState {
           !candidates.isEmpty else { return false }
     for candidate in candidates {
       var probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: candidate.requiresTunnelCookie)
-      // Step 1: unauthenticated reachability probe — /version requires no token.
-      // Relay gets 15s (tunnel setup overhead); direct gets 4s (fail-fast).
-      let reachTimeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
-      guard (try? await probe.serverVersion()) != nil else { continue }
-      // Step 2: server is reachable — verify the token is still valid.
+      // Step 1: unauthenticated reachability check — /version has no auth overhead.
+      // Relay gets 15s (tunnel setup); direct gets 4s (fail-fast if truly unreachable).
+      let versionTimeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
+      guard (try? await probe.serverVersion()) != nil else {
+        homeLog.info("reconnect: \(candidate.url) unreachable (version timeout/error) — skipping")
+        continue
+      }
+      // Step 2: verify the session token works end-to-end.
+      // A 401 means the token is expired/revoked — stop here and force re-login.
+      // A timeout here means the authenticated path is unreliable — skip this candidate.
       do {
-        _ = try await probe.syncStatus(timeout: 5)
+        _ = try await probe.syncStatus(timeout: versionTimeout)
+        homeLog.info("reconnect: \(candidate.url) fully verified — using")
         api = probe
         clearNetworkError()
         return true
       } catch let err as APIError {
         if case .http(401) = err {
-          // Token revoked or expired — trigger session expiry, don't try other candidates.
           homeLog.warning("reconnect: token rejected by \(candidate.url) — triggering session expiry")
           handleConnectionFailure(err)
           return false
         }
-        // Other API error (e.g. 5xx) — server is up but unhealthy, still reachable.
+        // Other HTTP error (5xx etc) — auth worked, server is reachable enough.
+        homeLog.info("reconnect: \(candidate.url) returned API error but is reachable — using")
         api = probe
         clearNetworkError()
         return true
       } catch {
-        // Timeout/network on syncStatus after serverVersion succeeded — treat as reachable.
-        api = probe
-        clearNetworkError()
-        return true
+        // syncStatus timed out or network error after /version succeeded — candidate is flaky, skip.
+        homeLog.warning("reconnect: \(candidate.url) /version ok but syncStatus failed (\(error.localizedDescription)) — skipping")
+        continue
       }
     }
     return false
