@@ -696,36 +696,48 @@ CREATE TABLE IF NOT EXISTS watchlist (
 		return fmt.Errorf("create tables: %w", err)
 	}
 
-	// Step 2: Add columns if they don't exist (for upgrades from older versions)
-	migrations := []string{
-		"ALTER TABLE items ADD COLUMN video_codec TEXT",
-		"ALTER TABLE items ADD COLUMN audio_codec TEXT",
-		"ALTER TABLE items ADD COLUMN container TEXT",
-		"ALTER TABLE items ADD COLUMN needs_transcode BOOLEAN DEFAULT FALSE",
-		"ALTER TABLE items ADD COLUMN tmdb_id INTEGER",
-		"ALTER TABLE items ADD COLUMN imdb_id TEXT",
-		"ALTER TABLE items ADD COLUMN overview TEXT",
-		"ALTER TABLE items ADD COLUMN poster_path TEXT",
-		"ALTER TABLE items ADD COLUMN backdrop_path TEXT",
-		"ALTER TABLE items ADD COLUMN rating REAL",
-		"ALTER TABLE items ADD COLUMN genres TEXT",
-		"ALTER TABLE items ADD COLUMN director TEXT",
-		"ALTER TABLE items ADD COLUMN cast_names TEXT",
-		"ALTER TABLE items ADD COLUMN content_rating TEXT",
-		"ALTER TABLE items ADD COLUMN original_title TEXT",
-		"ALTER TABLE items ADD COLUMN show_name TEXT",
-		"ALTER TABLE items ADD COLUMN season_number INTEGER",
-		"ALTER TABLE items ADD COLUMN episode_number INTEGER",
-		"ALTER TABLE items ADD COLUMN episode_title TEXT",
-		"ALTER TABLE items ADD COLUMN metadata_fetched_at TEXT",
+	// Step 2: Add columns if they don't exist (for upgrades from older versions).
+	// Use PRAGMA table_info to guard each ALTER TABLE so we never attempt to add
+	// a column that already exists — avoids "duplicate column name" log noise on
+	// every launch after the column is already present.
+	type colMigration struct {
+		column string
+		sql    string
+	}
+	migrations := []colMigration{
+		{"video_codec", "ALTER TABLE items ADD COLUMN video_codec TEXT"},
+		{"audio_codec", "ALTER TABLE items ADD COLUMN audio_codec TEXT"},
+		{"container", "ALTER TABLE items ADD COLUMN container TEXT"},
+		{"needs_transcode", "ALTER TABLE items ADD COLUMN needs_transcode BOOLEAN DEFAULT FALSE"},
+		{"tmdb_id", "ALTER TABLE items ADD COLUMN tmdb_id INTEGER"},
+		{"imdb_id", "ALTER TABLE items ADD COLUMN imdb_id TEXT"},
+		{"overview", "ALTER TABLE items ADD COLUMN overview TEXT"},
+		{"poster_path", "ALTER TABLE items ADD COLUMN poster_path TEXT"},
+		{"backdrop_path", "ALTER TABLE items ADD COLUMN backdrop_path TEXT"},
+		{"rating", "ALTER TABLE items ADD COLUMN rating REAL"},
+		{"genres", "ALTER TABLE items ADD COLUMN genres TEXT"},
+		{"director", "ALTER TABLE items ADD COLUMN director TEXT"},
+		{"cast_names", "ALTER TABLE items ADD COLUMN cast_names TEXT"},
+		{"content_rating", "ALTER TABLE items ADD COLUMN content_rating TEXT"},
+		{"original_title", "ALTER TABLE items ADD COLUMN original_title TEXT"},
+		{"show_name", "ALTER TABLE items ADD COLUMN show_name TEXT"},
+		{"season_number", "ALTER TABLE items ADD COLUMN season_number INTEGER"},
+		{"episode_number", "ALTER TABLE items ADD COLUMN episode_number INTEGER"},
+		{"episode_title", "ALTER TABLE items ADD COLUMN episode_title TEXT"},
+		{"metadata_fetched_at", "ALTER TABLE items ADD COLUMN metadata_fetched_at TEXT"},
 		// Delta sync support
-		"ALTER TABLE items ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0",
+		{"change_seq", "ALTER TABLE items ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0"},
 		// TASK-571: store show_folder_id at scan time so it is stable across TVPath config changes
-		"ALTER TABLE items ADD COLUMN show_folder_id TEXT",
+		{"show_folder_id", "ALTER TABLE items ADD COLUMN show_folder_id TEXT"},
 	}
 	for _, m := range migrations {
-		// Ignore errors - column may already exist
-		_, _ = db.Exec(m)
+		var exists bool
+		_ = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name=?`, m.column).Scan(&exists)
+		if !exists {
+			if _, err := db.Exec(m.sql); err != nil {
+				return fmt.Errorf("migration %s: %w", m.column, err)
+			}
+		}
 	}
 
 	// Step 3: Create indexes AFTER columns are guaranteed to exist
@@ -2658,7 +2670,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	baseURL := requestBaseURL(r)
+	baseURL := requestBaseURL(r, s.cfg.BaseURL)
 
 	// Build chapter list for response
 	var chapterList []map[string]any
@@ -3139,12 +3151,15 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 // handleSyncStatus — GET /api/v1/sync/status
 func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	itemSeq, progressSeq := s.getSyncSeqs()
-	var totalItems int
-	_ = s.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&totalItems)
+	// totalItems removed: SELECT COUNT(*) was a full table scan on every status
+	// probe (including the reconnect health check on cold NAS DB). The iOS client
+	// decodes the field but never uses it for sync logic or display, so it is safe
+	// to omit. The field is set to 0 here to keep the response shape stable and
+	// avoid breaking older clients that may decode the struct.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"itemSeq":     itemSeq,
 		"progressSeq": progressSeq,
-		"totalItems":  totalItems,
+		"totalItems":  0,
 	})
 }
 
@@ -5242,16 +5257,34 @@ func randID(prefix string) string {
 	return prefix + hex.EncodeToString(b[:])
 }
 
-// requestBaseURL derives a base URL from the incoming request's Host header.
-// This ensures stream URLs are reachable by the client (not localhost).
-func requestBaseURL(r *http.Request) string {
+// requestBaseURL derives a base URL for building stream URLs returned to the client.
+// If cfgBaseURL is set (non-empty, non-localhost), it is used directly — this is the
+// correct value for relay/QuickConnect deployments where nginx sets X-Forwarded-Proto:https
+// but the relay only speaks HTTP, causing scheme confusion when derived from headers.
+// Falls back to deriving from the request Host header for direct-IP deployments.
+func requestBaseURL(r *http.Request, cfgBaseURL string) string {
+	// Operator-configured base URL takes priority (relay/QuickConnect deployments).
+	if cfgBaseURL != "" && !strings.HasPrefix(cfgBaseURL, "http://localhost") &&
+		!strings.HasPrefix(cfgBaseURL, "https://localhost") {
+		return strings.TrimRight(cfgBaseURL, "/")
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	// Respect X-Forwarded-Proto from reverse proxies (e.g., DSM nginx)
+	// Respect X-Forwarded-Proto from reverse proxies (e.g., DSM nginx).
+	// Exception: if the host looks like a QuickConnect relay (quickconnect.to / direct.quickconnect.to),
+	// the relay speaks plain HTTP regardless of what nginx reports — override to http.
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		scheme = proto
+		host := r.Host
+		if host == "" {
+			host = r.URL.Host
+		}
+		if (strings.Contains(host, "quickconnect.to")) {
+			scheme = "http" // relay tunnel is always HTTP; nginx proto header is misleading here
+		} else {
+			scheme = proto
+		}
 	}
 	host := r.Host
 	if host == "" {

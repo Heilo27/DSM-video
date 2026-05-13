@@ -502,13 +502,20 @@ private struct QuickConnectSheet: View {
     defer { isResolving = false }
 
     do {
-      // Resolve the WAN address now and pass it directly to the address field so
-      // login() can connect immediately without a second QuickConnect lookup (TASK-422).
-      guard let resolvedURL = try await QuickConnectResolver.resolveWAN(id: id, useHTTPS: useHTTPS) else {
+      // Validate the QC ID is reachable by doing a quick resolution check.
+      // We store the bare QC ID (not the resolved URL) so that on next cold start
+      // login() can run the full LAN→WAN→relay cascade. Storing a resolved WAN URL
+      // breaks hairpin NAT (home-network) access and skips LAN fast-path.
+      guard let bareID = QuickConnectResolver.extractBareID(from: id) else {
         error = "Couldn't find \"\(id)\". Check the ID and try again."
         return
       }
-      onSelect(resolvedURL)
+      // Probe to confirm the ID is valid before accepting it.
+      guard try await QuickConnectResolver.resolveWAN(id: bareID, useHTTPS: useHTTPS) != nil else {
+        error = "Couldn't find \"\(id)\". Check the ID and try again."
+        return
+      }
+      onSelect(bareID)
       dismiss()
     } catch {
       self.error = "Network error. Check your connection and try again."
@@ -584,11 +591,11 @@ enum QuickConnectResolver {
       if let url = URL(string: urlStr) { candidates.append(Candidate(url: url, requiresTunnelCookie: false)) }
     }
 
-    // LAN IPs: HTTP first — TLS cert is issued for the DDNS name, not raw IPs,
-    // so HTTPS to a bare LAN IP will always fail cert validation.
+    // LAN IPs: HTTP only — TLS cert is issued for the DDNS name (e.g. kestreltak.synology.me),
+    // not raw IPs. HTTPS to a bare LAN IP always fails cert validation, wasting ~4s per candidate.
     for ip in lanIPs {
-      if let p = httpPort  { addDirect("http://\(ip):\(p)") }
-      if let p = httpsPort { addDirect("https://\(ip):\(p)") }
+      if let p = httpPort { addDirect("http://\(ip):\(p)") }
+      // HTTPS to raw LAN IPs always fails cert (cert is for DDNS name not IP)
     }
     // WAN: HTTPS only — cert is valid for the DDNS hostname assigned by Synology.
     // HTTP to a public IP is blocked by ATS (-1022) and would send credentials in plaintext.

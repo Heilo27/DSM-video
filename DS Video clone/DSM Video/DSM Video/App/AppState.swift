@@ -310,9 +310,14 @@ final class AppState {
             api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
             // FIX-1: Update useHTTPS and defaultPort to match the winning candidate's scheme
             // so normalizedBaseURL rebuilds correctly on the next cold launch.
-            self.useHTTPS = candidate.url.scheme == "https"
-            if let port = candidate.url.port {
-              self.defaultPort = port
+            // Skip relay candidates — relay URLs are always http:// and use an edge port
+            // that is not the NAS's real port. Updating from a relay win would corrupt
+            // future direct-IP sessions.
+            if !candidate.requiresTunnelCookie {
+              self.useHTTPS = candidate.url.scheme == "https"
+              if let port = candidate.url.port {
+                self.defaultPort = port
+              }
             }
             if rememberMe {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
@@ -407,11 +412,12 @@ final class AppState {
 
   /// Call after a successful API operation to clear network error state.
   /// Both flags cleared here; NWPathMonitor also clears isOffline independently on path recovery.
+  /// NOTE: reconnectRetryTask lifecycle is managed only by startBackgroundReconnectRetry() and
+  /// logout() — not here. Cancelling from clearNetworkError() would self-cancel the retry task
+  /// before homeLoad() runs on the success path (Issue 7).
   func clearNetworkError() {
     serverUnreachable = false
     isOffline = false
-    reconnectRetryTask?.cancel()
-    reconnectRetryTask = nil
   }
 
   /// Re-resolves QC candidates and updates api to the first reachable one.
@@ -448,7 +454,9 @@ final class AppState {
       // Step 1: unauthenticated reachability check — /version has no auth overhead.
       // Relay gets 15s (tunnel setup); direct gets 4s (fail-fast if truly unreachable).
       let versionTimeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
-      guard (try? await probe.serverVersion()) != nil else {
+      // syncStatus hits SQLite (cold NAS DB needs more time than /version)
+      let statusTimeout: TimeInterval = candidate.requiresTunnelCookie ? 20 : 10
+      guard (try? await probe.serverVersion(timeout: versionTimeout)) != nil else {
         homeLog.info("reconnect: \(candidate.url) unreachable (version timeout/error) — skipping")
         continue
       }
@@ -456,7 +464,7 @@ final class AppState {
       // A 401 means the token is expired/revoked — stop here and force re-login.
       // A timeout here means the authenticated path is unreliable — skip this candidate.
       do {
-        _ = try await probe.syncStatus(timeout: versionTimeout)
+        _ = try await probe.syncStatus(timeout: statusTimeout)
         homeLog.info("reconnect: \(candidate.url) fully verified — using")
         api = probe
         clearNetworkError()
@@ -487,23 +495,32 @@ final class AppState {
   private func startBackgroundReconnectRetry() {
     reconnectRetryTask?.cancel()
     reconnectRetryTask = Task { @MainActor in
-      let maxAttempts = 37  // 8s × 37 ≈ 5 minutes
+      // Exponential backoff: 5, 10, 20, 30, 30, 30... seconds (capped at 30).
+      // 20 attempts ≈ 10 min max. QC resolution can take up to ~24s per attempt
+      // so a flat 8s delay caused attempts to pile up behind isReconnecting.
+      let maxAttempts = 20
+      var delay: Double = 5
       for attempt in 1...maxAttempts {
         guard !Task.isCancelled else { return }
-        try? await Task.sleep(for: .seconds(8))
+        try? await Task.sleep(for: .seconds(delay))
         guard !Task.isCancelled else { return }
-        guard sessionToken != nil else { return }  // logged out
-        homeLog.info("backgroundReconnect: attempt \(attempt)/\(maxAttempts)")
+        guard sessionToken != nil else { return }  // logged out — stop retrying
+        homeLog.info("backgroundReconnect: attempt \(attempt)/\(maxAttempts) (delay was \(delay)s)")
         let ok = await reconnect()
         if ok {
           homeLog.info("backgroundReconnect: succeeded on attempt \(attempt) — url=\(self.api.baseURL)")
-          serverUnreachable = false
+          // Nil the task handle BEFORE reconnect()'s clearNetworkError() path fires,
+          // so the cancel() it used to call doesn't abort this task mid-flight.
           reconnectRetryTask = nil
+          serverUnreachable = false
           await homeLoad()
           return
         }
+        delay = min(delay * 2, 30)
       }
-      homeLog.warning("backgroundReconnect: all attempts exhausted — server still unreachable")
+      homeLog.warning("backgroundReconnect: all \(maxAttempts) attempts exhausted — server still unreachable")
+      serverUnreachable = false
+      homeError = "Unable to reach your server. Check that DSVideoServer is running, then pull to refresh."
     }
   }
 
@@ -733,9 +750,9 @@ final class AppState {
 
   func homeLoad() async {
     let callID = Int.random(in: 1000...9999)
-    homeLog.info("homeLoad[\(callID)]: called — isLoading=\(self.homeIsLoading) isCacheDecoding=\(self.homeIsCacheDecoding)")
-    guard !homeIsLoading, !homeIsCacheDecoding else {
-      homeLog.warning("homeLoad[\(callID)]: already loading, bailing")
+    homeLog.info("homeLoad[\(callID)]: called — isLoading=\(self.homeIsLoading) isCacheDecoding=\(self.homeIsCacheDecoding) isBackgroundRefreshing=\(self.homeIsBackgroundRefreshing)")
+    guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else {
+      homeLog.warning("homeLoad[\(callID)]: already loading/syncing, bailing")
       return
     }
 
@@ -749,6 +766,7 @@ final class AppState {
     // Already have in-memory rail data — run heartbeat to check for changes
     if !homeAllRailsEmpty || !homeLibraries.isEmpty {
       homeLog.info("homeLoad[\(callID)]: PATH=in-memory — rails populated, running heartbeat")
+      homeError = nil  // clear any stale error banner alongside populated content
       Task { await self.runHeartbeat() }
       return
     }

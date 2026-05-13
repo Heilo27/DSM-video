@@ -836,15 +836,22 @@ struct GestureVideoPlayer: View {
     private func setupPlayer() {
         didSetupPlayer = true
         // FIX-5: When using QC relay, HLS segments must include Cookie: type=tunnel.
-        // AVPlayerItem(url:) can't set custom headers; use AVURLAsset instead.
-        let playerItem: AVPlayerItem
-        if usesTunnelCookie {
-            let headers = ["Cookie": "type=tunnel"]
-            let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
-            playerItem = AVPlayerItem(asset: asset)
+        // AVURLAssetHTTPHeaderFieldsKey only applies to the master playlist request.
+        // AVURLAssetHTTPCookiesKey propagates the cookie to ALL requests made by the
+        // asset (variant playlists, .ts/.m4s segments) via the system cookie jar.
+        let asset: AVURLAsset
+        if usesTunnelCookie,
+           let cookie = HTTPCookie(properties: [
+               .name: "type",
+               .value: "tunnel",
+               .domain: url.host ?? "",
+               .path: "/",
+           ]) {
+            asset = AVURLAsset(url: url, options: [AVURLAssetHTTPCookiesKey: [cookie]])
         } else {
-            playerItem = AVPlayerItem(url: url)
+            asset = AVURLAsset(url: url)
         }
+        let playerItem = AVPlayerItem(asset: asset)
         // Buffer 10 seconds ahead — enough for smooth AirPlay without over-fetching.
         // Default (0) lets AVPlayer decide, which can be too conservative on HLS and
         // causes the periodic black-screen stalls seen during AirPlay sessions.

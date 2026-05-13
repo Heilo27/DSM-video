@@ -111,6 +111,7 @@ struct LibrariesView: View {
 
 struct LibraryHomeView: View {
   @Environment(AppState.self) private var appState
+  @Environment(\.scenePhase) private var scenePhase
 
   /// Pass `true` when this view is embedded inside an existing NavigationStack
   /// (e.g. the iPad split-view detail column) to avoid nesting stacks.
@@ -195,6 +196,13 @@ struct LibraryHomeView: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
       loadLog.info("LibraryHomeView: networkDidReconnect — triggering homeLoad")
+      Task { await appState.homeLoad() }
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      // Retry homeLoad when app returns to foreground — catches cases where the
+      // background retry exhausted or the relay URL expired while backgrounded.
+      guard newPhase == .active, appState.sessionToken != nil else { return }
+      loadLog.info("LibraryHomeView: scenePhase became active — triggering homeLoad")
       Task { await appState.homeLoad() }
     }
     .background(Color.black.ignoresSafeArea())

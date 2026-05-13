@@ -211,9 +211,9 @@ struct APIClient {
 
   // MARK: - Delta Sync
 
-  func serverVersion() async throws -> ServerVersion {
+  func serverVersion(timeout: TimeInterval = 5) async throws -> ServerVersion {
     try await request(path: "/api/v1/version", method: "GET", body: Optional<Int>.none,
-                      response: ServerVersion.self, authorized: false, timeoutInterval: 5)
+                      response: ServerVersion.self, authorized: false, timeoutInterval: timeout)
   }
 
   func syncStatus(timeout: TimeInterval = 10) async throws -> SyncStatusResponse {

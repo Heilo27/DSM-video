@@ -163,6 +163,15 @@ struct AuthenticatedImage: View {
             }
           }
           .task { await loadIfNeeded() }
+          .onChange(of: url) { oldURL, newURL in
+            // Retry when URL transitions from nil to non-nil (e.g. after reconnect resolves QC ID).
+            // Reset all state so loadIfNeeded() guard passes.
+            guard oldURL == nil, newURL != nil else { return }
+            image = nil
+            didFail = false
+            isLoading = false
+            Task { await loadIfNeeded() }
+          }
       }
     }
   }
