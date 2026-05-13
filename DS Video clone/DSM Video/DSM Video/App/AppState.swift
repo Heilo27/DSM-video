@@ -712,6 +712,18 @@ final class AppState {
         homeLog.info("homeLoad[\(callID)]: offline — showing cached content, skipping network sync")
         return
       }
+      // QuickConnect users: api.baseURL is fallbackURL until resolved. Resolve now so
+      // the background sync and all subsequent API calls use a real server address.
+      if api.baseURL == AppState.fallbackURL {
+        homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before background sync")
+        let resolved = await reconnect()
+        if !resolved {
+          homeLog.warning("homeLoad[\(callID)]: QC resolution failed — showing cached content")
+          serverUnreachable = true
+          return
+        }
+        homeLog.info("homeLoad[\(callID)]: QC resolved to \(self.api.baseURL)")
+      }
       // Sync in background — may update rails once complete
       homeLog.info("homeLoad[\(callID)]: starting background delta sync")
       homeBackgroundFetchTask?.cancel()
@@ -725,6 +737,15 @@ final class AppState {
         homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
         homeError = isOffline ? "No internet connection." : "Can't reach your server."
         return
+      }
+      // Resolve QC ID before the foreground sync too.
+      if api.baseURL == AppState.fallbackURL {
+        homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before full sync")
+        let resolved = await reconnect()
+        if !resolved {
+          homeError = "Can't reach your server. Check that DSVideoServer is running."
+          return
+        }
       }
       homeIsLoading = true
       homeError = nil
