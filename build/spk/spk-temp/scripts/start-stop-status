@@ -34,6 +34,18 @@ pid_alive() {
 start() {
   mkdir -p "${VAR}"
 
+  # Ensure the live nginx conf matches our package source — DSM may regenerate
+  # it from a stale cache on restarts, service events, or cert renewals.
+  NGINX_SRC="${BASE}/target/nginx/DSVideoServer.conf"
+  NGINX_LIVE="/etc/nginx/conf.d/dsm.pkg-static.DSVideoServer-2059624305.conf"
+  if [ -f "${NGINX_SRC}" ] && [ -f "${NGINX_LIVE}" ]; then
+    if ! cmp -s "${NGINX_SRC}" "${NGINX_LIVE}"; then
+      echo "[${PACKAGE}] nginx conf out of date — syncing and reloading" >> "${LOG}"
+      cp "${NGINX_SRC}" "${NGINX_LIVE}"
+      nginx -s reload 2>/dev/null || true
+    fi
+  fi
+
   GO_BINARY="$(find_go_binary || true)"
 
   # Check for Go binary
