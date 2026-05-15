@@ -1,0 +1,24 @@
+DSM Video turns your iPhone or iPad into a window to your Synology NAS video library. Browse and stream your personal collection of movies and TV shows from anywhere — at home or over the internet — with no subscriptions, no cloud storage, and no compromise on privacy.
+
+YOUR LIBRARY, IN YOUR POCKET
+Stream movies and TV shows stored on your Synology NAS directly to your iPhone or iPad. DSM Video scans your library automatically and organises your content with rich metadata — posters, episode guides, and descriptions pulled straight from your server.
+
+PAIR WITH APPLE TV
+Already using DSM Video on Apple TV? Pair your iPhone or iPad in seconds using a simple on-screen code. Your account and server connections carry over instantly — no re-entering passwords or server addresses.
+
+CONTINUE WATCHING
+Pick up right where you left off. Continue Watching keeps track of your progress across every device, so you can start a film on your TV and finish it on your phone without missing a beat.
+
+JUST ADDED
+See what's new in your library the moment it arrives. The Just Added rail surfaces recently added movies and episodes so you always know what's fresh.
+
+SMART DISCOVERY
+Your NAS is found automatically on your home network using Bonjour. No manual IP addresses required. For remote access, DSM Video supports Synology QuickConnect and direct HTTPS connections — stream your library from anywhere with an internet connection.
+
+SEARCH
+Find any title in your library instantly. Search across movies and TV shows with a fast, intuitive interface.
+
+PRIVATE BY DESIGN
+DSM Video connects directly to your Synology NAS. Your media never passes through third-party servers. Everything stays in your home.
+
+Compatible with Synology DiskStation NAS running DSM 6 or later. Requires a compatible DSM video library.

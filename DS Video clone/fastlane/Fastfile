@@ -26,16 +26,17 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
+      metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
       force:               true,
       run_precheck_before_submit: false,
       app_review_information: {
-        first_name:    File.read("metadata/en-US/review_information/first_name.txt").strip,
-        last_name:     File.read("metadata/en-US/review_information/last_name.txt").strip,
-        phone_number:  File.read("metadata/en-US/review_information/phone_number.txt").strip,
-        email_address: File.read("metadata/en-US/review_information/email_address.txt").strip,
-        notes:         File.read("metadata/en-US/review_information/notes.txt").strip
+        first_name:    File.read("metadata/ios/en-US/review_information/first_name.txt").strip,
+        last_name:     File.read("metadata/ios/en-US/review_information/last_name.txt").strip,
+        phone_number:  File.read("metadata/ios/en-US/review_information/phone_number.txt").strip,
+        email_address: File.read("metadata/ios/en-US/review_information/email_address.txt").strip,
+        notes:         File.read("metadata/ios/en-US/review_information/notes.txt").strip
       }
     )
   end
@@ -72,17 +73,18 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      TVOS_BUNDLE_ID,
+      metadata_path:       "metadata/tvos",
       platform:            "appletvos",
       skip_binary_upload:  true,
       skip_screenshots:    true,
       force:               true,
       run_precheck_before_submit: false,
       app_review_information: {
-        first_name:    File.read("metadata/en-US/review_information/first_name.txt").strip,
-        last_name:     File.read("metadata/en-US/review_information/last_name.txt").strip,
-        phone_number:  File.read("metadata/en-US/review_information/phone_number.txt").strip,
-        email_address: File.read("metadata/en-US/review_information/email_address.txt").strip,
-        notes:         File.read("metadata/en-US/review_information/notes.txt").strip
+        first_name:    File.read("metadata/tvos/en-US/review_information/first_name.txt").strip,
+        last_name:     File.read("metadata/tvos/en-US/review_information/last_name.txt").strip,
+        phone_number:  File.read("metadata/tvos/en-US/review_information/phone_number.txt").strip,
+        email_address: File.read("metadata/tvos/en-US/review_information/email_address.txt").strip,
+        notes:         File.read("metadata/tvos/en-US/review_information/notes.txt").strip
       }
     )
   end

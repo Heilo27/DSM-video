@@ -1,1 +1,0 @@
-NAS,Synology,DSM,video,streaming,media player,movies,TV shows,home server,DLNA
