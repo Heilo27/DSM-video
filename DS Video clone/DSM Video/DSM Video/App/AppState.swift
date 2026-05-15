@@ -450,7 +450,7 @@ final class AppState {
     guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID),
           !candidates.isEmpty else { return false }
     for candidate in candidates {
-      var probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: candidate.requiresTunnelCookie)
+      let probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: candidate.requiresTunnelCookie)
       // Step 1: unauthenticated reachability check — /version has no auth overhead.
       // Relay gets 15s (tunnel setup); direct gets 4s (fail-fast if truly unreachable).
       let versionTimeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
