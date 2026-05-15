@@ -136,10 +136,11 @@ final class AppState {
     useHTTPS = storedUseHTTPS
     defaultPort = storedDefaultPort
 
-    // Load saved credentials from Keychain if remember me is enabled
+    // Always load password from Keychain — rememberMe controls session token only.
+    // This ensures soft-logout (auto-reconnect recovery) pre-fills the login form.
+    savedPassword = Self.loadFromKeychain(account: Keys.keychainAccount) ?? ""
     var storedToken: String? = nil
     if storedRememberMe {
-      savedPassword = Self.loadFromKeychain(account: Keys.keychainAccount) ?? ""
       storedToken = Self.loadFromKeychain(account: Keys.keychainAccountToken)
     }
     sessionToken = storedToken
@@ -199,7 +200,7 @@ final class AppState {
     if expiry.timeIntervalSince(now) < twentyFourHours {
       // Expiring soon — schedule a silent refresh after the home screen has loaded
       // to avoid racing with homeLoad()'s own QC resolution and api mutation.
-      if rememberMe && !savedPassword.isEmpty {
+      if !savedPassword.isEmpty {
         Task { @MainActor [weak self] in
           // Brief yield so init's Task and homeLoad() settle first.
           try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -319,12 +320,10 @@ final class AppState {
                 self.defaultPort = port
               }
             }
-            if rememberMe {
+            // Always save password so soft-logout (auto-reconnect recovery) can pre-fill
+            // the login form. rememberMe controls session token persistence, not password.
+            if !savedPassword.isEmpty {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
-            } else {
-              Self.deleteFromKeychain(account: Keys.keychainAccount)
-              // Do NOT delete keychainAccountToken here — sessionToken.didSet already
-              // persisted it. Deleting it here would kill the session immediately after login.
             }
             return
           } catch {
@@ -349,11 +348,9 @@ final class AppState {
       sessionToken = resp.token
       clearNetworkError()  // login succeeded — reset any stale serverUnreachable flag
 
-      if rememberMe {
+      // Always save password — rememberMe controls session token only, not password.
+      if !savedPassword.isEmpty {
         Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
-      } else {
-        Self.deleteFromKeychain(account: Keys.keychainAccount)
-        // sessionToken.didSet handles token persistence — don't delete it here.
       }
     } catch {
       loginError = (error as? APIError)?.userMessage ?? "Login failed."
@@ -373,6 +370,23 @@ final class AppState {
     reconnectRetryTask = nil
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
+  }
+
+  /// Clears the session token (shows login screen) but keeps username and password
+  /// so the user can reconnect with a single tap of the Connect button.
+  /// Used for automatic session recovery when cold-start connection fails.
+  func softLogout(reason: String) {
+    Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+    sessionToken = nil
+    pairingCode = nil
+    isDemoMode = false
+    loginError = reason
+    watchlistItems = []
+    reconnectRetryTask?.cancel()
+    reconnectRetryTask = nil
+    stopHeartbeatTimer()
+    clearHomeState()
+    // Keep savedPassword and username intact so Connect works immediately.
   }
 
   /// Called when a network operation fails. Distinguishes:
@@ -518,9 +532,9 @@ final class AppState {
         }
         delay = min(delay * 2, 30)
       }
-      homeLog.warning("backgroundReconnect: all \(maxAttempts) attempts exhausted — server still unreachable")
+      homeLog.warning("backgroundReconnect: all \(maxAttempts) attempts exhausted — soft-logging out for clean reconnect")
       serverUnreachable = false
-      homeError = "Unable to reach your server. Check that DSVideoServer is running, then pull to refresh."
+      softLogout(reason: "Connection could not be restored. Sign in again to reconnect.")
     }
   }
 
