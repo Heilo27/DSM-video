@@ -124,9 +124,9 @@ final class AppState {
   init() {
     let d = UserDefaults.standard
     let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:8090"
-    // useHTTPS defaults to true for security — new installs encrypt by default.
-    // Users on a plain-HTTP LAN can toggle HTTPS off in Settings.
-    let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? true
+    // useHTTPS defaults to false — port 8090 is plain HTTP; login() auto-detects
+    // and persists the correct scheme from whichever candidate wins.
+    let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
     let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 8090
 

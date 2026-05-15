@@ -5276,23 +5276,24 @@ func requestBaseURL(r *http.Request, cfgBaseURL string) string {
 	if r.TLS != nil {
 		scheme = "https"
 	}
+	// Prefer X-Forwarded-Host (explicitly set by our nginx config) over r.Host.
+	// DSM nginx may proxy with HTTP/1.0 which doesn't reliably forward the Host
+	// header — X-Forwarded-Host is always set to $http_host so it's trustworthy.
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	if host == "" {
+		host = r.URL.Host
+	}
 	// Respect X-Forwarded-Proto from reverse proxies (e.g., DSM nginx).
-	// Exception: if the host looks like a QuickConnect relay (quickconnect.to / direct.quickconnect.to),
-	// the relay speaks plain HTTP regardless of what nginx reports — override to http.
+	// Exception: QuickConnect relay always speaks HTTP regardless of nginx's proto.
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		host := r.Host
-		if host == "" {
-			host = r.URL.Host
-		}
-		if (strings.Contains(host, "quickconnect.to")) {
-			scheme = "http" // relay tunnel is always HTTP; nginx proto header is misleading here
+		if strings.Contains(host, "quickconnect.to") {
+			scheme = "http"
 		} else {
 			scheme = proto
 		}
-	}
-	host := r.Host
-	if host == "" {
-		host = r.URL.Host
 	}
 	if host == "" {
 		return "http://localhost:8080" // fallback
