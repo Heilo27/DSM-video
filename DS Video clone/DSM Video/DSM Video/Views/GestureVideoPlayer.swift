@@ -852,14 +852,15 @@ struct GestureVideoPlayer: View {
             asset = AVURLAsset(url: url)
         }
         let playerItem = AVPlayerItem(asset: asset)
-        // Buffer 10 seconds ahead — enough for smooth AirPlay without over-fetching.
-        // Default (0) lets AVPlayer decide, which can be too conservative on HLS and
-        // causes the periodic black-screen stalls seen during AirPlay sessions.
-        playerItem.preferredForwardBufferDuration = 10
+        // Large forward buffer for WAN streaming: AVPlayer will pre-fetch aggressively
+        // even while paused, giving the stream time to fill before playback resumes.
+        // 120s means a 2-minute head-start can accumulate on a slow connection.
+        playerItem.preferredForwardBufferDuration = 120
         let newPlayer = AVPlayer(playerItem: playerItem)
-        // Don't wait for the ideal stall-free moment to start — start as soon as
-        // the buffer is ready. This prevents the periodic "hold" gaps on AirPlay.
-        newPlayer.automaticallyWaitsToMinimizeStalling = false
+        // Let AVPlayer wait and rebuffer automatically when bandwidth is insufficient.
+        // This allows the player to pause internally, accumulate buffer, then resume
+        // on its own when the connection recovers — no user action required.
+        newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
 
         // Observe playback status
