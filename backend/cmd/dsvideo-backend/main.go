@@ -5268,8 +5268,13 @@ func randID(prefix string) string {
 // Falls back to deriving from the request Host header for direct-IP deployments.
 func requestBaseURL(r *http.Request, cfgBaseURL string) string {
 	// Operator-configured base URL takes priority (relay/QuickConnect deployments).
-	if cfgBaseURL != "" && !strings.HasPrefix(cfgBaseURL, "http://localhost") &&
-		!strings.HasPrefix(cfgBaseURL, "https://localhost") {
+	// Skip loopback values — the start script defaults to http://127.0.0.1:PORT which
+	// is not a useful external URL; treat those the same as unset.
+	isLoopback := strings.HasPrefix(cfgBaseURL, "http://localhost") ||
+		strings.HasPrefix(cfgBaseURL, "https://localhost") ||
+		strings.HasPrefix(cfgBaseURL, "http://127.") ||
+		strings.HasPrefix(cfgBaseURL, "https://127.")
+	if cfgBaseURL != "" && !isLoopback {
 		return strings.TrimRight(cfgBaseURL, "/")
 	}
 	scheme := "http"

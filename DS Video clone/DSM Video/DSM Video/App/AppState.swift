@@ -1014,7 +1014,8 @@ final class AppState {
 
   /// Lightweight check — fires every 30s in foreground. Only syncs if sequences changed.
   func runHeartbeat() async {
-    guard !isDemoMode, !homeIsLoading, !homeIsBackgroundRefreshing else { return }
+    guard !isDemoMode, !homeIsLoading, !homeIsBackgroundRefreshing,
+          api.baseURL != AppState.fallbackURL else { return }
     let apiSnapshot = api
     do {
       let beat = try await apiSnapshot.syncHeartbeat()
