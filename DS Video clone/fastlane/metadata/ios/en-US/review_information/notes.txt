@@ -1,1 +1,10 @@
-DSM Video connects to a Synology NAS on the local network. For review, the app can be tested without a NAS — the onboarding flow, server discovery screen, and all UI is accessible without a live server connection. A Synology NAS is required only to actually stream video content.
+Use the demo account to review the app without a Synology NAS.
+
+Demo credentials:
+  Username: appledemo
+  Password: DSVideo2024
+  Server: (any value — leave as-is or type anything)
+
+The app detects these credentials and enters demo mode automatically. No NAS or network connection is required. All content shown is fictional and non-copyrighted — created specifically for App Review.
+
+The demo mode shows a full library of movies and TV shows, including browse, detail pages, seasons, episodes, search, and continue watching. Playback is not available in demo mode as no actual video files are present.

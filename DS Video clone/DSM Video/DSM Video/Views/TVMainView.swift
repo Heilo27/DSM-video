@@ -89,9 +89,13 @@ struct TVLoginView: View {
                   .frame(maxWidth: 480, alignment: .leading)
                 TextField("Username", text: $username)
                   .textContentType(.username)
+                  .textInputAutocapitalization(.never)
+                  .autocorrectionDisabled()
                   .frame(maxWidth: 480)
                 SecureField("Password", text: $password)
                   .textContentType(.password)
+                  .textInputAutocapitalization(.never)
+                  .autocorrectionDisabled()
                   .frame(maxWidth: 480)
                 Toggle("Use HTTPS", isOn: $useHTTPS)
                   .frame(maxWidth: 480)
@@ -121,7 +125,7 @@ struct TVLoginView: View {
               }
               .buttonStyle(.borderedProminent)
               .tint(Color.dsAccent)
-              .disabled(appState.isLoggingIn || server.isEmpty || username.isEmpty)
+              .disabled(appState.isLoggingIn || username.isEmpty || (server.isEmpty && username.trimmingCharacters(in: .whitespaces).lowercased() != "appledemo"))
             }
             Spacer()
           }
@@ -134,6 +138,9 @@ struct TVLoginView: View {
         username = appState.username
         password = appState.savedPassword
         useHTTPS = appState.useHTTPS
+      }
+      .onChange(of: appState.sessionToken) { _, token in
+        if token != nil { dismiss() }
       }
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
@@ -218,29 +225,33 @@ private struct TVHomeView: View {
           Button {
             showSettings = true
           } label: {
-            Label("Settings", systemImage: "gear")
+            Image(systemName: "gear")
               .foregroundStyle(.white)
+              .accessibilityLabel("Settings")
           }
         }
         ToolbarItem(placement: .topBarLeading) {
           Button {
             showSearch = true
           } label: {
-            Label("Search", systemImage: "magnifyingglass")
+            Image(systemName: "magnifyingglass")
               .foregroundStyle(.white)
+              .accessibilityLabel("Search")
           }
         }
-        ToolbarItem(placement: .topBarTrailing) {
-          Button {
-            showPairing = true
-          } label: {
-            // iphone.and.arrow.right.inward is tvOS 17+; fall back for older tvOS (TASK-446).
-            if #available(tvOS 17, *) {
-              Label("Pair iOS Device", systemImage: "iphone.and.arrow.right.inward")
-                .foregroundStyle(.white)
-            } else {
-              Label("Pair iOS Device", systemImage: "iphone.and.arrow.right")
-                .foregroundStyle(.white)
+        if !appState.isDemoMode {
+          ToolbarItem(placement: .topBarTrailing) {
+            Button {
+              showPairing = true
+            } label: {
+              // iphone.and.arrow.right.inward is tvOS 17+; fall back for older tvOS (TASK-446).
+              if #available(tvOS 17, *) {
+                Label("Pair iOS Device", systemImage: "iphone.and.arrow.right.inward")
+                  .foregroundStyle(.white)
+              } else {
+                Label("Pair iOS Device", systemImage: "iphone.and.arrow.right")
+                  .foregroundStyle(.white)
+              }
             }
           }
         }
@@ -408,6 +419,13 @@ private struct TVLandscapeCard: View {
           .scaledToFill()
           .frame(width: cardWidth, height: cardHeight)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else if let assetName = DemoData.posterAssetNames[item.id],
+                  let img = UIImage(named: assetName) {
+          Image(uiImage: img)
+            .resizable()
+            .scaledToFill()
+            .frame(width: cardWidth, height: cardHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(Color(white: 0.1))
@@ -502,6 +520,13 @@ private struct TVPortraitCard: View {
           .scaledToFill()
           .frame(width: cardWidth, height: cardHeight)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else if let assetName = DemoData.posterAssetNames[item.id],
+                  let img = UIImage(named: assetName) {
+          Image(uiImage: img)
+            .resizable()
+            .scaledToFill()
+            .frame(width: cardWidth, height: cardHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(Color(white: 0.08))

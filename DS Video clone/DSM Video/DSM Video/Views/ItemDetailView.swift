@@ -4,6 +4,7 @@ import SwiftUI
 struct ItemDetailView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  @Environment(\.dismiss) private var dismiss
   @State private var downloadManager = DownloadManager.shared
   let itemID: String
   let fallbackTitle: String
@@ -212,7 +213,19 @@ struct ItemDetailView: View {
       .toolbarVisibility(.hidden, for: .tabBar)
       #endif
     }
-    #if !os(tvOS)
+    #if os(tvOS)
+    .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Button {
+          dismiss()
+        } label: {
+          Image(systemName: "chevron.left")
+            .foregroundStyle(.white)
+        }
+        .accessibilityLabel("Back")
+      }
+    }
+    #else
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
         Menu {
@@ -1037,6 +1050,18 @@ private struct PlayerSheet: View {
     lastKnownDuration = 0
     lastSyncedPosition = 0
     isOffline = false
+
+    // Demo mode — play the bundled royalty-free sample video (Big Buck Bunny,
+    // Blender Foundation, CC BY 3.0) instead of hitting the server.
+    if appState.isDemoMode {
+      if let demoURL = Bundle.main.url(forResource: "demo_video", withExtension: "mp4") {
+        playbackURL = demoURL
+      } else {
+        error = "Demo video not found."
+      }
+      return
+    }
+
     // Check if we have a downloaded version first
     if let downloaded = DownloadManager.shared.getDownloadedItem(itemId: itemID) {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)

@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Network
 import Observation
@@ -257,11 +256,6 @@ final class AppState {
     savedPassword = value
   }
 
-  private func sha256(_ string: String) -> String {
-    let data = Data(string.utf8)
-    let hash = SHA256.hash(data: data)
-    return hash.compactMap { String(format: "%02x", $0) }.joined()
-  }
 
   func login() async {
     loginError = nil
@@ -274,11 +268,13 @@ final class AppState {
     // has no real data — it uses a synthetic local session with no server tokens. The hashes
     // in source code are intentionally public-safe. A future hardening option would be PBKDF2
     // with a stored salt, but the risk/reward for a synthetic demo account is low.
-    let demoUserHash = "fd3585e838137398830f6e33b448a8616344ca4352539a7da3b3e5cecd0957c4"
-    let demoPassHash = "293211d16112d308c2b21026d33e94326940be9f79a8bcd6f681c6f528c60058"
-    if sha256(username.trimmingCharacters(in: .whitespaces)) == demoUserHash &&
-       sha256(savedPassword) == demoPassHash {
+    if username.trimmingCharacters(in: .whitespaces).lowercased() == "appledemo" &&
+       savedPassword.trimmingCharacters(in: .whitespaces).lowercased() == "dsvideo2024" {
       isDemoMode = true
+      // Clear any real NAS data that may have loaded before demo login
+      homeLibraries = DemoData.libraries
+      let demoItems = DemoData.movieItems + DemoData.tvItems
+      recomputeHomeRails(from: demoItems)
       sessionToken = "demo"
       return
     }
