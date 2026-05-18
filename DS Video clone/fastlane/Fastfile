@@ -4,8 +4,8 @@ default_platform(:ios)
 
 # iOS bundle ID
 IOS_BUNDLE_ID  = "HeiloProjects.DSReel"
-# tvOS bundle ID
-TVOS_BUNDLE_ID = "HeiloProjects.DSReel.tvOS"
+# tvOS bundle ID (same app as iOS in ASC — platform param distinguishes it)
+TVOS_BUNDLE_ID = "HeiloProjects.DSReel"
 
 def api_key
   config = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
@@ -46,6 +46,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
+      metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
       skip_metadata:       true,
@@ -93,6 +94,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      TVOS_BUNDLE_ID,
+      metadata_path:       "metadata/tvos",
       platform:            "appletvos",
       skip_binary_upload:  true,
       skip_screenshots:    true,
