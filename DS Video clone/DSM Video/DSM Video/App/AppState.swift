@@ -517,6 +517,7 @@ final class AppState {
           // so the cancel() it used to call doesn't abort this task mid-flight.
           reconnectRetryTask = nil
           serverUnreachable = false
+          startHeartbeatTimer()
           await homeLoad()
           return
         }

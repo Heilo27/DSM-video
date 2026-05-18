@@ -82,6 +82,8 @@ struct TVLoginView: View {
 
               VStack(spacing: 16) {
                 TextField("Server Address", text: $server)
+                  .textInputAutocapitalization(.never)
+                  .autocorrectionDisabled()
                   .frame(maxWidth: 480)
                 Text("Enter your NAS IP address or QuickConnect ID")
                   .font(.system(size: 14))
@@ -393,6 +395,8 @@ private struct TVLibraryRail: View {
     // LocalStore empty (first launch before sync completes) — fall back to API.
     do {
       items = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
+    } catch is CancellationError {
+      // View disappeared — discard, don't set error
     } catch {
       self.error = (error as? APIError)?.userMessage ?? "Couldn't load"
     }
