@@ -46,6 +46,11 @@ struct GestureVideoPlayer: View {
     var onGoToShow: (() -> Void)?
 
     @State private var player: AVPlayer?
+    #if os(iOS)
+    @State private var pipController: AVPictureInPictureController?
+    @State private var pipDelegate: PictureInPictureDelegate?
+    @State private var isPiPActive: Bool = false
+    #endif
     @State private var isPlaying: Bool = false
     @State private var showControls: Bool = true
     @State private var controlsInteractive: Bool = true
@@ -132,6 +137,10 @@ struct GestureVideoPlayer: View {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .background {
+                    #if os(iOS)
+                    // Don't pause if PiP is active — the player must keep running.
+                    guard !isPiPActive else { return }
+                    #endif
                     // Pause playback when backgrounded. Progress sync is handled by
                     // the parent PlayerSheet's own scenePhase handler to avoid a double write.
                     player?.pause()
@@ -238,10 +247,19 @@ struct GestureVideoPlayer: View {
             // Video layer
             if let player {
                 if videoFillMode == .fill {
+                    #if os(iOS)
+                    VideoPlayerLayer(player: player, gravity: .resizeAspectFill, onLayerReady: setupPiP)
+                        .ignoresSafeArea()
+                    #else
                     VideoPlayerLayer(player: player, gravity: .resizeAspectFill)
                         .ignoresSafeArea()
+                    #endif
                 } else {
+                    #if os(iOS)
+                    VideoPlayerLayer(player: player, gravity: .resizeAspect, onLayerReady: setupPiP)
+                    #else
                     VideoPlayerLayer(player: player, gravity: .resizeAspect)
+                    #endif
                 }
             }
 
@@ -454,12 +472,29 @@ struct GestureVideoPlayer: View {
 
                 Spacer()
 
-                // Right actions: AirPlay + fill mode + speed selector
+                // Right actions: AirPlay + PiP + fill mode + speed selector
                 HStack(spacing: 16) {
                     // AirPlay button (iOS only)
                     #if os(iOS)
                     AirPlayButton()
                         .frame(width: 44, height: 44)
+
+                    // Picture-in-Picture button (iOS only)
+                    if AVPictureInPictureController.isPictureInPictureSupported(), pipController != nil {
+                        Button {
+                            if isPiPActive {
+                                pipController?.stopPictureInPicture()
+                            } else {
+                                pipController?.startPictureInPicture()
+                            }
+                        } label: {
+                            Image(systemName: isPiPActive ? "pip.exit" : "pip.enter")
+                                .font(.title3)
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                        }
+                        .accessibilityLabel(isPiPActive ? "Exit Picture in Picture" : "Picture in Picture")
+                    }
                     #endif
 
                     // Captions / subtitle picker
@@ -1096,6 +1131,20 @@ private extension GestureVideoPlayer {
     // MARK: - Helpers
 
     #if os(iOS)
+    private func setupPiP(layer: AVPlayerLayer) {
+        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        guard pipController == nil else { return }
+        guard let controller = AVPictureInPictureController(playerLayer: layer) else { return }
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        let delegate = PictureInPictureDelegate(
+            onWillStart: { isPiPActive = true },
+            onDidStop: { isPiPActive = false }
+        )
+        controller.delegate = delegate
+        pipController = controller
+        pipDelegate = delegate
+    }
+
     /// Locks orientation to landscape when the player appears.
     /// Uses setNeedsUpdateOfSupportedInterfaceOrientations (declarative) so UIKit
     /// rotates on its own next layout pass without competing with the fullScreenCover
@@ -1164,11 +1213,17 @@ private extension GestureVideoPlayer {
 struct VideoPlayerLayer: UIViewRepresentable {
     let player: AVPlayer
     var gravity: AVLayerVideoGravity = .resizeAspect
+    #if os(iOS)
+    var onLayerReady: ((AVPlayerLayer) -> Void)? = nil
+    #endif
 
     func makeUIView(context: Context) -> PlayerUIView {
         let view = PlayerUIView()
         view.player = player
         view.playerLayer.videoGravity = gravity
+        #if os(iOS)
+        onLayerReady?(view.playerLayer)
+        #endif
         return view
     }
 
@@ -1230,6 +1285,35 @@ struct VideoPlayerLayer: NSViewRepresentable {
             super.layout()
             playerLayer?.frame = bounds
         }
+    }
+}
+#endif
+
+// MARK: - PiP Delegate
+
+#if os(iOS)
+private final class PictureInPictureDelegate: NSObject, AVPictureInPictureControllerDelegate {
+    var onWillStart: () -> Void
+    var onDidStop: () -> Void
+
+    init(onWillStart: @escaping () -> Void, onDidStop: @escaping () -> Void) {
+        self.onWillStart = onWillStart
+        self.onDidStop = onDidStop
+    }
+
+    func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        onWillStart()
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        onDidStop()
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    ) {
+        completionHandler(true)
     }
 }
 #endif
