@@ -932,7 +932,11 @@ private struct PlayerSheet: View {
                   dismiss()
                   return
                 }
-                try? await Task.sleep(for: .seconds(1))
+                do {
+                  try await Task.sleep(for: .seconds(1))
+                } catch {
+                  return // Task cancelled — don't fire onPlayNextEpisode
+                }
               }
             }
           },
@@ -976,6 +980,8 @@ private struct PlayerSheet: View {
       // onPlayNextEpisode into a dismissed view, causing a navigation no-op and potential crash.
       countdownTask?.cancel()
       countdownTask = nil
+      subtitleOffsetRestartTask?.cancel()
+      subtitleOffsetRestartTask = nil
     }
     .onChange(of: scenePhase) { _, newPhase in
       // TASK-270: flush pending progress when app goes to background so force-kill

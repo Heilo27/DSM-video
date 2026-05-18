@@ -169,6 +169,7 @@ struct TVPairingView: View {
                   Spacer()
                   Image(systemName: "chevron.right")
                     .foregroundStyle(Color.dsTextMuted)
+                    .accessibilityHidden(true)
                 }
                 .padding(.horizontal, 32)
                 .padding(.vertical, 18)
@@ -179,7 +180,7 @@ struct TVPairingView: View {
                     .stroke(Color.dsBorderStrong, lineWidth: 1)
                 )
               }
-              .buttonStyle(TVFocusButtonStyle())
+              .buttonStyle(.card)
               .frame(maxWidth: 600)
             }
           }
@@ -197,7 +198,8 @@ struct TVPairingView: View {
         Button("Sign in manually") {
           showManualLogin = true
         }
-        .buttonStyle(TVFocusButtonStyle())
+        .buttonStyle(.bordered)
+        .tint(Color.dsTextSecondary)
         .font(.system(size: 19))
         .foregroundStyle(Color.dsTextSecondary)
         .padding(.top, 40)

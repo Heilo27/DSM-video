@@ -8,3 +8,5 @@ Demo credentials:
 The app detects these credentials and enters demo mode automatically. No NAS or network connection is required. All content shown is fictional and non-copyrighted — created specifically for App Review.
 
 The demo mode shows a full library of movies and TV shows, including browse, detail pages, seasons, episodes, search, and continue watching. A bundled demo video is available — tap Play on any item to watch it.
+
+Note: The app includes an ATS exception for quickconnect.to to support Synology's QuickConnect relay service, which uses HTTP redirects before establishing a direct connection.

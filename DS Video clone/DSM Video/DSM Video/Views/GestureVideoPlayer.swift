@@ -83,6 +83,7 @@ struct GestureVideoPlayer: View {
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var hideVolumeIndicatorTask: Task<Void, Never>?
     @State private var skipHideTask: Task<Void, Never>?
+    @State private var controlsHideTask: Task<Void, Never>?
     @State private var timeObserver: Any?
     // MARK: ACKNOWLEDGED (TASK-199): Set<AnyCancellable> in @State is a known pattern limitation
     // for struct-based SwiftUI views. The subscriptions established in setupPlayer() are stored
@@ -164,7 +165,8 @@ struct GestureVideoPlayer: View {
             if newValue {
                 controlsInteractive = true
             } else {
-                Task { @MainActor in
+                controlsHideTask?.cancel()
+                controlsHideTask = Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(250))
                     controlsInteractive = false
                 }
@@ -973,6 +975,7 @@ struct GestureVideoPlayer: View {
         hideControlsTask?.cancel()
         hideVolumeIndicatorTask?.cancel()
         skipHideTask?.cancel()
+        controlsHideTask?.cancel()
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
         }
@@ -1039,7 +1042,7 @@ struct GestureVideoPlayer: View {
         }
 
         skipHideTask?.cancel()
-        skipHideTask = Task {
+        skipHideTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 500_000_000)
             guard !Task.isCancelled else { return }
             withAnimation(.easeIn(duration: 0.15)) {
@@ -1141,6 +1144,7 @@ private extension GestureVideoPlayer {
 
     #if os(iOS)
     private func setupPiP(layer: AVPlayerLayer) {
+        guard !isPiPActive else { return }
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .moviePlayback)
         try? session.setActive(true)
@@ -1507,11 +1511,13 @@ private struct SubtitleAudioPickerView: View {
             Text("Offset")
             Spacer()
             Button("-") { subtitleOffsetSeconds = max(-10, subtitleOffsetSeconds - 0.5); onOffsetChange?(subtitleOffsetSeconds) }
+                .accessibilityLabel("Decrease subtitle offset")
             Text(subtitleOffsetSeconds == 0 ? "0.0s" : String(format: "%+.1fs", subtitleOffsetSeconds))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(minWidth: 50)
             Button("+") { subtitleOffsetSeconds = min(10, subtitleOffsetSeconds + 0.5); onOffsetChange?(subtitleOffsetSeconds) }
+                .accessibilityLabel("Increase subtitle offset")
         }
         #endif
     }

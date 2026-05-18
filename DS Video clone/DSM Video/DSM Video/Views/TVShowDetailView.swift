@@ -335,6 +335,7 @@ private struct TVEpisodeRow: View {
         .font(.system(size: 17, weight: .semibold).monospacedDigit())
         .foregroundStyle(Color.dsTextMuted)
         .frame(width: 40, alignment: .center)
+        .accessibilityHidden(true)
 
       // Thumbnail (16:9 landscape)
       ZStack {
@@ -416,6 +417,7 @@ private struct TVEpisodeRow: View {
       }
     }
     .padding(.vertical, 16)
+    .accessibilityElement(children: .combine)
   }
 }
 
@@ -501,6 +503,7 @@ private struct TVShowDetailScrollView: View {
         } label: {
           Image(systemName: "ellipsis.circle")
         }
+        .accessibilityLabel("More options")
       }
     }
     .sheet(isPresented: $showMetadataFixer, onDismiss: {

@@ -558,6 +558,7 @@ final class AppState {
   }
 
   func generatePairingCode() async {
+    guard !isDemoMode else { return }
     pairingError = nil
     isGeneratingPairingCode = true
     defer { isGeneratingPairingCode = false }
@@ -860,6 +861,7 @@ final class AppState {
   /// FIX-10: Wraps a background delta sync in a UIApplication background task so iOS
   /// grants up to 30s of extra runtime. Without this, iOS may suspend the process
   /// mid-sync ~30s after backgrounding, leaving the database in an inconsistent state.
+  @MainActor
   private func runDeltaSyncWithBackgroundTask() async {
     #if canImport(UIKit)
     // FIX-2: nonisolated(unsafe) var captures the task ID by reference in the expiry closure.
@@ -1037,6 +1039,7 @@ final class AppState {
 
   /// Optimistic progress write: update local store immediately, then fire network write.
   func recordProgress(itemId: String, positionSeconds: Int, durationSeconds: Int) async {
+    guard !isDemoMode else { return }
     await LocalStore.shared.upsertSingleProgress(
       itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
     let apiSnapshot = api

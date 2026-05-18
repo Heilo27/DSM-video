@@ -657,7 +657,8 @@ private struct TVSettingsView: View {
               .foregroundStyle(.white)
               .frame(maxWidth: 400, alignment: .leading)
           }
-          .buttonStyle(TVFocusButtonStyle())
+          .buttonStyle(.bordered)
+          .tint(.white)
           .accessibilityHint("Select to sign out of your account")
 
           Spacer()
@@ -779,7 +780,10 @@ private struct TVSearchView: View {
           }
         }
       }
-      .onSubmit(of: .search) { Task { await search() } }
+      .onSubmit(of: .search) {
+        debounceTask?.cancel()
+        debounceTask = Task { await search() }
+      }
       .onDisappear {
         debounceTask?.cancel()
       }
@@ -809,18 +813,12 @@ private struct TVSearchView: View {
       results = []
       searchError = (error as? APIError)?.userMessage ?? error.localizedDescription
     }
-  }
-}
 
-/// Applies a subtle scale + brightness lift when focused — satisfies tvOS HIG focus requirement
-/// for buttons using custom layouts incompatible with .borderedProminent.
-struct TVFocusButtonStyle: ButtonStyle {
-  @Environment(\.isFocused) private var isFocused
-  func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .scaleEffect(isFocused ? 1.05 : 1.0)
-      .brightness(isFocused ? 0.15 : 0)
-      .animation(.easeInOut(duration: 0.15), value: isFocused)
+    if !results.isEmpty {
+      UIAccessibility.post(notification: .announcement, argument: "\(results.count) results found")
+    } else if hasSearched {
+      UIAccessibility.post(notification: .announcement, argument: "No results found")
+    }
   }
 }
 

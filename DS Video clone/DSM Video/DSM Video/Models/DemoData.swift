@@ -18,7 +18,7 @@ enum DemoData {
                 year: 2023, durationSeconds: 7440,
                 addedAt: "2024-02-10T09:00:00Z", rating: 8.2,
                 posterImageId: nil, backdropImageId: nil,
-                progress: ItemProgress(positionSeconds: 7440, durationSeconds: 7440, updatedAt: "2024-03-01T20:00:00Z"),
+                progress: ItemProgress(positionSeconds: 3348, durationSeconds: 7440, updatedAt: "2024-03-01T20:00:00Z"),
                 showName: nil, seasonNumber: nil, episodeNumber: nil),
     ItemSummary(id: "dm-2", type: "movie", title: "Crimson Protocol",
                 year: 2022, durationSeconds: 6600,
