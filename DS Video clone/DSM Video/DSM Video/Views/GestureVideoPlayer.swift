@@ -1121,6 +1121,7 @@ struct GestureVideoPlayer: View {
 
 #if os(iOS)
 /// Caches the MPVolumeView slider to avoid creating a new one on every volume change
+@MainActor
 private final class VolumeSliderCache {
     static let shared = VolumeSliderCache()
 

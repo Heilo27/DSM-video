@@ -733,6 +733,8 @@ private struct iOSSeasonSection: View {
       let resp = try await appState.api.tvShowEpisodes(
         showId: show.id, season: season.seasonNumber, libraryId: library.id)
       episodes = resp.items
+    } catch is CancellationError {
+      self.error = nil
     } catch {
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }
