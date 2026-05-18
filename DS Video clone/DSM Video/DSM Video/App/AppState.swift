@@ -862,9 +862,10 @@ final class AppState {
   /// mid-sync ~30s after backgrounding, leaving the database in an inconsistent state.
   private func runDeltaSyncWithBackgroundTask() async {
     #if canImport(UIKit)
-    // Declare taskID before beginBackgroundTask so the expiry closure captures
-    // the variable by reference and sees the assigned value, not .invalid.
-    var bgTaskID: UIBackgroundTaskIdentifier = .invalid
+    // nonisolated(unsafe) lets the @Sendable expiry closure capture bgTaskID
+    // by reference without a concurrency warning — safe because UIKit serialises
+    // beginBackgroundTask / endBackgroundTask on the main thread.
+    nonisolated(unsafe) var bgTaskID: UIBackgroundTaskIdentifier = .invalid
     bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
       UIApplication.shared.endBackgroundTask(bgTaskID)
     }
