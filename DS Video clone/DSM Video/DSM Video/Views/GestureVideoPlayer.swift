@@ -1265,7 +1265,10 @@ struct VideoPlayerLayer: UIViewRepresentable {
         if uiView.playerLayer.videoGravity != gravity {
             uiView.playerLayer.videoGravity = gravity
             #if os(iOS)
-            onLayerReady?(uiView.playerLayer)
+            // Defer onLayerReady so @State writes inside it (pipController, pipDelegate)
+            // land after SwiftUI's current render pass, not inside updateUIView.
+            let layer = uiView.playerLayer
+            Task { @MainActor in onLayerReady?(layer) }
             #endif
         }
     }
