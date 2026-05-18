@@ -815,9 +815,9 @@ private struct TVSearchView: View {
     }
 
     if !results.isEmpty {
-      UIAccessibility.post(notification: .announcement, argument: "\(results.count) results found")
+      AccessibilityNotification.Announcement("\(results.count) results found").post()
     } else if hasSearched {
-      UIAccessibility.post(notification: .announcement, argument: "No results found")
+      AccessibilityNotification.Announcement("No results found").post()
     }
   }
 }

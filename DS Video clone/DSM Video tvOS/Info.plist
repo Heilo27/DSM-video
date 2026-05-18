@@ -30,8 +30,6 @@
         <key>CFBundlePrimaryIcon</key>
         <string>AppIconTV</string>
     </dict>
-    <key>LSRequiresIPhoneOS</key>
-    <true/>
     <key>MinimumOSVersion</key>
     <string>17.0</string>
     <key>UIRequiredDeviceCapabilities</key>
@@ -40,6 +38,12 @@
     </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.entertainment</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>DSM Video connects to your Synology NAS on the local network to stream your video library.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_dsvideo._tcp</string>
+    </array>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

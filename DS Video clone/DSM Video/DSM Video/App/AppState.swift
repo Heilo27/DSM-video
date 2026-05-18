@@ -270,6 +270,7 @@ final class AppState {
       let demoItems = DemoData.movieItems + DemoData.tvItems
       recomputeHomeRails(from: demoItems)
       sessionToken = "demo"
+      startHeartbeatTimer()
       return
     }
 
@@ -315,6 +316,7 @@ final class AppState {
             if !savedPassword.isEmpty {
               Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
             }
+            startHeartbeatTimer()
             return
           } catch {
             homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
@@ -342,6 +344,7 @@ final class AppState {
       if !savedPassword.isEmpty {
         Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
       }
+      startHeartbeatTimer()
     } catch {
       loginError = (error as? APIError)?.userMessage ?? "Login failed."
     }
