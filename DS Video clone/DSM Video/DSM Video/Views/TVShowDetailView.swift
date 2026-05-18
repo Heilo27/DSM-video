@@ -311,7 +311,11 @@ private struct TVSeasonSection: View {
       let resp = try await appState.api.tvShowEpisodes(
         showId: show.id, season: season.seasonNumber, libraryId: library.id)
       episodes = resp.items
+    } catch is CancellationError {
+      self.error = nil
     } catch {
+      let nsErr = error as NSError
+      if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }
   }

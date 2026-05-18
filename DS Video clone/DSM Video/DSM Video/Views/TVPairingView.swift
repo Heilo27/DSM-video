@@ -179,7 +179,7 @@ struct TVPairingView: View {
                     .stroke(Color.dsBorderStrong, lineWidth: 1)
                 )
               }
-              .buttonStyle(.plain)
+              .buttonStyle(TVFocusButtonStyle())
               .frame(maxWidth: 600)
             }
           }
@@ -197,7 +197,7 @@ struct TVPairingView: View {
         Button("Sign in manually") {
           showManualLogin = true
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TVFocusButtonStyle())
         .font(.system(size: 19))
         .foregroundStyle(Color.dsTextSecondary)
         .padding(.top, 40)

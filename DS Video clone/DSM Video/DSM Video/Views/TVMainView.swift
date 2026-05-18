@@ -657,7 +657,7 @@ private struct TVSettingsView: View {
               .foregroundStyle(.white)
               .frame(maxWidth: 400, alignment: .leading)
           }
-          .buttonStyle(.plain)
+          .buttonStyle(TVFocusButtonStyle())
           .accessibilityHint("Select to sign out of your account")
 
           Spacer()
@@ -685,34 +685,15 @@ private struct TVSearchView: View {
 
   var body: some View {
     NavigationStack {
-      VStack(alignment: .leading, spacing: 32) {
-        TextField("Search your library", text: $searchText)
-          .font(.system(size: 32))
-          .frame(maxWidth: 800)
-          .onSubmit { Task { await search() } }
-          .onChange(of: searchText) { _, newValue in
-            if newValue.isEmpty {
-              debounceTask?.cancel()
-              results = []
-              hasSearched = false
-              searchError = nil
-            } else if newValue.count >= 2 {
-              debounceTask?.cancel()
-              debounceTask = Task {
-                if (try? await Task.sleep(for: .milliseconds(500))) != nil {
-                  await search()
-                }
-              }
-            }
-          }
-
+      Group {
         if isSearching {
           ProgressView("Searching…")
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         } else if let err = searchError {
           Text(err)
             .font(.callout)
             .foregroundStyle(Color.dsError)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         } else if hasSearched && results.isEmpty {
           ContentUnavailableView(
             "No Results",
@@ -764,16 +745,15 @@ private struct TVSearchView: View {
               }
             }
           }
-        } else if !hasSearched {
-          Text("Enter a title to search your library")
-            .font(.system(size: 22))
-            .foregroundStyle(Color.dsTextSecondary)
-            .frame(maxWidth: .infinity, alignment: .center)
+        } else {
+          ContentUnavailableView(
+            "Search Your Library",
+            systemImage: "magnifyingglass",
+            description: Text("Enter a title to find movies and TV shows")
+          )
+          .foregroundStyle(.white)
         }
-
-        Spacer()
       }
-      .padding(.top, 60)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .background(Color.black.ignoresSafeArea())
       .navigationTitle("Search")
@@ -782,6 +762,24 @@ private struct TVSearchView: View {
           Button("Done") { dismiss() }
         }
       }
+      .searchable(text: $searchText, prompt: "Search your library")
+      .onChange(of: searchText) { _, newValue in
+        if newValue.isEmpty {
+          debounceTask?.cancel()
+          results = []
+          hasSearched = false
+          searchError = nil
+        } else if newValue.count >= 2 {
+          debounceTask?.cancel()
+          debounceTask = Task {
+            do {
+              try await Task.sleep(for: .milliseconds(500))
+              await search()
+            } catch { }
+          }
+        }
+      }
+      .onSubmit(of: .search) { Task { await search() } }
       .onDisappear {
         debounceTask?.cancel()
       }
@@ -811,6 +809,18 @@ private struct TVSearchView: View {
       results = []
       searchError = (error as? APIError)?.userMessage ?? error.localizedDescription
     }
+  }
+}
+
+/// Applies a subtle scale + brightness lift when focused — satisfies tvOS HIG focus requirement
+/// for buttons using custom layouts incompatible with .borderedProminent.
+struct TVFocusButtonStyle: ButtonStyle {
+  @Environment(\.isFocused) private var isFocused
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .scaleEffect(isFocused ? 1.05 : 1.0)
+      .brightness(isFocused ? 0.15 : 0)
+      .animation(.easeInOut(duration: 0.15), value: isFocused)
   }
 }
 
