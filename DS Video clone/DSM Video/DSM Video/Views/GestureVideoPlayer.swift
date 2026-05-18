@@ -903,8 +903,10 @@ struct GestureVideoPlayer: View {
         player?.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { status in
-                isPlaying = status == .playing
-                isBuffering = status == .waitingToPlayAtSpecifiedRate
+                Task { @MainActor in
+                    isPlaying = status == .playing
+                    isBuffering = status == .waitingToPlayAtSpecifiedRate
+                }
             }
             .store(in: &cancellables)
 
@@ -916,8 +918,10 @@ struct GestureVideoPlayer: View {
             .sink { [weak playerItem] status in
                 if status == .failed {
                     let msg = playerItem?.error.map { GestureVideoPlayer.friendlyPlayerError($0) } ?? "Unable to play this video."
-                    playerError = msg
-                    isBuffering = false
+                    Task { @MainActor in
+                        playerError = msg
+                        isBuffering = false
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -927,13 +931,14 @@ struct GestureVideoPlayer: View {
             .receive(on: DispatchQueue.main)
             .sink { dur in
                 if dur.isNumeric {
-                    duration = CMTimeGetSeconds(dur)
-
-                    // Seek to resume position once we have duration
-                    if !hasResumedPosition && resumePosition > 0 && resumePosition < CMTimeGetSeconds(dur) {
-                        hasResumedPosition = true
-                        seek(to: resumePosition)
-                        currentTime = resumePosition
+                    let secs = CMTimeGetSeconds(dur)
+                    Task { @MainActor in
+                        duration = secs
+                        if !hasResumedPosition && resumePosition > 0 && resumePosition < secs {
+                            hasResumedPosition = true
+                            seek(to: resumePosition)
+                            currentTime = resumePosition
+                        }
                     }
                 }
             }
@@ -942,9 +947,12 @@ struct GestureVideoPlayer: View {
         // Periodic time observer
         let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-            if !isScrubbing {
-                currentTime = CMTimeGetSeconds(time)
-                onProgressUpdate?(currentTime, duration)
+            let secs = CMTimeGetSeconds(time)
+            Task { @MainActor in
+                if !isScrubbing {
+                    currentTime = secs
+                    onProgressUpdate?(currentTime, duration)
+                }
             }
         }
 
@@ -953,7 +961,7 @@ struct GestureVideoPlayer: View {
             .receive(on: DispatchQueue.main)
             .sink { [weak playerItem] _ in
                 guard playerItem != nil else { return }
-                onPlaybackFinished?()
+                Task { @MainActor in onPlaybackFinished?() }
             }
             .store(in: &cancellables)
 
@@ -1102,9 +1110,11 @@ struct GestureVideoPlayer: View {
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { newVolume in
-                volumeLevel = newVolume
-                showVolumeIndicator = true
-                scheduleHideVolumeIndicator()
+                Task { @MainActor in
+                    volumeLevel = newVolume
+                    showVolumeIndicator = true
+                    scheduleHideVolumeIndicator()
+                }
             }
             .store(in: &cancellables)
         #else
