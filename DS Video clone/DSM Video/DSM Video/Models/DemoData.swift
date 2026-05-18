@@ -1,7 +1,7 @@
 import Foundation
 
 /// Static demo content shown to App Review when logging in with demo credentials.
-/// Credentials: username "appledemo" / password "DSVideo2024" (any server address).
+/// Credentials: username "appledemo" / password "dsvideo2024" (any server address, case-insensitive).
 enum DemoData {
 
   // MARK: - Libraries

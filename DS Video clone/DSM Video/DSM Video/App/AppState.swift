@@ -683,8 +683,7 @@ final class AppState {
       // Guard after the off-actor compute: if self was deallocated (e.g. logout)
       // during the heavy lift, silently drop the result (TASK-434).
       guard let self else { return }
-      await MainActor.run { [weak self] in
-        guard let self else { return }
+      await MainActor.run {
         self.homeContinueWatching = cont
         self.homeJustAdded = added
         self.homeRecentlyWatched = watched

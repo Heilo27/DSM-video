@@ -389,6 +389,7 @@ private struct TVLibraryRail: View {
     let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
     if !cached.isEmpty {
       items = cached
+      error = nil
       return
     }
 
@@ -781,7 +782,7 @@ private struct TVSearchView: View {
             do {
               try await Task.sleep(for: .milliseconds(500))
               await search()
-            } catch { }
+            } catch { /* CancellationError — debounce task was cancelled, nothing to do */ }
           }
         }
       }

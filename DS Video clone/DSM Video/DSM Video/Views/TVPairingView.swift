@@ -263,7 +263,7 @@ struct TVPairingView: View {
       countdownTask = Task { @MainActor in
         while countdown > 0 {
           do {
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+            try await Task.sleep(for: .seconds(1))
           } catch {
             return // Task cancelled — exit cleanly
           }

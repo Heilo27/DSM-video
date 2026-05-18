@@ -515,7 +515,8 @@ struct ItemDetailView: View {
 
   // MARK: - Cast Section
 
-  /// Returns a deterministic accent color from a person's name for their avatar chip.
+  /// Returns a stable accent color from a person's name for their avatar chip.
+  /// Uses UTF-8 byte sum so the color is consistent across app launches.
   private func avatarColor(for name: String) -> Color {
     let palette: [Color] = [
       Color(red: 0.55, green: 0.25, blue: 0.75),  // purple
@@ -525,8 +526,8 @@ struct ItemDetailView: View {
       Color(red: 0.75, green: 0.25, blue: 0.35),  // rose
       Color(red: 0.45, green: 0.60, blue: 0.25),  // green
     ]
-    let index = abs(name.hashValue) % palette.count
-    return palette[index]
+    let hash = name.utf8.reduce(0, { $0 &+ Int($1) })
+    return palette[abs(hash) % palette.count]
   }
 
   @ViewBuilder

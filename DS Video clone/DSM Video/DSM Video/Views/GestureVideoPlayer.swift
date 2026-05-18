@@ -1023,7 +1023,7 @@ struct GestureVideoPlayer: View {
 
     private func skipForward() {
         let newTime = min(duration, currentTime + skipSeconds)
-        seek(to: newTime)  // fast seek (positiveInfinity tolerance)
+        seek(to: newTime)
         currentTime = newTime
         showSkipAnimation(direction: .forward)
         if isPlaying { scheduleHideControls() }
@@ -1031,7 +1031,7 @@ struct GestureVideoPlayer: View {
 
     private func skipBackward() {
         let newTime = max(0, currentTime - skipSeconds)
-        seek(to: newTime)  // fast seek (positiveInfinity tolerance)
+        seek(to: newTime)
         currentTime = newTime
         showSkipAnimation(direction: .backward)
         if isPlaying { scheduleHideControls() }
@@ -1044,7 +1044,7 @@ struct GestureVideoPlayer: View {
 
         skipHideTask?.cancel()
         skipHideTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             withAnimation(.easeIn(duration: 0.15)) {
                 showSkipIndicator = nil
@@ -1066,7 +1066,7 @@ struct GestureVideoPlayer: View {
         #endif
         hideControlsTask?.cancel()
         hideControlsTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_500_000_000) // 2.5 seconds
+            try? await Task.sleep(for: .milliseconds(2500))
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.3)) {
                 showControls = false
@@ -1077,7 +1077,7 @@ struct GestureVideoPlayer: View {
     private func scheduleHideVolumeIndicator() {
         hideVolumeIndicatorTask?.cancel()
         hideVolumeIndicatorTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
+            try? await Task.sleep(for: .milliseconds(1500))
             if !Task.isCancelled {
                 withAnimation(.easeOut(duration: 0.2)) {
                     showVolumeIndicator = false
