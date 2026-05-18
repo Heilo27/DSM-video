@@ -869,17 +869,15 @@ final class AppState {
   @MainActor
   private func runDeltaSyncWithBackgroundTask() async {
     #if canImport(UIKit)
-    // FIX-2: nonisolated(unsafe) var captures the task ID by reference in the expiry closure.
-    // UIKit guarantees the expiry handler never fires before beginBackgroundTask returns,
-    // so bgTaskID is fully assigned before the closure can execute — no race.
-    nonisolated(unsafe) var bgTaskID = UIBackgroundTaskIdentifier.invalid
-    bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
-      UIApplication.shared.endBackgroundTask(bgTaskID)
+    final class Box: @unchecked Sendable { var value = UIBackgroundTaskIdentifier.invalid }
+    let bgTask = Box()
+    bgTask.value = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
+      UIApplication.shared.endBackgroundTask(bgTask.value)
     }
     defer {
-      if bgTaskID != .invalid {
-        UIApplication.shared.endBackgroundTask(bgTaskID)
-        bgTaskID = .invalid
+      if bgTask.value != .invalid {
+        UIApplication.shared.endBackgroundTask(bgTask.value)
+        bgTask.value = .invalid
       }
     }
     await runDeltaSync(background: true)
