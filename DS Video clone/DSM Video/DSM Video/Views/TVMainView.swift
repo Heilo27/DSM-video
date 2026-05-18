@@ -375,6 +375,12 @@ private struct TVLibraryRail: View {
     isLoading = true
     defer { isLoading = false }
 
+    // Demo mode — serve static data directly; no API calls during App Review.
+    if appState.isDemoMode {
+      items = DemoData.items(for: library)
+      return
+    }
+
     // Prefer LocalStore (already populated by delta sync) to avoid a redundant
     // network call on every TVHomeView appear (TASK-415).
     let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
@@ -434,7 +440,7 @@ private struct TVLandscapeCard: View {
               Image(systemName: "play.circle.fill")
                 .font(.system(size: 52))
                 .foregroundStyle(.white.opacity(0.3))
-                .accessibilityLabel("No thumbnail")
+                .accessibilityHidden(true)
             )
         }
 
@@ -535,7 +541,7 @@ private struct TVPortraitCard: View {
               Image(systemName: "film.fill")
                 .font(.system(size: 40))
                 .foregroundStyle(.white.opacity(0.25))
-                .accessibilityLabel("No poster")
+                .accessibilityHidden(true)
             )
         }
 
@@ -775,6 +781,9 @@ private struct TVSearchView: View {
         ToolbarItem(placement: .cancellationAction) {
           Button("Done") { dismiss() }
         }
+      }
+      .onDisappear {
+        debounceTask?.cancel()
       }
     }
   }

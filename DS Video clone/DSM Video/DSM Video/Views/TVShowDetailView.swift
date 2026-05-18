@@ -50,6 +50,7 @@ private struct TVShowDetailSplitView: View {
           // RIGHT: Info + episodes — 45% width
           infoPanel
             .frame(width: geo.size.width * 0.45)
+            .focusSection()
         }
       }
     }
@@ -68,6 +69,7 @@ private struct TVShowDetailSplitView: View {
           .scaledToFill()
           .frame(maxWidth: .infinity, maxHeight: .infinity)
           .clipped()
+          .accessibilityHidden(true)
       } else if let posterId = show.posterImageId {
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1400, version: show.metadataVersion),
@@ -77,6 +79,7 @@ private struct TVShowDetailSplitView: View {
         .scaledToFill()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
+        .accessibilityHidden(true)
       } else {
         LinearGradient(
           colors: [Color(white: 0.14), Color.black],

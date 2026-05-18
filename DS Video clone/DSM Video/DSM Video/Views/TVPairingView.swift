@@ -238,6 +238,7 @@ struct TVPairingView: View {
     }
   }
 
+  @MainActor
   private func generate() async {
     error = nil
     isGenerating = true
@@ -259,9 +260,11 @@ struct TVPairingView: View {
       countdown = appState.pairingCodeExpiresInSeconds
       countdownTask = Task { @MainActor in
         while countdown > 0 {
-          guard !Task.isCancelled else { return }
-          try? await Task.sleep(nanoseconds: 1_000_000_000)
-          guard !Task.isCancelled else { return }
+          do {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+          } catch {
+            return // Task cancelled — exit cleanly
+          }
           countdown -= 1
         }
         pairingCode = nil
