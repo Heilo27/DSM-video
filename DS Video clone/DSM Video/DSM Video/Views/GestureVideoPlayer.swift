@@ -967,6 +967,7 @@ struct GestureVideoPlayer: View {
         pipController?.delegate = nil
         pipController = nil
         pipDelegate = nil
+        isPiPActive = false
         #endif
         hideControlsTask?.cancel()
         hideVolumeIndicatorTask?.cancel()
@@ -974,6 +975,7 @@ struct GestureVideoPlayer: View {
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
         }
+        player?.pause()
         #if os(iOS)
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -981,7 +983,6 @@ struct GestureVideoPlayer: View {
             orientLog.warning("Failed to deactivate audio session: \(error.localizedDescription)")
         }
         #endif
-        player?.pause()
         player = nil
         cancellables.removeAll()
         // Only post playerDidDismiss if setupPlayer actually ran (TASK-430).
@@ -1150,7 +1151,7 @@ private extension GestureVideoPlayer {
             pipDelegate = nil
         }
         guard let controller = AVPictureInPictureController(playerLayer: layer) else { return }
-        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        controller.canStartPictureInPictureAutomaticallyFromInline = false
         let delegate = PictureInPictureDelegate(
             onWillStart: { isPiPActive = true },
             onDidStop: { isPiPActive = false }
@@ -1244,10 +1245,12 @@ struct VideoPlayerLayer: UIViewRepresentable {
 
     func updateUIView(_ uiView: PlayerUIView, context: Context) {
         uiView.player = player
-        uiView.playerLayer.videoGravity = gravity
-        #if os(iOS)
-        onLayerReady?(uiView.playerLayer)
-        #endif
+        if uiView.playerLayer.videoGravity != gravity {
+            uiView.playerLayer.videoGravity = gravity
+            #if os(iOS)
+            onLayerReady?(uiView.playerLayer)
+            #endif
+        }
     }
 
     class PlayerUIView: UIView {
@@ -1321,6 +1324,9 @@ private final class PictureInPictureDelegate: NSObject, AVPictureInPictureContro
 
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         onWillStart()
+    }
+
+    func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         UIAccessibility.post(notification: .announcement, argument: "Picture in Picture started")
     }
 

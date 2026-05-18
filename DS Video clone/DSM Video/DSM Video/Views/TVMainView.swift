@@ -652,7 +652,7 @@ private struct TVSettingsView: View {
               .frame(maxWidth: 400, alignment: .leading)
           }
           .buttonStyle(.plain)
-          .accessibilityHint("Double-tap to sign out of your account")
+          .accessibilityHint("Select to sign out of your account")
 
           Spacer()
         }
