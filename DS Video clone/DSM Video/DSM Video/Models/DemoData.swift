@@ -311,7 +311,7 @@ enum DemoData {
       images: noImages
     ),
     "ds-2": ItemDetail(
-      id: "ds-2", type: "show",
+      id: "ds-2", type: "tv",
       title: "Meridian Cross", originalTitle: nil,
       year: 2023, durationSeconds: nil,
       contentRating: "TV-14", rating: 7.4,

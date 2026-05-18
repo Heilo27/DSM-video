@@ -67,7 +67,7 @@ final class AppState {
     }
   }
 
-  var isDemoMode: Bool = false
+  var isDemoMode: Bool { sessionToken == "demo" }
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
@@ -263,14 +263,8 @@ final class AppState {
     defer { isLoggingIn = false }
 
     // Demo mode — App Review credentials. No network required.
-    // Pre-computed SHA-256 hashes so plaintext credentials are not stored in the binary.
-    // Note: SHA-256 is not a password KDF. This is acceptable here because the demo account
-    // has no real data — it uses a synthetic local session with no server tokens. The hashes
-    // in source code are intentionally public-safe. A future hardening option would be PBKDF2
-    // with a stored salt, but the risk/reward for a synthetic demo account is low.
     if username.trimmingCharacters(in: .whitespaces).lowercased() == "appledemo" &&
        savedPassword.trimmingCharacters(in: .whitespaces).lowercased() == "dsvideo2024" {
-      isDemoMode = true
       // Clear any real NAS data that may have loaded before demo login
       homeLibraries = DemoData.libraries
       let demoItems = DemoData.movieItems + DemoData.tvItems
@@ -359,7 +353,6 @@ final class AppState {
     savedPassword = ""
     sessionToken = nil
     pairingCode = nil
-    isDemoMode = false
     loginError = nil
     watchlistItems = []  // SEC-03: prevent cross-user watchlist leakage on shared devices
     reconnectRetryTask?.cancel()
@@ -375,7 +368,6 @@ final class AppState {
     Self.deleteFromKeychain(account: Keys.keychainAccountToken)
     sessionToken = nil
     pairingCode = nil
-    isDemoMode = false
     loginError = reason
     watchlistItems = []
     reconnectRetryTask?.cancel()
@@ -399,7 +391,6 @@ final class AppState {
         // Token expired or rejected — must re-authenticate
         Self.deleteFromKeychain(account: Keys.keychainAccountToken)
         sessionToken = nil
-        isDemoMode = false
         watchlistItems = []  // prevent stale watchlist briefly visible on the login screen
         loginError = "Your session expired. Please sign in again."
       case .network:
@@ -871,11 +862,11 @@ final class AppState {
   /// mid-sync ~30s after backgrounding, leaving the database in an inconsistent state.
   private func runDeltaSyncWithBackgroundTask() async {
     #if canImport(UIKit)
-    // Capture the task ID as a local let so the expiry closure doesn't race
-    // with the MainActor continuation that reads it after the await.
-    let bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
-      // Expiry handler — endBackgroundTask(.invalid) is a documented no-op, safe to call.
-      UIApplication.shared.endBackgroundTask(.invalid)
+    // Declare taskID before beginBackgroundTask so the expiry closure captures
+    // the variable by reference and sees the assigned value, not .invalid.
+    var bgTaskID: UIBackgroundTaskIdentifier = .invalid
+    bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "DeltaSync") {
+      UIApplication.shared.endBackgroundTask(bgTaskID)
     }
     await runDeltaSync(background: true)
     if bgTaskID != .invalid {

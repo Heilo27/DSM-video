@@ -227,8 +227,8 @@ private struct TVHomeView: View {
           } label: {
             Image(systemName: "gear")
               .foregroundStyle(.white)
-              .accessibilityLabel("Settings")
           }
+          .accessibilityLabel("Settings")
         }
         ToolbarItem(placement: .topBarLeading) {
           Button {
@@ -236,8 +236,8 @@ private struct TVHomeView: View {
           } label: {
             Image(systemName: "magnifyingglass")
               .foregroundStyle(.white)
-              .accessibilityLabel("Search")
           }
+          .accessibilityLabel("Search")
         }
         if !appState.isDemoMode {
           ToolbarItem(placement: .topBarTrailing) {

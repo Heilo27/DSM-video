@@ -478,6 +478,7 @@ struct GestureVideoPlayer: View {
                     #if os(iOS)
                     AirPlayButton()
                         .frame(width: 44, height: 44)
+                        .accessibilityLabel("AirPlay")
 
                     // Picture-in-Picture button (iOS only)
                     if AVPictureInPictureController.isPictureInPictureSupported(), pipController != nil {
@@ -493,7 +494,8 @@ struct GestureVideoPlayer: View {
                                 .foregroundStyle(.white)
                                 .frame(width: 44, height: 44)
                         }
-                        .accessibilityLabel(isPiPActive ? "Exit Picture in Picture" : "Picture in Picture")
+                        .accessibilityLabel(isPiPActive ? "Exit Picture in Picture" : "Enter Picture in Picture")
+                        .accessibilityHint(isPiPActive ? "Returns video to full screen" : "Floats video in a small window")
                     }
                     #endif
 
@@ -887,10 +889,6 @@ struct GestureVideoPlayer: View {
             asset = AVURLAsset(url: url)
         }
         let playerItem = AVPlayerItem(asset: asset)
-        // Large forward buffer for WAN streaming: AVPlayer will pre-fetch aggressively
-        // even while paused, giving the stream time to fill before playback resumes.
-        // 120s means a 2-minute head-start can accumulate on a slow connection.
-        playerItem.preferredForwardBufferDuration = 120
         let newPlayer = AVPlayer(playerItem: playerItem)
         // Let AVPlayer wait and rebuffer automatically when bandwidth is insufficient.
         // This allows the player to pause internally, accumulate buffer, then resume
@@ -961,6 +959,15 @@ struct GestureVideoPlayer: View {
     }
 
     private func cleanup() {
+        #if os(iOS)
+        if isPiPActive {
+            pipController?.stopPictureInPicture()
+            // isPiPActive will be set false by the delegate
+        }
+        pipController?.delegate = nil
+        pipController = nil
+        pipDelegate = nil
+        #endif
         hideControlsTask?.cancel()
         hideVolumeIndicatorTask?.cancel()
         skipHideTask?.cancel()
@@ -1132,8 +1139,16 @@ private extension GestureVideoPlayer {
 
     #if os(iOS)
     private func setupPiP(layer: AVPlayerLayer) {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .moviePlayback)
+        try? session.setActive(true)
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-        guard pipController == nil else { return }
+        // Teardown old controller if layer changed (e.g. videoFillMode toggle)
+        if pipController != nil {
+            pipController?.delegate = nil
+            pipController = nil
+            pipDelegate = nil
+        }
         guard let controller = AVPictureInPictureController(playerLayer: layer) else { return }
         controller.canStartPictureInPictureAutomaticallyFromInline = true
         let delegate = PictureInPictureDelegate(
@@ -1230,6 +1245,9 @@ struct VideoPlayerLayer: UIViewRepresentable {
     func updateUIView(_ uiView: PlayerUIView, context: Context) {
         uiView.player = player
         uiView.playerLayer.videoGravity = gravity
+        #if os(iOS)
+        onLayerReady?(uiView.playerLayer)
+        #endif
     }
 
     class PlayerUIView: UIView {
@@ -1303,10 +1321,12 @@ private final class PictureInPictureDelegate: NSObject, AVPictureInPictureContro
 
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         onWillStart()
+        UIAccessibility.post(notification: .announcement, argument: "Picture in Picture started")
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         onDidStop()
+        UIAccessibility.post(notification: .announcement, argument: "Picture in Picture stopped")
     }
 
     func pictureInPictureController(
