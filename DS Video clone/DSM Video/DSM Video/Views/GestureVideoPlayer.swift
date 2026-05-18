@@ -351,6 +351,7 @@ struct GestureVideoPlayer: View {
 
         Color.clear
             .contentShape(Rectangle())
+            .accessibilityHidden(true)
             #if os(iOS)
             .gesture(
                 DragGesture(minimumDistance: 10)
@@ -719,7 +720,7 @@ struct GestureVideoPlayer: View {
                     .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
                     #endif
 
-                    Text("-\(formatTime(duration - (isScrubbing ? scrubTime : currentTime)))")
+                    Text("-\(formatTime(max(0, duration - (isScrubbing ? scrubTime : currentTime))))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
                         .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
@@ -1577,7 +1578,8 @@ private struct SubtitleAudioPickerView: View {
             Image(systemName: "checkmark")
                 .foregroundStyle(Color.accentColor)
                 .opacity(isSelected ? 1 : 0)
-                .accessibilityLabel(isSelected ? "Selected" : "")
+                .accessibilityHidden(!isSelected)
+                .accessibilityLabel("Selected")
         }
         .contentShape(Rectangle())
     }

@@ -821,6 +821,7 @@ private struct PlayerSheet: View {
   @State private var isOffline: Bool = false
   @State private var chapters: [Chapter] = []
   @State private var subtitleOffset: Double = 0
+  @State private var subtitleOffsetRestartTask: Task<Void, Never>? = nil
 
   // Progress sync debouncing
   @State private var lastSyncTime: Date = .distantPast
@@ -937,8 +938,13 @@ private struct PlayerSheet: View {
           },
           onSubtitleOffsetChange: { offset in
             subtitleOffset = offset
-            playbackURL = nil
-            Task { await start() }
+            subtitleOffsetRestartTask?.cancel()
+            subtitleOffsetRestartTask = Task {
+              try? await Task.sleep(for: .milliseconds(500))
+              guard !Task.isCancelled else { return }
+              playbackURL = nil
+              await start()
+            }
           },
           onGoToShow: onGoToShow
         )
