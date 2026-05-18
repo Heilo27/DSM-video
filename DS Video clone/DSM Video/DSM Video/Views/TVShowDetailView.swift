@@ -530,6 +530,7 @@ private struct TVShowDetailScrollView: View {
           .scaledToFill()
           .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
           .clipped()
+          .accessibilityHidden(true)
       } else if let posterId = show.posterImageId {
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1200, version: show.metadataVersion),
@@ -539,6 +540,7 @@ private struct TVShowDetailScrollView: View {
         .scaledToFill()
         .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
         .clipped()
+        .accessibilityHidden(true)
       } else {
         Color(white: 0.08)
           .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)

@@ -125,6 +125,7 @@ struct TVLoginView: View {
               }
               .buttonStyle(.borderedProminent)
               .tint(Color.dsAccent)
+              .accessibilityLabel(appState.isLoggingIn ? "Signing in, please wait" : "Sign In")
               .disabled(appState.isLoggingIn || username.isEmpty || (server.isEmpty && username.trimmingCharacters(in: .whitespaces).lowercased() != "appledemo"))
             }
             Spacer()

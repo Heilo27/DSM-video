@@ -1333,12 +1333,12 @@ private final class PictureInPictureDelegate: NSObject, AVPictureInPictureContro
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        UIAccessibility.post(notification: .announcement, argument: "Picture in Picture started")
+        AccessibilityNotification.Announcement("Picture in Picture started").post()
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         onDidStop()
-        UIAccessibility.post(notification: .announcement, argument: "Picture in Picture stopped")
+        AccessibilityNotification.Announcement("Picture in Picture stopped").post()
     }
 
     func pictureInPictureController(

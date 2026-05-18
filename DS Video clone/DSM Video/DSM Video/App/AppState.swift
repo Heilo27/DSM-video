@@ -602,6 +602,7 @@ final class AppState {
           let resp = try await client.exchangePairingCode(code: code, timeoutInterval: 7)
           sessionToken = resp.token
           api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+          startHeartbeatTimer()
           return
         } catch {
           lastError = error
@@ -620,6 +621,7 @@ final class AppState {
       let resp = try await APIClient(baseURL: serverURL, token: nil)
         .exchangePairingCode(code: code)
       sessionToken = resp.token
+      startHeartbeatTimer()
     } catch {
       loginError = (error as? APIError)?.userMessage ?? "Invalid pairing code."
     }
