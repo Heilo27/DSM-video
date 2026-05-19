@@ -13,29 +13,48 @@ import (
 	"time"
 )
 
+// ABRVariant describes one rung of the adaptive bitrate ladder.
+type ABRVariant struct {
+	Height    int    // Max output height in pixels (e.g. 480, 720, 1080)
+	Bitrate   string // Target video bitrate (e.g. "800k", "2M", "4M")
+	MaxBitrate string // Max bitrate for VBV buffer (e.g. "1200k", "3M", "6M")
+	CRF       int    // x264 CRF for this rung
+	Name      string // Playlist filename stem (e.g. "v480p")
+}
+
+// DefaultABRLadder is the NAS-optimised three-rung ladder.
+// Bitrates are conservative to remain real-time on limited NAS CPUs.
+var DefaultABRLadder = []ABRVariant{
+	{Height: 480,  Bitrate: "800k",  MaxBitrate: "1200k", CRF: 26, Name: "v480p"},
+	{Height: 720,  Bitrate: "2000k", MaxBitrate: "3000k", CRF: 24, Name: "v720p"},
+	{Height: 1080, Bitrate: "4000k", MaxBitrate: "6000k", CRF: 23, Name: "v1080p"},
+}
+
 // HLSConfig contains configuration for HLS generation.
 type HLSConfig struct {
 	FFmpegPath     string        // Path to ffmpeg binary
 	TempDir        string        // Base directory for transcode output
-	SegmentSeconds int           // HLS segment duration (default: 4)
+	SegmentSeconds int           // HLS segment duration (default: 6)
 	VideoPreset    string        // x264 preset (default: "faster")
 	VideoCRF       int           // x264 CRF quality (default: 23)
 	AudioBitrate   string        // Audio bitrate (default: "192k")
 	Threads        int           // Number of threads (default: 2)
 	NicePriority   int           // Nice priority (default: 10 = medium-low; 19 = lowest possible)
 	MaxConcurrent  int           // Max concurrent transcodes (default: 1)
+	ABRLadder      []ABRVariant  // Variants for adaptive bitrate (nil = single-variant)
 }
 
 // DefaultHLSConfig returns sensible defaults for NAS transcoding.
 func DefaultHLSConfig() HLSConfig {
 	return HLSConfig{
-		SegmentSeconds: 2,
+		SegmentSeconds: 6,
 		VideoPreset:    "faster",
 		VideoCRF:       23,
 		AudioBitrate:   "192k",
 		Threads:        2,
 		NicePriority:   10,
 		MaxConcurrent:  1,
+		ABRLadder:      DefaultABRLadder,
 	}
 }
 
@@ -58,19 +77,20 @@ type SubtitleTrack struct {
 
 // HLSSession represents an active transcoding session.
 type HLSSession struct {
-	SessionID     string
-	VideoPath     string
-	OutputDir     string
-	Mode          PlaybackMode
-	MaxHeight     int
+	SessionID      string
+	VideoPath      string
+	OutputDir      string
+	Mode           PlaybackMode
+	MaxHeight      int
+	UseABR         bool   // true when multi-variant ABR ladder is active
 	SubtitleTracks []SubtitleTrack
-	StartedAt     time.Time
-	CompletedAt   *time.Time
-	LastAccess    time.Time
-	Error         error
-	cmd           *exec.Cmd
-	cancel        context.CancelFunc
-	stopped       bool // true when StopSession has already decremented g.active
+	StartedAt      time.Time
+	CompletedAt    *time.Time
+	LastAccess     time.Time
+	Error          error
+	cmd            *exec.Cmd
+	cancel         context.CancelFunc
+	stopped        bool // true when StopSession has already decremented g.active
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -141,12 +161,18 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 	// HTTP request lifecycle. The session's own cancel function (assigned to
 	// session.cancel below) provides explicit cleanup via StopSession.
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// ABR is enabled when: full transcode mode, no explicit quality cap, and
+	// the config has a ladder defined. RemuxOnly can't resize without re-encode.
+	useABR := mode == FullTranscode && maxHeight == 0 && len(g.config.ABRLadder) > 0
+
 	session := &HLSSession{
 		SessionID:      sessionID,
 		VideoPath:      videoPath,
 		OutputDir:      outputDir,
 		Mode:           mode,
 		MaxHeight:      maxHeight,
+		UseABR:         useABR,
 		SubtitleTracks: subtitles,
 		StartedAt:      time.Now(),
 		LastAccess:     time.Now(),
@@ -253,6 +279,14 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
+	// For ABR sessions ffmpeg writes per-variant playlists but its auto-generated
+	// master may not have BANDWIDTH values we want. Overwrite with ours.
+	if session.UseABR {
+		if err := g.writeMasterPlaylist(session); err != nil {
+			log.Printf("[HLS] ABR writeMasterPlaylist failed: %v", err)
+		}
+	}
+
 	// Convert subtitle tracks to WebVTT and patch the master playlist.
 	if len(session.SubtitleTracks) > 0 {
 		g.addSubtitleRenditions(ctx, session)
@@ -347,76 +381,199 @@ func (g *HLSGenerator) addSubtitleRenditions(ctx context.Context, session *HLSSe
 
 // buildFFmpegArgs constructs the FFmpeg command line arguments.
 func (g *HLSGenerator) buildFFmpegArgs(session *HLSSession) []string {
+	if session.UseABR {
+		return g.buildABRArgs(session)
+	}
+	return g.buildSingleVariantArgs(session)
+}
+
+// buildSingleVariantArgs builds args for the original single-quality HLS output.
+func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 	outputPath := filepath.Join(session.OutputDir, "master.m3u8")
 	segmentPath := filepath.Join(session.OutputDir, "segment_%05d.m4s")
 	initPath := filepath.Join(session.OutputDir, "init.mp4")
 
 	args := []string{
-		"-y",                    // Overwrite output
-		"-i", session.VideoPath, // Input file
+		"-y",
+		"-i", session.VideoPath,
 	}
 
-	// Video codec settings based on mode
 	switch session.Mode {
 	case RemuxOnly:
-		// Copy video stream, only transcode audio
-		args = append(args,
-			"-c:v", "copy",
-		)
+		args = append(args, "-c:v", "copy")
 	case FullTranscode:
-		// Apply resolution cap before codec args when requested
 		if session.MaxHeight > 0 {
 			args = append(args,
 				"-vf", fmt.Sprintf("scale=-2:min(ih\\,%d)", session.MaxHeight),
 			)
 		}
-		// Full video transcode to H.264
 		args = append(args,
 			"-c:v", "libx264",
 			"-preset", g.config.VideoPreset,
 			"-crf", fmt.Sprintf("%d", g.config.VideoCRF),
 			"-threads", fmt.Sprintf("%d", g.config.Threads),
-			"-pix_fmt", "yuv420p", // Ensure compatibility
+			"-pix_fmt", "yuv420p",
 		)
 	default:
-		// Should not happen, but default to copy
 		args = append(args, "-c:v", "copy")
 	}
 
-	// Audio transcoded to MP3 for NAS ffmpeg compatibility.
-	// NAS ffmpeg is compiled without AAC encoder (--disable-encoder=aac) but
-	// libmp3lame is available. MP3 is universally supported by HLS clients.
-	// -map flags: explicitly select first video+audio streams; '?' makes audio
-	// optional so ffmpeg doesn't fail if the source has no decodable audio track.
 	args = append(args,
 		"-map", "0:v:0",
 		"-map", "0:a:0?",
 		"-c:a", "libmp3lame",
 		"-b:a", g.config.AudioBitrate,
-		"-ac", "2", // Stereo (downmix surround if needed)
+		"-ac", "2",
 	)
 
-	// HLS output settings
-	segmentDuration := g.config.SegmentSeconds
-	if segmentDuration == 0 {
-		segmentDuration = 4
+	segDur := g.config.SegmentSeconds
+	if segDur == 0 {
+		segDur = 6
 	}
 
 	args = append(args,
 		"-f", "hls",
-		"-hls_time", fmt.Sprintf("%d", segmentDuration),
-		"-hls_list_size", "0",       // Keep all segments in playlist
-		"-hls_segment_type", "fmp4", // Fragmented MP4 (better compatibility)
+		"-hls_time", fmt.Sprintf("%d", segDur),
+		"-hls_list_size", "0",
+		"-hls_segment_type", "fmp4",
 		"-hls_fmp4_init_filename", filepath.Base(initPath),
 		"-hls_segment_filename", segmentPath,
-		// No hls_playlist_type — defaults to live-window which AirPlay and AVPlayer
-		// handle correctly for in-progress transcodes. "event" causes the playlist to
-		// grow unboundedly and can confuse AirPlay's playlist parser on long content.
-		"-hls_flags", "independent_segments", // Each segment decodable independently (required for seeking)
+		"-hls_flags", "independent_segments",
 		outputPath,
 	)
 
 	return args
+}
+
+// buildABRArgs builds args for a multi-variant ABR HLS output using a single
+// ffmpeg pass with filter_complex + var_stream_map. ffmpeg's HLS muxer writes
+// one variant playlist per stream group; we write master.m3u8 ourselves after.
+//
+// ffmpeg command shape:
+//
+//	ffmpeg -i input \
+//	  -filter_complex "[0:v]split=3[vin0][vin1][vin2];[vin0]scale=-2:480[v0];..." \
+//	  -map [v0] -c:v:0 libx264 -crf:0 26 -b:v:0 800k ... \
+//	  -map [v1] -c:v:1 libx264 -crf:1 24 -b:v:1 2000k ... \
+//	  -map [v2] -c:v:2 libx264 -crf:2 23 -b:v:2 4000k ... \
+//	  -map 0:a:0? -c:a libmp3lame -b:a 192k -ac 2 \
+//	  -f hls -hls_time 6 -hls_segment_type fmp4 \
+//	  -var_stream_map "v:0,a:0 v:1,a:0 v:2,a:0" \
+//	  -master_pl_name master_ffmpeg.m3u8 \
+//	  -hls_segment_filename <dir>/v%v_%05d.m4s \
+//	  <dir>/v%v.m3u8
+func (g *HLSGenerator) buildABRArgs(session *HLSSession) []string {
+	ladder := g.config.ABRLadder
+	segDur := g.config.SegmentSeconds
+	if segDur == 0 {
+		segDur = 6
+	}
+	threads := g.config.Threads
+	n := len(ladder)
+
+	args := []string{"-y", "-i", session.VideoPath}
+
+	// filter_complex: split + scale each rung
+	splitOut := ""
+	for i := range ladder {
+		splitOut += fmt.Sprintf("[vin%d]", i)
+	}
+	filter := fmt.Sprintf("[0:v]split=%d%s", n, splitOut)
+	for i, v := range ladder {
+		filter += fmt.Sprintf(";[vin%d]scale=-2:%d[v%d]", i, v.Height, i)
+	}
+	args = append(args, "-filter_complex", filter)
+
+	// Per-variant video codec args
+	for i, v := range ladder {
+		args = append(args,
+			"-map", fmt.Sprintf("[v%d]", i),
+			fmt.Sprintf("-c:v:%d", i), "libx264",
+			fmt.Sprintf("-preset:%d", i), g.config.VideoPreset,
+			fmt.Sprintf("-crf:%d", i), fmt.Sprintf("%d", v.CRF),
+			fmt.Sprintf("-b:v:%d", i), v.Bitrate,
+			fmt.Sprintf("-maxrate:%d", i), v.MaxBitrate,
+			fmt.Sprintf("-bufsize:%d", i), v.MaxBitrate,
+			fmt.Sprintf("-threads:%d", i), fmt.Sprintf("%d", threads),
+			fmt.Sprintf("-pix_fmt:%d", i), "yuv420p",
+		)
+	}
+
+	// Single audio stream shared across all variants
+	args = append(args,
+		"-map", "0:a:0?",
+		"-c:a", "libmp3lame",
+		"-b:a", g.config.AudioBitrate,
+		"-ac", "2",
+	)
+
+	// var_stream_map tells ffmpeg which video+audio streams form each variant group
+	var vsm []string
+	for i := range ladder {
+		vsm = append(vsm, fmt.Sprintf("v:%d,a:0", i))
+	}
+
+	segPattern := filepath.Join(session.OutputDir, "v%v_%05d.m4s")
+	playlistPattern := filepath.Join(session.OutputDir, "v%v.m3u8")
+
+	args = append(args,
+		"-f", "hls",
+		"-hls_time", fmt.Sprintf("%d", segDur),
+		"-hls_list_size", "0",
+		"-hls_segment_type", "fmp4",
+		// Use %v (variant index) in filenames so ffmpeg writes per-variant files.
+		"-hls_fmp4_init_filename", "v%v_init.mp4",
+		"-hls_segment_filename", segPattern,
+		"-hls_flags", "independent_segments",
+		"-var_stream_map", strings.Join(vsm, " "),
+		// ffmpeg writes its own master — we overwrite it with ours after the pass.
+		"-master_pl_name", "master_ffmpeg.m3u8",
+		playlistPattern,
+	)
+
+	return args
+}
+
+// writeMasterPlaylist generates master.m3u8 referencing all ABR variant playlists.
+// ffmpeg names them v0.m3u8, v1.m3u8, … matching the %v pattern in buildABRArgs.
+// Called after the ffmpeg ABR pass completes successfully.
+func (g *HLSGenerator) writeMasterPlaylist(session *HLSSession) error {
+	var sb strings.Builder
+	sb.WriteString("#EXTM3U\n")
+	sb.WriteString("#EXT-X-VERSION:6\n\n")
+
+	for i, v := range g.config.ABRLadder {
+		bps := parseBitrate(v.Bitrate)
+		// ffmpeg %v substitution uses the variant index, not the Name field.
+		sb.WriteString(fmt.Sprintf(
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=x%d,CODECS=\"avc1.42e01e,mp4a.40.2\"\nv%d.m3u8\n",
+			bps, v.Height, i,
+		))
+	}
+
+	masterPath := filepath.Join(session.OutputDir, "master.m3u8")
+	return os.WriteFile(masterPath, []byte(sb.String()), 0644)
+}
+
+// parseBitrate converts a bitrate string like "800k" or "4M" to integer bps.
+func parseBitrate(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	suffix := s[len(s)-1]
+	num := s[:len(s)-1]
+	var n int
+	fmt.Sscanf(num, "%d", &n)
+	switch suffix {
+	case 'k', 'K':
+		return n * 1000
+	case 'm', 'M':
+		return n * 1_000_000
+	default:
+		var full int
+		fmt.Sscanf(s, "%d", &full)
+		return full
+	}
 }
 
 // MasterPlaylistPath returns the path to the master playlist for a session.
