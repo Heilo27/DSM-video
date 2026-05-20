@@ -37,6 +37,12 @@ struct ItemsGridView: View {
     let raw = UserDefaults.standard.string(forKey: "dsReel.sortOption") ?? ""
     return SortOption(rawValue: raw) ?? .addedNewest
   }()
+  @State private var searchText: String = ""
+
+  private var displayedItems: [ItemSummary] {
+    guard !searchText.isEmpty else { return sortedItems }
+    return sortedItems.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+  }
 
   private func sorted(_ list: [ItemSummary], by option: SortOption) -> [ItemSummary] {
     switch option {
@@ -90,8 +96,23 @@ struct ItemsGridView: View {
           ContentUnavailableView("No Videos", systemImage: "film.stack", description: Text("This library has no videos yet."))
             .foregroundStyle(.white)
         }
+        #if os(tvOS)
+        if displayedItems.isEmpty && !searchText.isEmpty {
+          ContentUnavailableView(
+            "No Results",
+            systemImage: "magnifyingglass",
+            description: Text("No videos match \"\(searchText)\"")
+          )
+          .foregroundStyle(.white)
+          .padding(.top, 60)
+        }
+        #endif
         LazyVGrid(columns: columns, spacing: gridSpacing) {
+          #if os(tvOS)
+          ForEach(displayedItems) { item in
+          #else
           ForEach(sortedItems) { item in
+          #endif
             NavigationLink {
               ItemDetailView(itemID: item.id, fallbackTitle: item.title)
             } label: {
@@ -142,16 +163,35 @@ struct ItemsGridView: View {
       sortedItems = sorted(items, by: new)
     }
     #else
+    .searchable(text: $searchText, prompt: "Search \(library.title)")
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
-        Menu {
-          Picker("Sort", selection: $sortOption) {
-            ForEach(SortOption.allCases, id: \.self) { option in
-              Text(option.rawValue).tag(option)
-            }
+        HStack(spacing: 12) {
+          // A→Z toggle
+          Button {
+            sortOption = (sortOption == .nameAsc) ? .nameDesc : .nameAsc
+            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.sortOption")
+            sortedItems = sorted(items, by: sortOption)
+          } label: {
+            Label(
+              sortOption == .nameAsc ? "Z→A" : "A→Z",
+              systemImage: sortOption == .nameAsc ? "textformat.abc.dottedunderline" : "textformat.abc"
+            )
           }
-        } label: {
-          Label("Sort", systemImage: "arrow.up.arrow.down.circle")
+          .accessibilityLabel(sortOption == .nameAsc ? "Sort Z to A" : "Sort A to Z")
+
+          // Recently Added toggle
+          Button {
+            sortOption = (sortOption == .addedNewest) ? .addedOldest : .addedNewest
+            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.sortOption")
+            sortedItems = sorted(items, by: sortOption)
+          } label: {
+            Label(
+              sortOption == .addedOldest ? "Oldest First" : "Recently Added",
+              systemImage: sortOption == .addedOldest ? "clock" : "clock.badge.checkmark"
+            )
+          }
+          .accessibilityLabel(sortOption == .addedOldest ? "Sort oldest first" : "Sort recently added first")
         }
       }
     }
