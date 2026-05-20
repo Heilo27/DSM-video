@@ -587,6 +587,9 @@ struct ItemDetailView: View {
         }
         .padding(.vertical, 4)
       }
+      #if os(tvOS)
+      .focusSection()
+      #endif
     }
   }
 
@@ -888,8 +891,12 @@ private struct PlayerSheet: View {
             let timeSinceLastSync = now.timeIntervalSince(lastSyncTime)
             let positionDelta = abs(positionInt - lastSyncedPosition)
 
-            // Only sync if: enough time has passed OR user seeked significantly
-            guard timeSinceLastSync >= syncInterval || positionDelta >= seekThreshold else {
+            // Fire an immediate first sync if we haven't synced yet and playback
+            // has progressed past 5 seconds — covers fast-exit before the 10s timer fires.
+            let isFirstSync = lastSyncedPosition == 0 && positionInt > 5
+
+            // Only sync if: enough time has passed OR user seeked significantly OR first sync
+            guard timeSinceLastSync >= syncInterval || positionDelta >= seekThreshold || isFirstSync else {
               return
             }
 
@@ -1019,6 +1026,29 @@ private struct PlayerSheet: View {
           .foregroundStyle(.white.opacity(0.7))
           .monospacedDigit()
         HStack(spacing: 16) {
+          #if os(tvOS)
+          Button {
+            countdownTask?.cancel()
+            showNextEpisodeOverlay = false
+            onPlayNextEpisode?()
+            dismiss()
+          } label: {
+            Text("Play Now")
+              .font(.headline)
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(Color.dsAccent)
+
+          Button {
+            countdownTask?.cancel()
+            showNextEpisodeOverlay = false
+          } label: {
+            Text("Cancel")
+              .font(.headline)
+          }
+          .buttonStyle(.bordered)
+          .tint(.white)
+          #else
           Button {
             countdownTask?.cancel()
             showNextEpisodeOverlay = false
@@ -1045,6 +1075,7 @@ private struct PlayerSheet: View {
               .background(Color.white.opacity(0.2), in: Capsule())
           }
           .buttonStyle(.plain)
+          #endif
         }
       }
       .padding(28)

@@ -122,12 +122,12 @@ final class AppState {
 
   init() {
     let d = UserDefaults.standard
-    let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:8090"
-    // useHTTPS defaults to false — port 8090 is plain HTTP; login() auto-detects
+    let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:5000"
+    // useHTTPS defaults to false — port 5000 is plain HTTP; login() auto-detects
     // and persists the correct scheme from whichever candidate wins.
     let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
-    let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 8090
+    let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 5000
 
     baseURL = storedBaseURL
     username = d.string(forKey: Keys.username) ?? ""

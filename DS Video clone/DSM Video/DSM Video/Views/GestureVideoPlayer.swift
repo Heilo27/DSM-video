@@ -95,11 +95,16 @@ struct GestureVideoPlayer: View {
     @State private var didSetupPlayer: Bool = false
     @State private var subtitleOffsetSeconds: Double = 0
 
-    private let skipSeconds: Double = 15
+    private let skipSeconds: Double = 30
 
     enum SkipDirection {
         case backward, forward
     }
+
+    #if os(tvOS)
+    @FocusState private var focusedControl: TVFocusField?
+    enum TVFocusField { case playPause }
+    #endif
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -154,6 +159,19 @@ struct GestureVideoPlayer: View {
                 togglePlayPause()
                 return .handled
             }
+            #elseif os(macOS)
+            .onKeyPress(.space) {
+                togglePlayPause()
+                return .handled
+            }
+            .onKeyPress(.leftArrow) {
+                skipBackward()
+                return .handled
+            }
+            .onKeyPress(.rightArrow) {
+                skipForward()
+                return .handled
+            }
             #endif
     }
 
@@ -164,6 +182,9 @@ struct GestureVideoPlayer: View {
         .onChange(of: showControls) { _, newValue in
             if newValue {
                 controlsInteractive = true
+                #if os(tvOS)
+                focusedControl = .playPause
+                #endif
             } else {
                 controlsHideTask?.cancel()
                 controlsHideTask = Task { @MainActor in
@@ -236,6 +257,11 @@ struct GestureVideoPlayer: View {
                     )
                 }
             }
+            #if os(tvOS)
+            .onPlayPauseCommand { togglePlayPause() }
+            .onMoveCommand { direction in handleTVMoveCommand(direction: direction) }
+            .onTapGesture { handleTVSelectPress() }
+            #endif
         #endif
     }
 
@@ -533,6 +559,20 @@ struct GestureVideoPlayer: View {
                     #endif
 
                     // Playback speed button
+                    #if os(tvOS)
+                    Button {
+                        let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+                        let currentIdx = speeds.firstIndex(of: playbackRate) ?? 2
+                        let nextRate = speeds[(currentIdx + 1) % speeds.count]
+                        setPlaybackRate(nextRate)
+                    } label: {
+                        Text(playbackRate == 1.0 ? "1×" : String(format: "%.2g×", playbackRate))
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("Playback speed: \(playbackRate == 1.0 ? "normal" : "\(playbackRate, specifier: "%.2g") times")")
+                    #else
                     Menu {
                         ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
                             Button {
@@ -554,10 +594,17 @@ struct GestureVideoPlayer: View {
                             .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Playback speed, \(playbackRate == 1.0 ? "normal" : "\(playbackRate, specifier: "%.2g") times")")
+                    #endif
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, videoFillMode == .fill ? max(geometry.safeAreaInsets.top, 8) : 8)
+            .padding(.top, {
+                #if os(tvOS)
+                return 40.0
+                #else
+                return videoFillMode == .fill ? max(geometry.safeAreaInsets.top, 8) : 8
+                #endif
+            }())
             .padding(.bottom, 16)
             .background(
                 LinearGradient(
@@ -578,7 +625,7 @@ struct GestureVideoPlayer: View {
                     showSkipAnimation(direction: .backward)
                     if isPlaying { scheduleHideControls() }
                 } label: {
-                    Image(systemName: "gobackward.15")
+                    Image(systemName: "gobackward.30")
                         .font(.system(size: 35))
                         .foregroundStyle(.white)
                         .frame(minWidth: 55, minHeight: 55)
@@ -600,6 +647,9 @@ struct GestureVideoPlayer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
                 .accessibilityAddTraits(.isButton)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .playPause)
+                #endif
 
                 // Forward 15s
                 Button {
@@ -609,7 +659,7 @@ struct GestureVideoPlayer: View {
                     showSkipAnimation(direction: .forward)
                     if isPlaying { scheduleHideControls() }
                 } label: {
-                    Image(systemName: "goforward.15")
+                    Image(systemName: "goforward.30")
                         .font(.system(size: 35))
                         .foregroundStyle(.white)
                         .frame(minWidth: 55, minHeight: 55)
@@ -618,6 +668,9 @@ struct GestureVideoPlayer: View {
                 .accessibilityLabel("Forward 15 seconds")
                 .accessibilityAddTraits(.isButton)
             }
+            #if os(tvOS)
+            .focusSection()
+            #endif
             Spacer()
 
             // Bottom controls — scrub bar only
@@ -656,7 +709,9 @@ struct GestureVideoPlayer: View {
                     Text(formatTime(isScrubbing ? scrubTime : currentTime))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
-                        .frame(width: 50, alignment: .leading)
+                        .frame(minWidth: 50, alignment: .leading)
+                        .fixedSize()
+                        .lineLimit(1)
                         .accessibilityHidden(true)
 
                     #if os(iOS)
@@ -726,12 +781,20 @@ struct GestureVideoPlayer: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
                         .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
+                        .fixedSize()
+                        .lineLimit(1)
                         .accessibilityHidden(true)
                 }
 
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 40)
+            .padding(.bottom, {
+                #if os(tvOS)
+                return 60.0
+                #else
+                return 40.0
+                #endif
+            }())
             .background(
                 LinearGradient(
                     colors: [.clear, .black.opacity(0.7)],
@@ -796,7 +859,7 @@ struct GestureVideoPlayer: View {
 
     private func skipBubble(direction: SkipDirection) -> some View {
         VStack(spacing: 4) {
-            Image(systemName: direction == .backward ? "gobackward.15" : "goforward.15")
+            Image(systemName: direction == .backward ? "gobackward.30" : "goforward.30")
                 .font(.title)
                 .accessibilityLabel(direction == .backward ? "Skip backward" : "Skip forward")
             Text("\(Int(skipSeconds)) sec")
@@ -867,6 +930,35 @@ struct GestureVideoPlayer: View {
         // Schedule hide with short delay for smooth UX (indicator stays briefly after release)
         scheduleHideVolumeIndicator()
 
+        scheduleHideControls()
+    }
+    #endif
+
+    #if os(tvOS)
+    private func handleTVSelectPress() {
+        if showControls {
+            togglePlayPause()
+            if isPlaying { scheduleHideControls() }
+        } else {
+            withAnimation(.easeInOut(duration: 0.25)) { showControls = true }
+            scheduleHideControls()
+        }
+    }
+
+    // D-pad left/right scrubs in 30-second steps when controls are visible,
+    // or shows controls first if they're hidden.
+    private func handleTVMoveCommand(direction: MoveCommandDirection) {
+        guard direction == .left || direction == .right else { return }
+        guard showControls else {
+            withAnimation(.easeInOut(duration: 0.25)) { showControls = true }
+            scheduleHideControls()
+            return
+        }
+        let delta = direction == .right ? 30.0 : -30.0
+        let newTime = max(0, min(duration, currentTime + delta))
+        seek(to: newTime)
+        currentTime = newTime
+        showSkipAnimation(direction: direction == .right ? .forward : .backward)
         scheduleHideControls()
     }
     #endif
@@ -1255,7 +1347,8 @@ struct VideoPlayerLayer: UIViewRepresentable {
         view.player = player
         view.playerLayer.videoGravity = gravity
         #if os(iOS)
-        onLayerReady?(view.playerLayer)
+        let layer = view.playerLayer
+        Task { @MainActor in onLayerReady?(layer) }
         #endif
         return view
     }

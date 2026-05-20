@@ -295,6 +295,7 @@ private struct TVSeasonSection: View {
         }
       }
     }
+    .focusSection()
     .task { await load() }
   }
 

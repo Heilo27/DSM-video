@@ -149,40 +149,43 @@ struct TVPairingView: View {
               .foregroundStyle(Color.dsTextSecondary)
               .padding(.top, 32)
 
-            ForEach(discovery.servers) { server in
-              Button {
-                appState.baseURL = server.baseURL
-                showManualLogin = true
-              } label: {
-                HStack(spacing: 16) {
-                  Image(systemName: "server.rack")
-                    .font(.system(size: 22))
-                    .foregroundStyle(Color.dsAccent)
-                  VStack(alignment: .leading, spacing: 2) {
-                    Text(server.name)
-                      .font(.system(size: 20, weight: .medium))
-                      .foregroundStyle(.white)
-                    Text(server.baseURL)
-                      .font(.system(size: 16))
+            VStack(spacing: 12) {
+              ForEach(discovery.servers) { server in
+                Button {
+                  appState.baseURL = server.baseURL
+                  showManualLogin = true
+                } label: {
+                  HStack(spacing: 16) {
+                    Image(systemName: "server.rack")
+                      .font(.system(size: 22))
+                      .foregroundStyle(Color.dsAccent)
+                    VStack(alignment: .leading, spacing: 2) {
+                      Text(server.name)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(.white)
+                      Text(server.baseURL)
+                        .font(.system(size: 16))
+                        .foregroundStyle(Color.dsTextMuted)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
                       .foregroundStyle(Color.dsTextMuted)
+                      .accessibilityHidden(true)
                   }
-                  Spacer()
-                  Image(systemName: "chevron.right")
-                    .foregroundStyle(Color.dsTextMuted)
-                    .accessibilityHidden(true)
+                  .padding(.horizontal, 32)
+                  .padding(.vertical, 18)
+                  .background(Color(white: 0.1))
+                  .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                      .stroke(Color.dsBorderStrong, lineWidth: 1)
+                  )
                 }
-                .padding(.horizontal, 32)
-                .padding(.vertical, 18)
-                .background(Color(white: 0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                  RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.dsBorderStrong, lineWidth: 1)
-                )
+                .buttonStyle(.card)
+                .frame(maxWidth: 600)
               }
-              .buttonStyle(.card)
-              .frame(maxWidth: 600)
             }
+            .focusSection()
           }
         } else if discovery.isScanning {
           HStack(spacing: 12) {
@@ -198,8 +201,8 @@ struct TVPairingView: View {
         Button("Sign in manually") {
           showManualLogin = true
         }
-        .buttonStyle(.bordered)
-        .tint(Color.dsTextSecondary)
+        .buttonStyle(.borderedProminent)
+        .tint(Color(white: 0.25))
         .font(.system(size: 19))
         .foregroundStyle(Color.dsTextSecondary)
         .padding(.top, 40)

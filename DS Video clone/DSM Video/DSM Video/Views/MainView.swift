@@ -1097,7 +1097,7 @@ struct SettingsView: View {
         HStack {
           Text("Default Port")
           Spacer()
-          TextField("8090", value: $appState.defaultPort, format: .number)
+          TextField("5000", value: $appState.defaultPort, format: .number)
             #if os(iOS)
             .keyboardType(.numberPad)
             #endif
@@ -1107,7 +1107,7 @@ struct SettingsView: View {
       } header: {
         Text("Server")
       } footer: {
-        Text("DSVideoServer listens on port 8090 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
+        Text("DSVideoServer listens on port 5000 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
       }
 
       Section {
@@ -1206,7 +1206,7 @@ struct HowToView: View {
         HowToStep(
           number: "1",
           title: "Enter Your Server Address",
-          detail: "On the login screen, type your NAS's local IP address (e.g. 192.168.1.100) or your QuickConnect ID. No need to include a port — the app uses 8090 automatically."
+          detail: "On the login screen, type your NAS's local IP address (e.g. 192.168.1.100) or your QuickConnect ID. No need to include a port — the app uses 5000 automatically."
         )
         HowToStep(
           number: "2",
@@ -1239,7 +1239,7 @@ struct HowToView: View {
         HowToStep(
           number: nil,
           title: "Static IP or Domain",
-          detail: "If you have a static external IP or a domain pointed at your NAS, enter it in the server field. Make sure port 8090 is forwarded through your router to the NAS."
+          detail: "If you have a static external IP or a domain pointed at your NAS, enter it in the server field. Make sure port 5000 is forwarded through your router to the NAS."
         )
       } header: {
         Label("Remote Access", systemImage: "network")

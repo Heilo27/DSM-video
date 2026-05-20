@@ -72,7 +72,7 @@ final class BonjourDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDel
   nonisolated func netServiceDidResolveAddress(_ service: NetService) {
     // Extract ALL value types here — nothing from service crosses into the Task
     let name = service.name
-    let port = service.port > 0 ? service.port : 8090
+    let port = service.port > 0 ? service.port : 5000
     let addresses = service.addresses ?? []
     let hostnameFallback = service.hostName?
       .trimmingCharacters(in: CharacterSet(charactersIn: "."))

@@ -64,13 +64,18 @@ struct ItemsGridView: View {
     ScrollView {
       if isLoading && items.isEmpty {
         ProgressView("Loading videos")
+          #if os(tvOS)
+          .padding(.top, 60)
+          #else
           .padding(.top, 24)
+          #endif
       } else if let error {
         // FIX-18: retry button so users aren't stuck after a transient network error
         VStack(spacing: 12) {
           ContentUnavailableView("Couldn't load items", systemImage: "exclamationmark.triangle", description: Text(error))
           Button("Retry") { Task { await load() } }
             .buttonStyle(.borderedProminent)
+            .tint(Color.dsAccent)
         }
         .padding(.top, 24)
       } else {

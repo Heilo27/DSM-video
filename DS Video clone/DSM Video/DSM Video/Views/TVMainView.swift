@@ -99,9 +99,12 @@ struct TVLoginView: View {
                   .textInputAutocapitalization(.never)
                   .autocorrectionDisabled()
                   .frame(maxWidth: 480)
-                Toggle("Use HTTPS", isOn: $useHTTPS)
-                  .frame(maxWidth: 480)
-                  .tint(Color.dsAccent)
+                Toggle(isOn: $useHTTPS) {
+                  Text("Use HTTPS")
+                    .foregroundStyle(.white)
+                }
+                .frame(maxWidth: 480)
+                .tint(Color.dsAccent)
               }
 
               if let error = appState.loginError {
@@ -178,6 +181,17 @@ private struct TVHomeView: View {
                   description: Text(loadError)
                 )
                 .foregroundStyle(.white)
+
+                Button {
+                  Task { await appState.homeLoad() }
+                } label: {
+                  Label("Retry", systemImage: "arrow.clockwise")
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 48)
+                    .padding(.vertical, 20)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.dsAccent)
 
                 Button {
                   appState.logout()
@@ -305,6 +319,7 @@ private struct TVLandscapeRail: View {
         }
         .padding(.horizontal, 60)
         .padding(.vertical, 12)
+        .focusSection()
       }
     }
   }
@@ -317,14 +332,17 @@ private struct TVLibraryRail: View {
   let library: Library
 
   @State private var items: [ItemSummary] = []
+  @State private var shows: [TVShow] = []
   @State private var isLoading: Bool = false
   @State private var error: String?
+
+  private var isTVLibrary: Bool { library.kind == "tv" }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
       // Library header — navigates to full grid
       NavigationLink {
-        if library.kind == "tv" {
+        if isTVLibrary {
           TVShowsView(library: library)
         } else {
           ItemsGridView(library: library)
@@ -354,20 +372,33 @@ private struct TVLibraryRail: View {
 
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(alignment: .top, spacing: 28) {
-          ForEach(items.prefix(20)) { item in
-            NavigationLink {
-              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-            } label: {
-              // TV library uses portrait cards for movie/show posters
-              TVPortraitCard(item: item)
+          if isTVLibrary {
+            ForEach(shows.prefix(20)) { show in
+              NavigationLink {
+                TVShowDetailView(show: show, library: library)
+              } label: {
+                TVShowPortraitCard(show: show)
+              }
+              .buttonStyle(.card)
+              .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
+              .accessibilityHint("Opens show details")
             }
-            .buttonStyle(.card)
-            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
-            .accessibilityHint("Opens video details")
+          } else {
+            ForEach(items.prefix(20)) { item in
+              NavigationLink {
+                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+              } label: {
+                TVPortraitCard(item: item)
+              }
+              .buttonStyle(.card)
+              .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+              .accessibilityHint("Opens video details")
+            }
           }
         }
         .padding(.horizontal, 60)
         .padding(.vertical, 12)
+        .focusSection()
       }
     }
     .task { await load() }
@@ -378,28 +409,100 @@ private struct TVLibraryRail: View {
     isLoading = true
     defer { isLoading = false }
 
-    // Demo mode — serve static data directly; no API calls during App Review.
     if appState.isDemoMode {
-      items = DemoData.items(for: library)
+      if isTVLibrary {
+        shows = DemoData.tvShows
+      } else {
+        items = DemoData.items(for: library)
+      }
       return
     }
 
-    // Prefer LocalStore (already populated by delta sync) to avoid a redundant
-    // network call on every TVHomeView appear (TASK-415).
-    let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
-    if !cached.isEmpty {
-      items = cached
-      error = nil
-      return
-    }
-
-    // LocalStore empty (first launch before sync completes) — fall back to API.
     do {
-      items = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
+      if isTVLibrary {
+        let response = try await appState.api.tvShows(libraryId: library.id)
+        shows = response.shows
+      } else {
+        let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
+        if !cached.isEmpty {
+          items = cached
+          error = nil
+          return
+        }
+        items = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
+      }
+      error = nil
     } catch is CancellationError {
       // View disappeared — discard, don't set error
     } catch {
       self.error = (error as? APIError)?.userMessage ?? "Couldn't load"
+    }
+  }
+}
+
+// Portrait card for a TVShow in the home rail
+private struct TVShowPortraitCard: View {
+  @Environment(AppState.self) private var appState
+  let show: TVShow
+
+  private let cardWidth: CGFloat = 220
+  private let cardHeight: CGFloat = 330
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      ZStack(alignment: .bottom) {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(Color(white: 0.1))
+          .frame(width: cardWidth, height: cardHeight)
+
+        if let posterID = show.posterImageId {
+          AuthenticatedImage(
+            url: appState.api.imageURL(id: posterID, width: 440, version: show.metadataVersion),
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
+          )
+          .scaledToFill()
+          .frame(width: cardWidth, height: cardHeight)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else {
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color(white: 0.08))
+            .frame(width: cardWidth, height: cardHeight)
+            .overlay(
+              Image(systemName: "tv.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.white.opacity(0.25))
+                .accessibilityHidden(true)
+            )
+        }
+
+        LinearGradient(
+          stops: [
+            .init(color: .clear, location: 0.5),
+            .init(color: .black.opacity(0.7), location: 1.0)
+          ],
+          startPoint: .top,
+          endPoint: .bottom
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(width: cardWidth, height: cardHeight)
+      }
+      .frame(width: cardWidth, height: cardHeight)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(show.title)
+          .font(.system(size: 17, weight: .medium))
+          .foregroundStyle(.white)
+          .lineLimit(2)
+          .frame(width: cardWidth, alignment: .leading)
+
+        if let year = show.year {
+          Text(String(year))
+            .font(.system(size: 15))
+            .foregroundStyle(Color.dsTextSecondary)
+        }
+      }
+      .padding(.leading, 10)
     }
   }
 }
@@ -751,6 +854,7 @@ private struct TVSearchView: View {
                 Divider().background(Color(white: 0.2)).padding(.horizontal, 60)
               }
             }
+            .focusSection()
           }
         } else {
           ContentUnavailableView(

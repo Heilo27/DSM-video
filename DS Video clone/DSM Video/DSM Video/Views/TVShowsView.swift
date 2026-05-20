@@ -129,11 +129,18 @@ struct TVShowsView: View {
           .padding(.top, 24)
           #endif
       } else if let error {
-        ContentUnavailableView(
-          "Couldn't load shows",
-          systemImage: "exclamationmark.triangle",
-          description: Text(error)
-        )
+        VStack(spacing: 24) {
+          ContentUnavailableView(
+            "Couldn't load shows",
+            systemImage: "exclamationmark.triangle",
+            description: Text(error)
+          )
+          Button("Retry") {
+            Task { await load() }
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(Color.dsAccent)
+        }
         #if os(tvOS)
         .padding(.top, 60)
         #else
