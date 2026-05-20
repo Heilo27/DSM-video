@@ -110,22 +110,27 @@ struct ItemsGridView: View {
         LazyVGrid(columns: columns, spacing: gridSpacing) {
           #if os(tvOS)
           ForEach(displayedItems) { item in
-          #else
-          ForEach(sortedItems) { item in
-          #endif
             NavigationLink {
               ItemDetailView(itemID: item.id, fallbackTitle: item.title)
             } label: {
               ItemPosterCell(item: item)
             }
-            #if os(tvOS)
             .buttonStyle(.card)
-            #else
-            .buttonStyle(.plain)
-            #endif
             .accessibilityLabel(itemAccessibilityLabel(item))
             .accessibilityHint("Opens video details")
           }
+          #else
+          ForEach(sortedItems) { item in
+            NavigationLink {
+              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+            } label: {
+              ItemPosterCell(item: item)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(itemAccessibilityLabel(item))
+            .accessibilityHint("Opens video details")
+          }
+          #endif
         }
         .padding(gridPadding)
 
