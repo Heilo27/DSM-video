@@ -1,3 +1,14 @@
-Bug fixes and performance improvements.
+Overhauled Apple TV controls and library browsing.
 
-Streaming over WAN is smoother — the app now buffers aggressively in the background and resumes automatically when your connection recovers.
+PLAYER
+• D-pad left/right now skips back and forward 30 seconds
+• Select button shows controls when hidden, pauses when controls are visible
+• Play/Pause button on Siri Remote works correctly in all states
+• Time labels no longer wrap to two lines during playback
+
+LIBRARY
+• Search added to both Movies and TV Shows grids
+• Sort buttons added: A→Z and Recently Added, both libraries
+• Fixed missing TV show poster tiles that weren't focusable with the remote
+• Default server port corrected to 5000
+• HTTPS toggle label now always visible regardless of focus state
