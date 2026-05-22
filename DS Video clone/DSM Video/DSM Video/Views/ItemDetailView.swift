@@ -677,7 +677,7 @@ struct ItemDetailView: View {
   // MARK: - Data
 
   private func loadProgress() {
-    savedPositionSeconds = LocalStore.shared.getProgressSeconds(itemId: itemID)
+    Task { savedPositionSeconds = await LocalStore.shared.getProgressSeconds(itemId: itemID) }
   }
 
   private func load() async {
