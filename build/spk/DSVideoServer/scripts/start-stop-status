@@ -78,7 +78,7 @@ start() {
 
   # Default configuration (can be overridden by DSM package env/config files)
   export DSVIDEO_PORT="${DSVIDEO_PORT:-8090}"
-  export DSVIDEO_BASE_URL="${DSVIDEO_BASE_URL:-http://127.0.0.1:${DSVIDEO_PORT}}"
+  export DSVIDEO_BASE_URL="${DSVIDEO_BASE_URL:-}"
   export DSVIDEO_DB_PATH="${DSVIDEO_DB_PATH:-${VAR}/dsvideo.db}"
 
   # Generate JWT secret if not set - use /dev/urandom (no openssl dependency)

@@ -212,7 +212,7 @@ struct ItemDetailView: View {
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 260, height: 54)
-        .background(focused ? Color.red.brightness(0.12) : Color.red)
+        .background(Color.red.brightness(focused ? 0.12 : 0))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
@@ -1067,7 +1067,8 @@ private struct PlayerSheet: View {
               await start()
             }
           },
-          onGoToShow: onGoToShow
+          onGoToShow: onGoToShow,
+          blockDpadSeek: showNextEpisodeOverlay
         )
         .ignoresSafeArea()
 
@@ -1121,6 +1122,22 @@ private struct PlayerSheet: View {
 
   @ViewBuilder
   private func nextEpisodeOverlay(next: ItemSummary) -> some View {
+    #if os(tvOS)
+    _NextEpisodeOverlayView(
+      next: next,
+      countdown: nextEpisodeCountdown,
+      onPlayNow: {
+        countdownTask?.cancel()
+        showNextEpisodeOverlay = false
+        onPlayNextEpisode?()
+        dismiss()
+      },
+      onStay: {
+        countdownTask?.cancel()
+        showNextEpisodeOverlay = false
+      }
+    )
+    #else
     VStack(spacing: 20) {
       Spacer()
       VStack(spacing: 12) {
@@ -1138,29 +1155,6 @@ private struct PlayerSheet: View {
           .foregroundStyle(.white.opacity(0.7))
           .monospacedDigit()
         HStack(spacing: 16) {
-          #if os(tvOS)
-          Button {
-            countdownTask?.cancel()
-            showNextEpisodeOverlay = false
-            onPlayNextEpisode?()
-            dismiss()
-          } label: {
-            Text("Play Now")
-              .font(.headline)
-          }
-          .buttonStyle(.borderedProminent)
-          .tint(Color.dsAccent)
-
-          Button {
-            countdownTask?.cancel()
-            showNextEpisodeOverlay = false
-          } label: {
-            Text("Cancel")
-              .font(.headline)
-          }
-          .buttonStyle(.bordered)
-          .tint(.white)
-          #else
           Button {
             countdownTask?.cancel()
             showNextEpisodeOverlay = false
@@ -1187,7 +1181,6 @@ private struct PlayerSheet: View {
               .background(Color.white.opacity(0.2), in: Capsule())
           }
           .buttonStyle(.plain)
-          #endif
         }
       }
       .padding(28)
@@ -1199,6 +1192,7 @@ private struct PlayerSheet: View {
     .background(Color.black.opacity(0.45).ignoresSafeArea())
     .transition(.opacity)
     .animation(.easeInOut(duration: 0.25), value: showNextEpisodeOverlay)
+    #endif
   }
 
   private func start() async {
@@ -1263,3 +1257,76 @@ private struct PlayerSheet: View {
     }
   }
 }
+
+#if os(tvOS)
+private struct _NextEpisodeOverlayView: View {
+  let next: ItemSummary
+  let countdown: Int
+  let onPlayNow: () -> Void
+  let onStay: () -> Void
+
+  @Namespace private var ns
+  @FocusState private var focused: OverlayButton?
+  enum OverlayButton: Hashable { case playNow, stay }
+
+  var body: some View {
+    VStack(spacing: 20) {
+      Spacer()
+      VStack(spacing: 12) {
+        Text("UP NEXT")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.white.opacity(0.7))
+        Text(next.title)
+          .font(.title3.weight(.semibold))
+          .foregroundStyle(.white)
+          .multilineTextAlignment(.center)
+          .lineLimit(2)
+        Text("Playing in \(countdown)s")
+          .font(.subheadline)
+          .foregroundStyle(.white.opacity(0.7))
+          .monospacedDigit()
+        HStack(spacing: 24) {
+          Button(action: onPlayNow) {
+            Text("Play Now")
+              .font(.headline)
+              .foregroundStyle(.white)
+              .padding(.horizontal, 28)
+              .padding(.vertical, 14)
+              .background(Color.dsAccent, in: Capsule())
+              .brightness(focused == .playNow ? 0.1 : 0)
+          }
+          .buttonStyle(.plain)
+          .focusEffectDisabled()
+          .scaleEffect(focused == .playNow ? 1.05 : 1.0)
+          .animation(.easeInOut(duration: 0.15), value: focused)
+          .focused($focused, equals: .playNow)
+          .prefersDefaultFocus(in: ns)
+
+          Button(action: onStay) {
+            Text("Stay")
+              .font(.headline)
+              .foregroundStyle(.white)
+              .padding(.horizontal, 28)
+              .padding(.vertical, 14)
+              .background(Color.white.opacity(focused == .stay ? 0.3 : 0.18), in: Capsule())
+          }
+          .buttonStyle(.plain)
+          .focusEffectDisabled()
+          .scaleEffect(focused == .stay ? 1.05 : 1.0)
+          .animation(.easeInOut(duration: 0.15), value: focused)
+          .focused($focused, equals: .stay)
+        }
+        .focusScope(ns)
+      }
+      .padding(28)
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+      .padding(.horizontal, 32)
+      .padding(.bottom, 60)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(Color.black.opacity(0.45).ignoresSafeArea())
+    .transition(.opacity)
+    .animation(.easeInOut(duration: 0.25), value: countdown)
+  }
+}
+#endif

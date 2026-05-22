@@ -44,6 +44,8 @@ struct GestureVideoPlayer: View {
     /// Called when the user taps "Go to Show" in the controls overlay.
     /// Only set for TV episode playback.
     var onGoToShow: (() -> Void)?
+    /// When true, d-pad left/right does not seek (used when an overlay captures focus).
+    var blockDpadSeek: Bool = false
 
     @State private var player: AVPlayer?
     #if os(iOS)
@@ -969,6 +971,7 @@ struct GestureVideoPlayer: View {
     // or shows controls first if they're hidden.
     private func handleTVMoveCommand(direction: MoveCommandDirection) {
         guard direction == .left || direction == .right else { return }
+        guard !blockDpadSeek else { return }
         guard showControls else {
             withAnimation(.easeInOut(duration: 0.25)) { showControls = true }
             scheduleHideControls()
