@@ -333,6 +333,17 @@ actor LocalStore {
     }
   }
 
+  func getProgressSeconds(itemId: String) -> Int {
+    guard let db else { return 0 }
+    var stmt: OpaquePointer?
+    let sql = "SELECT position_seconds FROM progress WHERE item_id=? LIMIT 1"
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
+    guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+    return Int(sqlite3_column_int(stmt, 0))
+  }
+
   // MARK: - Rails Queries
 
   // Shared 18-column projection used by all three rail queries.

@@ -20,10 +20,15 @@ struct ItemDetailView: View {
   @State private var downloadError: String?
 
   @State private var showPlayer: Bool = false
+  @State private var playFromBeginning: Bool = false
+  @State private var savedPositionSeconds: Int = 0
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
   @State private var autoPlayFired: Bool = false
   @State private var viewHeight: CGFloat = 852  // sensible default (iPhone 15 Pro)
+  #if os(tvOS)
+  @Namespace private var actionNamespace
+  #endif
 
   private var isDownloaded: Bool {
     downloadManager.isDownloaded(itemId: itemID)
@@ -41,16 +46,17 @@ struct ItemDetailView: View {
     #if os(tvOS)
     tvBody
       .navigationTitle(detail?.title ?? fallbackTitle)
-      .task(id: itemID) { await load() }
+      .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
         autoPlayFired = false
         if autoPlay { autoPlayFired = true; showPlayer = true }
       }
-      .fullScreenCover(isPresented: $showPlayer) {
+      .fullScreenCover(isPresented: $showPlayer, onDismiss: { playFromBeginning = false; loadProgress() }) {
         PlayerSheet(
           itemID: itemID,
           title: detail?.title ?? fallbackTitle,
           itemYear: detail?.year,
+          forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode,
           onGoToShow: onGoToShow
@@ -72,16 +78,17 @@ struct ItemDetailView: View {
       .toolbarBackground(.visible, for: .navigationBar)
       .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
       .toolbarColorScheme(.dark, for: .navigationBar)
-      .task(id: itemID) { await load() }
+      .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
         autoPlayFired = false
         if autoPlay { autoPlayFired = true; showPlayer = true }
       }
-      .fullScreenCover(isPresented: $showPlayer) {
+      .fullScreenCover(isPresented: $showPlayer, onDismiss: { playFromBeginning = false; loadProgress() }) {
         PlayerSheet(
           itemID: itemID,
           title: detail?.title ?? fallbackTitle,
           itemYear: detail?.year,
+          forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode,
           onGoToShow: onGoToShow
@@ -184,6 +191,13 @@ struct ItemDetailView: View {
 
   // MARK: - Content Panel (metadata + actions)
 
+  // MARK: - Action Buttons
+
+  #if os(tvOS)
+  @FocusState private var focusedAction: ActionButton?
+  enum ActionButton: Hashable { case play, fromBeginning }
+  #endif
+
   @ViewBuilder
   private var contentPanel: some View {
     VStack(alignment: .leading, spacing: 14) {
@@ -194,7 +208,9 @@ struct ItemDetailView: View {
 
           // Action row: Play + compact icon buttons
           HStack(spacing: 12) {
+            // Play button — default focus on tvOS
             Button {
+              playFromBeginning = false
               showPlayer = true
             } label: {
               Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
@@ -210,6 +226,33 @@ struct ItemDetailView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .shadow(color: DSReelBrandColor.background.opacity(0.45), radius: 8, x: 0, y: 4)
             .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
+            #if os(tvOS)
+            .focused($focusedAction, equals: .play)
+            .prefersDefaultFocus(in: actionNamespace)
+            #endif
+
+            // Start from Beginning — shown only when there's saved progress to resume from
+            if savedPositionSeconds > 0 {
+              Button {
+                playFromBeginning = true
+                showPlayer = true
+              } label: {
+                Label("Start Over", systemImage: "arrow.counterclockwise")
+                  .font(.headline.weight(.semibold))
+                  #if os(tvOS)
+                  .frame(maxWidth: .infinity, minHeight: 80)
+                  #else
+                  .frame(maxWidth: .infinity, minHeight: 52)
+                  #endif
+              }
+              .background(Color(white: 0.18))
+              .foregroundStyle(.white)
+              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+              .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
+              #if os(tvOS)
+              .focused($focusedAction, equals: .fromBeginning)
+              #endif
+            }
 
             // Download icon button (iOS only)
             #if !os(tvOS)
@@ -217,6 +260,9 @@ struct ItemDetailView: View {
             watchlistIconButton
             #endif
           }
+          #if os(tvOS)
+          .focusScope(actionNamespace)
+          #endif
 
           // Download error (separate from detail-load error to avoid clobbering the header)
           #if !os(tvOS)
@@ -630,6 +676,10 @@ struct ItemDetailView: View {
 
   // MARK: - Data
 
+  private func loadProgress() {
+    savedPositionSeconds = LocalStore.shared.getProgressSeconds(itemId: itemID)
+  }
+
   private func load() async {
     guard !isLoading else { return }
     // Clear detail only after confirming we will actually start a load — avoids
@@ -851,6 +901,7 @@ private struct PlayerSheet: View {
   let itemID: String
   let title: String
   var itemYear: Int? = nil
+  var forceFromBeginning: Bool = false
   var nextEpisode: ItemSummary? = nil
   var onPlayNextEpisode: (() -> Void)? = nil
   var onGoToShow: (() -> Void)? = nil
@@ -1148,7 +1199,7 @@ private struct PlayerSheet: View {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)
       if FileManager.default.fileExists(atPath: downloaded.videoPath) {
         isOffline = true
-        resumePosition = Double(downloaded.resumePositionSeconds)
+        resumePosition = forceFromBeginning ? 0 : Double(downloaded.resumePositionSeconds)
         playbackURL = localURL
         return
       }
@@ -1162,7 +1213,7 @@ private struct PlayerSheet: View {
         error = "No playable URL."
         return
       }
-      resumePosition = Double(info.resumePositionSeconds)
+      resumePosition = forceFromBeginning ? 0 : Double(info.resumePositionSeconds)
       chapters = info.chapters ?? []
       playbackURL = url
     } catch {
@@ -1174,7 +1225,7 @@ private struct PlayerSheet: View {
           let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
           let url = info.streamUrl ?? info.hlsMasterUrl
           guard let url else { self.error = "No playable URL."; return }
-          resumePosition = Double(info.resumePositionSeconds)
+          resumePosition = forceFromBeginning ? 0 : Double(info.resumePositionSeconds)
           chapters = info.chapters ?? []
           playbackURL = url
           appState.clearNetworkError()
