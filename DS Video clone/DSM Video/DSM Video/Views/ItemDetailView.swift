@@ -47,7 +47,7 @@ struct ItemDetailView: View {
   var body: some View {
     #if os(tvOS)
     tvBody
-      .navigationTitle(detail?.title ?? fallbackTitle)
+      .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
         autoPlayFired = false
