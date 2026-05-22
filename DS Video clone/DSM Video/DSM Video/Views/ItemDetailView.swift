@@ -65,14 +65,6 @@ struct ItemDetailView: View {
         )
         .environment(appState)
       }
-      .toolbar {
-        ToolbarItem(placement: .topBarLeading) {
-          Button { dismiss() } label: {
-            Image(systemName: "chevron.left").foregroundStyle(.white)
-          }
-          .accessibilityLabel("Back")
-        }
-      }
     #else
     iOSBody
       .navigationTitle(detail?.title ?? fallbackTitle)
@@ -137,6 +129,17 @@ struct ItemDetailView: View {
         contentPanel
           .background(.ultraThinMaterial)
           .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+          // Fade the top edge of the panel into the hero image
+          .mask(
+            LinearGradient(
+              stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black, location: 0.06)
+              ],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+          )
           .frame(width: geo.size.width, alignment: .bottom)
           .frame(maxHeight: geo.size.height * 0.52, alignment: .bottom)
           .clipped()
@@ -203,7 +206,8 @@ struct ItemDetailView: View {
   @ViewBuilder
   private var contentPanel: some View {
     VStack(alignment: .leading, spacing: 14) {
-          // Metadata pills
+          // Metadata pills + action buttons grouped tightly together
+          VStack(alignment: .leading, spacing: 8) {
           if detail != nil {
             metadataPills
           }
@@ -222,10 +226,10 @@ struct ItemDetailView: View {
                 .frame(width: 200, height: 44)
                 #endif
             }
-            .background(DSReelBrandColor.background)
+            .background(Color.red)
             .foregroundStyle(.white)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: DSReelBrandColor.background.opacity(0.45), radius: 8, x: 0, y: 4)
+            .shadow(color: Color.red.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
             #if os(tvOS)
             .focused($focusedAction, equals: .play)
@@ -266,6 +270,7 @@ struct ItemDetailView: View {
           #if os(tvOS)
           .focusScope(actionNamespace)
           #endif
+          } // end pills+actions VStack
 
           // Download error (separate from detail-load error to avoid clobbering the header)
           #if !os(tvOS)
@@ -618,20 +623,18 @@ struct ItemDetailView: View {
   @ViewBuilder
   private func castSection(cast: [ItemDetail.Person]) -> some View {
     ScrollView(.horizontal, showsIndicators: false) {
-      HStack(spacing: 0) {
-        Text("Cast  ")
+      HStack(alignment: .center, spacing: 0) {
+        Text("Cast: ")
           .font(.headline)
           .foregroundStyle(.white)
           .accessibilityAddTraits(.isHeader)
 
-        HStack(spacing: 0) {
-          ForEach(Array(cast.enumerated()), id: \.offset) { idx, person in
-            Text(person.name + (idx < cast.count - 1 ? ",  " : ""))
-              .font(.subheadline)
-              .foregroundStyle(.white.opacity(0.75))
-              .fixedSize()
-              .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
-          }
+        ForEach(Array(cast.enumerated()), id: \.offset) { idx, person in
+          Text(person.name + (idx < cast.count - 1 ? ",  " : ""))
+            .font(.headline.weight(.regular))
+            .foregroundStyle(.white.opacity(0.75))
+            .fixedSize()
+            .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
         }
       }
       .padding(.vertical, 2)
