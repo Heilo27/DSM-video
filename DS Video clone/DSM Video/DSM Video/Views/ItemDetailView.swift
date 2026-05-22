@@ -592,11 +592,9 @@ struct ItemDetailView: View {
   private func formatDuration(_ seconds: Int) -> String {
     let hours = seconds / 3600
     let minutes = (seconds % 3600) / 60
-    if hours > 0 {
-      return "\(hours)h \(minutes)m"
-    } else {
-      return "\(minutes)m"
-    }
+    if hours > 0 { return "\(hours)h \(minutes)m" }
+    if minutes > 0 { return "\(minutes)m" }
+    return "\(seconds)s"
   }
 
   // MARK: - Download Icon Button
@@ -1111,6 +1109,9 @@ private struct PlayerSheet: View {
         if isOffline {
           DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos)
         }
+        // Write to LocalStore synchronously so force-kill doesn't lose the position,
+        // then fire the async network sync.
+        LocalStore.shared.upsertSingleProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
         Task {
           await appState.recordProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
         }

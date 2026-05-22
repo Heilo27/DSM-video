@@ -874,6 +874,7 @@ final class AppState {
     } else {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
       homeIsCacheDecoding = false
+      homeError = nil  // clear stale error before each retry attempt
       // When offline with no local data, skip the network attempt and surface an
       // appropriate error — avoids a loud failure on every network call (TASK-291).
       guard !isOffline && !serverUnreachable else {
