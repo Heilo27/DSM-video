@@ -226,8 +226,6 @@ private struct SetupLANScanScreen: View {
       try? await Task.sleep(for: .seconds(8))
       if discovery.servers.isEmpty { timedOut = true }
     }
-    // Stream in results: transition to found list as soon as the first server appears
-    .onChange(of: discovery.servers) { _, _ in }
   }
 }
 

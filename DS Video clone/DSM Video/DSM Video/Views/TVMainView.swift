@@ -325,7 +325,7 @@ private struct TVLandscapeRail: View {
           ForEach(items) { item in
             if let showId = item.showFolderId, !showId.isEmpty,
                let tvLibrary = appState.homeLibraries.first(where: {
-                 item.libraryId != nil ? $0.id == item.libraryId : $0.kind == "tv"
+                 item.libraryId != nil ? $0.id == item.libraryId : $0.kind == "tv" && item.libraryId == nil
                }) {
               // TV episode — navigate to the show's season/episode list,
               // highlighting the episode so the user can back out and browse,

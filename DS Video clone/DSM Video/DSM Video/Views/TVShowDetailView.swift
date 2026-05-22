@@ -322,7 +322,7 @@ private struct TVSeasonSection: View {
   }
 
   private func load() async {
-    guard !isLoading, episodes.isEmpty else { return }
+    guard !isLoading else { return }
     if appState.isDemoMode {
       episodes = DemoData.episodes(for: show.id, season: season.seasonNumber)
       return
@@ -556,7 +556,9 @@ private struct TVEpisodeDetailView: View {
       let resp = try await appState.api.tvShowEpisodes(
         showId: show.id, season: nextSeasonNumber, libraryId: library.id)
       nextSeasonEpisodes = resp.items
-    } catch {}
+    } catch {
+      showLog.error("fetchNextSeason failed for show \(show.id) season \(allSeasons[currentSeasonIndex + 1].seasonNumber): \(error)")
+    }
   }
 }
 
