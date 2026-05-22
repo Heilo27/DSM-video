@@ -208,9 +208,8 @@ struct ItemDetailView: View {
             metadataPills
           }
 
-          // Action row: Play + compact icon buttons
+          // Action row — Play is always fixed-width so adding Start Over doesn't resize it
           HStack(spacing: 12) {
-            // Play button — default focus on tvOS
             Button {
               playFromBeginning = false
               showPlayer = true
@@ -218,9 +217,9 @@ struct ItemDetailView: View {
               Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
                 .font(.headline.weight(.semibold))
                 #if os(tvOS)
-                .frame(maxWidth: .infinity, minHeight: 80)
+                .frame(width: 340, height: 60)
                 #else
-                .frame(maxWidth: .infinity, minHeight: 52)
+                .frame(width: 200, height: 44)
                 #endif
             }
             .background(DSReelBrandColor.background)
@@ -233,7 +232,7 @@ struct ItemDetailView: View {
             .prefersDefaultFocus(in: actionNamespace)
             #endif
 
-            // Start from Beginning — shown only when there's saved progress to resume from
+            // Start from Beginning — appears beside Play when there's saved progress
             if savedPositionSeconds > 0 {
               Button {
                 playFromBeginning = true
@@ -242,9 +241,9 @@ struct ItemDetailView: View {
                 Label("Start Over", systemImage: "arrow.counterclockwise")
                   .font(.headline.weight(.semibold))
                   #if os(tvOS)
-                  .frame(maxWidth: .infinity, minHeight: 80)
+                  .frame(width: 340, height: 60)
                   #else
-                  .frame(maxWidth: .infinity, minHeight: 52)
+                  .frame(width: 200, height: 44)
                   #endif
               }
               .background(Color(white: 0.18))
@@ -256,11 +255,13 @@ struct ItemDetailView: View {
               #endif
             }
 
-            // Download icon button (iOS only)
+            // Download / watchlist icon buttons (iOS only)
             #if !os(tvOS)
             downloadIconButton
             watchlistIconButton
             #endif
+
+            Spacer(minLength: 0)
           }
           #if os(tvOS)
           .focusScope(actionNamespace)
@@ -614,80 +615,26 @@ struct ItemDetailView: View {
 
   // MARK: - Cast Section
 
-  /// Returns a stable accent color from a person's name for their avatar chip.
-  /// Uses UTF-8 byte sum so the color is consistent across app launches.
-  private func avatarColor(for name: String) -> Color {
-    let palette: [Color] = [
-      Color(red: 0.55, green: 0.25, blue: 0.75),  // purple
-      Color(red: 0.20, green: 0.55, blue: 0.85),  // blue
-      Color(red: 0.20, green: 0.65, blue: 0.50),  // teal
-      Color(red: 0.80, green: 0.45, blue: 0.20),  // orange
-      Color(red: 0.75, green: 0.25, blue: 0.35),  // rose
-      Color(red: 0.45, green: 0.60, blue: 0.25),  // green
-    ]
-    let hash = name.utf8.reduce(0, { $0 &+ Int($1) })
-    return palette[abs(hash) % palette.count]
-  }
-
   @ViewBuilder
   private func castSection(cast: [ItemDetail.Person]) -> some View {
-    VStack(alignment: .leading, spacing: 10) {
-      Text("Cast")
-        .font(.headline)
-        .foregroundStyle(.white)
-        .accessibilityAddTraits(.isHeader)
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 0) {
+        Text("Cast  ")
+          .font(.headline)
+          .foregroundStyle(.white)
+          .accessibilityAddTraits(.isHeader)
 
-      // Horizontal avatar chip scroll (TASK-289)
-      ScrollView(.horizontal, showsIndicators: false) {
-        HStack(alignment: .top, spacing: 14) {
-          ForEach(Array(cast.enumerated()), id: \.offset) { _, person in
-            VStack(spacing: 6) {
-              // 56pt circle avatar — photo if available, else initial on colored background
-              ZStack {
-                if let imageId = person.imageId {
-                  AuthenticatedImage(
-                    url: appState.api.imageURL(id: imageId, width: 120),
-                    token: appState.sessionToken,
-                    usesTunnelCookie: appState.api.usesTunnelCookie
-                  )
-                  .scaledToFill()
-                  .frame(width: 56, height: 56)
-                  .clipShape(Circle())
-                } else {
-                  Circle()
-                    .fill(avatarColor(for: person.name))
-                    .frame(width: 56, height: 56)
-                  Text(String(person.name.prefix(1)).uppercased())
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.white)
-                }
-              }
-
-              // Name — natural width, wraps to 2 lines if needed
-              Text(person.name)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-
-              // Role
-              if let role = person.role, !role.isEmpty {
-                Text(role)
-                  .font(.caption2)
-                  .foregroundStyle(.white.opacity(0.6))
-                  .lineLimit(1)
-              }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
+        HStack(spacing: 0) {
+          ForEach(Array(cast.enumerated()), id: \.offset) { idx, person in
+            Text(person.name + (idx < cast.count - 1 ? ",  " : ""))
+              .font(.subheadline)
+              .foregroundStyle(.white.opacity(0.75))
+              .fixedSize()
+              .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
           }
         }
-        .padding(.vertical, 4)
       }
-      #if os(tvOS)
-      .focusSection()
-      #endif
+      .padding(.vertical, 2)
     }
   }
 
