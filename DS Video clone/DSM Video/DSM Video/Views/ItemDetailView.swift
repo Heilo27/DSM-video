@@ -115,30 +115,25 @@ struct ItemDetailView: View {
 
   #if os(tvOS)
   private var tvBody: some View {
-    ZStack(alignment: .bottom) {
-      Color.black.ignoresSafeArea()
-      backdropImage
-        .scaledToFill()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .clipped()
-        .ignoresSafeArea()
+    GeometryReader { geo in
+      ZStack(alignment: .bottom) {
+        // Image fills the full geometry frame
+        Color.black
+        backdropImage
+          .scaledToFill()
+          .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+          .clipped()
 
-      // Content panel pinned to bottom, gradient fade-in at top edge
-      contentPanel
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .mask(
-          VStack(spacing: 0) {
-            LinearGradient(
-              stops: [.init(color: .clear, location: 0), .init(color: .black, location: 1)],
-              startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: 56)
-            Rectangle()
-          }
-        )
-        .padding(.horizontal, 60)
-        .padding(.bottom, 48)
+        // Panel anchored to bottom — capped so hero image always dominates the top
+        contentPanel
+          .background(.ultraThinMaterial)
+          .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+          .frame(width: geo.size.width, alignment: .bottom)
+          .frame(maxHeight: geo.size.height * 0.52, alignment: .bottom)
+          .clipped()
+          .padding(.bottom, 20)
+      }
+      .frame(width: geo.size.width, height: geo.size.height)
     }
     .ignoresSafeArea(edges: .all)
     .id(showPlayer)
@@ -164,14 +159,14 @@ struct ItemDetailView: View {
               )
             )
             .mask(
-              VStack(spacing: 0) {
-                LinearGradient(
-                  stops: [.init(color: .clear, location: 0), .init(color: .black, location: 1)],
-                  startPoint: .top, endPoint: .bottom
-                )
-                .frame(height: 48)
-                Rectangle()
-              }
+              LinearGradient(
+                stops: [
+                  .init(color: .clear, location: 0),
+                  .init(color: .black, location: 0.06)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+              )
             )
         }
       }
@@ -309,8 +304,10 @@ struct ItemDetailView: View {
           #endif
         }
         #if os(tvOS)
+        .padding(.horizontal, 60)
         .padding(.top, 20)
         .padding(.bottom, 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
         #else
         .padding(.horizontal, 16)
         .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
@@ -609,7 +606,11 @@ struct ItemDetailView: View {
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
+                #if os(tvOS)
+                .frame(minWidth: 80, maxWidth: 120)
+                #else
                 .frame(width: 90)
+                #endif
 
               // Role
               if let role = person.role, !role.isEmpty {
@@ -617,7 +618,11 @@ struct ItemDetailView: View {
                   .font(.caption2)
                   .foregroundStyle(.white.opacity(0.6))
                   .lineLimit(1)
+                  #if os(tvOS)
+                  .frame(minWidth: 80, maxWidth: 120)
+                  #else
                   .frame(width: 90)
+                  #endif
               }
             }
             .accessibilityElement(children: .ignore)
