@@ -38,60 +38,143 @@ struct ItemDetailView: View {
   }
 
   var body: some View {
+    #if os(tvOS)
+    tvBody
+      .navigationTitle(detail?.title ?? fallbackTitle)
+      .task(id: itemID) { await load() }
+      .onAppear {
+        autoPlayFired = false
+        if autoPlay { autoPlayFired = true; showPlayer = true }
+      }
+      .fullScreenCover(isPresented: $showPlayer) {
+        PlayerSheet(
+          itemID: itemID,
+          title: detail?.title ?? fallbackTitle,
+          itemYear: detail?.year,
+          nextEpisode: nextEpisode,
+          onPlayNextEpisode: onNextEpisode,
+          onGoToShow: onGoToShow
+        )
+        .environment(appState)
+      }
+      .toolbar {
+        ToolbarItem(placement: .topBarLeading) {
+          Button { dismiss() } label: {
+            Image(systemName: "chevron.left").foregroundStyle(.white)
+          }
+          .accessibilityLabel("Back")
+        }
+      }
+    #else
+    iOSBody
+      .navigationTitle(detail?.title ?? fallbackTitle)
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbarBackground(.visible, for: .navigationBar)
+      .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+      .toolbarColorScheme(.dark, for: .navigationBar)
+      .task(id: itemID) { await load() }
+      .onAppear {
+        autoPlayFired = false
+        if autoPlay { autoPlayFired = true; showPlayer = true }
+      }
+      .fullScreenCover(isPresented: $showPlayer) {
+        PlayerSheet(
+          itemID: itemID,
+          title: detail?.title ?? fallbackTitle,
+          itemYear: detail?.year,
+          nextEpisode: nextEpisode,
+          onPlayNextEpisode: onNextEpisode,
+          onGoToShow: onGoToShow
+        )
+        .environment(appState)
+        .toolbarVisibility(.hidden, for: .tabBar)
+      }
+      .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Menu {
+            Button("Fix Metadata", systemImage: "magnifyingglass") {
+              showMetadataFixer = true
+            }
+          } label: {
+            Image(systemName: "ellipsis.circle")
+          }
+          .accessibilityLabel("More options")
+        }
+      }
+      .sheet(isPresented: $showMetadataFixer) {
+        MetadataFixerSheet(itemID: itemID, initialQuery: detail?.title ?? fallbackTitle) {
+          detail = nil
+          Task { await load() }
+        }
+        .environment(appState)
+      }
+    #endif
+  }
+
+  // MARK: - tvOS layout: full-screen ZStack, content anchored to bottom
+
+  #if os(tvOS)
+  private var tvBody: some View {
+    ZStack(alignment: .bottom) {
+      Color.black.ignoresSafeArea()
+      backdropImage
+        .scaledToFill()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .clipped()
+        .ignoresSafeArea()
+
+      // Content panel pinned to bottom, gradient fade-in at top edge
+      contentPanel
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .mask(
+          VStack(spacing: 0) {
+            LinearGradient(
+              stops: [.init(color: .clear, location: 0), .init(color: .black, location: 1)],
+              startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: 56)
+            Rectangle()
+          }
+        )
+        .padding(.horizontal, 60)
+        .padding(.bottom, 48)
+    }
+    .ignoresSafeArea(edges: .all)
+    .id(showPlayer)
+  }
+  #endif
+
+  // MARK: - iOS layout: scrollable, image bleeds behind panel
+
+  #if !os(tvOS)
+  private var iOSBody: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 0) {
-        // Image + frosted content panel.
-        // tvOS: fixed-height ZStack so the backdrop always fills the frame and
-        // the clear image band at the top is guaranteed regardless of content height.
-        // iOS: ZStack grows with content; image bleeds behind the panel from below.
         ZStack(alignment: .bottom) {
           header
-
-          // Frosted glass panel — gradient-masked at the top edge for a soft fade-in.
-          // On tvOS a Spacer at the top reserves the clear image zone.
-          VStack(spacing: 0) {
-            #if os(tvOS)
-            // Reserve ~40% of the frame height as clear image — panel starts below this
-            Spacer().frame(height: tvClearZoneHeight)
-            #endif
-            contentPanel
-              .background(.ultraThinMaterial)
-              #if os(tvOS)
-              .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-              #else
-              .clipShape(
-                .rect(
-                  topLeadingRadius: 20,
-                  bottomLeadingRadius: 0,
-                  bottomTrailingRadius: 0,
-                  topTrailingRadius: 20
+          contentPanel
+            .background(.ultraThinMaterial)
+            .clipShape(
+              .rect(
+                topLeadingRadius: 20,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 20
+              )
+            )
+            .mask(
+              VStack(spacing: 0) {
+                LinearGradient(
+                  stops: [.init(color: .clear, location: 0), .init(color: .black, location: 1)],
+                  startPoint: .top, endPoint: .bottom
                 )
-              )
-              #endif
-              .mask(
-                VStack(spacing: 0) {
-                  LinearGradient(
-                    stops: [
-                      .init(color: .clear, location: 0),
-                      .init(color: .black, location: 1)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                  )
-                  .frame(height: 48)
-                  Rectangle()
-                }
-              )
-          }
+                .frame(height: 48)
+                Rectangle()
+              }
+            )
         }
-        #if os(tvOS)
-        .frame(height: tvDetailFrameHeight)
-        .clipped()
-        #endif
       }
-      // Rebuild layout content when player dismisses — prevents horizontal
-      // offset corruption that SwiftUI applies to ScrollView content after
-      // fullScreenCover dismissal (shows content shifted left, clipping leading edge).
       .id(showPlayer)
     }
     .background(
@@ -101,69 +184,8 @@ struct ItemDetailView: View {
           .onChange(of: geo.size.height) { _, h in viewHeight = h }
       }
     )
-    .navigationTitle(detail?.title ?? fallbackTitle)
-    #if !os(tvOS)
-    .navigationBarTitleDisplayMode(.inline)
-    .toolbarBackground(.visible, for: .navigationBar)
-    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
-    .toolbarColorScheme(.dark, for: .navigationBar)
-    #endif
-    .task(id: itemID) {
-      await load()
-    }
-    .onAppear {
-      autoPlayFired = false
-      if autoPlay {
-        autoPlayFired = true
-        showPlayer = true
-      }
-    }
-    .fullScreenCover(isPresented: $showPlayer) {
-      PlayerSheet(
-        itemID: itemID,
-        title: detail?.title ?? fallbackTitle,
-        itemYear: detail?.year,
-        nextEpisode: nextEpisode,
-        onPlayNextEpisode: onNextEpisode,
-        onGoToShow: onGoToShow
-      )
-      .environment(appState)
-      #if !os(tvOS)
-      .toolbarVisibility(.hidden, for: .tabBar)
-      #endif
-    }
-    #if os(tvOS)
-    .toolbar {
-      ToolbarItem(placement: .topBarLeading) {
-        Button { dismiss() } label: {
-          Image(systemName: "chevron.left")
-            .foregroundStyle(.white)
-        }
-        .accessibilityLabel("Back")
-      }
-    }
-    #else
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        Menu {
-          Button("Fix Metadata", systemImage: "magnifyingglass") {
-            showMetadataFixer = true
-          }
-        } label: {
-          Image(systemName: "ellipsis.circle")
-        }
-        .accessibilityLabel("More options")
-      }
-    }
-    .sheet(isPresented: $showMetadataFixer) {
-      MetadataFixerSheet(itemID: itemID, initialQuery: detail?.title ?? fallbackTitle) {
-        detail = nil
-        Task { await load() }
-      }
-      .environment(appState)
-    }
-    #endif
   }
+  #endif
 
   // MARK: - Content Panel (metadata + actions)
 
@@ -282,34 +304,28 @@ struct ItemDetailView: View {
             castSection(cast: cast)
           }
 
+          #if !os(tvOS)
           Spacer(minLength: 32)
+          #endif
         }
         #if os(tvOS)
-        .padding(.horizontal, 48)
+        .padding(.top, 20)
+        .padding(.bottom, 24)
         #else
         .padding(.horizontal, 16)
         .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
         .frame(maxWidth: .infinity, alignment: .center)
-        #endif
         .padding(.top, 16)
         .padding(.bottom, 32)
+        #endif
   }
   // end contentPanel
 
   // MARK: - Header
 
   private var backdropHeight: CGFloat {
-    #if os(tvOS)
-    return tvDetailFrameHeight
-    #else
-    return horizontalSizeClass == .regular ? 420 : min(300, viewHeight * 0.35)
-    #endif
+    horizontalSizeClass == .regular ? 420 : min(300, viewHeight * 0.35)
   }
-
-  // tvOS: total height of the image+panel ZStack
-  private let tvDetailFrameHeight: CGFloat = 680
-  // tvOS: height reserved above the frosted panel so the image is clearly visible
-  private let tvClearZoneHeight: CGFloat = 260
 
   @ViewBuilder
   private var header: some View {
@@ -372,10 +388,7 @@ struct ItemDetailView: View {
         token: appState.sessionToken,
         usesTunnelCookie: appState.api.usesTunnelCookie
       )
-      #if os(tvOS)
-      .scaledToFill()
-      .frame(maxWidth: .infinity, maxHeight: tvDetailFrameHeight, alignment: .top)
-      #else
+      #if !os(tvOS)
       .scaledToFit()
       .frame(maxWidth: .infinity)
       #endif
@@ -596,7 +609,7 @@ struct ItemDetailView: View {
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
-                .frame(width: 68)
+                .frame(width: 90)
 
               // Role
               if let role = person.role, !role.isEmpty {
@@ -604,7 +617,7 @@ struct ItemDetailView: View {
                   .font(.caption2)
                   .foregroundStyle(.white.opacity(0.6))
                   .lineLimit(1)
-                  .frame(width: 68)
+                  .frame(width: 90)
               }
             }
             .accessibilityElement(children: .ignore)
