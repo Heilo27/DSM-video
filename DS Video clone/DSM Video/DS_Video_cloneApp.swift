@@ -81,6 +81,14 @@ struct DS_Video_cloneApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
+                .onOpenURL { url in
+                    // Handle dsvideo://item/{id} deep links from the Top Shelf extension
+                    guard url.scheme == "dsvideo",
+                          url.host == "item",
+                          !url.pathComponents.dropFirst().isEmpty else { return }
+                    let itemID = url.pathComponents.dropFirst().joined(separator: "/")
+                    appState.pendingDeepLinkItemID = itemID
+                }
         }
     }
 }

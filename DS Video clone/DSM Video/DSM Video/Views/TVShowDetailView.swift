@@ -67,7 +67,7 @@ private struct TVShowDetailSplitView: View {
         Image(assetName)
           .resizable()
           .scaledToFill()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
           .clipped()
           .accessibilityHidden(true)
       } else if let posterId = show.posterImageId {
@@ -77,7 +77,7 @@ private struct TVShowDetailSplitView: View {
           usesTunnelCookie: appState.api.usesTunnelCookie
         )
         .scaledToFill()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .clipped()
         .accessibilityHidden(true)
       } else {
@@ -348,7 +348,7 @@ private struct TVEpisodeRow: View {
           Image(assetName)
             .resizable()
             .scaledToFill()
-            .frame(width: 120, height: 68)
+            .frame(width: 120, height: 68, alignment: .top)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         } else if let posterID = ep.posterImageId {
           AuthenticatedImage(
@@ -357,7 +357,7 @@ private struct TVEpisodeRow: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          .frame(width: 120, height: 68)
+          .frame(width: 120, height: 68, alignment: .top)
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         } else {
           Image(systemName: "play.fill")
@@ -529,7 +529,7 @@ private struct TVShowDetailScrollView: View {
         Image(assetName)
           .resizable()
           .scaledToFill()
-          .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
+          .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight, alignment: .top)
           .clipped()
           .accessibilityHidden(true)
       } else if let posterId = show.posterImageId {
@@ -539,7 +539,7 @@ private struct TVShowDetailScrollView: View {
           usesTunnelCookie: appState.api.usesTunnelCookie
         )
         .scaledToFill()
-        .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
+        .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight, alignment: .top)
         .clipped()
         .accessibilityHidden(true)
       } else {
@@ -1004,7 +1004,7 @@ private struct TVShowMetadataFixerSheet: View {
               HStack(spacing: 12) {
                 AuthenticatedImage(url: candidate.posterURL, token: nil)
                   .scaledToFill()
-                  .frame(width: 50, height: 75)
+                  .frame(width: 50, height: 75, alignment: .top)
                   .clipShape(RoundedRectangle(cornerRadius: 6))
                   .accessibilityHidden(true)
 

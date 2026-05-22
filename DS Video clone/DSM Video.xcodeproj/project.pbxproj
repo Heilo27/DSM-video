@@ -6,7 +6,20 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA01000000000001000AA001 /* TopShelfProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA01000000000001000AA002 /* TopShelfProvider.swift */; };
+		AA01000000000001000AA003 /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA01000000000001000AA004 /* TVServices.framework */; };
+		AA01000000000001000AA005 /* DSM Video Top Shelf.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AA01000000000001000AA006 /* DSM Video Top Shelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
+		AA01000000000001000AA00F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F4468EF52F0EDAAB008B87E6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA01000000000001000AA00D;
+			remoteInfo = "DSM Video Top Shelf";
+		};
 		F4468F0D2F0EDAAD008B87E6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = F4468EF52F0EDAAB008B87E6 /* Project object */;
@@ -23,8 +36,26 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		AA01000000000001000AA009 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AA01000000000001000AA005 /* DSM Video Top Shelf.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		812F6926D48AB885753A8393 /* DSM Video tvOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSM Video tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA01000000000001000AA002 /* TopShelfProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopShelfProvider.swift; sourceTree = "<group>"; };
+		AA01000000000001000AA004 /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
+		AA01000000000001000AA006 /* DSM Video Top Shelf.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "DSM Video Top Shelf.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA01000000000001000AA007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F4468EFD2F0EDAAB008B87E6 /* DSM Video.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSM Video.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468F0C2F0EDAAD008B87E6 /* DSM VideoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM VideoTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468F162F0EDAAD008B87E6 /* DSM VideoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM VideoUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -56,6 +87,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA01000000000001000AA00A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA01000000000001000AA003 /* TVServices.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F4468EFA2F0EDAAB008B87E6 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -80,13 +119,32 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		94B69C5D2FBF74B300FC87BA /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				AA01000000000001000AA004 /* TVServices.framework */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
+		AA01000000000001000AA008 /* TopShelfExtension */ = {
+			isa = PBXGroup;
+			children = (
+				AA01000000000001000AA002 /* TopShelfProvider.swift */,
+				AA01000000000001000AA007 /* Info.plist */,
+			);
+			path = TopShelfExtension;
+			sourceTree = "<group>";
+		};
 		F4468EF42F0EDAAB008B87E6 = {
 			isa = PBXGroup;
 			children = (
 				F4468EFF2F0EDAAB008B87E6 /* DSM Video */,
+				AA01000000000001000AA008 /* TopShelfExtension */,
 				F4468F0F2F0EDAAD008B87E6 /* DS Video cloneTests */,
 				F4468F192F0EDAAD008B87E6 /* DS Video cloneUITests */,
 				F4468EFE2F0EDAAB008B87E6 /* Products */,
+				94B69C5D2FBF74B300FC87BA /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
@@ -95,6 +153,7 @@
 			children = (
 				F4468EFD2F0EDAAB008B87E6 /* DSM Video.app */,
 				812F6926D48AB885753A8393 /* DSM Video tvOS.app */,
+				AA01000000000001000AA006 /* DSM Video Top Shelf.appex */,
 				F4468F0C2F0EDAAD008B87E6 /* DSM VideoTests.xctest */,
 				F4468F162F0EDAAD008B87E6 /* DSM VideoUITests.xctest */,
 			);
@@ -104,6 +163,22 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		AA01000000000001000AA00D /* DSM Video Top Shelf */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA01000000000001000AA00E /* Build configuration list for PBXNativeTarget "DSM Video Top Shelf" */;
+			buildPhases = (
+				AA01000000000001000AA00B /* Sources */,
+				AA01000000000001000AA00A /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "DSM Video Top Shelf";
+			productName = "DSM Video Top Shelf";
+			productReference = AA01000000000001000AA006 /* DSM Video Top Shelf.appex */;
+			productType = "com.apple.product-type.tv-app-extension";
+		};
 		D4B6E34DAF9E45D7BB81EBFA /* DSM Video tvOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6854A70F6F5D7C3ED040C559 /* Build configuration list for PBXNativeTarget "DSM Video tvOS" */;
@@ -111,10 +186,12 @@
 				D54435FB73F24BE1D7C5D569 /* Sources */,
 				506354314269A0FCA10CF0BE /* Frameworks */,
 				DEEEA52E6297B59F6D633C3F /* Resources */,
+				AA01000000000001000AA009 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				AA01000000000001000AA00C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				F4468EFF2F0EDAAB008B87E6 /* DSM Video */,
@@ -204,6 +281,9 @@
 				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
+					AA01000000000001000AA00D = {
+						CreatedOnToolsVersion = 26.2;
+					};
 					D4B6E34DAF9E45D7BB81EBFA = {
 						CreatedOnToolsVersion = 26.2;
 					};
@@ -236,6 +316,7 @@
 			targets = (
 				F4468EFC2F0EDAAB008B87E6 /* DSM Video */,
 				D4B6E34DAF9E45D7BB81EBFA /* DSM Video tvOS */,
+				AA01000000000001000AA00D /* DSM Video Top Shelf */,
 				F4468F0B2F0EDAAD008B87E6 /* DSM VideoTests */,
 				F4468F152F0EDAAD008B87E6 /* DSM VideoUITests */,
 			);
@@ -274,6 +355,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		AA01000000000001000AA00B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA01000000000001000AA001 /* TopShelfProvider.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D54435FB73F24BE1D7C5D569 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -305,6 +394,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		AA01000000000001000AA00C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA01000000000001000AA00D /* DSM Video Top Shelf */;
+			targetProxy = AA01000000000001000AA00F /* PBXContainerItemProxy */;
+		};
 		F4468F0E2F0EDAAD008B87E6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = F4468EFC2F0EDAAB008B87E6 /* DSM Video */;
@@ -323,6 +417,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIconTV;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "DSM Video tvOS/DSM_Video_tvOS.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 752QKBCTJR;
@@ -349,11 +444,62 @@
 			};
 			name = Debug;
 		};
+		AA01000000000001000AA010 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/DSM_Video_TopShelf.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 752QKBCTJR;
+				INFOPLIST_FILE = TopShelfExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = HeiloProjects.DSReel.tvOS.TopShelf;
+				PRODUCT_NAME = "DSM Video Top Shelf";
+				SDKROOT = appletvos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 16.0;
+			};
+			name = Debug;
+		};
+		AA01000000000001000AA011 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/DSM_Video_TopShelf.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 752QKBCTJR;
+				INFOPLIST_FILE = TopShelfExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = HeiloProjects.DSReel.tvOS.TopShelf;
+				PRODUCT_NAME = "DSM Video Top Shelf";
+				SDKROOT = appletvos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 16.0;
+			};
+			name = Release;
+		};
 		CA08342D612A57993452FA82 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIconTV;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "DSM Video tvOS/DSM_Video_tvOS.entitlements";
 				CODE_SIGN_IDENTITY = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
@@ -653,6 +799,15 @@
 			buildConfigurations = (
 				18163D678A3A653548D7D651 /* Debug */,
 				CA08342D612A57993452FA82 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA01000000000001000AA00E /* Build configuration list for PBXNativeTarget "DSM Video Top Shelf" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA01000000000001000AA010 /* Debug */,
+				AA01000000000001000AA011 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -165,9 +165,11 @@ private struct TVHomeView: View {
   @State private var showPairing: Bool = false
   @State private var showSettings: Bool = false
   @State private var showSearch: Bool = false
+  @State private var deepLinkItemID: String? = nil
+  @State private var navPath: [String] = []
 
   var body: some View {
-    NavigationStack {
+    NavigationStack(path: $navPath) {
       ZStack(alignment: .top) {
         Color.black.ignoresSafeArea()
 
@@ -216,6 +218,11 @@ private struct TVHomeView: View {
                 TVLandscapeRail(title: "Just Added", items: appState.homeJustAdded)
               }
 
+              // Recently Watched rail
+              if !appState.homeRecentlyWatched.isEmpty {
+                TVLandscapeRail(title: "Recently Watched", items: appState.homeRecentlyWatched)
+              }
+
               // Empty state
               if appState.homeLibraries.isEmpty && !appState.homeIsLoading {
                 ContentUnavailableView(
@@ -236,6 +243,10 @@ private struct TVHomeView: View {
           .padding(.top, 60)
           .padding(.bottom, 80)
         }
+      }
+      .navigationDestination(for: String.self) { itemID in
+        ItemDetailView(itemID: itemID, fallbackTitle: "")
+          .environment(appState)
       }
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
@@ -261,7 +272,6 @@ private struct TVHomeView: View {
             Button {
               showPairing = true
             } label: {
-              // iphone.and.arrow.right.inward is tvOS 17+; fall back for older tvOS (TASK-446).
               if #available(tvOS 17, *) {
                 Label("Pair iOS Device", systemImage: "iphone.and.arrow.right.inward")
                   .foregroundStyle(.white)
@@ -287,6 +297,11 @@ private struct TVHomeView: View {
         .environment(appState)
     }
     .task { await appState.homeLoad() }
+    .onChange(of: appState.pendingDeepLinkItemID) { _, newID in
+      guard let id = newID else { return }
+      navPath = [id]
+      appState.pendingDeepLinkItemID = nil
+    }
   }
 }
 
@@ -421,7 +436,8 @@ private struct TVLibraryRail: View {
     do {
       if isTVLibrary {
         let response = try await appState.api.tvShows(libraryId: library.id)
-        shows = response.shows
+        var seen = Set<String>()
+        shows = response.shows.filter { seen.insert($0.id).inserted }
       } else {
         let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
         if !cached.isEmpty {
@@ -462,7 +478,7 @@ private struct TVShowPortraitCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          .frame(width: cardWidth, height: cardHeight)
+          .frame(width: cardWidth, height: cardHeight, alignment: .top)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -532,14 +548,14 @@ private struct TVLandscapeCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          .frame(width: cardWidth, height: cardHeight)
+          .frame(width: cardWidth, height: cardHeight, alignment: .top)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
             .resizable()
             .scaledToFill()
-            .frame(width: cardWidth, height: cardHeight)
+            .frame(width: cardWidth, height: cardHeight, alignment: .top)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -633,14 +649,14 @@ private struct TVPortraitCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          .frame(width: cardWidth, height: cardHeight)
+          .frame(width: cardWidth, height: cardHeight, alignment: .top)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
             .resizable()
             .scaledToFill()
-            .frame(width: cardWidth, height: cardHeight)
+            .frame(width: cardWidth, height: cardHeight, alignment: .top)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -792,111 +808,135 @@ private struct TVSearchView: View {
   @State private var hasSearched: Bool = false
   @State private var searchError: String?
   @State private var debounceTask: Task<Void, Never>?
+  @FocusState private var searchFieldFocused: Bool
 
   var body: some View {
     NavigationStack {
-      Group {
-        if isSearching {
-          ProgressView("Searching…")
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        } else if let err = searchError {
-          Text(err)
-            .font(.callout)
-            .foregroundStyle(Color.dsError)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        } else if hasSearched && results.isEmpty {
-          ContentUnavailableView(
-            "No Results",
-            systemImage: "magnifyingglass",
-            description: Text("No videos match \"\(searchText)\"")
-          )
-          .foregroundStyle(.white)
-        } else if !results.isEmpty {
-          ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-              ForEach(results) { item in
-                NavigationLink {
-                  ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-                } label: {
-                  HStack(spacing: 16) {
-                    if let posterID = item.posterImageId {
-                      AuthenticatedImage(
-                        url: appState.api.imageURL(id: posterID, width: 120),
-                        token: appState.sessionToken,
-                        usesTunnelCookie: appState.api.usesTunnelCookie
-                      )
-                      .scaledToFill()
-                      .frame(width: 60, height: 90)
-                      .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    } else {
-                      RoundedRectangle(cornerRadius: 6)
-                        .fill(Color(white: 0.15))
-                        .frame(width: 60, height: 90)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                      Text(item.title)
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(.white)
-                      if let year = item.year {
-                        Text(String(year))
-                          .font(.system(size: 16))
-                          .foregroundStyle(Color.dsTextSecondary)
-                      }
-                    }
-                    Spacer()
-                  }
-                  .padding(.vertical, 12)
-                  .padding(.horizontal, 60)
+      ZStack {
+        Color.black.ignoresSafeArea()
+
+        VStack(alignment: .leading, spacing: 40) {
+          // Prominent search field — full-width, large text, auto-focuses keyboard
+          TextField("Search movies and TV shows…", text: $searchText)
+            .font(.system(size: 36, weight: .regular))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 48)
+            .padding(.vertical, 24)
+            .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.horizontal, 60)
+            .focused($searchFieldFocused)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .onSubmit {
+              debounceTask?.cancel()
+              debounceTask = Task { await search() }
+            }
+            .onChange(of: searchText) { _, newValue in
+              if newValue.isEmpty {
+                debounceTask?.cancel()
+                results = []
+                hasSearched = false
+                searchError = nil
+              } else if newValue.count >= 2 {
+                debounceTask?.cancel()
+                debounceTask = Task {
+                  do {
+                    try await Task.sleep(for: .milliseconds(600))
+                    await search()
+                  } catch { /* debounce cancelled */ }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
-                .accessibilityHint("Opens video details")
-                Divider().background(Color(white: 0.2)).padding(.horizontal, 60)
               }
             }
-            .focusSection()
+            .accessibilityLabel("Search field")
+
+          // Results area
+          Group {
+            if isSearching {
+              ProgressView("Searching…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else if let err = searchError {
+              Text(err)
+                .font(.callout)
+                .foregroundStyle(Color.dsError)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else if hasSearched && results.isEmpty {
+              ContentUnavailableView(
+                "No Results",
+                systemImage: "magnifyingglass",
+                description: Text("No videos match \"\(searchText)\"")
+              )
+              .foregroundStyle(.white)
+            } else if !results.isEmpty {
+              ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                  ForEach(results) { item in
+                    NavigationLink {
+                      ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                    } label: {
+                      HStack(spacing: 16) {
+                        if let posterID = item.posterImageId {
+                          AuthenticatedImage(
+                            url: appState.api.imageURL(id: posterID, width: 120),
+                            token: appState.sessionToken,
+                            usesTunnelCookie: appState.api.usesTunnelCookie
+                          )
+                          .scaledToFill()
+                          .frame(width: 60, height: 90, alignment: .top)
+                          .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        } else {
+                          RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(white: 0.15))
+                            .frame(width: 60, height: 90)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                          Text(item.title)
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundStyle(.white)
+                          if let year = item.year {
+                            Text(String(year))
+                              .font(.system(size: 20))
+                              .foregroundStyle(Color.dsTextSecondary)
+                          }
+                        }
+                        Spacer()
+                      }
+                      .padding(.vertical, 16)
+                      .padding(.horizontal, 60)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
+                    .accessibilityHint("Opens video details")
+                    Divider().background(Color(white: 0.2)).padding(.horizontal, 60)
+                  }
+                }
+                .focusSection()
+              }
+            } else {
+              VStack(spacing: 16) {
+                Image(systemName: "magnifyingglass")
+                  .font(.system(size: 60))
+                  .foregroundStyle(Color.dsTextMuted)
+                Text("Search Your Library")
+                  .font(.system(size: 28, weight: .semibold))
+                  .foregroundStyle(.white)
+                Text("Enter a title to find movies and TV shows")
+                  .font(.system(size: 20))
+                  .foregroundStyle(Color.dsTextSecondary)
+              }
+              .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
           }
-        } else {
-          ContentUnavailableView(
-            "Search Your Library",
-            systemImage: "magnifyingglass",
-            description: Text("Enter a title to find movies and TV shows")
-          )
-          .foregroundStyle(.white)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .padding(.top, 60)
       }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(Color.black.ignoresSafeArea())
-      .navigationTitle("Search")
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
           Button("Done") { dismiss() }
         }
       }
-      .searchable(text: $searchText, prompt: "Search your library")
-      .onChange(of: searchText) { _, newValue in
-        if newValue.isEmpty {
-          debounceTask?.cancel()
-          results = []
-          hasSearched = false
-          searchError = nil
-        } else if newValue.count >= 2 {
-          debounceTask?.cancel()
-          debounceTask = Task {
-            do {
-              try await Task.sleep(for: .milliseconds(500))
-              await search()
-            } catch { /* CancellationError — debounce task was cancelled, nothing to do */ }
-          }
-        }
-      }
-      .onSubmit(of: .search) {
-        debounceTask?.cancel()
-        debounceTask = Task { await search() }
-      }
-      .onDisappear {
-        debounceTask?.cancel()
-      }
+      .onAppear { searchFieldFocused = true }
+      .onDisappear { debounceTask?.cancel() }
     }
   }
 

@@ -635,7 +635,9 @@ final class AppState {
   // Persistent across tab switches — populated once, never cleared unless logout/forceRefresh
   var homeLibraries: [Library] = []
   var homeContinueWatching: [ItemSummary] = []
-  var homeJustAdded: [ItemSummary] = []
+  var homeJustAdded: [ItemSummary] = [] {
+    didSet { writeTopShelfSnapshot() }
+  }
   var homeRecentlyWatched: [ItemSummary] = []
 
   // Loading state flags
@@ -1080,6 +1082,46 @@ final class AppState {
       watchlistItems.insert(item, at: 0)
       try? await api.addToWatchlist(id: item.id)
     }
+  }
+
+  // MARK: - Deep Link
+
+  /// Set when the app is opened via a dsvideo://item/{id} URL from the Top Shelf.
+  var pendingDeepLinkItemID: String? = nil
+
+  // MARK: - Top Shelf Snapshot
+
+  /// Writes the Just Added rail (up to 10 items) to the shared App Group container
+  /// so the Top Shelf extension can display them when the app is focused.
+  func writeTopShelfSnapshot() {
+    guard !homeJustAdded.isEmpty else { return }
+    guard let container = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
+    ) else { return }
+
+    let items: [TopShelfItem] = homeJustAdded.prefix(10).compactMap { item in
+      // Prefer backdrop for landscape Top Shelf cards, fall back to poster
+      let imageID = item.backdropImageId ?? item.posterImageId
+      var imageURLString: String? = nil
+      if let imageID {
+        var urlString = api.imageURL(id: imageID, width: 760)?.absoluteString
+        if let token = sessionToken, let base = urlString {
+          urlString = base + (base.contains("?") ? "&" : "?") + "token=\(token)"
+        }
+        imageURLString = urlString
+      }
+      return TopShelfItem(
+        id: item.id,
+        title: item.title,
+        year: item.year,
+        imageURL: imageURLString,
+        deepLinkURL: "dsvideo://item/\(item.id)"
+      )
+    }
+
+    let fileURL = container.appendingPathComponent("topshelf.json")
+    guard let data = try? JSONEncoder().encode(items) else { return }
+    try? data.write(to: fileURL, options: .atomic)
   }
 }
 

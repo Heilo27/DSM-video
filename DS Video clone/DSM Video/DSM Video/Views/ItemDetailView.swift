@@ -40,9 +40,116 @@ struct ItemDetailView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 0) {
-        header
+        // Image + frosted content panel in a ZStack so the image bleeds behind the UI
+        ZStack(alignment: .bottom) {
+          header
 
-        VStack(alignment: .leading, spacing: 14) {
+          // Frosted glass panel sitting over the lower portion of the image
+          VStack(alignment: .leading, spacing: 0) {
+            // Subtle top blur-in edge so the glass doesn't hard-cut the image
+            Rectangle()
+              .fill(.ultraThinMaterial)
+              .frame(height: 1)
+              .opacity(0)
+            contentPanel
+          }
+          .background(.ultraThinMaterial)
+          #if os(tvOS)
+          .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+          .padding(.horizontal, 0)
+          #else
+          .clipShape(
+            .rect(
+              topLeadingRadius: 20,
+              bottomLeadingRadius: 0,
+              bottomTrailingRadius: 0,
+              topTrailingRadius: 20
+            )
+          )
+          #endif
+        }
+      }
+      // Rebuild layout content when player dismisses — prevents horizontal
+      // offset corruption that SwiftUI applies to ScrollView content after
+      // fullScreenCover dismissal (shows content shifted left, clipping leading edge).
+      .id(showPlayer)
+    }
+    .background(
+      GeometryReader { geo in
+        Color.black.ignoresSafeArea()
+          .onAppear { viewHeight = geo.size.height }
+          .onChange(of: geo.size.height) { _, h in viewHeight = h }
+      }
+    )
+    .navigationTitle(detail?.title ?? fallbackTitle)
+    #if !os(tvOS)
+    .navigationBarTitleDisplayMode(.inline)
+    .toolbarBackground(.visible, for: .navigationBar)
+    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+    .toolbarColorScheme(.dark, for: .navigationBar)
+    #endif
+    .task(id: itemID) {
+      await load()
+    }
+    .onAppear {
+      autoPlayFired = false
+      if autoPlay {
+        autoPlayFired = true
+        showPlayer = true
+      }
+    }
+    .fullScreenCover(isPresented: $showPlayer) {
+      PlayerSheet(
+        itemID: itemID,
+        title: detail?.title ?? fallbackTitle,
+        itemYear: detail?.year,
+        nextEpisode: nextEpisode,
+        onPlayNextEpisode: onNextEpisode,
+        onGoToShow: onGoToShow
+      )
+      .environment(appState)
+      #if !os(tvOS)
+      .toolbarVisibility(.hidden, for: .tabBar)
+      #endif
+    }
+    #if os(tvOS)
+    .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Button { dismiss() } label: {
+          Image(systemName: "chevron.left")
+            .foregroundStyle(.white)
+        }
+        .accessibilityLabel("Back")
+      }
+    }
+    #else
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+          Button("Fix Metadata", systemImage: "magnifyingglass") {
+            showMetadataFixer = true
+          }
+        } label: {
+          Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("More options")
+      }
+    }
+    .sheet(isPresented: $showMetadataFixer) {
+      MetadataFixerSheet(itemID: itemID, initialQuery: detail?.title ?? fallbackTitle) {
+        detail = nil
+        Task { await load() }
+      }
+      .environment(appState)
+    }
+    #endif
+  }
+
+  // MARK: - Content Panel (metadata + actions)
+
+  @ViewBuilder
+  private var contentPanel: some View {
+    VStack(alignment: .leading, spacing: 14) {
           // Metadata pills
           if detail != nil {
             metadataPills
@@ -165,89 +272,9 @@ struct ItemDetailView: View {
         .frame(maxWidth: .infinity, alignment: .center)
         #endif
         .padding(.top, 16)
-      }
-      // Rebuild layout content when player dismisses — prevents horizontal
-      // offset corruption that SwiftUI applies to ScrollView content after
-      // fullScreenCover dismissal (shows content shifted left, clipping leading edge).
-      .id(showPlayer)
-    }
-    .background(
-      GeometryReader { geo in
-        Color.black.ignoresSafeArea()
-          .onAppear { viewHeight = geo.size.height }
-          .onChange(of: geo.size.height) { _, h in viewHeight = h }
-      }
-    )
-    .navigationTitle(detail?.title ?? fallbackTitle)
-    #if !os(tvOS)
-    .navigationBarTitleDisplayMode(.inline)
-    .toolbarBackground(.visible, for: .navigationBar)
-    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
-    .toolbarColorScheme(.dark, for: .navigationBar)
-    #endif
-    .task(id: itemID) {
-      await load()
-    }
-    .onAppear {
-      // Reset autoPlayFired here (synchronously, on MainActor) before checking autoPlay.
-      // Previously this reset lived in .task(id:) which could race with onAppear —
-      // the task body ran after onAppear had already set autoPlayFired=true, clearing
-      // the flag and preventing the player from ever opening on subsequent navigations.
-      autoPlayFired = false
-      if autoPlay {
-        autoPlayFired = true
-        showPlayer = true
-      }
-    }
-    .fullScreenCover(isPresented: $showPlayer) {
-      PlayerSheet(
-        itemID: itemID,
-        title: detail?.title ?? fallbackTitle,
-        itemYear: detail?.year,
-        nextEpisode: nextEpisode,
-        onPlayNextEpisode: onNextEpisode,
-        onGoToShow: onGoToShow
-      )
-      .environment(appState)
-      #if !os(tvOS)
-      .toolbarVisibility(.hidden, for: .tabBar)
-      #endif
-    }
-    #if os(tvOS)
-    .toolbar {
-      ToolbarItem(placement: .topBarLeading) {
-        Button {
-          dismiss()
-        } label: {
-          Image(systemName: "chevron.left")
-            .foregroundStyle(.white)
-        }
-        .accessibilityLabel("Back")
-      }
-    }
-    #else
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        Menu {
-          Button("Fix Metadata", systemImage: "magnifyingglass") {
-            showMetadataFixer = true
-          }
-        } label: {
-          Image(systemName: "ellipsis.circle")
-        }
-        .accessibilityLabel("More options")
-      }
-    }
-    .sheet(isPresented: $showMetadataFixer) {
-      MetadataFixerSheet(itemID: itemID, initialQuery: detail?.title ?? fallbackTitle) {
-        // Reload detail after fix applied
-        detail = nil
-        Task { await load() }
-      }
-      .environment(appState)
-    }
-    #endif
+        .padding(.bottom, 32)
   }
+  // end contentPanel
 
   // MARK: - Header
 
@@ -281,66 +308,34 @@ struct ItemDetailView: View {
           }
         )
     } else {
-      ZStack(alignment: .bottomLeading) {
-        backdropImage
-          .frame(maxWidth: .infinity, minHeight: backdropHeight)
-          .frame(height: backdropHeight, alignment: .top)
-          .clipped()
-          #if !os(tvOS)
-          .overlay(alignment: .topTrailing) {
-            if !appState.isDemoMode,
-               (detail?.summary == nil || detail?.summary?.isEmpty == true),
-               detail?.images.backdrop.id == nil {
-              Button {
-                showMetadataFixer = true
-              } label: {
-                Text("No metadata · Fix")
-                  .font(.caption2.weight(.semibold))
-                  .foregroundStyle(.white)
-                  .padding(.horizontal, 8)
-                  .padding(.vertical, 4)
-                  .frame(minHeight: 44)  // HIG minimum tap target (TASK-445)
-                  .background(Color.black.opacity(0.7))
-                  .clipShape(Capsule())
-              }
-              .accessibilityLabel("Fix missing metadata for \(fallbackTitle)")
-              .accessibilityHint("Opens metadata search")
-              .padding(10)
+      // Full-height image — no clip. The frosted content panel in the parent ZStack
+      // overlaps the bottom portion, so the image bleeds through behind the UI.
+      backdropImage
+        .frame(maxWidth: .infinity, alignment: .top)
+        .frame(minHeight: backdropHeight)
+        #if !os(tvOS)
+        .overlay(alignment: .topTrailing) {
+          if !appState.isDemoMode,
+             (detail?.summary == nil || detail?.summary?.isEmpty == true),
+             detail?.images.backdrop.id == nil {
+            Button {
+              showMetadataFixer = true
+            } label: {
+              Text("No metadata · Fix")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .frame(minHeight: 44)
+                .background(Color.black.opacity(0.7))
+                .clipShape(Capsule())
             }
-          }
-          #endif
-
-        // Gradient fade to black at bottom
-        LinearGradient(
-          stops: [
-            .init(color: .clear, location: 0.0),
-            .init(color: .black.opacity(0.8), location: 0.55),
-            .init(color: .black, location: 1.0)
-          ],
-          startPoint: .top,
-          endPoint: .bottom
-        )
-        .frame(maxWidth: .infinity)
-        .frame(height: backdropHeight)
-
-        // Floating title/year on gradient — decorative duplicate of nav bar title
-        VStack(alignment: .leading, spacing: 4) {
-          Text(detail?.title ?? fallbackTitle)
-            .font(.title2.weight(.bold))
-            .foregroundStyle(.white)
-            .lineLimit(2)
-            .shadow(color: .black.opacity(0.8), radius: 6, x: 0, y: 2)
-
-          if let year = detail?.year {
-            Text(String(year))
-              .font(.subheadline)
-              .foregroundStyle(.white.opacity(0.75))
+            .accessibilityLabel("Fix missing metadata for \(fallbackTitle)")
+            .accessibilityHint("Opens metadata search")
+            .padding(10)
           }
         }
-        .accessibilityHidden(true)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
-      }
+        #endif
     }
   }
 
@@ -352,7 +347,8 @@ struct ItemDetailView: View {
         token: appState.sessionToken,
         usesTunnelCookie: appState.api.usesTunnelCookie
       )
-      .scaledToFill()
+      .scaledToFit()
+      .frame(maxWidth: .infinity)
     } else {
       // No backdrop — gradient placeholder with title overlay
       LinearGradient(
@@ -701,6 +697,7 @@ private struct MetadataFixerSheet: View {
               HStack(spacing: 12) {
                 AsyncImage(url: candidate.posterURL) { img in
                   img.resizable().scaledToFill()
+                    .frame(width: 50, height: 75, alignment: .top)
                 } placeholder: {
                   Color(white: 0.15)
                 }

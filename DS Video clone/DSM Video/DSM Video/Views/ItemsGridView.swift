@@ -385,7 +385,7 @@ struct ItemPosterCell: View {
       Image(assetName)
         .resizable()
         .scaledToFill()
-        .frame(width: width, height: height)
+        .frame(width: width, height: height, alignment: .top)
         .clipped()
     } else if item.posterImageId != nil {
       AuthenticatedImage(
@@ -394,7 +394,7 @@ struct ItemPosterCell: View {
         usesTunnelCookie: appState.api.usesTunnelCookie
       )
       .scaledToFill()
-      .frame(width: width, height: height)
+      .frame(width: width, height: height, alignment: .top)
       .clipped()
     } else {
       Rectangle()

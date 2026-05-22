@@ -95,7 +95,8 @@ struct GestureVideoPlayer: View {
     @State private var didSetupPlayer: Bool = false
     @State private var subtitleOffsetSeconds: Double = 0
 
-    private let skipSeconds: Double = 30
+    private let skipForwardSeconds: Double = 30
+    private let skipBackwardSeconds: Double = 15
 
     enum SkipDirection {
         case backward, forward
@@ -103,7 +104,7 @@ struct GestureVideoPlayer: View {
 
     #if os(tvOS)
     @FocusState private var focusedControl: TVFocusField?
-    enum TVFocusField { case playPause }
+    enum TVFocusField { case playPause, hidden }
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -190,13 +191,16 @@ struct GestureVideoPlayer: View {
                 controlsHideTask = Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(250))
                     controlsInteractive = false
+                    #if os(tvOS)
+                    focusedControl = .hidden
+                    #endif
                 }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Play/Pause") { togglePlayPause() }
-        .accessibilityAction(named: "Skip forward \(Int(skipSeconds)) seconds") { skipForward() }
-        .accessibilityAction(named: "Skip backward \(Int(skipSeconds)) seconds") { skipBackward() }
+        .accessibilityAction(named: "Skip forward \(Int(skipForwardSeconds)) seconds") { skipForward() }
+        .accessibilityAction(named: "Skip backward \(Int(skipBackwardSeconds)) seconds") { skipBackward() }
         #if os(iOS)
         return base
             .accessibilityAction(named: "Increase volume") {
@@ -260,7 +264,6 @@ struct GestureVideoPlayer: View {
             #if os(tvOS)
             .onPlayPauseCommand { togglePlayPause() }
             .onMoveCommand { direction in handleTVMoveCommand(direction: direction) }
-            .onTapGesture { handleTVSelectPress() }
             #endif
         #endif
     }
@@ -278,6 +281,10 @@ struct GestureVideoPlayer: View {
                     #if os(iOS)
                     VideoPlayerLayer(player: player, gravity: .resizeAspectFill, onLayerReady: setupPiP)
                         .ignoresSafeArea()
+                    #elseif os(tvOS)
+                    // tvOS: always use resizeAspect regardless of fill mode to prevent edge cropping.
+                    VideoPlayerLayer(player: player, gravity: .resizeAspect)
+                        .ignoresSafeArea()
                     #else
                     VideoPlayerLayer(player: player, gravity: .resizeAspectFill)
                         .ignoresSafeArea()
@@ -293,6 +300,18 @@ struct GestureVideoPlayer: View {
 
             // Gesture overlay
             gestureOverlay(geometry: geometry)
+
+            #if os(tvOS)
+            // Zero-size focus sink: holds focus when controls are hidden so Select
+            // press reliably fires. Offset off-screen so tvOS never renders a highlight.
+            Button { handleTVSelectPress() } label: { Color.clear.frame(width: 0, height: 0) }
+                .frame(width: 0, height: 0)
+                .focused($focusedControl, equals: .hidden)
+                .buttonStyle(.plain)
+                .clipShape(Rectangle())
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            #endif
 
             // Controls overlay
             controlsOverlay(geometry: geometry)
@@ -619,19 +638,19 @@ struct GestureVideoPlayer: View {
             HStack(spacing: 40) {
                 // Rewind 15s
                 Button {
-                    let t = max(0, currentTime - 15)
+                    let t = max(0, currentTime - skipBackwardSeconds)
                     seek(to: t)
                     currentTime = t
                     showSkipAnimation(direction: .backward)
                     if isPlaying { scheduleHideControls() }
                 } label: {
-                    Image(systemName: "gobackward.30")
+                    Image(systemName: "gobackward.15")
                         .font(.system(size: 35))
                         .foregroundStyle(.white)
                         .frame(minWidth: 55, minHeight: 55)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Rewind 15 seconds")
+                .accessibilityLabel("Rewind \(Int(skipBackwardSeconds)) seconds")
                 .accessibilityAddTraits(.isButton)
 
                 // Play / Pause
@@ -651,9 +670,9 @@ struct GestureVideoPlayer: View {
                 .focused($focusedControl, equals: .playPause)
                 #endif
 
-                // Forward 15s
+                // Forward 30s
                 Button {
-                    let t = min(duration, currentTime + 15)
+                    let t = min(duration, currentTime + skipForwardSeconds)
                     seek(to: t)
                     currentTime = t
                     showSkipAnimation(direction: .forward)
@@ -665,7 +684,7 @@ struct GestureVideoPlayer: View {
                         .frame(minWidth: 55, minHeight: 55)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Forward 15 seconds")
+                .accessibilityLabel("Forward \(Int(skipForwardSeconds)) seconds")
                 .accessibilityAddTraits(.isButton)
             }
             #if os(tvOS)
@@ -858,11 +877,12 @@ struct GestureVideoPlayer: View {
     }
 
     private func skipBubble(direction: SkipDirection) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: direction == .backward ? "gobackward.30" : "goforward.30")
+        let secs = direction == .backward ? skipBackwardSeconds : skipForwardSeconds
+        return VStack(spacing: 4) {
+            Image(systemName: direction == .backward ? "gobackward.15" : "goforward.30")
                 .font(.title)
                 .accessibilityLabel(direction == .backward ? "Skip backward" : "Skip forward")
-            Text("\(Int(skipSeconds)) sec")
+            Text("\(Int(secs)) sec")
                 .font(.caption)
         }
         .foregroundStyle(.white)
@@ -1122,7 +1142,7 @@ struct GestureVideoPlayer: View {
     }
 
     private func skipForward() {
-        let newTime = min(duration, currentTime + skipSeconds)
+        let newTime = min(duration, currentTime + skipForwardSeconds)
         seek(to: newTime)
         currentTime = newTime
         showSkipAnimation(direction: .forward)
@@ -1130,7 +1150,7 @@ struct GestureVideoPlayer: View {
     }
 
     private func skipBackward() {
-        let newTime = max(0, currentTime - skipSeconds)
+        let newTime = max(0, currentTime - skipBackwardSeconds)
         seek(to: newTime)
         currentTime = newTime
         showSkipAnimation(direction: .backward)
