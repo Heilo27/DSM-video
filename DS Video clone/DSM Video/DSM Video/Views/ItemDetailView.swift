@@ -203,7 +203,8 @@ struct ItemDetailView: View {
   enum ActionButton: Hashable { case play, fromBeginning }
 
   private var tvPlayButton: some View {
-    Button {
+    let focused = focusedAction == .play
+    return Button {
       playFromBeginning = false
       showPlayer = true
     } label: {
@@ -211,22 +212,22 @@ struct ItemDetailView: View {
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 260, height: 54)
-        .background(Color.red)
+        .background(focused ? Color.red.brightness(0.12) : Color.red)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-          RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(Color.white.opacity(focusedAction == .play ? 0.9 : 0), lineWidth: 2)
-        )
+        .scaleEffect(focused ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: focused)
     }
     .buttonStyle(.plain)
-    .shadow(color: Color.red.opacity(0.4), radius: 6, x: 0, y: 3)
+    .focusEffectDisabled()
+    .shadow(color: Color.red.opacity(focused ? 0.7 : 0.3), radius: focused ? 10 : 5, x: 0, y: 3)
     .focused($focusedAction, equals: .play)
     .prefersDefaultFocus(in: actionNamespace)
     .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
   }
 
   private var tvStartOverButton: some View {
-    Button {
+    let focused = focusedAction == .fromBeginning
+    return Button {
       playFromBeginning = true
       showPlayer = true
     } label: {
@@ -234,14 +235,13 @@ struct ItemDetailView: View {
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 260, height: 54)
-        .background(Color(white: 0.25))
+        .background(focused ? Color(white: 0.35) : Color(white: 0.22))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-          RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(Color.white.opacity(focusedAction == .fromBeginning ? 0.9 : 0), lineWidth: 2)
-        )
+        .scaleEffect(focused ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: focused)
     }
     .buttonStyle(.plain)
+    .focusEffectDisabled()
     .focused($focusedAction, equals: .fromBeginning)
     .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
   }
