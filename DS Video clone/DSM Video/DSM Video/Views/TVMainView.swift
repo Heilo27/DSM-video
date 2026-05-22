@@ -421,25 +421,11 @@ private struct TVLibraryRail: View {
         LazyHStack(alignment: .top, spacing: 28) {
           if isTVLibrary {
             ForEach(shows.prefix(20)) { show in
-              NavigationLink {
-                TVShowDetailView(show: show, library: library)
-              } label: {
-                TVShowPortraitCard(show: show)
-              }
-              .buttonStyle(.card)
-              .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
-              .accessibilityHint("Opens show details")
+              TVShowNavCard(show: show, library: library)
             }
           } else {
             ForEach(items.prefix(20)) { item in
-              NavigationLink {
-                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-              } label: {
-                TVPortraitCard(item: item)
-              }
-              .buttonStyle(.card)
-              .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
-              .accessibilityHint("Opens video details")
+              TVItemNavCard(item: item)
             }
           }
         }
@@ -489,9 +475,45 @@ private struct TVLibraryRail: View {
 }
 
 // Portrait card for a TVShow in the home rail
+private struct TVShowNavCard: View {
+  let show: TVShow
+  let library: Library
+  @FocusState private var isFocused: Bool
+
+  var body: some View {
+    NavigationLink {
+      TVShowDetailView(show: show, library: library)
+    } label: {
+      TVShowPortraitCard(show: show, isFocused: isFocused)
+    }
+    .buttonStyle(.plain)
+    .focused($isFocused)
+    .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
+    .accessibilityHint("Opens show details")
+  }
+}
+
+private struct TVItemNavCard: View {
+  let item: ItemSummary
+  @FocusState private var isFocused: Bool
+
+  var body: some View {
+    NavigationLink {
+      ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+    } label: {
+      TVPortraitCard(item: item, isFocused: isFocused)
+    }
+    .buttonStyle(.plain)
+    .focused($isFocused)
+    .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+    .accessibilityHint("Opens video details")
+  }
+}
+
 private struct TVShowPortraitCard: View {
   @Environment(AppState.self) private var appState
   let show: TVShow
+  var isFocused: Bool = false
 
   private let cardWidth: CGFloat = 220
   private let cardHeight: CGFloat = 330
@@ -552,6 +574,8 @@ private struct TVShowPortraitCard: View {
       }
       .padding(.leading, 10)
     }
+    .scaleEffect(isFocused ? 1.05 : 1.0)
+    .animation(.easeInOut(duration: 0.15), value: isFocused)
   }
 }
 
@@ -663,6 +687,7 @@ private struct TVLandscapeCard: View {
 private struct TVPortraitCard: View {
   @Environment(AppState.self) private var appState
   let item: ItemSummary
+  var isFocused: Bool = false
 
   private let cardWidth: CGFloat = 220
   private let cardHeight: CGFloat = 330  // 2:3
@@ -775,6 +800,8 @@ private struct TVPortraitCard: View {
       }
       .padding(.leading, 10)
     }
+    .scaleEffect(isFocused ? 1.05 : 1.0)
+    .animation(.easeInOut(duration: 0.15), value: isFocused)
   }
 }
 
