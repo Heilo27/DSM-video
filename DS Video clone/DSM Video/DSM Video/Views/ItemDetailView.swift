@@ -40,34 +40,54 @@ struct ItemDetailView: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 0) {
-        // Image + frosted content panel in a ZStack so the image bleeds behind the UI
+        // Image + frosted content panel.
+        // tvOS: fixed-height ZStack so the backdrop always fills the frame and
+        // the clear image band at the top is guaranteed regardless of content height.
+        // iOS: ZStack grows with content; image bleeds behind the panel from below.
         ZStack(alignment: .bottom) {
           header
 
-          // Frosted glass panel sitting over the lower portion of the image
-          VStack(alignment: .leading, spacing: 0) {
-            // Subtle top blur-in edge so the glass doesn't hard-cut the image
-            Rectangle()
-              .fill(.ultraThinMaterial)
-              .frame(height: 1)
-              .opacity(0)
+          // Frosted glass panel — gradient-masked at the top edge for a soft fade-in.
+          // On tvOS a Spacer at the top reserves the clear image zone.
+          VStack(spacing: 0) {
+            #if os(tvOS)
+            // Reserve ~40% of the frame height as clear image — panel starts below this
+            Spacer().frame(height: tvClearZoneHeight)
+            #endif
             contentPanel
+              .background(.ultraThinMaterial)
+              #if os(tvOS)
+              .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+              #else
+              .clipShape(
+                .rect(
+                  topLeadingRadius: 20,
+                  bottomLeadingRadius: 0,
+                  bottomTrailingRadius: 0,
+                  topTrailingRadius: 20
+                )
+              )
+              #endif
+              .mask(
+                VStack(spacing: 0) {
+                  LinearGradient(
+                    stops: [
+                      .init(color: .clear, location: 0),
+                      .init(color: .black, location: 1)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                  )
+                  .frame(height: 48)
+                  Rectangle()
+                }
+              )
           }
-          .background(.ultraThinMaterial)
-          #if os(tvOS)
-          .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-          .padding(.horizontal, 0)
-          #else
-          .clipShape(
-            .rect(
-              topLeadingRadius: 20,
-              bottomLeadingRadius: 0,
-              bottomTrailingRadius: 0,
-              topTrailingRadius: 20
-            )
-          )
-          #endif
         }
+        #if os(tvOS)
+        .frame(height: tvDetailFrameHeight)
+        .clipped()
+        #endif
       }
       // Rebuild layout content when player dismisses — prevents horizontal
       // offset corruption that SwiftUI applies to ScrollView content after
@@ -280,11 +300,16 @@ struct ItemDetailView: View {
 
   private var backdropHeight: CGFloat {
     #if os(tvOS)
-    return 450
+    return tvDetailFrameHeight
     #else
     return horizontalSizeClass == .regular ? 420 : min(300, viewHeight * 0.35)
     #endif
   }
+
+  // tvOS: total height of the image+panel ZStack
+  private let tvDetailFrameHeight: CGFloat = 680
+  // tvOS: height reserved above the frosted panel so the image is clearly visible
+  private let tvClearZoneHeight: CGFloat = 260
 
   @ViewBuilder
   private var header: some View {
@@ -347,8 +372,13 @@ struct ItemDetailView: View {
         token: appState.sessionToken,
         usesTunnelCookie: appState.api.usesTunnelCookie
       )
+      #if os(tvOS)
+      .scaledToFill()
+      .frame(maxWidth: .infinity, maxHeight: tvDetailFrameHeight, alignment: .top)
+      #else
       .scaledToFit()
       .frame(maxWidth: .infinity)
+      #endif
     } else {
       // No backdrop — gradient placeholder with title overlay
       LinearGradient(

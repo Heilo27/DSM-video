@@ -179,6 +179,7 @@ private struct TVShowDetailSplitView: View {
         } else {
           ForEach(seasons, id: \.seasonNumber) { season in
             TVSeasonSection(show: show, season: season, library: library,
+                            allSeasons: seasons,
                             highlightEpisodeID: highlightEpisodeID,
                             highlightSeason: highlightSeason)
           }
@@ -217,19 +218,35 @@ private struct TVSeasonSection: View {
   let show: TVShow
   let season: TVSeason
   let library: Library
+  let allSeasons: [TVSeason]
   var highlightEpisodeID: String? = nil
   var highlightSeason: Int? = nil
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
-  @State private var isExpanded = true
+  // Default collapsed — only open if this season contains the highlighted episode
+  @State private var isExpanded: Bool
   @State private var error: String?
+
+  init(show: TVShow, season: TVSeason, library: Library, allSeasons: [TVSeason],
+       highlightEpisodeID: String? = nil, highlightSeason: Int? = nil) {
+    self.show = show
+    self.season = season
+    self.library = library
+    self.allSeasons = allSeasons
+    self.highlightEpisodeID = highlightEpisodeID
+    self.highlightSeason = highlightSeason
+    // Open the season that has the highlight; collapse everything else
+    self._isExpanded = State(initialValue: highlightSeason == season.seasonNumber)
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       // Season header
       Button {
-        withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+        withAnimation(.easeInOut(duration: 0.2)) {
+          isExpanded.toggle()
+        }
       } label: {
         HStack(spacing: 12) {
           Text("Season \(season.seasonNumber)")
@@ -270,23 +287,28 @@ private struct TVSeasonSection: View {
                 .font(.system(size: 17))
                 .foregroundStyle(Color.dsTextMuted)
               Spacer()
-              Button("Retry") {
-                Task { await load() }
-              }
-              .font(.system(size: 17))
-              .foregroundStyle(Color.dsAccent)
+              Button("Retry") { Task { await load() } }
+                .font(.system(size: 17))
+                .foregroundStyle(Color.dsAccent)
             }
             .padding(.horizontal, 0)
             .padding(.vertical, 20)
           }
-          ForEach(episodes) { ep in
-            NavigationLink {
-              ItemDetailView(itemID: ep.id, fallbackTitle: ep.title,
-                             autoPlay: ep.id == highlightEpisodeID)
-            } label: {
-              TVEpisodeRow(ep: ep, isHighlighted: ep.id == highlightEpisodeID)
-            }
-            .buttonStyle(.card)
+          let seasonIdx = allSeasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
+          ForEach(Array(episodes.enumerated()), id: \.element.id) { index, ep in
+            TVEpisodeNavRow(
+              ep: ep,
+              isHighlighted: ep.id == highlightEpisodeID,
+              destination: TVEpisodeDetailView(
+                episodes: episodes,
+                initialIndex: index,
+                show: show,
+                library: library,
+                allSeasons: allSeasons,
+                currentSeasonIndex: seasonIdx,
+                autoPlay: ep.id == highlightEpisodeID
+              )
+            )
 
             Rectangle()
               .fill(Color.dsBorderSubtle)
@@ -319,6 +341,29 @@ private struct TVSeasonSection: View {
       if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }
+  }
+}
+
+// MARK: - tvOS Episode Nav Row (plain button style to prevent focus-scale clipping)
+
+private struct TVEpisodeNavRow<Destination: View>: View {
+  let ep: ItemSummary
+  let isHighlighted: Bool
+  let destination: Destination
+  @FocusState private var isFocused: Bool
+
+  var body: some View {
+    NavigationLink {
+      destination
+    } label: {
+      TVEpisodeRow(ep: ep, isHighlighted: isHighlighted)
+        .background(
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(isFocused ? Color(white: 0.22) : Color.clear)
+        )
+    }
+    .buttonStyle(.plain)
+    .focused($isFocused)
   }
 }
 
@@ -418,7 +463,100 @@ private struct TVEpisodeRow: View {
       }
     }
     .padding(.vertical, 16)
+    .padding(.horizontal, 20)
     .accessibilityElement(children: .combine)
+  }
+}
+
+// MARK: - tvOS Episode Detail (with next-episode support)
+
+private struct TVEpisodeDetailView: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
+
+  @State private var currentEpisodes: [ItemSummary]
+  @State private var currentIndex: Int
+  @State private var autoPlayCurrent: Bool
+  let show: TVShow
+  let library: Library
+  let allSeasons: [TVSeason]
+  @State private var currentSeasonIndex: Int
+  @State private var nextSeasonEpisodes: [ItemSummary] = []
+  @State private var isFetchingNextSeason = false
+
+  init(episodes: [ItemSummary], initialIndex: Int, show: TVShow, library: Library,
+       allSeasons: [TVSeason] = [], currentSeasonIndex: Int = 0, autoPlay: Bool = false) {
+    self._currentEpisodes = State(initialValue: episodes)
+    self._currentIndex = State(initialValue: initialIndex)
+    self._autoPlayCurrent = State(initialValue: autoPlay)
+    self.show = show
+    self.library = library
+    self.allSeasons = allSeasons
+    self._currentSeasonIndex = State(initialValue: currentSeasonIndex)
+  }
+
+  private var current: ItemSummary? {
+    guard !currentEpisodes.isEmpty else { return nil }
+    return currentEpisodes[min(currentIndex, currentEpisodes.count - 1)]
+  }
+
+  private var hasNextInSeason: Bool { currentIndex + 1 < currentEpisodes.count }
+  private var isAtSeasonBoundary: Bool {
+    !currentEpisodes.isEmpty
+      && currentIndex == currentEpisodes.count - 1
+      && currentSeasonIndex + 1 < allSeasons.count
+  }
+  private var isLastOfSeason: Bool {
+    !currentEpisodes.isEmpty
+      && currentIndex == currentEpisodes.count - 1
+      && currentSeasonIndex + 1 >= allSeasons.count
+  }
+  private var nextEpisode: ItemSummary? {
+    if hasNextInSeason { return currentEpisodes[currentIndex + 1] }
+    if isAtSeasonBoundary, let first = nextSeasonEpisodes.first { return first }
+    return nil
+  }
+
+  var body: some View {
+    if let current {
+      ItemDetailView(
+        itemID: current.id,
+        fallbackTitle: current.title,
+        autoPlay: autoPlayCurrent,
+        nextEpisode: nextEpisode,
+        onNextEpisode: nextEpisode != nil ? {
+          if hasNextInSeason {
+            currentIndex += 1
+            autoPlayCurrent = true
+          } else if isAtSeasonBoundary, !nextSeasonEpisodes.isEmpty {
+            currentEpisodes = nextSeasonEpisodes
+            nextSeasonEpisodes = []
+            currentSeasonIndex += 1
+            currentIndex = 0
+            autoPlayCurrent = true
+          }
+        } : nil,
+        onGoToShow: { dismiss() },
+        isLastOfSeason: isLastOfSeason
+      )
+      .id(current.id)
+      .task(id: currentIndex) {
+        guard isAtSeasonBoundary, !isFetchingNextSeason, nextSeasonEpisodes.isEmpty else { return }
+        await fetchNextSeason()
+      }
+    }
+  }
+
+  private func fetchNextSeason() async {
+    guard isAtSeasonBoundary, !isFetchingNextSeason, nextSeasonEpisodes.isEmpty else { return }
+    let nextSeasonNumber = allSeasons[currentSeasonIndex + 1].seasonNumber
+    isFetchingNextSeason = true
+    defer { isFetchingNextSeason = false }
+    do {
+      let resp = try await appState.api.tvShowEpisodes(
+        showId: show.id, season: nextSeasonNumber, libraryId: library.id)
+      nextSeasonEpisodes = resp.items
+    } catch {}
   }
 }
 

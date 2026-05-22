@@ -41,7 +41,16 @@ struct RootView: View {
             TVMainView()
             #else
             if appState.sessionToken == nil {
-                LoginView()
+                if appState.isReturningUser {
+                    // Returning user: skip wizard, go straight to credentials
+                    NavigationStack {
+                        SetupCredentialsScreen()
+                    }
+                    .environment(SetupFlowState())
+                    .preferredColorScheme(.dark)
+                } else {
+                    ServerSetupView()
+                }
             } else {
                 MainView(layout: resolvedLayout)
                     .onAppear {

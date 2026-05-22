@@ -308,6 +308,7 @@ private struct TVHomeView: View {
 // MARK: - Landscape Card Rail (Continue Watching / Just Added)
 
 private struct TVLandscapeRail: View {
+  @Environment(AppState.self) private var appState
   let title: String
   let items: [ItemSummary]
 
@@ -322,14 +323,45 @@ private struct TVLandscapeRail: View {
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(alignment: .top, spacing: 28) {
           ForEach(items) { item in
-            NavigationLink {
-              ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-            } label: {
-              TVLandscapeCard(item: item)
+            if let showId = item.showFolderId, !showId.isEmpty,
+               let tvLibrary = appState.homeLibraries.first(where: {
+                 item.libraryId != nil ? $0.id == item.libraryId : $0.kind == "tv"
+               }) {
+              // TV episode — navigate to the show's season/episode list,
+              // highlighting the episode so the user can back out and browse,
+              // or play it directly with next-episode support.
+              NavigationLink {
+                TVShowDetailView(
+                  show: TVShow(
+                    id: showId,
+                    title: item.showName ?? item.title,
+                    year: item.year,
+                    seasonCount: nil,
+                    episodeCount: nil,
+                    posterImageId: item.posterImageId,
+                    lastWatchedAt: nil,
+                    addedAt: nil
+                  ),
+                  library: tvLibrary,
+                  highlightEpisodeID: item.id,
+                  highlightSeason: item.seasonNumber
+                )
+              } label: {
+                TVLandscapeCard(item: item)
+              }
+              .buttonStyle(.card)
+              .accessibilityLabel("\(item.showName ?? item.title)\(item.seasonNumber.map { ", Season \($0)" } ?? "")\(item.episodeNumber.map { ", Episode \($0)" } ?? "")")
+              .accessibilityHint("Opens show to resume episode")
+            } else {
+              NavigationLink {
+                ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+              } label: {
+                TVLandscapeCard(item: item)
+              }
+              .buttonStyle(.card)
+              .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
+              .accessibilityHint("Opens video details")
             }
-            .buttonStyle(.card)
-            .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
-            .accessibilityHint("Opens video details")
           }
         }
         .padding(.horizontal, 60)
@@ -548,14 +580,14 @@ private struct TVLandscapeCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          .frame(width: cardWidth, height: cardHeight, alignment: .top)
+          .frame(width: cardWidth, height: cardHeight, alignment: .center)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
             .resizable()
             .scaledToFill()
-            .frame(width: cardWidth, height: cardHeight, alignment: .top)
+            .frame(width: cardWidth, height: cardHeight, alignment: .center)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)

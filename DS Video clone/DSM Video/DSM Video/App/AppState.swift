@@ -33,6 +33,8 @@ final class AppState {
   static let fallbackURL = URL(string: "https://0.0.0.0")!
   private enum Keys {
     static let baseURL = "dsReel.baseURL"
+    static let lanAddress = "dsReel.lanAddress"
+    static let wanAddress = "dsReel.wanAddress"
     static let username = "dsReel.username"
     static let rememberMe = "dsReel.rememberMe"
     static let useHTTPS = "dsReel.useHTTPS"
@@ -47,6 +49,17 @@ final class AppState {
       UserDefaults.standard.set(baseURL, forKey: Keys.baseURL)
       updateAPI()
     }
+  }
+
+  /// Local network address (e.g. 192.168.1.100). Optional — set alongside wanAddress
+  /// for automatic LAN/WAN switching. When set, login() tries this first with a 2s timeout.
+  var lanAddress: String {
+    didSet { UserDefaults.standard.set(lanAddress, forKey: Keys.lanAddress) }
+  }
+
+  /// Remote address (e.g. mynas.duckdns.org or a Tailscale IP). Optional.
+  var wanAddress: String {
+    didSet { UserDefaults.standard.set(wanAddress, forKey: Keys.wanAddress) }
   }
   var username: String {
     didSet { UserDefaults.standard.set(username, forKey: Keys.username) }
@@ -68,6 +81,13 @@ final class AppState {
   }
 
   var isDemoMode: Bool { sessionToken == "demo" }
+
+  /// True when the user has previously connected — saved address and password exist.
+  /// Used to skip the setup wizard and go straight to the credentials screen.
+  var isReturningUser: Bool {
+    let addr = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !addr.isEmpty && addr != "http://localhost:5000" && !savedPassword.isEmpty
+  }
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
@@ -130,6 +150,8 @@ final class AppState {
     let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 5000
 
     baseURL = storedBaseURL
+    lanAddress = d.string(forKey: Keys.lanAddress) ?? ""
+    wanAddress = d.string(forKey: Keys.wanAddress) ?? ""
     username = d.string(forKey: Keys.username) ?? ""
     rememberMe = storedRememberMe
     useHTTPS = storedUseHTTPS
@@ -256,6 +278,56 @@ final class AppState {
     savedPassword = value
   }
 
+  // MARK: - Candidate Resolution
+
+  /// Builds an ordered list of candidate URLs to try for login/reconnect.
+  ///
+  /// Priority order:
+  ///   1. LAN address (2s timeout) — fastest when on home network
+  ///   2. WAN address (8s timeout) — used when LAN unreachable or not set
+  ///   3. QuickConnect candidates (LAN→WAN→relay) — when baseURL is a QC ID
+  ///   4. baseURL directly — legacy / single-address fallback
+  ///
+  /// Returns `QuickConnectResolver.Candidate` so callers get the tunnel-cookie
+  /// flag for free — LAN/WAN direct candidates always have requiresTunnelCookie=false.
+  func buildCandidates() async throws -> [QuickConnectResolver.Candidate] {
+    let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+    let wan = wanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+    let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    var candidates: [QuickConnectResolver.Candidate] = []
+
+    func addDirect(_ address: String) {
+      guard !address.isEmpty else { return }
+      if let qcID = QuickConnectResolver.extractBareID(from: address) {
+        // QC IDs handled separately below
+        _ = qcID
+        return
+      }
+      guard let url = normalizedBaseURL(address, forceHTTPS: useHTTPS, defaultPort: defaultPort) else { return }
+      candidates.append(.init(url: url, requiresTunnelCookie: false))
+    }
+
+    // LAN first — short timeout callers know to use 2s for these
+    addDirect(lan)
+    // WAN second
+    addDirect(wan)
+
+    // If baseURL is a QC ID, append its full cascade after direct addresses
+    if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+      let qcCandidates = (try? await QuickConnectResolver.resolveCandidates(id: qcID)) ?? []
+      // Avoid duplicating any LAN IP that QC also resolved
+      let existing = Set(candidates.map(\.url.absoluteString))
+      for c in qcCandidates where !existing.contains(c.url.absoluteString) {
+        candidates.append(c)
+      }
+    } else if lan.isEmpty && wan.isEmpty {
+      // No dual addresses — fall back to baseURL directly
+      addDirect(raw)
+    }
+
+    return candidates
+  }
 
   func login() async {
     loginError = nil
@@ -275,76 +347,60 @@ final class AppState {
     }
 
     do {
-      // If the server field is a bare QuickConnect ID (no dots, no scheme),
-      // resolve it to candidate NAS URLs and try each until one works.
-      // LAN IPs are tried first to avoid NAT hairpinning and self-signed cert issues.
-      let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-      if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-        let candidates = try await QuickConnectResolver.resolveCandidates(id: qcID)
-        guard !candidates.isEmpty else {
-          loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
-          return
-        }
-        // Candidates are ordered: LAN direct → WAN direct → relay (tunnel).
-        // DSM nginx on 5000/5001 proxies /api/v1/ to the backend — no port forwarding needed.
-        var lastError: Error?
-        for candidate in candidates {
-          do {
-            var tempClient = APIClient(baseURL: candidate.url, token: nil)
-            tempClient.usesTunnelCookie = candidate.requiresTunnelCookie
-            // Relay gets more time (15s) — it's a real routable connection.
-            // LAN/WAN direct get 4s — if unreachable they fail fast so relay isn't delayed.
-            let timeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
-            homeLog.info("login: trying \(candidate.url) tunnel=\(candidate.requiresTunnelCookie) timeout=\(timeout)s")
-            let resp = try await tempClient.login(username: username, password: savedPassword, timeoutInterval: timeout)
-            sessionToken = resp.token
-            clearNetworkError()
-            api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
-            // FIX-1: Update useHTTPS and defaultPort to match the winning candidate's scheme
-            // so normalizedBaseURL rebuilds correctly on the next cold launch.
-            // Skip relay candidates — relay URLs are always http:// and use an edge port
-            // that is not the NAS's real port. Updating from a relay win would corrupt
-            // future direct-IP sessions.
-            if !candidate.requiresTunnelCookie {
-              self.useHTTPS = candidate.url.scheme == "https"
-              if let port = candidate.url.port {
-                self.defaultPort = port
-              }
-            }
-            // Always save password so soft-logout (auto-reconnect recovery) can pre-fill
-            // the login form. rememberMe controls session token persistence, not password.
-            if !savedPassword.isEmpty {
-              Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
-            }
-            startHeartbeatTimer()
-            return
-          } catch {
-            homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
-            lastError = error
-          }
-        }
-        loginError = (lastError as? APIError)?.userMessage ?? "Login failed. Check that DSVideoServer is running on your NAS."
-        return
-      }
-
-      // Validate server address before attempting login
-      guard normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) != nil else {
+      let candidates = try await buildCandidates()
+      guard !candidates.isEmpty else {
         loginError = "Invalid server address. Please check the URL."
         return
       }
 
-      // Direct IP / hostname login
-      let resp = try await api.login(username: username, password: savedPassword)
+      let lanCount = { () -> Int in
+        let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        return lan.isEmpty ? 0 : 1
+      }()
 
-      // Store session token (didSet persists to Keychain when rememberMe is on)
-      sessionToken = resp.token
-      clearNetworkError()  // login succeeded — reset any stale serverUnreachable flag
-
-      // Always save password — rememberMe controls session token only, not password.
-      if !savedPassword.isEmpty {
-        Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
+      var lastError: Error?
+      for (index, candidate) in candidates.enumerated() {
+        do {
+          var tempClient = APIClient(baseURL: candidate.url, token: nil)
+          tempClient.usesTunnelCookie = candidate.requiresTunnelCookie
+          // LAN candidates (first lanCount entries) get 2s — fail-fast so WAN isn't delayed
+          // when the user is away from home. Relay gets 15s. WAN direct gets 8s.
+          let timeout: TimeInterval
+          if candidate.requiresTunnelCookie {
+            timeout = 15
+          } else if index < lanCount {
+            timeout = 2
+          } else {
+            timeout = 8
+          }
+          homeLog.info("login: trying \(candidate.url) tunnel=\(candidate.requiresTunnelCookie) timeout=\(timeout)s")
+          let resp = try await tempClient.login(username: username, password: savedPassword, timeoutInterval: timeout)
+          sessionToken = resp.token
+          clearNetworkError()
+          api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+          // Update baseURL to the winning candidate so reconnect() has a real URL to probe.
+          // Skip relay candidates — relay URLs are ephemeral edge addresses.
+          if !candidate.requiresTunnelCookie {
+            baseURL = candidate.url.absoluteString
+            self.useHTTPS = candidate.url.scheme == "https"
+            if let port = candidate.url.port { self.defaultPort = port }
+          }
+          if !savedPassword.isEmpty {
+            Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
+          }
+          startHeartbeatTimer()
+          return
+        } catch {
+          homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
+          lastError = error
+        }
       }
-      startHeartbeatTimer()
+      let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+      if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+        loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
+      } else {
+        loginError = (lastError as? APIError)?.userMessage ?? "Login failed. Check that DSVideoServer is running on your NAS."
+      }
     } catch {
       loginError = (error as? APIError)?.userMessage ?? "Login failed."
     }
@@ -433,44 +489,31 @@ final class AppState {
     isReconnecting = true
     defer { isReconnecting = false }
 
-    let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    // FIX-6: For direct-IP/hostname users, probe the current api instead of returning false.
-    guard let qcID = QuickConnectResolver.extractBareID(from: raw) else {
-      // Direct IP path: probe /version then verify token.
-      guard sessionToken != nil else { return false }
-      guard (try? await api.serverVersion()) != nil else { return false }
-      do {
-        _ = try await api.syncStatus(timeout: 10)
-        clearNetworkError()
-      } catch let err as APIError {
-        if case .http(401) = err { handleConnectionFailure(err); return false }
-        clearNetworkError()  // other API error — server reachable
-      } catch {
-        return false  // syncStatus timed out — don't claim success
-      }
-      return true
-    }
     guard sessionToken != nil else { return false }
-    guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID),
-          !candidates.isEmpty else { return false }
-    for candidate in candidates {
+    guard let candidates = try? await buildCandidates(), !candidates.isEmpty else { return false }
+
+    let lanCount = { () -> Int in
+      let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+      return lan.isEmpty ? 0 : 1
+    }()
+
+    for (index, candidate) in candidates.enumerated() {
       let probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: candidate.requiresTunnelCookie)
-      // Step 1: unauthenticated reachability check — /version has no auth overhead.
-      // Relay gets 15s (tunnel setup); direct gets 4s (fail-fast if truly unreachable).
-      let versionTimeout: TimeInterval = candidate.requiresTunnelCookie ? 15 : 4
-      // syncStatus hits SQLite (cold NAS DB needs more time than /version)
+      let versionTimeout: TimeInterval
+      if candidate.requiresTunnelCookie { versionTimeout = 15 }
+      else if index < lanCount { versionTimeout = 2 }
+      else { versionTimeout = 4 }
       let statusTimeout: TimeInterval = candidate.requiresTunnelCookie ? 20 : 10
+
       guard (try? await probe.serverVersion(timeout: versionTimeout)) != nil else {
-        homeLog.info("reconnect: \(candidate.url) unreachable (version timeout/error) — skipping")
+        homeLog.info("reconnect: \(candidate.url) unreachable — skipping")
         continue
       }
-      // Step 2: verify the session token works end-to-end.
-      // A 401 means the token is expired/revoked — stop here and force re-login.
-      // A timeout here means the authenticated path is unreliable — skip this candidate.
       do {
         _ = try await probe.syncStatus(timeout: statusTimeout)
         homeLog.info("reconnect: \(candidate.url) fully verified — using")
         api = probe
+        if !candidate.requiresTunnelCookie { baseURL = candidate.url.absoluteString }
         clearNetworkError()
         return true
       } catch let err as APIError {
@@ -479,14 +522,13 @@ final class AppState {
           handleConnectionFailure(err)
           return false
         }
-        // Other HTTP error (5xx etc) — auth worked, server is reachable enough.
         homeLog.info("reconnect: \(candidate.url) returned API error but is reachable — using")
         api = probe
+        if !candidate.requiresTunnelCookie { baseURL = candidate.url.absoluteString }
         clearNetworkError()
         return true
       } catch {
-        // syncStatus timed out or network error after /version succeeded — candidate is flaky, skip.
-        homeLog.warning("reconnect: \(candidate.url) /version ok but syncStatus failed (\(error.localizedDescription)) — skipping")
+        homeLog.warning("reconnect: \(candidate.url) /version ok but syncStatus failed — skipping")
         continue
       }
     }
@@ -552,9 +594,19 @@ final class AppState {
         guard let self else { return }
         let wasOffline = self.isOffline
         self.isOffline = path.status != .satisfied
-        // When network comes back, trigger a background refresh
         if wasOffline && !self.isOffline {
           NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
+        }
+        // When already logged in with dual addresses, silently re-probe on any
+        // network change so the app switches between LAN and WAN automatically.
+        let hasLAN = !self.lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasWAN = !self.wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if hasLAN && hasWAN && self.sessionToken != nil && path.status == .satisfied {
+          Task { @MainActor [weak self] in
+            guard let self, !self.isReconnecting else { return }
+            homeLog.info("networkMonitor: path changed with dual addresses — re-probing")
+            _ = await self.reconnect()
+          }
         }
       }
     }
