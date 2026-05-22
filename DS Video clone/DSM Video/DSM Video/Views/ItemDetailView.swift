@@ -129,12 +129,12 @@ struct ItemDetailView: View {
         contentPanel
           .background(.ultraThinMaterial)
           .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-          // Fade the top edge of the panel into the hero image
+          // Fade the very top edge of the panel into the hero image
           .mask(
             LinearGradient(
               stops: [
                 .init(color: .clear, location: 0),
-                .init(color: .black, location: 0.06)
+                .init(color: .black, location: 0.03)
               ],
               startPoint: .top,
               endPoint: .bottom
@@ -220,15 +220,16 @@ struct ItemDetailView: View {
             } label: {
               Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
                 .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
                 #if os(tvOS)
                 .frame(width: 340, height: 60)
                 #else
                 .frame(width: 200, height: 44)
                 #endif
+                .background(Color.red)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            .background(Color.red)
-            .foregroundStyle(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .buttonStyle(.plain)
             .shadow(color: Color.red.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
             #if os(tvOS)
@@ -244,15 +245,16 @@ struct ItemDetailView: View {
               } label: {
                 Label("Start Over", systemImage: "arrow.counterclockwise")
                   .font(.headline.weight(.semibold))
+                  .foregroundStyle(.white)
                   #if os(tvOS)
                   .frame(width: 340, height: 60)
                   #else
                   .frame(width: 200, height: 44)
                   #endif
+                  .background(Color(white: 0.25))
+                  .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
               }
-              .background(Color(white: 0.18))
-              .foregroundStyle(.white)
-              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+              .buttonStyle(.plain)
               .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
               #if os(tvOS)
               .focused($focusedAction, equals: .fromBeginning)
