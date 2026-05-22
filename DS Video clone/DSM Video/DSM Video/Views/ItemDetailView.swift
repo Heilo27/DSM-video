@@ -600,17 +600,12 @@ struct ItemDetailView: View {
                 }
               }
 
-              // Name
+              // Name — natural width, wraps to 2 lines if needed
               Text(person.name)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
-                #if os(tvOS)
-                .frame(minWidth: 80, maxWidth: 120)
-                #else
-                .frame(width: 90)
-                #endif
 
               // Role
               if let role = person.role, !role.isEmpty {
@@ -618,13 +613,9 @@ struct ItemDetailView: View {
                   .font(.caption2)
                   .foregroundStyle(.white.opacity(0.6))
                   .lineLimit(1)
-                  #if os(tvOS)
-                  .frame(minWidth: 80, maxWidth: 120)
-                  #else
-                  .frame(width: 90)
-                  #endif
               }
             }
+            .fixedSize(horizontal: true, vertical: false)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
           }
