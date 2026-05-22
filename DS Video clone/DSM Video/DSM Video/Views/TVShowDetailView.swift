@@ -537,7 +537,9 @@ private struct TVEpisodeDetailView: View {
           }
         } : nil,
         onGoToShow: { dismiss() },
-        isLastOfSeason: isLastOfSeason
+        isLastOfSeason: isLastOfSeason,
+        seasonNumber: current.seasonNumber,
+        episodeNumber: current.episodeNumber
       )
       .id(current.id)
       .task(id: currentIndex) {
@@ -1031,7 +1033,9 @@ private struct EpisodeDetailView: View {
           }
         } : nil,
         onGoToShow: { dismiss() },
-        isLastOfSeason: isLastOfSeason
+        isLastOfSeason: isLastOfSeason,
+        seasonNumber: current.seasonNumber,
+        episodeNumber: current.episodeNumber
       )
       .id(current.id)  // force view recreation when episode changes
       .task(id: currentIndex) {
