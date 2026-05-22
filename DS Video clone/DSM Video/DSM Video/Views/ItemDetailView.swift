@@ -203,33 +203,6 @@ struct ItemDetailView: View {
   @ViewBuilder
   private var contentPanel: some View {
     VStack(alignment: .leading, spacing: 14) {
-          // Episode identifier — show name + S·E badge + episode title
-          if seasonNumber != nil || episodeNumber != nil {
-            VStack(alignment: .leading, spacing: 4) {
-              // S1 E4 badge
-              if let s = seasonNumber, let e = episodeNumber {
-                Text("S\(s) · E\(e)")
-                  .font(.caption.weight(.semibold))
-                  .foregroundStyle(Color.dsAccent)
-                  .textCase(.uppercase)
-                  .accessibilityLabel("Season \(s), Episode \(e)")
-              } else if let s = seasonNumber {
-                Text("Season \(s)")
-                  .font(.caption.weight(.semibold))
-                  .foregroundStyle(Color.dsAccent)
-              } else if let e = episodeNumber {
-                Text("Episode \(e)")
-                  .font(.caption.weight(.semibold))
-                  .foregroundStyle(Color.dsAccent)
-              }
-              // Episode title
-              Text(detail?.title ?? fallbackTitle)
-                .font(.title3.weight(.bold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-            }
-          }
-
           // Metadata pills
           if detail != nil {
             metadataPills
@@ -352,6 +325,30 @@ struct ItemDetailView: View {
             .accessibilityLabel("End of season — no more episodes in this season")
           }
           #endif
+
+          // Episode identifier — S·E badge + title, shown just above the description
+          if seasonNumber != nil || episodeNumber != nil {
+            VStack(alignment: .leading, spacing: 4) {
+              if let s = seasonNumber, let e = episodeNumber {
+                Text("S\(s) · E\(e)")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(Color.dsAccent)
+                  .accessibilityLabel("Season \(s), Episode \(e)")
+              } else if let s = seasonNumber {
+                Text("Season \(s)")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(Color.dsAccent)
+              } else if let e = episodeNumber {
+                Text("Episode \(e)")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(Color.dsAccent)
+              }
+              Text(detail?.title ?? fallbackTitle)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            }
+          }
 
           if let summary = detail?.summary, !summary.isEmpty {
             Text(summary)
