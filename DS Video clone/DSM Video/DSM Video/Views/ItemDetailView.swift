@@ -201,18 +201,94 @@ struct ItemDetailView: View {
   #if os(tvOS)
   @FocusState private var focusedAction: ActionButton?
   enum ActionButton: Hashable { case play, fromBeginning }
+
+  private var tvPlayButton: some View {
+    Button {
+      playFromBeginning = false
+      showPlayer = true
+    } label: {
+      Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
+        .font(.headline.weight(.semibold))
+        .foregroundStyle(.white)
+        .frame(width: 260, height: 54)
+        .background(Color.red)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Color.white.opacity(focusedAction == .play ? 0.9 : 0), lineWidth: 2)
+        )
+    }
+    .buttonStyle(.plain)
+    .shadow(color: Color.red.opacity(0.4), radius: 6, x: 0, y: 3)
+    .focused($focusedAction, equals: .play)
+    .prefersDefaultFocus(in: actionNamespace)
+    .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
+  }
+
+  private var tvStartOverButton: some View {
+    Button {
+      playFromBeginning = true
+      showPlayer = true
+    } label: {
+      Label("Start Over", systemImage: "arrow.counterclockwise")
+        .font(.headline.weight(.semibold))
+        .foregroundStyle(.white)
+        .frame(width: 260, height: 54)
+        .background(Color(white: 0.25))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Color.white.opacity(focusedAction == .fromBeginning ? 0.9 : 0), lineWidth: 2)
+        )
+    }
+    .buttonStyle(.plain)
+    .focused($focusedAction, equals: .fromBeginning)
+    .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
+  }
   #endif
 
   @ViewBuilder
   private var contentPanel: some View {
     VStack(alignment: .leading, spacing: 14) {
-          // Metadata pills + action buttons grouped tightly together
-          VStack(alignment: .leading, spacing: 8) {
+          // Metadata pills
           if detail != nil {
             metadataPills
           }
 
-          // Action row — Play is always fixed-width so adding Start Over doesn't resize it
+          #if os(tvOS)
+          // tvOS: episode badge + title on left, action buttons on right — one row
+          HStack(alignment: .center, spacing: 16) {
+            // Episode badge + title (expands to fill available space)
+            if seasonNumber != nil || episodeNumber != nil {
+              let badge: String = {
+                if let s = seasonNumber, let e = episodeNumber { return "S\(s) · E\(e)" }
+                if let s = seasonNumber { return "Season \(s)" }
+                if let e = episodeNumber { return "Episode \(e)" }
+                return ""
+              }()
+              (Text(badge).foregroundStyle(Color.dsAccent)
+                + Text("  \(detail?.title ?? fallbackTitle)").foregroundStyle(.white))
+                .font(.title3.weight(.bold))
+                .lineLimit(1)
+                .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
+            } else {
+              Text(detail?.title ?? fallbackTitle)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+
+            // Action buttons — fixed width, right-aligned
+            HStack(spacing: 12) {
+              tvPlayButton
+              if savedPositionSeconds > 0 { tvStartOverButton }
+            }
+            .focusScope(actionNamespace)
+          }
+          #else
+          // iOS: action buttons row
           HStack(spacing: 12) {
             Button {
               playFromBeginning = false
@@ -221,23 +297,14 @@ struct ItemDetailView: View {
               Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white)
-                #if os(tvOS)
-                .frame(width: 340, height: 60)
-                #else
                 .frame(width: 200, height: 44)
-                #endif
                 .background(Color.red)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
             .shadow(color: Color.red.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
-            #if os(tvOS)
-            .focused($focusedAction, equals: .play)
-            .prefersDefaultFocus(in: actionNamespace)
-            #endif
 
-            // Start from Beginning — appears beside Play when there's saved progress
             if savedPositionSeconds > 0 {
               Button {
                 playFromBeginning = true
@@ -246,33 +313,19 @@ struct ItemDetailView: View {
                 Label("Start Over", systemImage: "arrow.counterclockwise")
                   .font(.headline.weight(.semibold))
                   .foregroundStyle(.white)
-                  #if os(tvOS)
-                  .frame(width: 340, height: 60)
-                  #else
                   .frame(width: 200, height: 44)
-                  #endif
                   .background(Color(white: 0.25))
                   .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
-              #if os(tvOS)
-              .focused($focusedAction, equals: .fromBeginning)
-              #endif
             }
 
-            // Download / watchlist icon buttons (iOS only)
-            #if !os(tvOS)
             downloadIconButton
             watchlistIconButton
-            #endif
-
             Spacer(minLength: 0)
           }
-          #if os(tvOS)
-          .focusScope(actionNamespace)
           #endif
-          } // end pills+actions VStack
 
           // Download error (separate from detail-load error to avoid clobbering the header)
           #if !os(tvOS)
@@ -334,7 +387,8 @@ struct ItemDetailView: View {
           }
           #endif
 
-          // Episode identifier — S·E (red) + episode title on one line
+          // iOS episode identifier — S·E (red) + title (tvOS has it in the action row)
+          #if !os(tvOS)
           if seasonNumber != nil || episodeNumber != nil {
             let badge: String = {
               if let s = seasonNumber, let e = episodeNumber { return "S\(s) · E\(e)" }
@@ -348,6 +402,7 @@ struct ItemDetailView: View {
               .lineLimit(2)
               .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
           }
+          #endif
 
           if let summary = detail?.summary, !summary.isEmpty {
             Text(summary)
