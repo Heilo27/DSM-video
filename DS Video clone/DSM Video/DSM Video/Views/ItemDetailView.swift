@@ -326,28 +326,19 @@ struct ItemDetailView: View {
           }
           #endif
 
-          // Episode identifier — S·E badge + title, shown just above the description
+          // Episode identifier — S·E (red) + episode title on one line
           if seasonNumber != nil || episodeNumber != nil {
-            VStack(alignment: .leading, spacing: 4) {
-              if let s = seasonNumber, let e = episodeNumber {
-                Text("S\(s) · E\(e)")
-                  .font(.caption.weight(.semibold))
-                  .foregroundStyle(Color.dsAccent)
-                  .accessibilityLabel("Season \(s), Episode \(e)")
-              } else if let s = seasonNumber {
-                Text("Season \(s)")
-                  .font(.caption.weight(.semibold))
-                  .foregroundStyle(Color.dsAccent)
-              } else if let e = episodeNumber {
-                Text("Episode \(e)")
-                  .font(.caption.weight(.semibold))
-                  .foregroundStyle(Color.dsAccent)
-              }
-              Text(detail?.title ?? fallbackTitle)
-                .font(.title3.weight(.bold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-            }
+            let badge: String = {
+              if let s = seasonNumber, let e = episodeNumber { return "S\(s) · E\(e)" }
+              if let s = seasonNumber { return "Season \(s)" }
+              if let e = episodeNumber { return "Episode \(e)" }
+              return ""
+            }()
+            (Text(badge).foregroundStyle(Color.dsAccent)
+              + Text("  \(detail?.title ?? fallbackTitle)").foregroundStyle(.white))
+              .font(.title3.weight(.bold))
+              .lineLimit(2)
+              .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
           }
 
           if let summary = detail?.summary, !summary.isEmpty {
