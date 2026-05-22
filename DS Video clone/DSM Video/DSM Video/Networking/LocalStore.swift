@@ -118,6 +118,7 @@ actor LocalStore {
   }
 
   private func migrate() throws {
+    // Baseline schema — safe to run on any existing DB (all IF NOT EXISTS)
     try execThrows("""
       CREATE TABLE IF NOT EXISTS items (
         id               TEXT PRIMARY KEY,
@@ -156,8 +157,30 @@ actor LocalStore {
       CREATE INDEX IF NOT EXISTS idx_items_change_seq  ON items(change_seq);
       CREATE INDEX IF NOT EXISTS idx_progress_updated  ON progress(updated_at DESC);
     """)
-    // Additive migrations for existing databases (safe to run on any schema version)
-    execIgnoringErrors("ALTER TABLE items ADD COLUMN show_folder_id TEXT")
+
+    // Versioned additive migrations — each runs exactly once, guarded by PRAGMA user_version.
+    // To add a new migration: append a block incrementing to the next version number.
+    let version = userVersion()
+    if version < 1 {
+      // v1: show_folder_id was added after initial schema; already present in CREATE TABLE
+      // above for new installs, but old DBs need the ALTER TABLE.
+      execIgnoringErrors("ALTER TABLE items ADD COLUMN show_folder_id TEXT")
+      setUserVersion(1)
+    }
+  }
+
+  private func userVersion() -> Int {
+    guard let db else { return 0 }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+    defer { sqlite3_finalize(stmt) }
+    return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+  }
+
+  private func setUserVersion(_ version: Int) {
+    guard let db else { return }
+    // PRAGMA user_version does not support bound parameters — value is an integer literal.
+    sqlite3_exec(db, "PRAGMA user_version = \(version)", nil, nil, nil)
   }
 
   // MARK: - JSON Cache Migration
