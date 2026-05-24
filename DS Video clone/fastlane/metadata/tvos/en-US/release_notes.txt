@@ -1,27 +1,5 @@
-Overhauled Apple TV experience — detail views, episode navigation, and UI polish.
+Bug fixes and improvements to the Apple TV experience.
 
-DETAIL VIEW
-• Hero image now fills the screen with info panel anchored to the bottom
-• Play button is red and clearly visible; Start Over button appears when you have saved progress
-• Season and episode number shown alongside the title on one line
-• Cast listed inline — cleaner, takes less space
-• Navigation title removed — artwork speaks for itself
-
-EPISODE NAVIGATION
-• Continue Watching TV episodes navigate into the show's season view, so back-out shows the full season and next-episode autoplay works correctly
-• Season list defaults to collapsed; the active season expands automatically
-• Episode rows no longer clip checkmarks or progress indicators on the right edge
-
-LIBRARY
-• Show and movie tiles without posters are now focusable and selectable
-• Fixed missing TV show poster tiles that weren't focusable with the remote
-• Search added to both Movies and TV Shows grids
-• Sort buttons added: A→Z and Recently Added, both libraries
-
-PLAYER
-• D-pad left/right skips back and forward 30 seconds
-• Select button shows controls when hidden, pauses when controls are visible
-• Play/Pause button on Siri Remote works correctly in all states
-
-SETUP
-• Optional remote address field for automatic LAN/WAN switching
+• Up Next overlay now defaults focus to Play Now button
+• Stay button label visible and correctly styled
+• D-pad left/right no longer seeks while Up Next overlay is showing
