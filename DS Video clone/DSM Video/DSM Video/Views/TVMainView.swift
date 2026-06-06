@@ -235,8 +235,8 @@ private struct TVHomeView: View {
               }
 
               // Per-library rails
-              ForEach(appState.homeLibraries) { lib in
-                TVLibraryRail(library: lib)
+              ForEach(Array(appState.homeLibraries.enumerated()), id: \.element.id) { idx, lib in
+                TVLibraryRail(library: lib, index: idx)
               }
             }
           }
@@ -377,6 +377,8 @@ private struct TVLandscapeRail: View {
 private struct TVLibraryRail: View {
   @Environment(AppState.self) private var appState
   let library: Library
+  /// Rail index — used to stagger concurrent home-load fetches by 150ms per rail (TASK-432).
+  var index: Int = 0
 
   @State private var items: [ItemSummary] = []
   @State private var shows: [TVShow] = []
@@ -434,10 +436,17 @@ private struct TVLibraryRail: View {
         .focusSection()
       }
     }
-    .task { await load() }
+    // TASK-432: stagger per-rail fetches to avoid N concurrent requests on home load.
+    // TASK-442: re-trigger fetch when homeForceRefresh bumps libraryRailsVersion.
+    .task(id: appState.libraryRailsVersion) { await load() }
   }
 
   private func load() async {
+    // TASK-432: stagger fetches based on rail index to spread concurrent network load.
+    if index > 0 {
+      try? await Task.sleep(for: .milliseconds(index * 150))
+      guard !Task.isCancelled else { return }
+    }
     guard !isLoading else { return }
     isLoading = true
     defer { isLoading = false }

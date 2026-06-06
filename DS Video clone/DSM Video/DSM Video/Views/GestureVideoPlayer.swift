@@ -637,7 +637,22 @@ struct GestureVideoPlayer: View {
 
             // Center transport controls — play/pause + skip buttons float in the middle
             Spacer()
-            HStack(spacing: 40) {
+            HStack(spacing: 28) {
+                // Skip to start
+                Button {
+                    seek(to: 0, tight: true)
+                    currentTime = 0
+                    if isPlaying { scheduleHideControls() }
+                } label: {
+                    Image(systemName: "gobackward.end")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Skip to start")
+                .accessibilityAddTraits(.isButton)
+
                 // Rewind 15s
                 Button {
                     let t = max(0, currentTime - skipBackwardSeconds)
@@ -663,9 +678,10 @@ struct GestureVideoPlayer: View {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 50))
                         .foregroundStyle(.white)
-                        .frame(minWidth: 75, minHeight: 75)
+                        .frame(width: 56, height: 56)
                 }
                 .buttonStyle(.plain)
+                .background(Color.white.opacity(0.15), in: Circle())
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
                 .accessibilityAddTraits(.isButton)
                 #if os(tvOS)
@@ -687,6 +703,22 @@ struct GestureVideoPlayer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Forward \(Int(skipForwardSeconds)) seconds")
+                .accessibilityAddTraits(.isButton)
+
+                // Skip to end
+                Button {
+                    let t = max(0, duration - 3)
+                    seek(to: t, tight: true)
+                    currentTime = t
+                    if isPlaying { scheduleHideControls() }
+                } label: {
+                    Image(systemName: "goforward.end")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Skip to end")
                 .accessibilityAddTraits(.isButton)
             }
             #if os(tvOS)
@@ -771,9 +803,22 @@ struct GestureVideoPlayer: View {
                             }
                         }
                         .tint(.white)
-                        .scaleEffect(y: 1.3)
                         .accessibilityLabel("Playback position")
                         .accessibilityValue("\(formatTime(currentTime)) of \(formatTime(duration))")
+                        .accessibilityAdjustableAction { direction in
+                            let step = max(duration * 0.01, 5.0)
+                            switch direction {
+                            case .increment:
+                                let t = min(duration, currentTime + step)
+                                seek(to: t, tight: true)
+                                currentTime = t
+                            case .decrement:
+                                let t = max(0, currentTime - step)
+                                seek(to: t, tight: true)
+                                currentTime = t
+                            @unknown default: break
+                            }
+                        }
                     }
                     #else
                     // tvOS: progress bar only (no interactive Slider)

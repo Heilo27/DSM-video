@@ -102,6 +102,12 @@ type Server struct {
 	// Keyed by remote IP; value is *authRateEntry.
 	authRateMu    sync.Mutex
 	authRateLimit sync.Map
+
+	// Cached sync sequence counters (TASK-579). Eliminates the DB SELECT on every
+	// heartbeat/status call. Zero means uninitialised — getSyncSeqs falls back to DB.
+	// Updated by incrementSeq and by inline item_seq updates during scan.
+	cachedItemSeq     atomic.Int64
+	cachedProgressSeq atomic.Int64
 }
 
 // authRateEntry tracks per-IP attempt counts for auth endpoints.
@@ -802,16 +808,35 @@ CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);
 // -------------------------
 
 // incrementSeq atomically increments a sync counter and returns the new value.
+// Returns 0 and logs an error if the DB write fails (TASK-611).
+// Also updates the in-memory cache so getSyncSeqs avoids a DB round-trip (TASK-579).
 func (s *Server) incrementSeq(key string) int64 {
 	var newVal int64
-	_ = s.db.QueryRow(
+	if err := s.db.QueryRow(
 		`UPDATE sync_state SET value = value + 1 WHERE key = ? RETURNING value`, key,
-	).Scan(&newVal)
+	).Scan(&newVal); err != nil {
+		log.Printf("[incrementSeq] failed to increment %q: %v", key, err)
+		return 0
+	}
+	switch key {
+	case "item_seq":
+		s.cachedItemSeq.Store(newVal)
+	case "progress_seq":
+		s.cachedProgressSeq.Store(newVal)
+	}
 	return newVal
 }
 
 // getSyncSeqs returns the current item_seq and progress_seq.
+// Reads from in-memory atomic cache when initialised; falls back to a DB query
+// on first call (zero values) so the cache warms up automatically (TASK-579).
 func (s *Server) getSyncSeqs() (itemSeq, progressSeq int64) {
+	itemSeq = s.cachedItemSeq.Load()
+	progressSeq = s.cachedProgressSeq.Load()
+	if itemSeq != 0 || progressSeq != 0 {
+		return
+	}
+	// Cache uninitialised — read from DB once and populate it.
 	rows, err := s.db.Query(`SELECT key, value FROM sync_state WHERE key IN ('item_seq','progress_seq')`)
 	if err != nil {
 		return 0, 0
@@ -824,8 +849,10 @@ func (s *Server) getSyncSeqs() (itemSeq, progressSeq int64) {
 			switch k {
 			case "item_seq":
 				itemSeq = v
+				s.cachedItemSeq.Store(v)
 			case "progress_seq":
 				progressSeq = v
+				s.cachedProgressSeq.Store(v)
 			}
 		}
 	}
@@ -4106,7 +4133,11 @@ func (s *Server) handleWatchlistCheck(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 
 	var count int
-	_ = s.db.QueryRow("SELECT COUNT(*) FROM watchlist WHERE item_id = ? AND user_id = ?", itemID, u.ID).Scan(&count)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM watchlist WHERE item_id = ? AND user_id = ?", itemID, u.ID).Scan(&count); err != nil {
+		log.Printf("[handleWatchlistCheck] db error for item %q user %q: %v", itemID, u.ID, err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"inWatchlist": count > 0})
 }
 
@@ -4326,6 +4357,9 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			_ = tx.QueryRowContext(ctx,
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
+			if seq > 0 {
+				s.cachedItemSeq.Store(seq)
+			}
 			if _, err := tx.Exec(
 				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id)
 				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -4492,6 +4526,9 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 					_ = staleTx.QueryRowContext(ctx,
 						`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 					).Scan(&seq)
+					if seq > 0 {
+						s.cachedItemSeq.Store(seq)
+					}
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx,
 						`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,?)`,
@@ -5077,6 +5114,9 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		_ = tx.QueryRowContext(ctx,
 			`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 		).Scan(&seq)
+		if seq > 0 {
+			s.cachedItemSeq.Store(seq)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE items SET
 				tmdb_id = ?,
@@ -5152,6 +5192,9 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 			_ = s.db.QueryRowContext(bgCtx,
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
+			if seq > 0 {
+				s.cachedItemSeq.Store(seq)
+			}
 			_, _ = s.db.ExecContext(bgCtx, `
 				UPDATE items SET
 					episode_title = ?,

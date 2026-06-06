@@ -38,6 +38,7 @@ struct ItemsGridView: View {
     return SortOption(rawValue: raw) ?? .addedNewest
   }()
   @State private var searchText: String = ""
+  @State private var showFilterSheet: Bool = false
 
   private var displayedItems: [ItemSummary] {
     guard !searchText.isEmpty else { return sortedItems }
@@ -149,9 +150,26 @@ struct ItemsGridView: View {
     .task { await load() }
     #if !os(tvOS)
     .refreshable { await load() }
+    .sheet(isPresented: $showFilterSheet) {
+      NavigationStack {
+        ContentUnavailableView(
+          "Genre Filter",
+          systemImage: "line.3.horizontal.decrease.circle",
+          description: Text("Genre filtering coming in a future update.")
+        )
+        .navigationTitle("Filter")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+          ToolbarItem(placement: .topBarTrailing) {
+            Button("Done") { showFilterSheet = false }
+          }
+        }
+      }
+      .presentationDetents([.medium])
+    }
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
-        SortChipBar(selection: $sortOption)
+        SortChipBar(selection: $sortOption, showFilterSheet: $showFilterSheet)
         if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
           Text("Showing cached content")
             .font(.caption2)
@@ -289,10 +307,29 @@ struct ItemsGridView: View {
 #if !os(tvOS)
 private struct SortChipBar: View {
   @Binding var selection: SortOption
+  @Binding var showFilterSheet: Bool
 
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
+        // Filter chip — always first, right-anchored visually
+        Button {
+          showFilterSheet = true
+        } label: {
+          Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(Color.dsTextSecondary)
+            .frame(minHeight: 44)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 14)
+            .background(
+              RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.dsSurface)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Filter library")
+
         ForEach(SortOption.allCases, id: \.self) { option in
           Button {
             selection = option

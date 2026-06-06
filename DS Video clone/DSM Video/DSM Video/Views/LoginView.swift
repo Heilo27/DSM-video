@@ -160,11 +160,11 @@ struct LoginView: View {
           if appState.isLoggingIn {
             ProgressView("Connecting")
               .tint(.white)
-              .frame(maxWidth: .infinity, minHeight: 52)
+              .frame(maxWidth: .infinity, minHeight: 56)
           } else {
             Text("Connect")
               .font(.headline)
-              .frame(maxWidth: .infinity, minHeight: 52)
+              .frame(maxWidth: .infinity, minHeight: 56)
           }
         }
         .background(Color.dsAccent)
@@ -192,17 +192,29 @@ struct LoginView: View {
         }
 
         #if !os(tvOS)
+        HStack(spacing: 12) {
+          Rectangle().fill(Color.white.opacity(0.2)).frame(height: 1)
+          Text("or").font(.subheadline).foregroundStyle(.white.opacity(0.45))
+          Rectangle().fill(Color.white.opacity(0.2)).frame(height: 1)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
+        .accessibilityHidden(true)
+
         Button {
           showQuickConnect = true
         } label: {
-          Text("Or connect via QuickConnect")
-            .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.75))
-            .frame(minHeight: 44)
+          Text("Connect via QuickConnect")
+            .font(.headline.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(Color(white: 0.2))
+            .clipShape(Capsule())
         }
         .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .padding(.top, 4)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
+        .accessibilityLabel("Connect via QuickConnect")
         #endif
 
         #if !os(tvOS)
@@ -330,6 +342,8 @@ private struct BonjourScanSheet: View {
 
   @Environment(\.dismiss) private var dismiss
   @State private var discovery = BonjourDiscovery()
+  @State private var scanTimedOut: Bool = false
+  @State private var timeoutTask: Task<Void, Never>?
 
   var body: some View {
     NavigationStack {
@@ -345,10 +359,16 @@ private struct BonjourScanSheet: View {
               ContentUnavailableView(
                 "No Servers Found",
                 systemImage: "network.slash",
-                description: Text("Make sure DSVideoServer is running on your NAS and both devices are on the same network.")
+                description: Text(scanTimedOut
+                  ? "No DSVideoServer found within 10 seconds. Make sure it's running and both devices are on the same network."
+                  : "Make sure DSVideoServer is running on your NAS and both devices are on the same network.")
               )
-              Button("Scan Again") { discovery.startScan() }
-                .buttonStyle(.borderedProminent)
+              Button("Scan Again") {
+                scanTimedOut = false
+                discovery.startScan()
+                scheduleTimeout()
+              }
+              .buttonStyle(.borderedProminent)
             }
             Spacer()
           }
@@ -382,8 +402,26 @@ private struct BonjourScanSheet: View {
           }
         }
       }
-      .onAppear { discovery.startScan() }
-      .onDisappear { discovery.stopScan() }
+      .onAppear {
+        discovery.startScan()
+        scheduleTimeout()
+      }
+      .onDisappear {
+        timeoutTask?.cancel()
+        discovery.stopScan()
+      }
+    }
+  }
+
+  private func scheduleTimeout() {
+    timeoutTask?.cancel()
+    timeoutTask = Task { @MainActor in
+      try? await Task.sleep(for: .seconds(10))
+      guard !Task.isCancelled else { return }
+      if discovery.servers.isEmpty {
+        discovery.stopScan()
+        scanTimedOut = true
+      }
     }
   }
 }

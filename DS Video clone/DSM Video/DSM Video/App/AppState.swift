@@ -410,10 +410,11 @@ final class AppState {
     Self.deleteFromKeychain(account: Keys.keychainAccountToken)
     Self.deleteFromKeychain(account: Keys.keychainAccount)
     savedPassword = ""
+    username = ""  // SEC-03: clear username so it doesn't persist cross-user on shared devices
     sessionToken = nil
     pairingCode = nil
     loginError = nil
-    watchlistItems = []  // SEC-03: prevent cross-user watchlist leakage on shared devices
+    watchlistItems = []
     reconnectRetryTask?.cancel()
     reconnectRetryTask = nil
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
@@ -686,6 +687,8 @@ final class AppState {
 
   // Persistent across tab switches — populated once, never cleared unless logout/forceRefresh
   var homeLibraries: [Library] = []
+  /// Bumped on homeForceRefresh so TVLibraryRail's .task(id:) re-triggers a fresh fetch.
+  var libraryRailsVersion: UUID = UUID()
   var homeContinueWatching: [ItemSummary] = []
   var homeJustAdded: [ItemSummary] = [] {
     didSet { writeTopShelfSnapshot() }
@@ -915,6 +918,8 @@ final class AppState {
     homeError = nil
     await runDeltaSync(background: false)
     homeIsLoading = false
+    // Bump version so TVLibraryRail views re-fetch their content via .task(id:).
+    libraryRailsVersion = UUID()
   }
 
   // MARK: - Delta Sync
@@ -1044,6 +1049,8 @@ final class AppState {
       homeRecentlyWatched = rails.recentlyWatched
       clearNetworkError()
       homeLog.info("runDeltaSync: done — CW=\(rails.continueWatching.count) JA=\(rails.justAdded.count) RW=\(rails.recentlyWatched.count)")
+      // Step 6: Refresh watchlist so it stays current with server state
+      await loadWatchlist()
 
     } catch {
       homeLog.error("runDeltaSync: FAILED — \(error.localizedDescription)")
