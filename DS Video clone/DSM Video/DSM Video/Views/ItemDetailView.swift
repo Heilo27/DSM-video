@@ -281,9 +281,13 @@ struct ItemDetailView: View {
             Spacer(minLength: 12)
 
             // Action buttons — fixed width, right-aligned
+            // Start Over is always in the layout (opacity 0 when no saved position)
+            // so the Play button never shifts when progress loads asynchronously.
             HStack(spacing: 12) {
               tvPlayButton
-              if savedPositionSeconds > 0 { tvStartOverButton }
+              tvStartOverButton
+                .opacity(savedPositionSeconds > 0 ? 1 : 0)
+                .accessibilityHidden(savedPositionSeconds == 0)
             }
             .focusScope(actionNamespace)
           }

@@ -834,6 +834,7 @@ final class AppState {
 
     // Cold start — load SQLite first (fast), then sync from network
     homeIsCacheDecoding = true
+    defer { homeIsCacheDecoding = false }
     // Ensure setup has completed before any store access (TASK-420).
     await LocalStore.shared.ensureReady()
     let hasLocal = await Task.detached(priority: .userInitiated) {

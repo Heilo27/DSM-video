@@ -220,32 +220,62 @@ private struct TVShowDetailSplitView: View {
     }
   }
 
-  // Find the last in-progress episode across all seasons. Fetches season episodes
-  // concurrently; stops scanning once a clear resume point is found.
+  // Find the resume point across seasons. Fetches seasons sequentially (up to a cap)
+  // and stops early once an in-progress episode is found — avoids 20+ parallel requests.
+  //
+  // Algorithm:
+  //   Walk all episodes in season order.
+  //   - Track the latest episode with 2%–95% progress as inProgressEp.
+  //   - Fully-watched (≥95%) episodes advance the firstUnwatched cursor past them.
+  //   - An episode with no progress is firstUnwatched only if no fully-watched or
+  //     in-progress episode has been seen yet in this season.
+  //   After scanning:
+  //   - If inProgressEp found: resume point is the episode immediately after it.
+  //   - Else: resume point is firstUnwatchedEp (first episode with no progress at all).
+  //
+  // TASK-654: capped to scanLimit seasons; sequential fetch exits early on first
+  //           in-progress find — worst case 3–4 calls, not 20 parallel.
+  // TASK-656: CancellationError propagates; guard after withTaskGroup prevents
+  //           state writes on a dismissed view.
   private func resolveResumePoint(for seasons: [TVSeason]) async {
     guard !seasons.isEmpty else { return }
-    // Fan out: fetch all seasons in parallel (episodes come with progress data)
-    let results: [(season: Int, episodes: [ItemSummary])] = await withTaskGroup(
-      of: (Int, [ItemSummary]).self
-    ) { group in
-      for s in seasons {
-        group.addTask {
-          do {
-            let resp = try await appState.api.tvShowEpisodes(
-              showId: show.id, season: s.seasonNumber, libraryId: library.id)
-            return (s.seasonNumber, resp.items)
-          } catch {
-            return (s.seasonNumber, [])
-          }
+
+    // TASK-654: Only scan enough seasons to find a resume point.
+    // Most users are within the first 5 seasons; cap avoids hammering the API on
+    // a 20-season show when the user is on S1.
+    let scanLimit = min(5, seasons.count)
+    let seasonsToScan = Array(seasons.prefix(scanLimit))
+
+    // TASK-654: Sequential fetch — stop once we find an in-progress season.
+    // This is 1–3 calls in the common case instead of N parallel calls.
+    var results: [(season: Int, episodes: [ItemSummary])] = []
+    for s in seasonsToScan {
+      // TASK-656: Check cancellation before each fetch
+      guard !Task.isCancelled else { return }
+      do {
+        let resp = try await appState.api.tvShowEpisodes(
+          showId: show.id, season: s.seasonNumber, libraryId: library.id)
+        results.append((season: s.seasonNumber, episodes: resp.items))
+        // Early exit: if this season has an in-progress episode, no need to scan further
+        let hasInProgress = resp.items.contains { ep in
+          guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
+          let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
+          return frac > 0.02 && frac < 0.95
         }
+        if hasInProgress { break }
+      } catch is CancellationError {
+        return
+      } catch {
+        // Non-fatal: skip this season for resume detection
+        results.append((season: s.seasonNumber, episodes: []))
       }
-      var out: [(Int, [ItemSummary])] = []
-      for await pair in group { out.append(pair) }
-      return out.map { (season: $0.0, episodes: $0.1) }.sorted { $0.season < $1.season }
     }
 
-    // Walk seasons in order; find the last episode with meaningful progress.
-    // Priority: in-progress (0 < frac < 0.95) > first unwatched > nothing
+    // TASK-656: Don't write state if the parent task was cancelled while fetching
+    guard !Task.isCancelled else { return }
+
+    // Walk seasons in order; find the latest in-progress episode and first unwatched.
+    // Priority: in-progress (2%–95%) > first unwatched (0% progress) > nothing
     var inProgressEp: ItemSummary? = nil
     var inProgressSeason: Int? = nil
     var firstUnwatchedEp: ItemSummary? = nil
@@ -259,23 +289,30 @@ private struct TVShowDetailSplitView: View {
             // Track the *latest* in-progress episode (overwrite as we walk forward)
             inProgressEp = ep
             inProgressSeason = entry.season
+            // Once we've seen in-progress content, the firstUnwatched cursor resets —
+            // the next unwatched episode after the in-progress block is what matters
+            firstUnwatchedEp = nil
+            firstUnwatchedSeason = nil
           } else if frac >= 0.95 {
-            // Fully watched — next episode (if any) is the first unwatched candidate
-            // We'll pick it up in the next iteration
+            // TASK-657: Fully watched — advance the firstUnwatched cursor past this ep.
+            // Without this, a show where S1 is 100% done kept pointing firstUnwatched
+            // at S1E1 (or nowhere) rather than S2E1.
+            firstUnwatchedEp = nil
+            firstUnwatchedSeason = nil
           }
-        } else if firstUnwatchedEp == nil && inProgressEp == nil {
-          // No progress at all on this episode — first genuinely unwatched
-          firstUnwatchedEp = ep
-          firstUnwatchedSeason = entry.season
+        } else {
+          // No progress record — genuinely unwatched.
+          // Only record it if we haven't already got a candidate.
+          if firstUnwatchedEp == nil {
+            firstUnwatchedEp = ep
+            firstUnwatchedSeason = entry.season
+          }
         }
       }
-      // After each fully-watched season, reset firstUnwatched to pick from next season
-      if let _ = inProgressEp { firstUnwatchedEp = nil; firstUnwatchedSeason = nil }
     }
 
-    // After the in-progress episode, the *next* episode is the one to land on
+    // After the in-progress episode, the *next* episode is the resume point
     if let ipEp = inProgressEp, let ipSeason = inProgressSeason {
-      // Find the next episode after the in-progress one in the same or next season
       var foundNext = false
       outer: for entry in results where entry.season >= ipSeason {
         for ep in entry.episodes {
@@ -287,7 +324,7 @@ private struct TVShowDetailSplitView: View {
           if ep.id == ipEp.id { foundNext = true }
         }
       }
-      // In-progress episode is the last one (or end of series) — open on it directly
+      // In-progress episode is the last one scanned — open on it directly
       resolvedHighlightEpisodeID = ipEp.id
       resolvedHighlightSeason = ipSeason
       return
@@ -325,8 +362,10 @@ private struct TVSeasonSection: View {
     self.allSeasons = allSeasons
     self.highlightEpisodeID = highlightEpisodeID
     self.highlightSeason = highlightSeason
-    // Open the season that has the highlight; collapse everything else
-    self._isExpanded = State(initialValue: highlightSeason == season.seasonNumber)
+    // Open the season that has the highlight; if no highlight, auto-expand the lowest season number
+    let lowestSeasonNumber = allSeasons.min(by: { $0.seasonNumber < $1.seasonNumber })?.seasonNumber ?? 1
+    self._isExpanded = State(initialValue: highlightSeason == season.seasonNumber
+      || (highlightSeason == nil && season.seasonNumber == lowestSeasonNumber))
   }
 
   var body: some View {
@@ -408,6 +447,18 @@ private struct TVSeasonSection: View {
     }
     .focusSection()
     .task { await load() }
+    // TASK-659: React to async-resolved highlightSeason. The @State initializer runs
+    // before resolveResumePoint completes, so the initial isExpanded value is always
+    // false for the resume season. This onChange fires when the parent's
+    // effectiveHighlightSeason updates after the async resolve, and expands the
+    // correct season at that point.
+    .onChange(of: highlightSeason) { _, newHighlight in
+      if newHighlight == season.seasonNumber {
+        withAnimation(.easeInOut(duration: 0.2)) {
+          isExpanded = true
+        }
+      }
+    }
   }
 
   private func load() async {
@@ -665,16 +716,38 @@ private struct TVEpisodeDetailView: View {
   private func advanceToNextEpisode() {
     consecutiveEpisodesWatched += 1
 
+    // TASK-690: The advance closure re-checks live state at execution time rather than
+    // capturing isAtSeasonBoundary / nextSeasonEpisodes at creation time. This matters
+    // when pendingAdvance is held during a StillWatching prompt and the user confirms
+    // after the fetch state may have changed.
     let advance = {
       if self.hasNextInSeason {
         self.currentIndex += 1
         self.autoPlayCurrent = true
-      } else if self.isAtSeasonBoundary, !self.nextSeasonEpisodes.isEmpty {
-        self.currentEpisodes = self.nextSeasonEpisodes
-        self.nextSeasonEpisodes = []
-        self.currentSeasonIndex += 1
-        self.currentIndex = 0
-        self.autoPlayCurrent = true
+      } else if self.isAtSeasonBoundary {
+        if !self.nextSeasonEpisodes.isEmpty {
+          self.currentEpisodes = self.nextSeasonEpisodes
+          self.nextSeasonEpisodes = []
+          self.currentSeasonIndex += 1
+          self.currentIndex = 0
+          self.autoPlayCurrent = true
+        } else {
+          // TASK-690: nextSeasonEpisodes empty at advance time — retry fetch.
+          // If the retry also fails, fetchNextSeason logs and leaves nextSeasonEpisodes
+          // empty, which means the advance is a no-op rather than a blank screen.
+          Task { @MainActor in
+            await self.fetchNextSeason()
+            if !self.nextSeasonEpisodes.isEmpty {
+              self.currentEpisodes = self.nextSeasonEpisodes
+              self.nextSeasonEpisodes = []
+              self.currentSeasonIndex += 1
+              self.currentIndex = 0
+              self.autoPlayCurrent = true
+            }
+            // If still empty after retry, silently stay on current episode — the
+            // ItemDetailView remains visible rather than showing a blank screen.
+          }
+        }
       }
     }
 

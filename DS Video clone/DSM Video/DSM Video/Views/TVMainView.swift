@@ -240,7 +240,7 @@ private struct TVHomeView: View {
               }
             }
           }
-          .padding(.top, 60)
+          .padding(.top, 100)
           .padding(.bottom, 80)
         }
       }
@@ -478,16 +478,14 @@ private struct TVLibraryRail: View {
 private struct TVShowNavCard: View {
   let show: TVShow
   let library: Library
-  @FocusState private var isFocused: Bool
 
   var body: some View {
     NavigationLink {
       TVShowDetailView(show: show, library: library)
     } label: {
-      TVShowPortraitCard(show: show, isFocused: isFocused)
+      TVShowPortraitCard(show: show)
     }
-    .buttonStyle(.plain)
-    .focused($isFocused)
+    .buttonStyle(.card)
     .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
     .accessibilityHint("Opens show details")
   }
@@ -495,16 +493,14 @@ private struct TVShowNavCard: View {
 
 private struct TVItemNavCard: View {
   let item: ItemSummary
-  @FocusState private var isFocused: Bool
 
   var body: some View {
     NavigationLink {
       ItemDetailView(itemID: item.id, fallbackTitle: item.title)
     } label: {
-      TVPortraitCard(item: item, isFocused: isFocused)
+      TVPortraitCard(item: item)
     }
-    .buttonStyle(.plain)
-    .focused($isFocused)
+    .buttonStyle(.card)
     .accessibilityLabel("\(item.title)\(item.year.map { ", \($0)" } ?? "")")
     .accessibilityHint("Opens video details")
   }
@@ -513,7 +509,6 @@ private struct TVItemNavCard: View {
 private struct TVShowPortraitCard: View {
   @Environment(AppState.self) private var appState
   let show: TVShow
-  var isFocused: Bool = false
 
   private let cardWidth: CGFloat = 220
   private let cardHeight: CGFloat = 330
@@ -574,8 +569,6 @@ private struct TVShowPortraitCard: View {
       }
       .padding(.leading, 10)
     }
-    .scaleEffect(isFocused ? 1.05 : 1.0)
-    .animation(.easeInOut(duration: 0.15), value: isFocused)
   }
 }
 
@@ -687,7 +680,6 @@ private struct TVLandscapeCard: View {
 private struct TVPortraitCard: View {
   @Environment(AppState.self) private var appState
   let item: ItemSummary
-  var isFocused: Bool = false
 
   private let cardWidth: CGFloat = 220
   private let cardHeight: CGFloat = 330  // 2:3
@@ -800,8 +792,6 @@ private struct TVPortraitCard: View {
       }
       .padding(.leading, 10)
     }
-    .scaleEffect(isFocused ? 1.05 : 1.0)
-    .animation(.easeInOut(duration: 0.15), value: isFocused)
   }
 }
 

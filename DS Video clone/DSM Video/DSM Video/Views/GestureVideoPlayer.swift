@@ -583,7 +583,7 @@ struct GestureVideoPlayer: View {
                     #if os(tvOS)
                     Button {
                         let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-                        let currentIdx = speeds.firstIndex(of: playbackRate) ?? 2
+                        let currentIdx = speeds.firstIndex(where: { abs($0 - playbackRate) < 0.01 }) ?? 2
                         let nextRate = speeds[(currentIdx + 1) % speeds.count]
                         setPlaybackRate(nextRate)
                     } label: {
@@ -601,7 +601,7 @@ struct GestureVideoPlayer: View {
                             } label: {
                                 HStack {
                                     Text(speed == 1.0 ? "Normal" : "\(speed, specifier: "%.2g")x")
-                                    if playbackRate == Float(speed) {
+                                    if abs(playbackRate - Float(speed)) < 0.01 {
                                         Image(systemName: "checkmark")
                                             .accessibilityLabel("Selected")
                                     }
@@ -967,7 +967,7 @@ struct GestureVideoPlayer: View {
         }
     }
 
-    // D-pad left/right scrubs in 30-second steps when controls are visible,
+    // D-pad left/right scrubs in 10-second steps when controls are visible,
     // or shows controls first if they're hidden.
     private func handleTVMoveCommand(direction: MoveCommandDirection) {
         guard direction == .left || direction == .right else { return }
@@ -977,7 +977,7 @@ struct GestureVideoPlayer: View {
             scheduleHideControls()
             return
         }
-        let delta = direction == .right ? 30.0 : -30.0
+        let delta = direction == .right ? 10.0 : -10.0
         let newTime = max(0, min(duration, currentTime + delta))
         seek(to: newTime)
         currentTime = newTime
@@ -1080,7 +1080,7 @@ struct GestureVideoPlayer: View {
             }
             .store(in: &cancellables)
 
-        player?.play()
+        player?.rate = playbackRate
         scheduleHideControls()
     }
 
@@ -1124,7 +1124,7 @@ struct GestureVideoPlayer: View {
             player?.pause()
             hideControlsTask?.cancel() // Keep controls visible when paused
         } else {
-            player?.play()
+            player?.rate = playbackRate
             scheduleHideControls() // Auto-hide when playing
         }
     }
