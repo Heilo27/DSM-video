@@ -149,6 +149,7 @@ struct ItemDetailView: View {
     }
     .ignoresSafeArea(edges: .all)
     .id(showPlayer)
+    .privacySensitive()
   }
   #endif
 
@@ -191,6 +192,7 @@ struct ItemDetailView: View {
           .onChange(of: geo.size.height) { _, h in viewHeight = h }
       }
     )
+    .privacySensitive()
   }
   #endif
 
@@ -200,7 +202,7 @@ struct ItemDetailView: View {
 
   #if os(tvOS)
   @FocusState private var focusedAction: ActionButton?
-  enum ActionButton: Hashable { case play, fromBeginning }
+  enum ActionButton: Hashable { case play, fromBeginning, watchlist }
 
   private var tvPlayButton: some View {
     let focused = focusedAction == .play
@@ -244,6 +246,34 @@ struct ItemDetailView: View {
     .focusEffectDisabled()
     .focused($focusedAction, equals: .fromBeginning)
     .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
+  }
+
+  private var tvWatchlistButton: some View {
+    let focused = focusedAction == .watchlist
+    let inList = isInWatchlist
+    return Button {
+      guard let d = detail else { return }
+      let summary = ItemSummary(
+        id: d.id, type: d.type, title: d.title, year: d.year,
+        durationSeconds: d.durationSeconds, addedAt: "",
+        rating: d.rating, posterImageId: d.images.poster.id
+      )
+      Task { await appState.toggleWatchlist(item: summary) }
+    } label: {
+      Image(systemName: inList ? "bookmark.fill" : "bookmark")
+        .font(.system(size: 22, weight: .semibold))
+        .foregroundStyle(inList ? Color.dsAccent : .white)
+        .frame(width: 54, height: 54)
+        .background(focused ? Color(white: 0.35) : Color(white: 0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .scaleEffect(focused ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+    .buttonStyle(.plain)
+    .focusEffectDisabled()
+    .focused($focusedAction, equals: .watchlist)
+    .disabled(detail == nil)
+    .accessibilityLabel(inList ? "Remove from Watchlist" : "Add to Watchlist")
   }
   #endif
 
@@ -290,6 +320,7 @@ struct ItemDetailView: View {
                 .disabled(savedPositionSeconds == 0)
                 .allowsHitTesting(savedPositionSeconds > 0)
                 .accessibilityHidden(savedPositionSeconds == 0)
+              tvWatchlistButton
             }
             .focusScope(actionNamespace)
           }
@@ -343,20 +374,31 @@ struct ItemDetailView: View {
           }
           #endif
 
-          // Next Episode button (TV show context only)
-          #if !os(tvOS)
+          // Next Episode button (TV show context only — both tvOS and iOS)
           if let next = nextEpisode, let action = onNextEpisode {
             Button {
               action()
             } label: {
               HStack(spacing: 10) {
                 Image(systemName: "forward.end.fill")
+                  #if os(tvOS)
+                  .font(.body.weight(.semibold))
+                  #else
                   .font(.subheadline.weight(.semibold))
+                  #endif
                 VStack(alignment: .leading, spacing: 2) {
                   Text("Next Episode")
+                    #if os(tvOS)
+                    .font(.body.weight(.semibold))
+                    #else
                     .font(.subheadline.weight(.semibold))
+                    #endif
                   Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
+                    #if os(tvOS)
+                    .font(.subheadline)
+                    #else
                     .font(.caption)
+                    #endif
                     .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(1)
                 }
@@ -366,22 +408,40 @@ struct ItemDetailView: View {
                   .foregroundStyle(.white.opacity(0.5))
               }
               .foregroundStyle(.white)
+              #if os(tvOS)
+              .padding(.horizontal, 20)
+              .padding(.vertical, 14)
+              .frame(maxWidth: .infinity, minHeight: 64)
+              #else
               .padding(.horizontal, 14)
               .padding(.vertical, 10)
               .frame(maxWidth: .infinity, minHeight: 52)
+              #endif
               .background(Color(white: 0.12))
               .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+            #if os(tvOS)
             .buttonStyle(.plain)
+            #else
+            .buttonStyle(.plain)
+            #endif
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
           } else if isLastOfSeason {
             HStack(spacing: 8) {
               Image(systemName: "flag.checkered")
+                #if os(tvOS)
+                .font(.body)
+                #else
                 .font(.subheadline)
+                #endif
                 .foregroundStyle(.white.opacity(0.45))
               Text("End of Season")
+                #if os(tvOS)
+                .font(.body)
+                #else
                 .font(.subheadline)
+                #endif
                 .foregroundStyle(.white.opacity(0.45))
             }
             .padding(.horizontal, 14)
@@ -391,7 +451,6 @@ struct ItemDetailView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .accessibilityLabel("End of season — no more episodes in this season")
           }
-          #endif
 
           // iOS episode identifier — S·E (red) + title (tvOS has it in the action row)
           #if !os(tvOS)

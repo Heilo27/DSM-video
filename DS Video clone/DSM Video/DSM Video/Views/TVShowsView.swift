@@ -186,6 +186,7 @@ struct TVShowsView: View {
               .accessibilityHint("Opens show details")
             }
           }
+          .privacySensitive()
           .padding(.horizontal, 60)
           .padding(.vertical, 48)
         }
@@ -236,6 +237,17 @@ struct TVShowsView: View {
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
         HStack(spacing: 12) {
+          // Recently Watched
+          Button {
+            sortOption = .recentlyWatched
+            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.tvSortOption")
+            sortedShows = computeSortedShows()
+          } label: {
+            Label("Watched", systemImage: "play.circle")
+          }
+          .tint(sortOption == .recentlyWatched ? Color.dsAccent : .white)
+          .accessibilityLabel("Sort by recently watched")
+
           // A→Z toggle
           Button {
             sortOption = (sortOption == .nameAsc) ? .nameDesc : .nameAsc
@@ -247,6 +259,7 @@ struct TVShowsView: View {
               systemImage: sortOption == .nameAsc ? "textformat.abc.dottedunderline" : "textformat.abc"
             )
           }
+          .tint(sortOption == .nameAsc || sortOption == .nameDesc ? Color.dsAccent : .white)
           .accessibilityLabel(sortOption == .nameAsc ? "Sort Z to A" : "Sort A to Z")
 
           // Recently Added toggle
@@ -260,7 +273,22 @@ struct TVShowsView: View {
               systemImage: sortOption == .addedOldest ? "clock" : "clock.badge.checkmark"
             )
           }
+          .tint(sortOption == .addedNewest || sortOption == .addedOldest ? Color.dsAccent : .white)
           .accessibilityLabel(sortOption == .addedOldest ? "Sort oldest first" : "Sort recently added first")
+
+          // Release Year toggle
+          Button {
+            sortOption = (sortOption == .releaseNewest) ? .releaseOldest : .releaseNewest
+            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.tvSortOption")
+            sortedShows = computeSortedShows()
+          } label: {
+            Label(
+              sortOption == .releaseOldest ? "Year ↑" : "Year ↓",
+              systemImage: "calendar"
+            )
+          }
+          .tint(sortOption == .releaseNewest || sortOption == .releaseOldest ? Color.dsAccent : .white)
+          .accessibilityLabel(sortOption == .releaseOldest ? "Sort by oldest release year" : "Sort by newest release year")
         }
       }
     }
