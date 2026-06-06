@@ -35,6 +35,12 @@ private struct TVShowDetailSplitView: View {
   @State private var seasons: [TVSeason] = []
   @State private var isLoading = false
   @State private var error: String?
+  // Computed resume point — derived from episode progress after seasons load
+  @State private var resolvedHighlightEpisodeID: String? = nil
+  @State private var resolvedHighlightSeason: Int? = nil
+
+  private var effectiveHighlightEpisodeID: String? { highlightEpisodeID ?? resolvedHighlightEpisodeID }
+  private var effectiveHighlightSeason: Int? { highlightSeason ?? resolvedHighlightSeason }
 
   var body: some View {
     ZStack(alignment: .topLeading) {
@@ -180,8 +186,8 @@ private struct TVShowDetailSplitView: View {
           ForEach(seasons, id: \.seasonNumber) { season in
             TVSeasonSection(show: show, season: season, library: library,
                             allSeasons: seasons,
-                            highlightEpisodeID: highlightEpisodeID,
-                            highlightSeason: highlightSeason)
+                            highlightEpisodeID: effectiveHighlightEpisodeID,
+                            highlightSeason: effectiveHighlightSeason)
           }
         }
 
@@ -204,9 +210,92 @@ private struct TVShowDetailSplitView: View {
       let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
       seasons = resp.seasons
       error = nil
+      // Only resolve a resume point if none was passed in from outside
+      if highlightEpisodeID == nil, highlightSeason == nil {
+        await resolveResumePoint(for: resp.seasons)
+      }
     } catch {
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       if seasons.isEmpty { self.error = msg }
+    }
+  }
+
+  // Find the last in-progress episode across all seasons. Fetches season episodes
+  // concurrently; stops scanning once a clear resume point is found.
+  private func resolveResumePoint(for seasons: [TVSeason]) async {
+    guard !seasons.isEmpty else { return }
+    // Fan out: fetch all seasons in parallel (episodes come with progress data)
+    let results: [(season: Int, episodes: [ItemSummary])] = await withTaskGroup(
+      of: (Int, [ItemSummary]).self
+    ) { group in
+      for s in seasons {
+        group.addTask {
+          do {
+            let resp = try await appState.api.tvShowEpisodes(
+              showId: show.id, season: s.seasonNumber, libraryId: library.id)
+            return (s.seasonNumber, resp.items)
+          } catch {
+            return (s.seasonNumber, [])
+          }
+        }
+      }
+      var out: [(Int, [ItemSummary])] = []
+      for await pair in group { out.append(pair) }
+      return out.map { (season: $0.0, episodes: $0.1) }.sorted { $0.season < $1.season }
+    }
+
+    // Walk seasons in order; find the last episode with meaningful progress.
+    // Priority: in-progress (0 < frac < 0.95) > first unwatched > nothing
+    var inProgressEp: ItemSummary? = nil
+    var inProgressSeason: Int? = nil
+    var firstUnwatchedEp: ItemSummary? = nil
+    var firstUnwatchedSeason: Int? = nil
+
+    for entry in results {
+      for ep in entry.episodes {
+        if let prog = ep.progress, prog.durationSeconds > 0 {
+          let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
+          if frac > 0.02 && frac < 0.95 {
+            // Track the *latest* in-progress episode (overwrite as we walk forward)
+            inProgressEp = ep
+            inProgressSeason = entry.season
+          } else if frac >= 0.95 {
+            // Fully watched — next episode (if any) is the first unwatched candidate
+            // We'll pick it up in the next iteration
+          }
+        } else if firstUnwatchedEp == nil && inProgressEp == nil {
+          // No progress at all on this episode — first genuinely unwatched
+          firstUnwatchedEp = ep
+          firstUnwatchedSeason = entry.season
+        }
+      }
+      // After each fully-watched season, reset firstUnwatched to pick from next season
+      if let _ = inProgressEp { firstUnwatchedEp = nil; firstUnwatchedSeason = nil }
+    }
+
+    // After the in-progress episode, the *next* episode is the one to land on
+    if let ipEp = inProgressEp, let ipSeason = inProgressSeason {
+      // Find the next episode after the in-progress one in the same or next season
+      var foundNext = false
+      outer: for entry in results where entry.season >= ipSeason {
+        for ep in entry.episodes {
+          if foundNext {
+            resolvedHighlightEpisodeID = ep.id
+            resolvedHighlightSeason = entry.season
+            return
+          }
+          if ep.id == ipEp.id { foundNext = true }
+        }
+      }
+      // In-progress episode is the last one (or end of series) — open on it directly
+      resolvedHighlightEpisodeID = ipEp.id
+      resolvedHighlightSeason = ipSeason
+      return
+    }
+
+    if let ep = firstUnwatchedEp, let s = firstUnwatchedSeason {
+      resolvedHighlightEpisodeID = ep.id
+      resolvedHighlightSeason = s
     }
   }
 }
@@ -484,6 +573,16 @@ private struct TVEpisodeDetailView: View {
   @State private var nextSeasonEpisodes: [ItemSummary] = []
   @State private var isFetchingNextSeason = false
 
+  // "Are you still watching?" state
+  @State private var consecutiveEpisodesWatched: Int = 0
+  @State private var showStillWatching: Bool = false
+  @State private var stillWatchingCountdown: Int = 20
+  @State private var stillWatchingTask: Task<Void, Never>? = nil
+  // Pending next-episode advance — held until user confirms or timer fires
+  @State private var pendingAdvance: (() -> Void)? = nil
+
+  private let stillWatchingThreshold = 4
+
   init(episodes: [ItemSummary], initialIndex: Int, show: TVShow, library: Library,
        allSeasons: [TVSeason] = [], currentSeasonIndex: Int = 0, autoPlay: Bool = false) {
     self._currentEpisodes = State(initialValue: episodes)
@@ -518,33 +617,88 @@ private struct TVEpisodeDetailView: View {
   }
 
   var body: some View {
-    if let current {
-      ItemDetailView(
-        itemID: current.id,
-        fallbackTitle: current.title,
-        autoPlay: autoPlayCurrent,
-        nextEpisode: nextEpisode,
-        onNextEpisode: nextEpisode != nil ? {
-          if hasNextInSeason {
-            currentIndex += 1
-            autoPlayCurrent = true
-          } else if isAtSeasonBoundary, !nextSeasonEpisodes.isEmpty {
-            currentEpisodes = nextSeasonEpisodes
-            nextSeasonEpisodes = []
-            currentSeasonIndex += 1
-            currentIndex = 0
-            autoPlayCurrent = true
+    ZStack {
+      if let current {
+        ItemDetailView(
+          itemID: current.id,
+          fallbackTitle: current.title,
+          autoPlay: autoPlayCurrent,
+          nextEpisode: nextEpisode,
+          onNextEpisode: nextEpisode != nil ? { advanceToNextEpisode() } : nil,
+          onGoToShow: { dismiss() },
+          isLastOfSeason: isLastOfSeason,
+          seasonNumber: current.seasonNumber,
+          episodeNumber: current.episodeNumber
+        )
+        .id(current.id)
+        .task(id: currentIndex) {
+          guard isAtSeasonBoundary, !isFetchingNextSeason, nextSeasonEpisodes.isEmpty else { return }
+          await fetchNextSeason()
+        }
+      }
+
+      if showStillWatching {
+        StillWatchingOverlay(
+          countdown: stillWatchingCountdown,
+          onYes: {
+            stillWatchingTask?.cancel()
+            showStillWatching = false
+            consecutiveEpisodesWatched = 0
+            pendingAdvance?()
+            pendingAdvance = nil
+          },
+          onStop: {
+            stillWatchingTask?.cancel()
+            showStillWatching = false
+            dismiss()
           }
-        } : nil,
-        onGoToShow: { dismiss() },
-        isLastOfSeason: isLastOfSeason,
-        seasonNumber: current.seasonNumber,
-        episodeNumber: current.episodeNumber
-      )
-      .id(current.id)
-      .task(id: currentIndex) {
-        guard isAtSeasonBoundary, !isFetchingNextSeason, nextSeasonEpisodes.isEmpty else { return }
-        await fetchNextSeason()
+        )
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.3), value: showStillWatching)
+      }
+    }
+    .onDisappear {
+      stillWatchingTask?.cancel()
+    }
+  }
+
+  private func advanceToNextEpisode() {
+    consecutiveEpisodesWatched += 1
+
+    let advance = {
+      if self.hasNextInSeason {
+        self.currentIndex += 1
+        self.autoPlayCurrent = true
+      } else if self.isAtSeasonBoundary, !self.nextSeasonEpisodes.isEmpty {
+        self.currentEpisodes = self.nextSeasonEpisodes
+        self.nextSeasonEpisodes = []
+        self.currentSeasonIndex += 1
+        self.currentIndex = 0
+        self.autoPlayCurrent = true
+      }
+    }
+
+    guard consecutiveEpisodesWatched >= stillWatchingThreshold else {
+      advance()
+      return
+    }
+
+    // Hit the threshold — pause and ask
+    pendingAdvance = advance
+    stillWatchingCountdown = 20
+    showStillWatching = true
+    stillWatchingTask?.cancel()
+    stillWatchingTask = Task { @MainActor in
+      for remaining in stride(from: 20, through: 0, by: -1) {
+        guard !Task.isCancelled else { return }
+        stillWatchingCountdown = remaining
+        if remaining == 0 {
+          showStillWatching = false
+          pendingAdvance = nil
+          dismiss()
+          return
+        }
+        do { try await Task.sleep(for: .seconds(1)) } catch { return }
       }
     }
   }
@@ -561,6 +715,73 @@ private struct TVEpisodeDetailView: View {
     } catch {
       showLog.error("fetchNextSeason failed for show \(show.id) season \(allSeasons[currentSeasonIndex + 1].seasonNumber): \(error)")
     }
+  }
+}
+
+// MARK: - Still Watching Overlay (tvOS)
+
+private struct StillWatchingOverlay: View {
+  let countdown: Int
+  let onYes: () -> Void
+  let onStop: () -> Void
+
+  @FocusState private var focused: StillWatchingButton?
+  enum StillWatchingButton: Hashable { case yes, stop }
+
+  var body: some View {
+    ZStack {
+      Color.black.opacity(0.75).ignoresSafeArea()
+
+      VStack(spacing: 32) {
+        VStack(spacing: 12) {
+          Text("Are you still watching?")
+            .font(.system(size: 36, weight: .bold))
+            .foregroundStyle(.white)
+          Text("Stopping in \(countdown)s")
+            .font(.system(size: 22))
+            .foregroundStyle(Color.dsTextSecondary)
+            .monospacedDigit()
+        }
+
+        HStack(spacing: 24) {
+          stillWatchingButton(label: "Yes, keep playing", sfSymbol: "play.fill",
+                              button: .yes, isPrimary: true, action: onYes)
+          stillWatchingButton(label: "Stop", sfSymbol: "stop.fill",
+                              button: .stop, isPrimary: false, action: onStop)
+        }
+      }
+      .padding(60)
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+    .onAppear { focused = .yes }
+  }
+
+  @ViewBuilder
+  private func stillWatchingButton(label: String, sfSymbol: String,
+                                   button: StillWatchingButton, isPrimary: Bool,
+                                   action: @escaping () -> Void) -> some View {
+    let isFocused = focused == button
+    Button(action: action) {
+      Label(label, systemImage: sfSymbol)
+        .font(.system(size: 22, weight: .semibold))
+        .foregroundStyle(.white)
+        .frame(width: 280, height: 60)
+        .background(
+          Group {
+            if isPrimary {
+              Color.red.brightness(isFocused ? 0.12 : 0)
+            } else {
+              isFocused ? Color(white: 0.35) : Color(white: 0.22)
+            }
+          }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .scaleEffect(isFocused ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+    .buttonStyle(.plain)
+    .focusEffectDisabled()
+    .focused($focused, equals: button)
   }
 }
 
