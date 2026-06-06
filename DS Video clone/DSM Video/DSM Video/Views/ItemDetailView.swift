@@ -287,6 +287,8 @@ struct ItemDetailView: View {
               tvPlayButton
               tvStartOverButton
                 .opacity(savedPositionSeconds > 0 ? 1 : 0)
+                .disabled(savedPositionSeconds == 0)
+                .allowsHitTesting(savedPositionSeconds > 0)
                 .accessibilityHidden(savedPositionSeconds == 0)
             }
             .focusScope(actionNamespace)
