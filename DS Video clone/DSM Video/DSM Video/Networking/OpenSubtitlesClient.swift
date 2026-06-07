@@ -5,10 +5,22 @@ import Foundation
 // Leave empty to disable the feature (search button will show a "not configured" message).
 let OpenSubtitlesAPIKey = ""
 
+// BCP-47 language code for subtitle search. "en" = English.
+// Override to your preferred language, e.g. "fr", "de", "es", "ja".
+let OpenSubtitlesLanguage = "en"
+
 enum OpenSubtitlesError: LocalizedError {
   case notConfigured
+  case invalidAPIKey
+  case quotaExceeded
+  case rateLimited
   var errorDescription: String? {
-    "Subtitle search requires an OpenSubtitles API key. See OpenSubtitlesClient.swift to configure one."
+    switch self {
+    case .notConfigured: return "Subtitle search requires an OpenSubtitles API key. See OpenSubtitlesClient.swift to configure one."
+    case .invalidAPIKey: return "OpenSubtitles API key is invalid. Check your key at opensubtitles.com."
+    case .quotaExceeded: return "OpenSubtitles daily download quota exceeded. Try again tomorrow."
+    case .rateLimited:   return "Too many subtitle requests. Please wait a moment and try again."
+    }
   }
 }
 
@@ -28,7 +40,7 @@ struct OpenSubtitlesClient {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("subtitles"), resolvingAgainstBaseURL: false) else {
       throw URLError(.badURL)
     }
-    var queryItems = [URLQueryItem(name: "query", value: query), URLQueryItem(name: "languages", value: "en")]
+    var queryItems = [URLQueryItem(name: "query", value: query), URLQueryItem(name: "languages", value: OpenSubtitlesLanguage)]
     if let y = year { queryItems.append(URLQueryItem(name: "year", value: String(y))) }
     comps.queryItems = queryItems
     guard let url = comps.url else { throw URLError(.badURL) }
@@ -38,7 +50,15 @@ struct OpenSubtitlesClient {
     req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-    let (data, _) = try await URLSession.shared.data(for: req)
+    let (data, response) = try await URLSession.shared.data(for: req)
+    if let http = response as? HTTPURLResponse {
+      switch http.statusCode {
+      case 401: throw OpenSubtitlesError.invalidAPIKey
+      case 406: throw OpenSubtitlesError.quotaExceeded
+      case 429: throw OpenSubtitlesError.rateLimited
+      default: break
+      }
+    }
 
     struct Response: Decodable {
       struct Item: Decodable {
@@ -87,7 +107,15 @@ struct OpenSubtitlesClient {
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.httpBody = try JSONEncoder().encode(["file_id": fileId])
 
-    let (data, _) = try await URLSession.shared.data(for: req)
+    let (data, dlResponse) = try await URLSession.shared.data(for: req)
+    if let http = dlResponse as? HTTPURLResponse {
+      switch http.statusCode {
+      case 401: throw OpenSubtitlesError.invalidAPIKey
+      case 406: throw OpenSubtitlesError.quotaExceeded
+      case 429: throw OpenSubtitlesError.rateLimited
+      default: break
+      }
+    }
 
     struct DownloadResponse: Decodable {
       let link: String

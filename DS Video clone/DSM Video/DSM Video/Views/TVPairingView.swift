@@ -210,6 +210,7 @@ struct TVPairingView: View {
       }
       .padding(60)
     }
+    .privacySensitive()
     .fullScreenCover(isPresented: $showManualLogin) {
       TVLoginView()
         .environment(appState)
