@@ -1,5 +1,28 @@
-Bug fixes and improvements to the Apple TV experience.
+A big quality-of-life update for the Apple TV experience.
 
-• Up Next overlay now defaults focus to Play Now button
-• Stay button label visible and correctly styled
-• D-pad left/right no longer seeks while Up Next overlay is showing
+RESUME WHERE YOU LEFT OFF
+Open any TV show and the app automatically lands on your last-watched season and episode — so the next thing to watch is always right there waiting.
+
+ARE YOU STILL WATCHING?
+After four consecutive auto-played episodes, the app pauses and asks if you're still watching. A 20-second countdown gives you time to confirm. If you walk away, playback stops and you're taken back to the show page.
+
+WATCHLIST ON APPLE TV
+Bookmark movies and TV episodes directly from Apple TV. The watchlist button now appears alongside Play and Start Over.
+
+SORT OPTIONS
+The TV Shows grid now exposes all four sort options from the toolbar: Recently Watched, A→Z, Recently Added, and Release Year.
+
+NEXT EPISODE BUTTON
+The Next Episode button now appears on the episode detail screen, giving you a shortcut to the next episode without going back to the season list.
+
+PLAYER IMPROVEMENTS
+• Skip to start and skip to end buttons added to the transport strip
+• Play/pause button has a subtle background ring for better visibility
+• D-pad seek moves in 10-second steps (was 30)
+• Playback speed is preserved when resuming after pause
+
+BUG FIXES
+• Season list auto-expands to the correct resume season after loading
+• Fixed a case where multiple seasons could expand simultaneously
+• Bonjour server discovery updated to use the modern NWBrowser API
+• Pairing code screen now hidden in the App Switcher
