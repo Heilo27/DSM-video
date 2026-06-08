@@ -420,11 +420,7 @@ struct ItemDetailView: View {
               .background(Color(white: 0.12))
               .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            #if os(tvOS)
             .buttonStyle(.plain)
-            #else
-            .buttonStyle(.plain)
-            #endif
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
           } else if isLastOfSeason {

@@ -450,12 +450,16 @@ private struct TVSeasonSection: View {
     // TASK-659: React to async-resolved highlightSeason. The @State initializer runs
     // before resolveResumePoint completes, so the initial isExpanded value is always
     // false for the resume season. This onChange fires when the parent's
-    // effectiveHighlightSeason updates after the async resolve, and expands the
-    // correct season at that point.
+    // effectiveHighlightSeason updates after the async resolve, expands the correct
+    // season, and collapses the lowest-season fallback that was opened by default.
     .onChange(of: highlightSeason) { _, newHighlight in
-      if newHighlight == season.seasonNumber {
-        withAnimation(.easeInOut(duration: 0.2)) {
+      withAnimation(.easeInOut(duration: 0.2)) {
+        if newHighlight == season.seasonNumber {
           isExpanded = true
+        } else if newHighlight != nil {
+          // A specific season has been resolved — collapse any section that was
+          // opened only as a placeholder (the lowest-season default).
+          isExpanded = false
         }
       }
     }

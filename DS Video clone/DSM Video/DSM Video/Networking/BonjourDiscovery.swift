@@ -64,6 +64,7 @@ final class BonjourDiscovery {
   func stopScan() {
     browser?.cancel()
     browser = nil
+    servers = []
     isScanning = false
   }
 
@@ -97,6 +98,8 @@ final class BonjourDiscovery {
           }
           let portInt = Int(port.rawValue) > 0 ? Int(port.rawValue) : 5000
           guard !hostStr.isEmpty, hostStr != "0.0.0.0" else { connection.cancel(); return }
+          // Guard against stale resolution completing after stopScan() was called.
+          guard self.isScanning else { connection.cancel(); return }
           let server = DiscoveredServer(id: "\(hostStr):\(portInt)", name: name, host: hostStr, port: portInt)
           if !self.servers.contains(server) { self.servers.append(server) }
           connection.cancel()
