@@ -27,6 +27,11 @@ struct ItemDetailView: View {
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
   @State private var autoPlayFired: Bool = false
+  // Set when the player requests the next episode. The advance must run in the
+  // cover's onDismiss — firing it while the cover is still presented swaps this
+  // view's identity (.id) mid-dismissal, and tvOS silently drops the next
+  // episode's fullScreenCover presentation.
+  @State private var advanceToNextAfterDismiss: Bool = false
   @State private var viewHeight: CGFloat = 852  // sensible default (iPhone 15 Pro)
   #if os(tvOS)
   @Namespace private var actionNamespace
@@ -53,14 +58,21 @@ struct ItemDetailView: View {
         autoPlayFired = false
         if autoPlay { autoPlayFired = true; showPlayer = true }
       }
-      .fullScreenCover(isPresented: $showPlayer, onDismiss: { playFromBeginning = false; loadProgress() }) {
+      .fullScreenCover(isPresented: $showPlayer, onDismiss: {
+        playFromBeginning = false
+        loadProgress()
+        if advanceToNextAfterDismiss {
+          advanceToNextAfterDismiss = false
+          onNextEpisode?()
+        }
+      }) {
         PlayerSheet(
           itemID: itemID,
           title: detail?.title ?? fallbackTitle,
           itemYear: detail?.year,
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
-          onPlayNextEpisode: onNextEpisode,
+          onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
           onGoToShow: onGoToShow
         )
         .environment(appState)
@@ -77,14 +89,21 @@ struct ItemDetailView: View {
         autoPlayFired = false
         if autoPlay { autoPlayFired = true; showPlayer = true }
       }
-      .fullScreenCover(isPresented: $showPlayer, onDismiss: { playFromBeginning = false; loadProgress() }) {
+      .fullScreenCover(isPresented: $showPlayer, onDismiss: {
+        playFromBeginning = false
+        loadProgress()
+        if advanceToNextAfterDismiss {
+          advanceToNextAfterDismiss = false
+          onNextEpisode?()
+        }
+      }) {
         PlayerSheet(
           itemID: itemID,
           title: detail?.title ?? fallbackTitle,
           itemYear: detail?.year,
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
-          onPlayNextEpisode: onNextEpisode,
+          onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
           onGoToShow: onGoToShow
         )
         .environment(appState)
