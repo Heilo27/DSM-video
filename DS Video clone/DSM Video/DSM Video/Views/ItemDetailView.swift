@@ -32,6 +32,11 @@ struct ItemDetailView: View {
   // episode's fullScreenCover presentation.
   @State private var advanceToNextAfterDismiss: Bool = false
   @State private var viewHeight: CGFloat = 852  // sensible default (iPhone 15 Pro)
+  // Measured content (safe-area) width. The content panel is hard-clamped to this so
+  // its greedy horizontal-scroll children (metadata pills, cast) can never adopt a
+  // landscape layout proposal during the player round-trip — the cause of the
+  // exit-to-listing overflow bug. 0 = not yet measured (fall back to unconstrained).
+  @State private var viewWidth: CGFloat = 0
   #if os(tvOS)
   @Namespace private var actionNamespace
   #endif
@@ -172,40 +177,52 @@ struct ItemDetailView: View {
 
   #if !os(tvOS)
   private var iOSBody: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 0) {
-        ZStack(alignment: .bottom) {
-          header
-          contentPanel
-            .background(.ultraThinMaterial)
-            .clipShape(
-              .rect(
-                topLeadingRadius: 20,
-                bottomLeadingRadius: 0,
-                bottomTrailingRadius: 0,
-                topTrailingRadius: 20
+    // Measure the available (safe-area-respecting) size from a container GeometryReader
+    // and feed both viewWidth (content clamp) and viewHeight (backdrop sizing). This
+    // reflects the CURRENT orientation's content width, so after the player round-trip
+    // the panel re-clamps to the restored portrait width instead of inheriting the
+    // landscape proposal.
+    GeometryReader { container in
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+          ZStack(alignment: .bottom) {
+            header
+            contentPanel
+              .background(.ultraThinMaterial)
+              .clipShape(
+                .rect(
+                  topLeadingRadius: 20,
+                  bottomLeadingRadius: 0,
+                  bottomTrailingRadius: 0,
+                  topTrailingRadius: 20
+                )
               )
-            )
-            .mask(
-              LinearGradient(
-                stops: [
-                  .init(color: .clear, location: 0),
-                  .init(color: .black, location: 0.06)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
+              .mask(
+                LinearGradient(
+                  stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.06)
+                  ],
+                  startPoint: .top,
+                  endPoint: .bottom
+                )
               )
-            )
+          }
         }
+        .frame(width: container.size.width)
+      }
+      .frame(width: container.size.width, height: container.size.height)
+      .background(Color.black)
+      .onAppear {
+        viewWidth = container.size.width
+        viewHeight = container.size.height
+      }
+      .onChange(of: container.size) { _, s in
+        viewWidth = s.width
+        viewHeight = s.height
       }
     }
-    .background(
-      GeometryReader { geo in
-        Color.black.ignoresSafeArea()
-          .onAppear { viewHeight = geo.size.height }
-          .onChange(of: geo.size.height) { _, h in viewHeight = h }
-      }
-    )
+    .background(Color.black.ignoresSafeArea())
     .privacySensitive()
   }
   #endif
@@ -516,7 +533,14 @@ struct ItemDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         #else
         .padding(.horizontal, 16)
-        .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
+        // Hard-clamp to the measured viewport width (capped at 720 on regular-width
+        // layouts) so the panel — and its greedy horizontal-scroll children — can
+        // never adopt a stale landscape width after the player round-trip. Falls back
+        // to .infinity only before the first measurement.
+        .frame(
+          width: viewWidth > 0 ? min(viewWidth, horizontalSizeClass == .regular ? 720 : viewWidth) : nil,
+          alignment: .center
+        )
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.top, 16)
         .padding(.bottom, 32)
