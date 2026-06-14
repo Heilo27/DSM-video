@@ -813,44 +813,62 @@ private struct TVSettingsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
 
+  // TASK-746: playback + subtitle prefs, shared keys with the iOS SettingsView so a
+  // setting changed on either platform applies on both. Slider is unavailable on
+  // tvOS, so subtitle size/background use Pickers over discrete steps.
+  @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
+  @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
+  @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
+
   var body: some View {
     NavigationStack {
-      ZStack {
-        Color.black.ignoresSafeArea()
-        VStack(alignment: .leading, spacing: 32) {
-          // Server info
-          VStack(alignment: .leading, spacing: 8) {
-            Text("Connected Server")
-              .font(.system(size: 20, weight: .semibold))
-              .foregroundStyle(Color.dsTextSecondary)
-            Text(appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
-              .font(.system(size: 24, weight: .medium))
-              .foregroundStyle(.white)
-            Text("Signed in as \(appState.username)")
-              .font(.system(size: 18))
-              .foregroundStyle(Color.dsTextSecondary)
+      Form {
+        Section("Playback") {
+          Picker("Video Quality", selection: Binding(
+            get: { appState.qualityCap },
+            set: { appState.qualityCap = $0 }
+          )) {
+            Text("Auto").tag("auto")
+            Text("1080p").tag("1080p")
+            Text("720p").tag("720p")
+            Text("480p").tag("480p")
           }
+        }
 
-          Divider().background(Color(white: 0.2))
+        Section("Subtitles") {
+          Picker("Text Size", selection: $subtitleScale) {
+            Text("Small").tag(0.8)
+            Text("Default").tag(1.0)
+            Text("Large").tag(1.3)
+            Text("Extra Large").tag(1.6)
+          }
+          Picker("Text Color", selection: $subtitleTextColor) {
+            ForEach(SubtitleStyle.textColorPresets, id: \.hex) { preset in
+              Text(preset.name).tag(preset.hex)
+            }
+          }
+          Picker("Background", selection: $subtitleBackgroundOpacity) {
+            Text("None").tag(0.0)
+            Text("Light").tag(0.4)
+            Text("Medium").tag(0.7)
+            Text("Solid").tag(1.0)
+          }
+        }
 
-          // Logout button
-          Button {
+        Section("Server") {
+          LabeledContent("Connected To", value: appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
+          LabeledContent("Signed in as", value: appState.username)
+        }
+
+        Section {
+          Button(role: .destructive) {
             appState.logout()
             dismiss()
           } label: {
             Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-              .font(.system(size: 20, weight: .semibold))
-              .foregroundStyle(.white)
-              .frame(maxWidth: 400, alignment: .leading)
           }
-          .buttonStyle(.bordered)
-          .tint(.white)
           .accessibilityHint("Select to sign out of your account")
-
-          Spacer()
         }
-        .padding(60)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
       }
       .navigationTitle("Settings")
     }
