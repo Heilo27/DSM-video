@@ -922,6 +922,16 @@ final class AppState {
     libraryRailsVersion = UUID()
   }
 
+  /// TASK-738: lightweight refresh when the app returns to the foreground, so
+  /// Continue Watching reflects playback that happened on another device while we
+  /// were backgrounded. Runs a background delta sync (heartbeat + changed items
+  /// only — not a full reload) and skips when offline or already busy.
+  func foregroundRefresh() async {
+    guard !isDemoMode, !isOffline, !serverUnreachable else { return }
+    guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else { return }
+    await runDeltaSyncWithBackgroundTask()
+  }
+
   // MARK: - Delta Sync
 
   /// FIX-10: Wraps a background delta sync in a UIApplication background task so iOS

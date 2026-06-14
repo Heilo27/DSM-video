@@ -76,6 +76,10 @@ struct DS_Video_cloneApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     #endif
     @State private var appState = AppState()
+    @Environment(\.scenePhase) private var scenePhase
+    // Track the prior phase so we only refresh on a real background→active return,
+    // not on initial launch (RootView's own .task already does the cold load).
+    @State private var didBecomeActiveOnce = false
 
     var body: some Scene {
         WindowGroup {
@@ -89,6 +93,17 @@ struct DS_Video_cloneApp: App {
                     let itemID = url.pathComponents.dropFirst().joined(separator: "/")
                     appState.pendingDeepLinkItemID = itemID
                 }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // TASK-738: refresh Continue Watching when returning to the foreground so it
+            // reflects playback from another device. Skip the very first activation —
+            // the initial cold load handles that.
+            guard newPhase == .active else { return }
+            if didBecomeActiveOnce {
+                Task { await appState.foregroundRefresh() }
+            } else {
+                didBecomeActiveOnce = true
+            }
         }
     }
 }

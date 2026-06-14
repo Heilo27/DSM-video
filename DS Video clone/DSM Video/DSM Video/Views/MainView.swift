@@ -1090,6 +1090,8 @@ private struct DownloadedItemCell: View {
 struct SettingsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.openURL) private var openURL
+  // TASK-738: defaults to true via DownloadManager's registerDefaults.
+  @AppStorage("dsReel.downloadsWifiOnly") private var downloadsWifiOnly: Bool = true
   var isEmbedded: Bool = false
 
   var body: some View {
@@ -1124,6 +1126,14 @@ struct SettingsView: View {
         Text("Playback")
       } footer: {
         Text("Caps transcoded video resolution. Useful on slower connections. Direct-play streams are not affected.")
+      }
+
+      Section {
+        Toggle("Download over Wi-Fi Only", isOn: $downloadsWifiOnly)
+      } header: {
+        Text("Downloads")
+      } footer: {
+        Text("When on, downloads pause on cellular and resume once you're back on Wi-Fi. Recommended to avoid large data charges.")
       }
 
       Section("Help") {

@@ -90,6 +90,8 @@ final class DownloadManager: NSObject {
   var backgroundCompletionHandler: (() -> Void)?
 
   override private init() {
+    // TASK-738: default downloads to Wi-Fi only unless the user opts into cellular.
+    UserDefaults.standard.register(defaults: ["dsReel.downloadsWifiOnly": true])
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
     config.isDiscretionary = false
     config.sessionSendsLaunchEvents = true
@@ -121,6 +123,10 @@ final class DownloadManager: NSObject {
     if !videoURL.absoluteString.contains("_sid="), let token {
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
+    // TASK-738: honour the "Download over Wi-Fi only" preference (default on) at the
+    // request level — works without recreating the background session. Defaults to
+    // true when the key has never been set (registerDefaults below).
+    request.allowsCellularAccess = !UserDefaults.standard.bool(forKey: "dsReel.downloadsWifiOnly")
 
     let task = backgroundSession.downloadTask(with: request)
     downloadTasks[task] = itemId
