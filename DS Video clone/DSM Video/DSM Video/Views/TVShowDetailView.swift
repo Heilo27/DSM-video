@@ -182,6 +182,18 @@ private struct TVShowDetailSplitView: View {
           )
           .foregroundStyle(.white)
           .padding(.top, 60)
+        } else if seasons.isEmpty {
+          // The seasons endpoint returns 200 {seasons: []} (not an error) when a show
+          // folder can't be resolved — e.g. a stale Continue Watching / Just Added entry
+          // whose folder was renamed or removed. Show an explicit empty state instead of
+          // a blank page (TASK-732).
+          ContentUnavailableView(
+            "No Episodes Found",
+            systemImage: "tv.slash",
+            description: Text("This show's episodes couldn't be found on the server. They may have been moved or removed.")
+          )
+          .foregroundStyle(.white)
+          .padding(.top, 60)
         } else {
           ForEach(seasons, id: \.seasonNumber) { season in
             TVSeasonSection(show: show, season: season, library: library,

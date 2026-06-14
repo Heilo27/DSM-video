@@ -1025,6 +1025,13 @@ private struct PlayerSheet: View {
   @State private var lastKnownDuration: Int = 0
   private let syncInterval: TimeInterval = 10  // Sync at most every 10 seconds
   private let seekThreshold: Int = 15  // Or if position changes by 15+ seconds (seek)
+  // TASK-719: when a mid-playback failure forces a stream refresh, carry the
+  // last-known position/duration across start()'s reset so (a) the refreshed
+  // stream resumes where the user was rather than the up-to-10s-stale server
+  // position, and (b) an immediate dismiss after recovery still flushes progress
+  // instead of being suppressed by the 0/0 guard.
+  @State private var resumeOverrideSeconds: Int = 0
+  @State private var resumeOverrideDuration: Int = 0
 
   // Autoplay next episode
   @State private var showNextEpisodeOverlay: Bool = false
@@ -1114,6 +1121,13 @@ private struct PlayerSheet: View {
           onPlaybackFailed: {
             // Reset and re-fetch a fresh playback URL. Handles stale HLS sessions
             // (e.g. server restart clears in-memory sessions, causing 404 on stream).
+            // TASK-719: snapshot the last-known position BEFORE start() wipes the sync
+            // trackers, so recovery resumes where the user was and a quick dismiss
+            // afterward still records progress.
+            if lastSyncedPosition > 0 && lastKnownDuration > 0 {
+              resumeOverrideSeconds = lastSyncedPosition
+              resumeOverrideDuration = lastKnownDuration
+            }
             playbackURL = nil
             Task { await start() }
           },
@@ -1146,6 +1160,13 @@ private struct PlayerSheet: View {
             subtitleOffsetRestartTask = Task {
               try? await Task.sleep(for: .milliseconds(500))
               guard !Task.isCancelled else { return }
+              // TASK-722: the stream is rebuilt with the new subtitle offset. Carry the
+              // live position across the restart so playback resumes where the user was,
+              // not at the up-to-10s-stale server heartbeat position.
+              if lastSyncedPosition > 0 && lastKnownDuration > 0 {
+                resumeOverrideSeconds = lastSyncedPosition
+                resumeOverrideDuration = lastKnownDuration
+              }
               playbackURL = nil
               await start()
             }
@@ -1193,11 +1214,20 @@ private struct PlayerSheet: View {
         if isOffline {
           DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos)
         }
-        // Write to LocalStore synchronously so force-kill doesn't lose the position,
-        // then fire the async network sync.
+        // Write to LocalStore synchronously so force-kill doesn't lose the position
+        // (this is the durability guarantee). Then fire the network sync under an
+        // expiring-activity assertion (TASK-719) so it has a chance to finish during
+        // the suspend window instead of being torn down the instant we background.
         LocalStore.shared.upsertSingleProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
-        Task {
-          await appState.recordProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
+        ProcessInfo.processInfo.performExpiringActivity(withReason: "Sync playback progress") { expired in
+          guard !expired else { return }
+          let sem = DispatchSemaphore(value: 0)
+          Task {
+            await appState.recordProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
+            sem.signal()
+          }
+          // Hold the assertion until the sync completes (or the system expires it).
+          sem.wait()
         }
       }
     }
@@ -1285,6 +1315,14 @@ private struct PlayerSheet: View {
     lastSyncedPosition = 0
     isOffline = false
 
+    // TASK-719: if a failure-recovery snapshot exists, seed the trackers so an
+    // immediate dismiss after recovery still flushes (vs. the 0/0 guard eating it).
+    // Consumed once — cleared after use so a later legitimate reset isn't overridden.
+    if resumeOverrideSeconds > 0 && resumeOverrideDuration > 0 {
+      lastSyncedPosition = resumeOverrideSeconds
+      lastKnownDuration = resumeOverrideDuration
+    }
+
     // Demo mode — play the bundled royalty-free sample video (Big Buck Bunny,
     // Blender Foundation, CC BY 3.0) instead of hitting the server.
     if appState.isDemoMode {
@@ -1315,7 +1353,9 @@ private struct PlayerSheet: View {
         error = "No playable URL."
         return
       }
-      resumePosition = forceFromBeginning ? 0 : Double(info.resumePositionSeconds)
+      resumePosition = forceFromBeginning ? 0 : Double(max(info.resumePositionSeconds, resumeOverrideSeconds))
+      resumeOverrideSeconds = 0
+      resumeOverrideDuration = 0
       chapters = info.chapters ?? []
       playbackURL = url
     } catch {
@@ -1327,7 +1367,9 @@ private struct PlayerSheet: View {
           let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
           let url = info.streamUrl ?? info.hlsMasterUrl
           guard let url else { self.error = "No playable URL."; return }
-          resumePosition = forceFromBeginning ? 0 : Double(info.resumePositionSeconds)
+          resumePosition = forceFromBeginning ? 0 : Double(max(info.resumePositionSeconds, resumeOverrideSeconds))
+          resumeOverrideSeconds = 0
+          resumeOverrideDuration = 0
           chapters = info.chapters ?? []
           playbackURL = url
           appState.clearNetworkError()
