@@ -370,10 +370,13 @@ struct ItemPosterCell: View {
         gradientOverlay
         cellFooter
 
-        // Progress bar — pinned to bottom edge, INSIDE clip boundary
+        // Progress bar — pinned to bottom edge, INSIDE clip boundary.
+        // Only render meaningful progress: below ~2% it's a glitchy sliver, and at
+        // ≥98% the watched badge already conveys "done" (avoids a near-full bar that
+        // reads as a rendering bug).
         if let progress = item.progress, progress.durationSeconds > 0 {
           let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac < 1.0 {
+          if frac >= 0.02 && frac < 0.98 {
             GeometryReader { barGeo in
               ZStack(alignment: .leading) {
                 Rectangle()
@@ -412,6 +415,10 @@ struct ItemPosterCell: View {
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    #if os(iOS)
+    // iPad trackpad/pointer affordance — lifts the poster on hover.
+    .hoverEffect(.highlight)
+    #endif
   }
 
   @ViewBuilder

@@ -70,6 +70,9 @@ private struct SplitView: View {
   var body: some View {
     NavigationSplitView {
       SidebarView(selection: $selection, libraries: $libraries)
+        // Constrain the sidebar so it doesn't overflow or get truncated at narrow
+        // Split View / Stage Manager widths on iPad.
+        .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 360)
     } detail: {
       // One NavigationStack owns all detail navigation. LibraryHomeView stays permanently
       // in the tree (opacity trick) so its @State (allItems, rails, etc.) survives navigation.

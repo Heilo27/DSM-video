@@ -281,6 +281,9 @@ private struct ContinueWatchingCard: View {
     }
     .frame(width: 200, height: 120)
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    #if os(iOS)
+    .hoverEffect(.highlight)
+    #endif
   }
 }
 

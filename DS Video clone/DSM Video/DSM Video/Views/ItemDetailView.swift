@@ -626,7 +626,7 @@ struct ItemDetailView: View {
         year.map { String($0) },
         durationSeconds.flatMap { $0 > 0 ? formatDuration($0) : nil },
         contentRating.flatMap { $0.isEmpty ? nil : $0 },
-        starRating.map { "Rating \(String(format: "%.1f", $0)) out of 10" },
+        starRating.flatMap { $0 > 0 ? "Rating \(String(format: "%.1f", $0)) out of 10" : nil },
         genres.isEmpty ? nil : genres.joined(separator: ", ")
       ].compactMap { $0 }.joined(separator: ", ")
 
@@ -641,7 +641,9 @@ struct ItemDetailView: View {
           if let contentRating, !contentRating.isEmpty {
             MetadataPill(text: contentRating)
           }
-          if let starRating {
+          // Guard > 0: items with no rating data come back as 0.0, which would
+          // otherwise render an empty "0.0" star pill.
+          if let starRating, starRating > 0 {
             HStack(spacing: 3) {
               Image(systemName: "star.fill")
                 .foregroundStyle(Color.dsWarning)
