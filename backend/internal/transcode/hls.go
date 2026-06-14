@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -227,6 +228,18 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 		session.cancel()
 	}
 
+	// Kill the whole process group (negative PID). ctx cancel only reaches the
+	// direct child; the `nice`-wrapped ffmpeg grandchild needs an explicit group
+	// kill or it leaks until the cleanup tick. SIGKILL because we're tearing down.
+	if session.cmd != nil && session.cmd.Process != nil {
+		if pgid, err := syscall.Getpgid(session.cmd.Process.Pid); err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		} else {
+			// Fall back to killing just the process if the group lookup failed.
+			_ = session.cmd.Process.Kill()
+		}
+	}
+
 	// If the goroutine hasn't finished yet (CompletedAt is nil), decrement
 	// active now and set stopped so the goroutine callback knows not to
 	// double-decrement when it eventually exits.
@@ -238,8 +251,17 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 	delete(g.sessions, sessionID)
 	g.mu.Unlock()
 
-	// Clean up output directory
-	return os.RemoveAll(session.OutputDir)
+	// Clean up output directory. ffmpeg may still hold segment files for a beat
+	// after the kill signal on slow NAS I/O, so retry briefly rather than leaking
+	// the temp dir on the first EBUSY/ENOTEMPTY.
+	var rmErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if rmErr = os.RemoveAll(session.OutputDir); rmErr == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return rmErr
 }
 
 // runTranscode executes the FFmpeg command for transcoding, then converts any
@@ -259,6 +281,12 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 	} else {
 		cmd = exec.CommandContext(ctx, g.config.FFmpegPath, args...)
 	}
+
+	// Run ffmpeg (and the `nice` wrapper, when used) in its own process group so
+	// StopSession can kill the entire group. exec.CommandContext only signals the
+	// direct child on ctx cancel — when wrapped in `nice`, ffmpeg is a grandchild
+	// and would otherwise survive as an orphan until the 5-minute cleanup tick.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	session.cmd = cmd
 	cmd.Stdout = io.Discard
