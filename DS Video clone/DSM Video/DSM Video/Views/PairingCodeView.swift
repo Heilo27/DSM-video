@@ -40,7 +40,7 @@ struct PairingCodeView: View {
         if let error {
           Text(error)
             .font(.footnote)
-            .foregroundStyle(.red)
+            .foregroundStyle(Color.dsError)
             .padding(.horizontal)
         }
 

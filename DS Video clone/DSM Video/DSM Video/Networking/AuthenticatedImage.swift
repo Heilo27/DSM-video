@@ -164,9 +164,12 @@ struct AuthenticatedImage: View {
           }
           .task { await loadIfNeeded() }
           .onChange(of: url) { oldURL, newURL in
-            // Retry when URL transitions from nil to non-nil (e.g. after reconnect resolves QC ID).
-            // Reset all state so loadIfNeeded() guard passes.
-            guard oldURL == nil, newURL != nil else { return }
+            // Reload whenever the URL actually changes to a different non-nil value.
+            // Covers nil→URL (QC ID resolved after reconnect) AND URL→different-URL
+            // (metadata refresh bumps a ?v= cache-buster) — the latter previously
+            // stuck on the stale poster because loadIfNeeded()'s `image == nil` guard
+            // short-circuited. Reset state so the guard passes and we fetch the new URL.
+            guard oldURL != newURL, newURL != nil else { return }
             image = nil
             didFail = false
             isLoading = false
@@ -277,7 +280,9 @@ struct AuthenticatedImage: View {
           }
           .task { await loadIfNeeded() }
           .onChange(of: url) { oldURL, newURL in
-            guard oldURL == nil, newURL != nil else { return }
+            // Reload on any change to a different non-nil URL (nil→URL or a bumped
+            // ?v= cache-buster after a metadata refresh). See the UIKit body for detail.
+            guard oldURL != newURL, newURL != nil else { return }
             image = nil
             didFail = false
             isLoading = false

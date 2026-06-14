@@ -511,8 +511,15 @@ final class DownloadManager: NSObject {
   private func downloadsDirectory() -> URL {
     let fm = FileManager.default
     let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    let dir = docs.appendingPathComponent("Downloads", isDirectory: true)
+    var dir = docs.appendingPathComponent("Downloads", isDirectory: true)
     try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    // Exclude downloaded videos (multi-GB) and resume-data blobs from iCloud/iTunes
+    // backup. Without this, large media files count against the user's iCloud quota
+    // and the app risks App Review rejection under guideline 2.5.x for storing
+    // re-downloadable content in a backed-up location.
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try? dir.setResourceValues(values)
     return dir
   }
 
@@ -573,6 +580,9 @@ final class DownloadManager: NSObject {
     activeDownloads.removeValue(forKey: itemId)
     downloadProgress.removeValue(forKey: itemId)
     pendingDownloadInfo.removeValue(forKey: itemId)
+
+    // Download finished and is now playable offline — confirm with a success haptic.
+    Haptics.play(.success)
 
     // Fetch poster image asynchronously and update the stored item once done.
     guard let posterURL = info.posterURL else { return }

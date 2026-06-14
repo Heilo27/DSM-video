@@ -846,7 +846,7 @@ private struct StillWatchingOverlay: View {
         .background(
           Group {
             if isPrimary {
-              Color.red.brightness(isFocused ? 0.12 : 0)
+              Color.dsAccent.brightness(isFocused ? 0.12 : 0)
             } else {
               isFocused ? Color(white: 0.35) : Color(white: 0.22)
             }
@@ -1487,7 +1487,7 @@ private struct TVShowMetadataFixerSheet: View {
 
         if let error {
           Text(error)
-            .foregroundStyle(.red)
+            .foregroundStyle(Color.dsError)
             .font(.caption)
             .listRowBackground(Color(white: 0.08))
         }

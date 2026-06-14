@@ -167,7 +167,6 @@ struct ItemDetailView: View {
       .frame(width: geo.size.width, height: geo.size.height)
     }
     .ignoresSafeArea(edges: .all)
-    .id(showPlayer)
     .privacySensitive()
   }
   #endif
@@ -233,14 +232,14 @@ struct ItemDetailView: View {
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 260, height: 54)
-        .background(Color.red.brightness(focused ? 0.12 : 0))
+        .background(Color.dsAccent.brightness(focused ? 0.12 : 0))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
     .buttonStyle(.plain)
     .focusEffectDisabled()
-    .shadow(color: Color.red.opacity(focused ? 0.7 : 0.3), radius: focused ? 10 : 5, x: 0, y: 3)
+    .shadow(color: Color.dsAccent.opacity(focused ? 0.7 : 0.3), radius: focused ? 10 : 5, x: 0, y: 3)
     .focused($focusedAction, equals: .play)
     .prefersDefaultFocus(in: actionNamespace)
     .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
@@ -354,11 +353,11 @@ struct ItemDetailView: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(width: 200, height: 44)
-                .background(Color.red)
+                .background(Color.dsAccent)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
-            .shadow(color: Color.red.opacity(0.5), radius: 8, x: 0, y: 4)
+            .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
 
             if savedPositionSeconds > 0 {
@@ -684,10 +683,13 @@ struct ItemDetailView: View {
     Button {
       guard !appState.isDemoMode else { return }
       if isDownloading {
+        Haptics.play(.light)
         downloadManager.cancelDownload(itemId: itemID)
       } else if isDownloaded {
+        Haptics.play(.light)
         downloadManager.deleteDownload(itemId: itemID)
       } else {
+        Haptics.play(.medium)
         Task { await startDownload() }
       }
     } label: {
@@ -698,7 +700,7 @@ struct ItemDetailView: View {
               .stroke(Color(white: 0.3), lineWidth: 2)
             Circle()
               .trim(from: 0, to: min(1.0, max(0.0, downloadProgress)))
-              .stroke(DSReelBrandColor.background, lineWidth: 2)
+              .stroke(Color.dsAccent, lineWidth: 2)
               .rotationEffect(.degrees(-90))
           }
           .frame(width: 22, height: 22)
@@ -707,7 +709,7 @@ struct ItemDetailView: View {
         } else {
           Image(systemName: isDownloaded ? "checkmark" : "arrow.down")
             .font(.title3.weight(.semibold))
-            .foregroundStyle(isDownloaded ? DSReelBrandColor.background : .white)
+            .foregroundStyle(isDownloaded ? Color.dsAccent : .white)
         }
       }
       .frame(width: 52, height: 52)
@@ -740,11 +742,12 @@ struct ItemDetailView: View {
         rating: d.rating,
         posterImageId: d.images.poster.id
       )
+      Haptics.play(.selection)
       Task { await appState.toggleWatchlist(item: summary) }
     } label: {
       Image(systemName: isInWatchlist ? "bookmark.fill" : "bookmark")
         .font(.title3.weight(.semibold))
-        .foregroundStyle(isInWatchlist ? DSReelBrandColor.background : .white)
+        .foregroundStyle(isInWatchlist ? Color.dsAccent : .white)
         .frame(width: 52, height: 52)
     }
     .background(Color(white: 0.12))
@@ -922,7 +925,7 @@ private struct MetadataFixerSheet: View {
 
         if let error {
           Text(error)
-            .foregroundStyle(.red)
+            .foregroundStyle(Color.dsError)
             .font(.caption)
             .listRowBackground(Color(white: 0.08))
         }
@@ -1407,6 +1410,13 @@ private struct _NextEpisodeOverlayView: View {
     .background(Color.black.opacity(0.45).ignoresSafeArea())
     .transition(.opacity)
     .animation(.easeInOut(duration: 0.25), value: countdown)
+    .onAppear {
+      // This overlay is a ZStack layer over the player, not a sheet/cover, so tvOS
+      // does not automatically move focus into its focusScope — prefersDefaultFocus
+      // alone won't fire. Claim focus explicitly so a Select press during the
+      // countdown hits "Play Now" instead of falling through to the player beneath.
+      DispatchQueue.main.async { focused = .playNow }
+    }
   }
 }
 #endif

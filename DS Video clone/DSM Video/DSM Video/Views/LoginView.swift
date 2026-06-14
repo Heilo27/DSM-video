@@ -498,7 +498,7 @@ private struct QuickConnectSheet: View {
         if let error {
           Section {
             Label(error, systemImage: "exclamationmark.triangle")
-              .foregroundStyle(.red)
+              .foregroundStyle(Color.dsError)
               .font(.footnote)
           }
         }

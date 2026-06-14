@@ -97,7 +97,6 @@ struct ItemsGridView: View {
           ContentUnavailableView("No Videos", systemImage: "film.stack", description: Text("This library has no videos yet."))
             .foregroundStyle(.white)
         }
-        #if os(tvOS)
         if displayedItems.isEmpty && !searchText.isEmpty {
           ContentUnavailableView(
             "No Results",
@@ -107,7 +106,6 @@ struct ItemsGridView: View {
           .foregroundStyle(.white)
           .padding(.top, 60)
         }
-        #endif
         LazyVGrid(columns: columns, spacing: gridSpacing) {
           #if os(tvOS)
           ForEach(displayedItems) { item in
@@ -121,7 +119,7 @@ struct ItemsGridView: View {
             .accessibilityHint("Opens video details")
           }
           #else
-          ForEach(sortedItems) { item in
+          ForEach(displayedItems) { item in
             NavigationLink {
               ItemDetailView(itemID: item.id, fallbackTitle: item.title)
             } label: {
@@ -135,8 +133,8 @@ struct ItemsGridView: View {
         }
         .padding(gridPadding)
 
-        if !sortedItems.isEmpty {
-          Text("\(sortedItems.count) item\(sortedItems.count == 1 ? "" : "s")")
+        if !displayedItems.isEmpty {
+          Text("\(displayedItems.count) item\(displayedItems.count == 1 ? "" : "s")")
             .font(.caption)
             .foregroundStyle(Color.dsTextTertiary)
             .frame(maxWidth: .infinity)

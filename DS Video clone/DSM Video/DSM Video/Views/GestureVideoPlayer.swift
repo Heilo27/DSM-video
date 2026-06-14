@@ -740,6 +740,7 @@ struct GestureVideoPlayer: View {
                     HStack {
                         Spacer()
                         Button {
+                            Haptics.play(.medium)
                             seek(to: intro.endSecs, tight: true)
                         } label: {
                             Text("Skip Intro")
@@ -797,8 +798,11 @@ struct GestureVideoPlayer: View {
                             ),
                             in: 0...max(duration, 1)
                         ) { editing in
-                            if !editing {
+                            if editing {
+                                Haptics.play(.selection)
+                            } else {
                                 isScrubbing = false
+                                Haptics.play(.rigid)
                                 seek(to: scrubTime, tight: true)
                             }
                         }
@@ -1035,6 +1039,10 @@ struct GestureVideoPlayer: View {
 
     private func setupPlayer() {
         didSetupPlayer = true
+        // Keep the screen awake during playback. Without this, tvOS shows the
+        // screensaver and iOS auto-locks during long, interaction-free stretches
+        // (e.g. a 90-minute film), interrupting the video.
+        UIApplication.shared.isIdleTimerDisabled = true
         // FIX-5: When using QC relay, HLS segments must include Cookie: type=tunnel.
         // AVURLAssetHTTPHeaderFieldsKey only applies to the master playlist request.
         // AVURLAssetHTTPCookiesKey propagates the cookie to ALL requests made by the
@@ -1130,6 +1138,8 @@ struct GestureVideoPlayer: View {
     }
 
     private func cleanup() {
+        // Re-enable auto-lock / screensaver now that playback is ending.
+        UIApplication.shared.isIdleTimerDisabled = false
         #if os(iOS)
         if isPiPActive {
             pipController?.stopPictureInPicture()
@@ -1165,6 +1175,7 @@ struct GestureVideoPlayer: View {
     }
 
     private func togglePlayPause() {
+        Haptics.play(.medium)
         if isPlaying {
             player?.pause()
             hideControlsTask?.cancel() // Keep controls visible when paused
@@ -1193,6 +1204,7 @@ struct GestureVideoPlayer: View {
         let newTime = min(duration, currentTime + skipForwardSeconds)
         seek(to: newTime)
         currentTime = newTime
+        Haptics.play(.light)
         showSkipAnimation(direction: .forward)
         if isPlaying { scheduleHideControls() }
     }
@@ -1201,6 +1213,7 @@ struct GestureVideoPlayer: View {
         let newTime = max(0, currentTime - skipBackwardSeconds)
         seek(to: newTime)
         currentTime = newTime
+        Haptics.play(.light)
         showSkipAnimation(direction: .backward)
         if isPlaying { scheduleHideControls() }
     }
@@ -1532,7 +1545,7 @@ struct AirPlayButton: UIViewRepresentable {
     func makeUIView(context: Context) -> AVRoutePickerView {
         let picker = AVRoutePickerView()
         picker.tintColor = .white
-        picker.activeTintColor = UIColor(DSReelBrandColor.background)
+        picker.activeTintColor = UIColor(Color.dsAccent)
         return picker
     }
 
