@@ -26,7 +26,6 @@ struct ItemDetailView: View {
   @State private var savedPositionSeconds: Int = 0
   @State private var isStartingDownload: Bool = false
   @State private var showMetadataFixer: Bool = false
-  @State private var autoPlayFired: Bool = false
   // Set when the player requests the next episode. The advance must run in the
   // cover's onDismiss — firing it while the cover is still presented swaps this
   // view's identity (.id) mid-dismissal, and tvOS silently drops the next
@@ -55,8 +54,7 @@ struct ItemDetailView: View {
       .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        autoPlayFired = false
-        if autoPlay { autoPlayFired = true; showPlayer = true }
+        if autoPlay { showPlayer = true }
       }
       .fullScreenCover(isPresented: $showPlayer, onDismiss: {
         playFromBeginning = false
@@ -86,8 +84,7 @@ struct ItemDetailView: View {
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        autoPlayFired = false
-        if autoPlay { autoPlayFired = true; showPlayer = true }
+        if autoPlay { showPlayer = true }
       }
       .fullScreenCover(isPresented: $showPlayer, onDismiss: {
         playFromBeginning = false

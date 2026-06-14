@@ -1119,8 +1119,16 @@ final class AppState {
     await LocalStore.shared.upsertSingleProgress(
       itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
     let apiSnapshot = api
+    let logSnapshot = homeLog
     Task.detached(priority: .utility) {
-      try? await apiSnapshot.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      // TASK-695: the LocalStore write above is the durability guarantee, so a network
+      // sync failure isn't data loss — but it shouldn't be invisible. Log it (the
+      // delta-sync cursor reconciles the server on the next sync pass).
+      do {
+        try await apiSnapshot.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      } catch {
+        logSnapshot.warning("recordProgress: server sync failed for \(itemId) — \(error.localizedDescription); local store holds it until next sync")
+      }
     }
   }
 

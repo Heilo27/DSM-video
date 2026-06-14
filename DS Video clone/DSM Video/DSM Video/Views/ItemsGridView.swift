@@ -415,6 +415,8 @@ struct ItemPosterCell: View {
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    // TASK-693/698: redact poster + title in the app switcher / screen recordings.
+    .privacySensitive()
     #if os(iOS)
     // iPad trackpad/pointer affordance — lifts the poster on hover.
     .hoverEffect(.highlight)

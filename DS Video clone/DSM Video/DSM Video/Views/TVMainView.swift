@@ -578,6 +578,7 @@ private struct TVShowPortraitCard: View {
       }
       .padding(.leading, 10)
     }
+    .privacySensitive()  // TASK-693/698: redact in app switcher / recordings
   }
 }
 
@@ -681,6 +682,7 @@ private struct TVLandscapeCard: View {
       }
       .padding(.leading, 10)
     }
+    .privacySensitive()  // TASK-693/698: redact in app switcher / recordings
   }
 }
 
@@ -801,6 +803,7 @@ private struct TVPortraitCard: View {
       }
       .padding(.leading, 10)
     }
+    .privacySensitive()  // TASK-693/698: redact in app switcher / recordings
   }
 }
 
@@ -929,7 +932,25 @@ private struct TVSearchView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                   ForEach(results) { item in
                     NavigationLink {
-                      ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                      // TASK-685/700: TV episodes open the show page (with the episode's
+                      // season highlighted) so the user can browse seasons; movies open
+                      // the item detail directly.
+                      if let showId = item.showFolderId ?? item.showName,
+                         !showId.isEmpty, let tvLibrary = appState.homeFirstTVLibrary {
+                        TVShowDetailView(
+                          show: TVShow(
+                            id: showId, title: item.showName ?? showId, year: item.year,
+                            seasonCount: nil, episodeCount: nil,
+                            posterImageId: item.posterImageId,
+                            lastWatchedAt: nil, addedAt: nil
+                          ),
+                          library: tvLibrary,
+                          highlightEpisodeID: item.id,
+                          highlightSeason: item.seasonNumber
+                        )
+                      } else {
+                        ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                      }
                     } label: {
                       HStack(spacing: 16) {
                         if let posterID = item.posterImageId {
@@ -968,6 +989,7 @@ private struct TVSearchView: View {
                   }
                 }
                 .focusSection()
+                .privacySensitive()  // TASK-693/698: redact search results (titles + posters)
               }
             } else {
               VStack(spacing: 16) {

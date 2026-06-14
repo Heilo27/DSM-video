@@ -405,6 +405,10 @@ private struct TVSeasonSection: View {
             .accessibilityHidden(true)
         }
         .padding(.vertical, 20)
+        // TASK-710: guarantee a tall, full-width hit/focus region so the d-pad reliably
+        // lands on the season header rather than skipping past a thin frame.
+        .frame(minHeight: 60)
+        .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
@@ -459,6 +463,11 @@ private struct TVSeasonSection: View {
     }
     .focusSection()
     .task { await load() }
+    // TASK-704: fetch episodes the moment a section expands (the .task load() above
+    // no-ops while collapsed). Covers both user taps and the resume-season auto-expand.
+    .onChange(of: isExpanded) { _, expanded in
+      if expanded { Task { await load() } }
+    }
     // TASK-659: React to async-resolved highlightSeason. The @State initializer runs
     // before resolveResumePoint completes, so the initial isExpanded value is always
     // false for the resume season. This onChange fires when the parent's
@@ -479,6 +488,11 @@ private struct TVSeasonSection: View {
 
   private func load() async {
     guard !isLoading else { return }
+    // TASK-704/667: only fetch episodes for an expanded section. Previously every
+    // season section fired its episode request on appear, so opening an 8-season
+    // show launched 8 concurrent calls the user mostly never saw. Collapsed sections
+    // now defer their fetch until expanded (loadIfNeeded on isExpanded change).
+    guard isExpanded, episodes.isEmpty else { return }
     if appState.isDemoMode {
       episodes = DemoData.episodes(for: show.id, season: season.seasonNumber)
       return
@@ -1168,6 +1182,11 @@ private struct iOSSeasonSection: View {
       }
     }
     .task { await load() }
+    // TASK-704: load episodes when a collapsed section is expanded (the .task load()
+    // no-ops while collapsed, so this drives the deferred fetch).
+    .onChange(of: isExpanded) { _, expanded in
+      if expanded { Task { await load() } }
+    }
   }
 
   private func load() async {
@@ -1175,6 +1194,8 @@ private struct iOSSeasonSection: View {
     // Previously, once episodes were loaded, retapping would no-op even after a metadata
     // fix was applied. isLoading guard still prevents concurrent fetches.
     guard !isLoading else { return }
+    // TASK-704: skip fetching episodes for collapsed sections (deferred to expand).
+    guard isExpanded else { return }
     if appState.isDemoMode {
       episodes = DemoData.episodes(for: show.id, season: season.seasonNumber)
       return

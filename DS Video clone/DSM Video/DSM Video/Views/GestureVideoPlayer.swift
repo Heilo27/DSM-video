@@ -108,6 +108,9 @@ struct GestureVideoPlayer: View {
 
     private let skipForwardSeconds: Double = 30
     private let skipBackwardSeconds: Double = 15
+    // TASK-734: d-pad left/right seek step on tvOS. Kept symmetric and small for
+    // fine-scrubbing; named so it sits alongside the skip-button constants.
+    private let tvDpadSeekSeconds: Double = 10
 
     enum SkipDirection {
         case backward, forward
@@ -1047,7 +1050,7 @@ struct GestureVideoPlayer: View {
             scheduleHideControls()
             return
         }
-        let delta = direction == .right ? 10.0 : -10.0
+        let delta = direction == .right ? tvDpadSeekSeconds : -tvDpadSeekSeconds
         let newTime = max(0, min(duration, currentTime + delta))
         seek(to: newTime)
         currentTime = newTime

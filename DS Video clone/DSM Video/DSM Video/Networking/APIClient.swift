@@ -72,7 +72,9 @@ struct APIClient {
     comps.percentEncodedPath = "/api/v1/tv/shows/\(encodedId)/seasons"
     comps.queryItems = [URLQueryItem(name: "libraryId", value: libraryId)]
     guard let url = comps.url else { throw APIError.invalidURL }
-    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TVSeasonsResponse.self)
+    // TASK-655/675: explicit 15s timeout (was defaulting to 60s) so a slow NAS
+    // fails fast instead of hanging the season list.
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: TVSeasonsResponse.self, timeoutInterval: 15)
   }
 
   func tvShowEpisodes(showId: String, season: Int, libraryId: String) async throws -> ItemsResponse {
@@ -89,7 +91,8 @@ struct APIClient {
       URLQueryItem(name: "season", value: String(season)),
     ]
     guard let url = comps.url else { throw APIError.invalidURL }
-    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self)
+    // TASK-655/675: explicit 15s timeout (was defaulting to 60s).
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self, timeoutInterval: 15)
   }
 
   func itemDetail(id: String) async throws -> ItemDetail {
