@@ -149,11 +149,14 @@ struct LibraryHomeView: View {
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
+            // TASK-742: these are curated, finite, mixed-library lists — a "See All"
+            // that dumps the user into a single library grid is misleading, so they
+            // carry no See-All. Full browsing lives in the Libraries tab.
             if !appState.homeContinueWatching.isEmpty {
               HomeRail(
                 title: "Continue Watching",
                 items: appState.homeContinueWatching,
-                seeAllLibrary: appState.homeFirstMovieLibrary,
+                seeAllLibrary: nil,
                 useLandscapeCards: true
               )
             }
@@ -161,14 +164,14 @@ struct LibraryHomeView: View {
               HomeRail(
                 title: "Just Added",
                 items: appState.homeJustAdded,
-                seeAllLibrary: appState.homeFirstMovieLibrary
+                seeAllLibrary: nil
               )
             }
             if !appState.homeRecentlyWatched.isEmpty {
               HomeRail(
                 title: "Recently Watched",
                 items: appState.homeRecentlyWatched,
-                seeAllLibrary: appState.homeFirstMovieLibrary
+                seeAllLibrary: nil
               )
             }
           }
