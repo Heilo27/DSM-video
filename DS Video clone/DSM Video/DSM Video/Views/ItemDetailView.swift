@@ -1077,6 +1077,8 @@ private struct PlayerSheet: View {
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
+          trickplayBaseURL: isOffline ? nil : appState.api.trickplayBaseURL(itemID: itemID),
+          authToken: appState.sessionToken,
           usesTunnelCookie: appState.api.usesTunnelCookie,
           onDismiss: {
             // Guard: if user dismissed before video started or position/duration are

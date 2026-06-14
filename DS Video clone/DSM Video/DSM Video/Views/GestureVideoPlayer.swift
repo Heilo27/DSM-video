@@ -29,6 +29,9 @@ struct GestureVideoPlayer: View {
     var itemID: String = ""
     var itemTitle: String = ""
     var itemYear: Int? = nil
+    // TASK-740: base URL for the trick-play VTT/sprite endpoints (nil = no preview).
+    var trickplayBaseURL: URL? = nil
+    var authToken: String? = nil
     // FIX-5: When true, HLS segments are fetched with Cookie: type=tunnel for QC relay mode.
     var usesTunnelCookie: Bool = false
     var onDismiss: (() -> Void)?
@@ -100,6 +103,8 @@ struct GestureVideoPlayer: View {
     @State private var showCaptionsPicker: Bool = false
     @State private var didSetupPlayer: Bool = false
     @State private var subtitleOffsetSeconds: Double = 0
+    // TASK-740: loaded trick-play sprite + cue table for scrub previews.
+    @State private var trickplay: Trickplay?
 
     private let skipForwardSeconds: Double = 30
     private let skipBackwardSeconds: Double = 15
@@ -135,6 +140,7 @@ struct GestureVideoPlayer: View {
                 setupVolumeObserver()
                 #if os(iOS)
                 lockLandscape()
+                loadTrickplay()
                 #endif
             }
             .onDisappear {
@@ -884,6 +890,17 @@ struct GestureVideoPlayer: View {
 
     private var scrubPreviewOverlay: some View {
         VStack(spacing: 8) {
+            #if os(iOS)
+            // TASK-740: frame preview at the scrub position when trick-play is available.
+            if let tp = trickplay, let thumb = tp.thumbnail(at: scrubTime) {
+                Image(uiImage: thumb)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 240)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.25), lineWidth: 1))
+            }
+            #endif
             Text(formatTime(scrubTime))
                 .font(.largeTitle.weight(.bold).monospacedDigit())
                 .foregroundStyle(.white)
@@ -1152,6 +1169,18 @@ struct GestureVideoPlayer: View {
         scheduleHideControls()
         setupNowPlaying()
     }
+
+    // MARK: - Trick-play (TASK-740)
+
+    #if os(iOS)
+    private func loadTrickplay() {
+        guard let base = trickplayBaseURL else { return }
+        Task {
+            let tp = await Trickplay.load(baseURL: base, token: authToken, usesTunnelCookie: usesTunnelCookie)
+            await MainActor.run { trickplay = tp }
+        }
+    }
+    #endif
 
     // MARK: - Subtitle Styling (TASK-739)
 

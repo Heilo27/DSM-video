@@ -209,6 +209,13 @@ struct APIClient {
     return comps.url
   }
 
+  /// TASK-740: base URL for an item's trick-play assets. The player appends
+  /// "trickplay.vtt"/"trickplay.jpg". Returns nil when the server isn't resolved.
+  func trickplayBaseURL(itemID: String) -> URL? {
+    guard baseURL != AppState.fallbackURL else { return nil }
+    return baseURL.appendingPathComponent("/api/v1/trickplay/\(itemID)")
+  }
+
   // MARK: - Delta Sync
 
   func serverVersion(timeout: TimeInterval = 5) async throws -> ServerVersion {
