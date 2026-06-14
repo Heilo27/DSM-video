@@ -2450,6 +2450,13 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	if err == nil && cachedPath.Valid {
 		// Serve from cache
 		if _, err := os.Stat(cachedPath.String); err == nil {
+			// IMAGE-CACHE FIX: this is the hot path (image already cached on the
+			// server, served by ID) and was the ONLY image path missing a
+			// Cache-Control header. Without it the client's URLCache won't persist
+			// posters, so every cold launch re-downloaded all artwork over the
+			// network (~10-15s of blank posters). Match the 7-day TTL the other
+			// image paths already set. Client caching is unchanged.
+			w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
 			http.ServeFile(w, r, cachedPath.String)
 			return
 		}
