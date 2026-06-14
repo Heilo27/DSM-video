@@ -60,6 +60,13 @@ type Config struct {
 	// Metadata settings
 	TMDbAPIKey    string
 	ImageCacheDir string
+
+	// Security: when true, a DS Video User-Agent presenting an unknown SID is
+	// granted a local session WITHOUT validating the SID against DSM. This was the
+	// historical default to work around fragile DS Video builds, but it lets anyone
+	// on the network forge a session. Default false — only enable on a trusted LAN
+	// where a specific DS Video client misbehaves, and never when port-forwarded.
+	AllowUnvalidatedDSVideo bool
 }
 
 type Server struct {
@@ -610,6 +617,10 @@ func loadConfig() Config {
 		// Metadata settings
 		TMDbAPIKey:    get("DSVIDEO_TMDB_API_KEY", ""),
 		ImageCacheDir: get("DSVIDEO_IMAGE_CACHE_DIR", filepath.Join(os.TempDir(), "dsvideo_images")),
+
+		// Security — default false. Opt in only with an explicit "1"/"true".
+		AllowUnvalidatedDSVideo: strings.EqualFold(get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", ""), "true") ||
+			get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", "") == "1",
 	}
 }
 

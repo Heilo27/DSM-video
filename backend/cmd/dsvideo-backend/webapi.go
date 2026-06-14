@@ -272,45 +272,64 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 		return session
 	}
 
-	// DS Video is extremely fragile and may crash if SID validation fails
-	// immediately after login. Some DSM builds also return checkauth responses
-	// that omit data.account, which breaks our validation flow.
-	//
-	// Fallback: for DS Video UAs only, accept the SID and create a local session
-	// placeholder so subsequent VideoStation calls can proceed.
+	// SEC (TASK-726): For a DS Video UA presenting an unknown SID, validate it
+	// against DSM FIRST and create the session under the REAL account. Previously
+	// this branch trusted any DS Video UA's SID unconditionally — letting anyone on
+	// the network forge a session. The insecure placeholder path now only runs when
+	// AllowUnvalidatedDSVideo is explicitly enabled (trusted-LAN workaround for
+	// fragile DS Video builds; never safe when port-forwarded).
 	if isDSVideo {
-		user := "sid_" + sid
-		userID := "u_" + sanitizeID(user)
-		token, err := s.issueToken(userID, user)
-		if err == nil {
-			session := &WebAPISession{
-				SID:       sid,
-				UserID:    userID,
-				Username:  user,
-				Token:     token,
-				DeviceID:  randID("did_"),
-				CreatedAt: time.Now(),
+		sidPrefix := func() string {
+			if len(sid) > 16 {
+				return sid[:16]
 			}
-			webAPISessions.mu.Lock()
-			webAPISessions.sessions[sid] = session
-			webAPISessions.mu.Unlock()
-			go persistSession(s.db, session)
-			log.Printf("[WebAPI] getWebAPISession: accepted SID %s... for DS Video UA (fallback session created)",
-				func() string {
-					if len(sid) > 16 {
-						return sid[:16]
-					}
-					return sid
-				}())
-			return session
+			return sid
 		}
-		log.Printf("[WebAPI] getWebAPISession: DS Video fallback token issue failed for SID %s...: %v",
-			func() string {
-				if len(sid) > 16 {
-					return sid[:16]
+
+		if account, vErr := s.validateDSMSession(sid); vErr == nil && account != "" {
+			userID := "u_" + sanitizeID(account)
+			if token, err := s.issueToken(userID, account); err == nil {
+				session := &WebAPISession{
+					SID:       sid,
+					UserID:    userID,
+					Username:  account,
+					Token:     token,
+					DeviceID:  randID("did_"),
+					CreatedAt: time.Now(),
 				}
-				return sid
-			}(), err)
+				webAPISessions.mu.Lock()
+				webAPISessions.sessions[sid] = session
+				webAPISessions.mu.Unlock()
+				go persistSession(s.db, session)
+				log.Printf("[WebAPI] getWebAPISession: DS Video SID %s... validated against DSM as %q", sidPrefix(), account)
+				return session
+			}
+		}
+
+		if s.cfg.AllowUnvalidatedDSVideo {
+			user := "sid_" + sid
+			userID := "u_" + sanitizeID(user)
+			token, err := s.issueToken(userID, user)
+			if err == nil {
+				session := &WebAPISession{
+					SID:       sid,
+					UserID:    userID,
+					Username:  user,
+					Token:     token,
+					DeviceID:  randID("did_"),
+					CreatedAt: time.Now(),
+				}
+				webAPISessions.mu.Lock()
+				webAPISessions.sessions[sid] = session
+				webAPISessions.mu.Unlock()
+				go persistSession(s.db, session)
+				log.Printf("[WebAPI] getWebAPISession: accepted UNVALIDATED SID %s... for DS Video UA (AllowUnvalidatedDSVideo=true)", sidPrefix())
+				return session
+			}
+			log.Printf("[WebAPI] getWebAPISession: DS Video fallback token issue failed for SID %s...: %v", sidPrefix(), err)
+		} else {
+			log.Printf("[WebAPI] getWebAPISession: DS Video SID %s... failed DSM validation and AllowUnvalidatedDSVideo is off — rejecting", sidPrefix())
+		}
 	}
 
 	// SID not found in local store — log the prefix for diagnostics.
