@@ -35,6 +35,10 @@ private struct TVShowDetailSplitView: View {
   @State private var seasons: [TVSeason] = []
   @State private var isLoading = false
   @State private var error: String?
+  // TASK-716: surface the metadata fixer on tvOS (the sheet already existed but was
+  // only reachable from the iOS toolbar).
+  @State private var showMetadataFixer = false
+  @State private var metadataFixApplied = false
   // Computed resume point — derived from episode progress after seasons load
   @State private var resolvedHighlightEpisodeID: String? = nil
   @State private var resolvedHighlightSeason: Int? = nil
@@ -203,11 +207,34 @@ private struct TVShowDetailSplitView: View {
           }
         }
 
+        // TASK-716: Fix Metadata entry (matches the iOS toolbar action).
+        if !seasons.isEmpty {
+          Button {
+            showMetadataFixer = true
+          } label: {
+            Label("Fix Metadata", systemImage: "magnifyingglass")
+              .font(.system(size: 20, weight: .medium))
+          }
+          .buttonStyle(.bordered)
+          .padding(.top, 32)
+          .accessibilityHint("Search and correct this show's metadata")
+        }
+
         Spacer(minLength: 80)
       }
     }
     .padding(.leading, 48)
     .padding(.trailing, 60)
+    .sheet(isPresented: $showMetadataFixer, onDismiss: {
+      let shouldReload = metadataFixApplied
+      metadataFixApplied = false
+      if shouldReload { Task { await load() } }
+    }) {
+      TVShowMetadataFixerSheet(showId: show.id, initialQuery: show.title, onApplied: {
+        metadataFixApplied = true
+      })
+      .environment(appState)
+    }
   }
 
   private func load() async {
@@ -1421,7 +1448,8 @@ private struct iOSCircularProgress: View {
 
 // MARK: - TV Show Metadata Fixer Sheet
 
-#if !os(tvOS)
+// TASK-716: available on tvOS too (List/TextField/Button all work with the focus
+// engine); iOS-only navigation-bar modifiers below are guarded individually.
 private struct TVShowMetadataFixerSheet: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
@@ -1526,6 +1554,7 @@ private struct TVShowMetadataFixerSheet: View {
         }
       }
       .navigationTitle("Fix Show Metadata")
+      #if !os(tvOS)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
@@ -1536,8 +1565,11 @@ private struct TVShowMetadataFixerSheet: View {
             .disabled(isSearching)
         }
       }
+      #endif
       .task { await search() }
+      #if !os(tvOS)
       .scrollContentBackground(.hidden)
+      #endif
       .background(Color.black)
       .onChange(of: error) { _, msg in
         if let msg { AccessibilityNotification.Announcement(msg).post() }
@@ -1571,4 +1603,3 @@ private struct TVShowMetadataFixerSheet: View {
     }
   }
 }
-#endif
