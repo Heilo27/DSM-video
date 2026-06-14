@@ -103,11 +103,17 @@ start() {
   # bin/ dir — it's built with --enable-vaapi (and QSV where available) so hardware
   # transcode and trick-play thumbnails can engage. The Synology system ffmpeg is
   # usually compiled without VAAPI, so we only fall back to it.
+  # ff_works: true only if the binary both exists AND actually runs here. The bundled
+  # ffmpeg is built against libva/libdrm which DSM may not ship in the default loader
+  # path — if it can't load its libs, -version exits non-zero and we must skip it
+  # rather than hand the server a binary that fails at transcode time.
+  ff_works() { [ -x "$1" ] && "$1" -hide_banner -version >/dev/null 2>&1; }
+
   PKG_FFMPEG="${BASE}/target/bin/ffmpeg"
   PKG_FFPROBE="${BASE}/target/bin/ffprobe"
   if [ -z "${DSVIDEO_FFMPEG_PATH:-}" ]; then
     for ffpath in "$PKG_FFMPEG" /usr/bin/ffmpeg /var/packages/ffmpeg/target/bin/ffmpeg /volume1/@appstore/ffmpeg/bin/ffmpeg; do
-      if [ -x "$ffpath" ]; then
+      if ff_works "$ffpath"; then
         export DSVIDEO_FFMPEG_PATH="$ffpath"
         break
       fi
@@ -115,7 +121,7 @@ start() {
   fi
   if [ -z "${DSVIDEO_FFPROBE_PATH:-}" ]; then
     for ffpath in "$PKG_FFPROBE" /usr/bin/ffprobe /var/packages/ffmpeg/target/bin/ffprobe /volume1/@appstore/ffmpeg/bin/ffprobe; do
-      if [ -x "$ffpath" ]; then
+      if ff_works "$ffpath"; then
         export DSVIDEO_FFPROBE_PATH="$ffpath"
         break
       fi

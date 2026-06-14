@@ -160,6 +160,7 @@ echo "📦 Creating package.tgz..."
 cd "$PACKAGE_DIR"
 # Build list of directories to include
 PKG_CONTENTS="backend/ var/"
+[ -d "bin" ] && PKG_CONTENTS="$PKG_CONTENTS bin/"   # TASK-750: bundled VAAPI ffmpeg
 [ -d "ui" ] && PKG_CONTENTS="$PKG_CONTENTS ui/"
 [ -d "webapi" ] && PKG_CONTENTS="$PKG_CONTENTS webapi/"
 [ -d "nginx" ] && PKG_CONTENTS="$PKG_CONTENTS nginx/"
