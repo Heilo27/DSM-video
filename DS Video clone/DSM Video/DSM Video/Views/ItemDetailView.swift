@@ -198,7 +198,6 @@ struct ItemDetailView: View {
             )
         }
       }
-      .id(showPlayer)
     }
     .background(
       GeometryReader { geo in
@@ -472,11 +471,16 @@ struct ItemDetailView: View {
               if let e = episodeNumber { return "Episode \(e)" }
               return ""
             }()
-            (Text(badge).foregroundStyle(Color.dsAccent)
-              + Text("  \(detail?.title ?? fallbackTitle)").foregroundStyle(.white))
-              .font(.title3.weight(.bold))
-              .lineLimit(2)
-              .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
+            // iOS 26 deprecated Text + Text concatenation. HStack keeps the
+            // two-color treatment (accent badge + white title) without it.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+              Text(badge).foregroundStyle(Color.dsAccent)
+              Text(detail?.title ?? fallbackTitle).foregroundStyle(.white)
+            }
+            .font(.title3.weight(.bold))
+            .lineLimit(2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
           }
           #endif
 
@@ -775,7 +779,8 @@ struct ItemDetailView: View {
           .accessibilityAddTraits(.isHeader)
 
         ForEach(Array(cast.enumerated()), id: \.offset) { idx, person in
-          Text(person.name + (idx < cast.count - 1 ? ",  " : ""))
+          let separator = idx < cast.count - 1 ? ",  " : ""
+          Text("\(person.name)\(separator)")
             .font(.headline.weight(.regular))
             .foregroundStyle(.white.opacity(0.75))
             .fixedSize()
@@ -1239,20 +1244,16 @@ private struct PlayerSheet: View {
         if isOffline {
           DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos)
         }
-        // Write to LocalStore synchronously so force-kill doesn't lose the position
-        // (this is the durability guarantee). Then fire the network sync under an
-        // expiring-activity assertion (TASK-719) so it has a chance to finish during
-        // the suspend window instead of being torn down the instant we background.
-        LocalStore.shared.upsertSingleProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
-        ProcessInfo.processInfo.performExpiringActivity(withReason: "Sync playback progress") { expired in
-          guard !expired else { return }
-          let sem = DispatchSemaphore(value: 0)
-          Task {
-            await appState.recordProgress(itemId: itemID, positionSeconds: pos, durationSeconds: dur)
-            sem.signal()
-          }
-          // Hold the assertion until the sync completes (or the system expires it).
-          sem.wait()
+        // TASK-719 / TASK-270: flush progress when backgrounding so a force-kill
+        // doesn't lose position. recordProgress writes LocalStore first (the
+        // durability guarantee) and then fires the network sync. Wrap in a UIKit
+        // background-task assertion so iOS grants extra runtime to finish the local
+        // write + sync before suspending, rather than killing us mid-flush.
+        let itemSnapshot = itemID
+        Task { @MainActor in
+          let bgID = UIApplication.shared.beginBackgroundTask(withName: "FlushProgress")
+          await appState.recordProgress(itemId: itemSnapshot, positionSeconds: pos, durationSeconds: dur)
+          if bgID != .invalid { UIApplication.shared.endBackgroundTask(bgID) }
         }
       }
     }

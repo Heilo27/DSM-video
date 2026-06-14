@@ -82,14 +82,19 @@ final class BonjourDiscovery {
           let hostStr: String
           switch host {
           case .ipv4(let addr):
+            // addr.rawValue is Data; take a pointer to its actual bytes via
+            // withUnsafeBytes rather than &Data (which points at the struct, not
+            // the buffer — the warning was flagging undefined behavior).
             var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            var a = addr.rawValue
-            inet_ntop(AF_INET, &a, &buf, socklen_t(INET_ADDRSTRLEN))
+            addr.rawValue.withUnsafeBytes { raw in
+              _ = inet_ntop(AF_INET, raw.baseAddress, &buf, socklen_t(INET_ADDRSTRLEN))
+            }
             hostStr = String(cString: buf)
           case .ipv6(let addr):
             var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-            var a = addr.rawValue
-            inet_ntop(AF_INET6, &a, &buf, socklen_t(INET6_ADDRSTRLEN))
+            addr.rawValue.withUnsafeBytes { raw in
+              _ = inet_ntop(AF_INET6, raw.baseAddress, &buf, socklen_t(INET6_ADDRSTRLEN))
+            }
             hostStr = String(cString: buf)
           case .name(let n, _):
             hostStr = n.trimmingCharacters(in: CharacterSet(charactersIn: "."))
