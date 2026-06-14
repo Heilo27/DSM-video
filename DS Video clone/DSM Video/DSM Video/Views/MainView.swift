@@ -1092,6 +1092,10 @@ struct SettingsView: View {
   @Environment(\.openURL) private var openURL
   // TASK-738: defaults to true via DownloadManager's registerDefaults.
   @AppStorage("dsReel.downloadsWifiOnly") private var downloadsWifiOnly: Bool = true
+  // TASK-739: subtitle appearance (defaults registered in SubtitleStyle).
+  @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
+  @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
+  @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
   var isEmbedded: Bool = false
 
   var body: some View {
@@ -1135,6 +1139,35 @@ struct SettingsView: View {
       } footer: {
         Text("When on, downloads pause on cellular and resume once you're back on Wi-Fi. Recommended to avoid large data charges.")
       }
+
+      #if !os(tvOS)
+      Section {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Text Size")
+          Slider(value: $subtitleScale, in: 0.7...2.0, step: 0.1)
+          Text(String(format: "%.0f%%", subtitleScale * 100))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Picker("Text Color", selection: $subtitleTextColor) {
+          ForEach(SubtitleStyle.textColorPresets, id: \.hex) { preset in
+            Text(preset.name).tag(preset.hex)
+          }
+        }
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Background")
+          Slider(value: $subtitleBackgroundOpacity, in: 0...1, step: 0.1)
+          Text(subtitleBackgroundOpacity < 0.05 ? "None"
+               : String(format: "%.0f%% black box", subtitleBackgroundOpacity * 100))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      } header: {
+        Text("Subtitles")
+      } footer: {
+        Text("Applies to the next video you play.")
+      }
+      #endif
 
       Section("Help") {
         NavigationLink {

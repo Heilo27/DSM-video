@@ -77,6 +77,11 @@ struct DS_Video_cloneApp: App {
     #endif
     @State private var appState = AppState()
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        // TASK-739: register subtitle-appearance defaults before any player reads them.
+        SubtitleStyle.registerDefaults()
+    }
     // Track the prior phase so we only refresh on a real background→active return,
     // not on initial launch (RootView's own .task already does the cold load).
     @State private var didBecomeActiveOnce = false

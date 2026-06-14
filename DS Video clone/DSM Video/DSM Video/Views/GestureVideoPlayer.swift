@@ -1064,6 +1064,8 @@ struct GestureVideoPlayer: View {
             asset = AVURLAsset(url: url)
         }
         let playerItem = AVPlayerItem(asset: asset)
+        // TASK-739: apply the user's subtitle appearance (size / color / background).
+        applySubtitleStyle(to: playerItem)
         let newPlayer = AVPlayer(playerItem: playerItem)
         // Let AVPlayer wait and rebuffer automatically when bandwidth is insufficient.
         // This allows the player to pause internally, accumulate buffer, then resume
@@ -1149,6 +1151,41 @@ struct GestureVideoPlayer: View {
         player?.rate = playbackRate
         scheduleHideControls()
         setupNowPlaying()
+    }
+
+    // MARK: - Subtitle Styling (TASK-739)
+
+    /// Build AVTextStyleRules from the user's stored subtitle-appearance preferences
+    /// and apply them to the player item. No-op (system default styling) when the
+    /// user hasn't customised anything. Keys are registered with sensible defaults
+    /// in SubtitleStyle.registerDefaults().
+    private func applySubtitleStyle(to item: AVPlayerItem) {
+        let d = UserDefaults.standard
+        var attrs: [String: Any] = [:]
+
+        // Font scale relative to the video frame height (1.0 = system default ~5%).
+        let scale = d.double(forKey: "dsReel.subtitleScale")
+        if scale > 0 && abs(scale - 1.0) > 0.001 {
+            attrs[kCMTextMarkupAttribute_RelativeFontSize as String] = 5.0 * scale
+        }
+
+        // Foreground text color.
+        if let hex = d.string(forKey: "dsReel.subtitleTextColor"),
+           let rgb = SubtitleStyle.rgb(fromHex: hex) {
+            attrs[kCMTextMarkupAttribute_ForegroundColorARGB as String] = [1.0, rgb.r, rgb.g, rgb.b]
+        }
+
+        // Background box opacity (0 = none, 1 = solid black box).
+        let bgOpacity = d.double(forKey: "dsReel.subtitleBackgroundOpacity")
+        if bgOpacity > 0.001 {
+            attrs[kCMTextMarkupAttribute_BackgroundColorARGB as String] = [bgOpacity, 0.0, 0.0, 0.0]
+        }
+
+        guard !attrs.isEmpty, let rule = AVTextStyleRule(textMarkupAttributes: attrs) else {
+            item.textStyleRules = nil
+            return
+        }
+        item.textStyleRules = [rule]
     }
 
     // MARK: - Now Playing / Remote Commands (TASK-724)
