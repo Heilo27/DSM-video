@@ -532,6 +532,11 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	r.Get("/tmdb/image", s.handleTMDbImageProxy)
 	r.Get("/version", s.handleVersion)
 
+	// TASK-740: trick-play scrubbing previews. The .vtt request lazily generates the
+	// sprite + VTT (cached per item); the sprite is then served from the same dir.
+	r.Get("/trickplay/{itemId}/trickplay.vtt", s.handleTrickplayVTT)
+	r.Get("/trickplay/{itemId}/trickplay.jpg", s.handleTrickplaySprite)
+
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
 		r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
@@ -3135,6 +3140,57 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 	}
 
 	cmd.Wait()
+}
+
+// trickplayDir returns the cache directory for an item's scrubbing-preview assets.
+func (s *Server) trickplayDir(itemID string) string {
+	return filepath.Join(s.cfg.TranscodeDir, "trickplay", sanitizeID(itemID))
+}
+
+// handleTrickplayVTT lazily generates (and caches) the sprite + VTT for an item,
+// then serves the VTT. Generation is best-effort; failures return 404 so the client
+// simply shows no scrub preview.
+func (s *Server) handleTrickplayVTT(w http.ResponseWriter, r *http.Request) {
+	itemID := chi.URLParam(r, "itemId")
+	var path string
+	var duration sql.NullInt64
+	if err := s.db.QueryRow("SELECT path, duration_seconds FROM items WHERE id = ?", itemID).Scan(&path, &duration); err != nil {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if s.prober == nil || s.cfg.FFmpegPath == "" {
+		writeErr(w, http.StatusNotFound, "trickplay_unavailable")
+		return
+	}
+	dur := float64(duration.Int64)
+	if dur <= 0 {
+		// Fall back to a probe if duration wasn't recorded at scan time.
+		if pr, err := s.prober.Probe(r.Context(), path); err == nil {
+			dur = pr.DurationSecs
+		}
+	}
+	outDir := s.trickplayDir(itemID)
+	if _, err := transcode.GenerateTrickplay(r.Context(), s.cfg.FFmpegPath, path, outDir, dur, transcode.TrickplayConfig{}); err != nil {
+		log.Printf("[trickplay] generate failed for %s: %v", itemID, err)
+		writeErr(w, http.StatusNotFound, "trickplay_unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "text/vtt")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, filepath.Join(outDir, "trickplay.vtt"))
+}
+
+// handleTrickplaySprite serves the previously generated sprite sheet.
+func (s *Server) handleTrickplaySprite(w http.ResponseWriter, r *http.Request) {
+	itemID := chi.URLParam(r, "itemId")
+	spritePath := filepath.Join(s.trickplayDir(itemID), "trickplay.jpg")
+	if _, err := os.Stat(spritePath); err != nil {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, spritePath)
 }
 
 func (s *Server) handleHLSFile(filename string) http.HandlerFunc {
