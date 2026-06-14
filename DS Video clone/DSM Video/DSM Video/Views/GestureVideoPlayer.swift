@@ -58,7 +58,11 @@ struct GestureVideoPlayer: View {
     @State private var controlsInteractive: Bool = true
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
-    @State private var playbackRate: Float = 1.0
+    // TASK-738: persist playback speed across sessions (was resetting to 1× each launch).
+    @State private var playbackRate: Float = {
+        let stored = UserDefaults.standard.float(forKey: "dsReel.playbackRate")
+        return stored > 0 ? stored : 1.0
+    }()
     @State private var isBuffering: Bool = true
     @State private var playerError: String?
 
@@ -1090,6 +1094,13 @@ struct GestureVideoPlayer: View {
                         playerError = msg
                         isBuffering = false
                     }
+                } else if status == .readyToPlay, let item = playerItem {
+                    // TASK-738: apply the user's remembered audio-track language so playback
+                    // doesn't always default to track 0. Best-effort — falls through to the
+                    // asset default if no preference is stored or no track matches.
+                    Task { @MainActor in
+                        applyPreferredAudioLanguage(to: item)
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -1235,8 +1246,25 @@ struct GestureVideoPlayer: View {
 
     private func setPlaybackRate(_ rate: Float) {
         playbackRate = rate
+        UserDefaults.standard.set(rate, forKey: "dsReel.playbackRate")
+        Haptics.play(.selection)
         if isPlaying {
             player?.rate = rate
+        }
+    }
+
+    /// TASK-738: select the audio option matching the user's last-chosen language, if any.
+    private func applyPreferredAudioLanguage(to item: AVPlayerItem) {
+        guard let pref = UserDefaults.standard.string(forKey: "dsReel.preferredAudioLanguage"),
+              !pref.isEmpty else { return }
+        Task {
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .audible) else { return }
+            let match = group.options.first { opt in
+                opt.extendedLanguageTag == pref || opt.locale?.identifier == pref
+            }
+            if let match {
+                await MainActor.run { item.select(match, in: group) }
+            }
         }
     }
 
@@ -1733,6 +1761,11 @@ private struct SubtitleAudioPickerView: View {
                 Button {
                     player.currentItem?.select(option, in: group)
                     currentSelection = player.currentItem?.currentMediaSelection
+                    // TASK-738: remember the chosen audio language so the next playback
+                    // defaults to it instead of always falling back to track 0.
+                    if let lang = option.extendedLanguageTag ?? option.locale?.identifier {
+                        UserDefaults.standard.set(lang, forKey: "dsReel.preferredAudioLanguage")
+                    }
                 } label: {
                     trackRow(name: option.displayName, isSelected: isSelected)
                 }
