@@ -349,6 +349,7 @@ private struct HomeRail: View {
                   ContinueWatchingCard(item: item)
                 }
                 .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel((item.showName ?? showId) + (item.year.map { ", \($0)" } ?? ""))
                 .accessibilityHint("Opens TV show")
               } else {
@@ -359,6 +360,7 @@ private struct HomeRail: View {
                   ContinueWatchingCard(item: item)
                 }
                 .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
                 .accessibilityHint("Plays video")
               }
@@ -385,6 +387,7 @@ private struct HomeRail: View {
                   .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
               }
               .buttonStyle(.plain)
+              .accessibilityElement(children: .ignore)
               .accessibilityLabel(displayTitle + (item.year.map { ", \($0)" } ?? ""))
               .accessibilityHint("Opens TV show")
             } else {
@@ -396,6 +399,7 @@ private struct HomeRail: View {
                   .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
               }
               .buttonStyle(.plain)
+              .accessibilityElement(children: .ignore)
               .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
               .accessibilityHint("Opens video details")
             }

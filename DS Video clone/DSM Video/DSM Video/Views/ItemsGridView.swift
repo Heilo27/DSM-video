@@ -115,6 +115,9 @@ struct ItemsGridView: View {
               ItemPosterCell(item: item)
             }
             .buttonStyle(.card)
+            // TASK-745: collapse the cell's internal text/art into one element so the
+            // explicit label (title, year, watched %) is what VoiceOver speaks.
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(itemAccessibilityLabel(item))
             .accessibilityHint("Opens video details")
           }
@@ -126,6 +129,7 @@ struct ItemsGridView: View {
               ItemPosterCell(item: item)
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(itemAccessibilityLabel(item))
             .accessibilityHint("Opens video details")
           }
