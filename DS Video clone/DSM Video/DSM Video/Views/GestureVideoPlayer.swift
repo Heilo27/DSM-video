@@ -1390,10 +1390,14 @@ struct GestureVideoPlayer: View {
         }
         player?.pause()
         #if os(iOS)
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        } catch {
-            orientLog.warning("Failed to deactivate audio session: \(error.localizedDescription)")
+        // AVAudioSession.setActive can block on the main thread (hang risk). Teardown
+        // has no UI dependency, so run it off-main.
+        Task.detached(priority: .utility) {
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            } catch {
+                // best-effort deactivation; nothing actionable on failure
+            }
         }
         #endif
         player = nil
@@ -1520,11 +1524,26 @@ struct GestureVideoPlayer: View {
 
     // MARK: - Volume Control
 
+    #if os(iOS)
+    // Configure + activate the shared playback audio session off the main thread.
+    // setCategory/setActive can block the main thread (AVAudioSession hang risk), and
+    // none of it produces UI — so do it on a utility task. Idempotent: AVAudioSession
+    // is a process-wide singleton, so calling this from setupVolumeObserver and
+    // setupPiP just re-applies the same config harmlessly.
+    private func activatePlaybackAudioSession() {
+        Task.detached(priority: .userInitiated) {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .moviePlayback)
+            try? session.setActive(true)
+        }
+    }
+    #endif
+
     private func setupVolumeObserver() {
         #if os(iOS)
         let audioSession = AVAudioSession.sharedInstance()
-        try? audioSession.setCategory(.playback, mode: .moviePlayback)
-        try? audioSession.setActive(true)
+        activatePlaybackAudioSession()
+        // outputVolume is readable immediately without waiting for activation.
         volumeLevel = audioSession.outputVolume
 
         // Show the volume HUD when hardware volume buttons are pressed.
@@ -1580,9 +1599,9 @@ private extension GestureVideoPlayer {
     #if os(iOS)
     private func setupPiP(layer: AVPlayerLayer) {
         guard !isPiPActive else { return }
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .moviePlayback)
-        try? session.setActive(true)
+        // The playback session is already activated in setupVolumeObserver (onAppear,
+        // before this runs). Re-apply off-main rather than blocking here (hang risk).
+        activatePlaybackAudioSession()
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
         // Teardown old controller if layer changed (e.g. videoFillMode toggle)
         if pipController != nil {
