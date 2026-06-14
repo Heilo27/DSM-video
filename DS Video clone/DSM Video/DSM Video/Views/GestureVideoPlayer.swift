@@ -74,6 +74,12 @@ struct GestureVideoPlayer: View {
     @State private var scrubTime: Double = 0
     @State private var scrubStartTime: Double = 0
     @State private var showScrubPreview: Bool = false
+    // TASK-663: tvOS interactive scrub. D-pad left/right moves a preview position
+    // (scrubTime) without seeking; the seek commits once after a brief idle or on
+    // Select. Consecutive presses within the window accelerate the step.
+    @State private var scrubCommitTask: Task<Void, Never>?
+    @State private var lastScrubPressAt: Date = .distantPast
+    @State private var scrubStepRepeat: Int = 0
 
     @State private var isAdjustingVolume: Bool = false
     @State private var volumeLevel: Float = 0.5
@@ -1031,6 +1037,12 @@ struct GestureVideoPlayer: View {
 
     #if os(tvOS)
     private func handleTVSelectPress() {
+        // TASK-663: if a scrub is in progress, Select commits it immediately rather
+        // than toggling playback.
+        if isScrubbing {
+            commitTVScrub()
+            return
+        }
         if showControls {
             togglePlayPause()
             if isPlaying { scheduleHideControls() }
@@ -1040,8 +1052,10 @@ struct GestureVideoPlayer: View {
         }
     }
 
-    // D-pad left/right scrubs in 10-second steps when controls are visible,
-    // or shows controls first if they're hidden.
+    // TASK-663: interactive scrub. D-pad left/right moves a preview position without
+    // seeking; rapid presses accelerate the step (10s → 30s → 60s). The actual seek
+    // is debounced — it fires once after ~0.6s of no input, or immediately on Select.
+    // First press just reveals controls if they were hidden.
     private func handleTVMoveCommand(direction: MoveCommandDirection) {
         guard direction == .left || direction == .right else { return }
         guard !blockDpadSeek else { return }
@@ -1050,11 +1064,49 @@ struct GestureVideoPlayer: View {
             scheduleHideControls()
             return
         }
-        let delta = direction == .right ? tvDpadSeekSeconds : -tvDpadSeekSeconds
-        let newTime = max(0, min(duration, currentTime + delta))
-        seek(to: newTime)
-        currentTime = newTime
-        showSkipAnimation(direction: direction == .right ? .forward : .backward)
+        guard duration > 0 else { return }
+
+        // Accelerate when presses come in quick succession.
+        let now = Date()
+        if now.timeIntervalSince(lastScrubPressAt) < 0.45 {
+            scrubStepRepeat = min(scrubStepRepeat + 1, 12)
+        } else {
+            scrubStepRepeat = 0
+        }
+        lastScrubPressAt = now
+        let step: Double = scrubStepRepeat >= 8 ? 60 : (scrubStepRepeat >= 3 ? 30 : tvDpadSeekSeconds)
+
+        // Enter scrub mode (preview only — no seek yet).
+        if !isScrubbing {
+            isScrubbing = true
+            scrubStartTime = currentTime
+            scrubTime = currentTime
+        }
+        hideControlsTask?.cancel()  // keep controls up while actively scrubbing
+        let delta = direction == .right ? step : -step
+        scrubTime = max(0, min(duration, scrubTime + delta))
+        showScrubPreview = true
+
+        // Debounce the commit.
+        scrubCommitTask?.cancel()
+        scrubCommitTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            commitTVScrub()
+        }
+    }
+
+    // Commit the previewed scrub position to an actual seek and exit scrub mode.
+    private func commitTVScrub() {
+        scrubCommitTask?.cancel()
+        scrubCommitTask = nil
+        guard isScrubbing else { return }
+        let target = scrubTime
+        seek(to: target, tight: true)
+        currentTime = target
+        isScrubbing = false
+        scrubStepRepeat = 0
+        withAnimation(.easeInOut(duration: 0.2)) { showScrubPreview = false }
         scheduleHideControls()
     }
     #endif
@@ -1328,6 +1380,10 @@ struct GestureVideoPlayer: View {
         hideVolumeIndicatorTask?.cancel()
         skipHideTask?.cancel()
         controlsHideTask?.cancel()
+        #if os(tvOS)
+        scrubCommitTask?.cancel()  // TASK-663: don't fire a deferred seek post-teardown
+        scrubCommitTask = nil
+        #endif
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
             timeObserver = nil
