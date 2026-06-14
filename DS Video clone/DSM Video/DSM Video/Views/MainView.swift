@@ -712,11 +712,20 @@ struct DownloadsView: View {
           title: item.title,
           resumePosition: Double(item.resumePositionSeconds),
           onDismiss: { showPlayer = false },
-          onProgressUpdate: { currentTime, _ in
+          onProgressUpdate: { currentTime, duration in
+            let pos = Int(currentTime)
             DownloadManager.shared.updateResumePosition(
               itemId: item.id,
-              positionSeconds: Int(currentTime)
+              positionSeconds: pos
             )
+            // TASK-730: also record through AppState so LocalStore (Continue Watching)
+            // and the server are updated. The offline asset's reported duration can be
+            // 0 early, so fall back to the item's stored duration. recordProgress's
+            // server write reconciles automatically once the device is back online.
+            let dur = duration > 0 ? Int(duration) : item.durationSeconds
+            if dur > 0 {
+              Task { await appState.recordProgress(itemId: item.id, positionSeconds: pos, durationSeconds: dur) }
+            }
           }
         )
         #if !os(tvOS)

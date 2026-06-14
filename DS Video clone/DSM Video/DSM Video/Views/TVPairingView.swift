@@ -197,12 +197,13 @@ struct TVPairingView: View {
           .padding(.top, 24)
         }
 
-        // Manual login fallback
+        // Manual login fallback. TASK-715: use .bordered (outline) rather than
+        // .borderedProminent so it reads as a secondary action and its focused state
+        // is visually distinct from the prominent "Generate Pairing Code" button.
         Button("Sign in manually") {
           showManualLogin = true
         }
-        .buttonStyle(.borderedProminent)
-        .tint(Color(white: 0.25))
+        .buttonStyle(.bordered)
         .font(.system(size: 19))
         .foregroundStyle(Color.dsTextSecondary)
         .padding(.top, 40)
