@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,19 @@ type ProbeResult struct {
 	Bitrate        int64     // Overall bitrate in bps
 	NeedsTranscode bool      // Pre-computed flag for whether transcoding is needed
 	Chapters       []Chapter // Chapter list (may be empty)
+	EmbeddedSubs   []EmbeddedSubtitle // Text-based embedded subtitle streams (may be empty)
+}
+
+// EmbeddedSubtitle describes a text subtitle stream muxed inside the container
+// (e.g. an MKV with internal SRT/ASS). Image-based subs (PGS/VobSub) are excluded
+// since they can't be converted to WebVTT without OCR.
+type EmbeddedSubtitle struct {
+	Index    int    // ffmpeg stream index
+	Language string // BCP-47-ish tag from stream tags (e.g. "en"), or "und"
+	Title    string // Optional human title from stream tags
+	Codec    string // e.g. "subrip", "ass", "mov_text"
+	Forced   bool
+	Default  bool
 }
 
 // ffprobeOutput represents the JSON output from ffprobe.
@@ -44,12 +58,18 @@ type ffprobeOutput struct {
 		FormatLong string `json:"format_long_name"`
 	} `json:"format"`
 	Streams []struct {
-		CodecType  string `json:"codec_type"`
-		CodecName  string `json:"codec_name"`
-		Width      int    `json:"width,omitempty"`
-		Height     int    `json:"height,omitempty"`
-		Channels   int    `json:"channels,omitempty"`
-		SampleRate string `json:"sample_rate,omitempty"`
+		Index      int               `json:"index"`
+		CodecType  string            `json:"codec_type"`
+		CodecName  string            `json:"codec_name"`
+		Width      int               `json:"width,omitempty"`
+		Height     int               `json:"height,omitempty"`
+		Channels   int               `json:"channels,omitempty"`
+		SampleRate string            `json:"sample_rate,omitempty"`
+		Tags       map[string]string `json:"tags,omitempty"`
+		Disposition struct {
+			Default int `json:"default"`
+			Forced  int `json:"forced"`
+		} `json:"disposition,omitempty"`
 	} `json:"streams"`
 	Chapters []struct {
 		ID        int               `json:"id"`
@@ -146,6 +166,24 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 			if result.AudioCodec == "" { // Take first audio stream
 				result.AudioCodec = normalizeAudioCodec(stream.CodecName)
 				result.AudioChannels = stream.Channels
+			}
+		case "subtitle":
+			// Only text-based subtitle codecs can be converted to WebVTT. Image-based
+			// (hdmv_pgs_subtitle, dvd_subtitle/VobSub) require OCR — skip them.
+			switch strings.ToLower(stream.CodecName) {
+			case "subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text":
+				sub := EmbeddedSubtitle{
+					Index:   stream.Index,
+					Codec:   strings.ToLower(stream.CodecName),
+					Forced:  stream.Disposition.Forced == 1,
+					Default: stream.Disposition.Default == 1,
+				}
+				sub.Language = "und"
+				if l := strings.ToLower(stream.Tags["language"]); l != "" {
+					sub.Language = l
+				}
+				sub.Title = stream.Tags["title"]
+				result.EmbeddedSubs = append(result.EmbeddedSubs, sub)
 			}
 		}
 	}
@@ -296,4 +334,37 @@ func needsTranscode(result *ProbeResult) bool {
 	audioOK := result.AudioCodec == "aac"
 
 	return !containerOK || !videoOK || !audioOK
+}
+
+// ExtractEmbeddedSubtitle extracts one text subtitle stream from a container to a
+// .srt file at destPath using ffmpeg. Returns an error if ffmpeg fails. The output
+// is SRT (universally convertible by the existing HLS WebVTT pipeline). Caller is
+// responsible for choosing a stable destPath (e.g. in a per-item cache dir) and for
+// not re-extracting when the file already exists.
+func ExtractEmbeddedSubtitle(ctx context.Context, ffmpegPath, videoPath string, streamIndex int, destPath string) error {
+	if ffmpegPath == "" {
+		return fmt.Errorf("ffmpeg not found")
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("create subtitle cache dir: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	// -map 0:<index> selects the specific subtitle stream; -c:s srt transcodes
+	// ass/mov_text/etc to SubRip. -y overwrites a stale partial file.
+	cmd := exec.CommandContext(ctx, ffmpegPath,
+		"-v", "error",
+		"-y",
+		"-i", videoPath,
+		"-map", fmt.Sprintf("0:%d", streamIndex),
+		"-c:s", "srt",
+		destPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Clean up any partial output so a later run retries cleanly.
+		_ = os.Remove(destPath)
+		return fmt.Errorf("ffmpeg subtitle extract (stream %d): %w: %s", streamIndex, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

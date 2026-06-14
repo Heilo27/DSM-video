@@ -2670,6 +2670,10 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		subtitleOffset = v
 	}
 	subtitleTracks := findSubtitleFiles(path, subtitleOffset)
+	// TASK-739: also extract text subtitle tracks embedded in the container (e.g. MKV
+	// internal SRT/ASS) so they're selectable like external files. Best-effort — on
+	// any failure we just proceed with the external tracks.
+	subtitleTracks = append(subtitleTracks, s.extractEmbeddedSubtitles(r.Context(), itemID, path, subtitleOffset)...)
 
 	ps := PlaySession{
 		ItemID:       itemID,
@@ -2896,6 +2900,59 @@ func findSubtitleFiles(videoPath string, offset float64) []transcode.SubtitleTra
 		})
 	}
 
+	return tracks
+}
+
+// extractEmbeddedSubtitles probes the container for text subtitle streams and
+// extracts each to a per-item cache dir as SRT, returning SubtitleTrack entries
+// the HLS pipeline can consume. Cached across calls — re-extraction is skipped if
+// the .srt already exists. Best-effort: returns nil on any probe/extract failure.
+func (s *Server) extractEmbeddedSubtitles(ctx context.Context, itemID, videoPath string, offset float64) []transcode.SubtitleTrack {
+	if s.prober == nil || s.cfg.FFmpegPath == "" {
+		return nil
+	}
+	probe, err := s.prober.Probe(ctx, videoPath)
+	if err != nil || len(probe.EmbeddedSubs) == 0 {
+		return nil
+	}
+
+	langNames := map[string]string{
+		"en": "English", "fr": "French", "de": "German", "es": "Spanish",
+		"it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ru": "Russian",
+		"ja": "Japanese", "ko": "Korean", "zh": "Chinese", "ar": "Arabic",
+		"pl": "Polish", "sv": "Swedish", "da": "Danish", "fi": "Finnish",
+		"no": "Norwegian", "cs": "Czech", "hu": "Hungarian", "ro": "Romanian",
+		"tr": "Turkish", "he": "Hebrew", "th": "Thai", "vi": "Vietnamese",
+	}
+
+	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", sanitizeID(itemID))
+	var tracks []transcode.SubtitleTrack
+	for _, sub := range probe.EmbeddedSubs {
+		destPath := filepath.Join(cacheDir, fmt.Sprintf("stream_%d.srt", sub.Index))
+		if _, statErr := os.Stat(destPath); statErr != nil {
+			if exErr := transcode.ExtractEmbeddedSubtitle(ctx, s.cfg.FFmpegPath, videoPath, sub.Index, destPath); exErr != nil {
+				log.Printf("[subs] embedded extract failed for %s stream %d: %v", itemID, sub.Index, exErr)
+				continue
+			}
+		}
+		name := "Subtitles"
+		if sub.Title != "" {
+			name = sub.Title
+		} else if n, ok := langNames[sub.Language]; ok {
+			name = n
+		} else if sub.Language != "und" && sub.Language != "" {
+			name = strings.ToUpper(sub.Language)
+		}
+		if sub.Forced {
+			name += " (Forced)"
+		}
+		tracks = append(tracks, transcode.SubtitleTrack{
+			Language: sub.Language,
+			Name:     name,
+			Path:     destPath,
+			Offset:   offset,
+		})
+	}
 	return tracks
 }
 
