@@ -64,6 +64,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
         orientLog.debug("setOrientation: signaling \(type(of: rootVC), privacy: .public)")
         rootVC.setNeedsUpdateOfSupportedInterfaceOrientations()
+
+        // When restoring portrait on player exit, the mask flip + re-query alone can
+        // leave the just-revealed listing/detail rendered at the stale landscape width
+        // for a beat (the cause of the broken layout on exit). Actively request the
+        // geometry update to portrait so the rotation happens promptly. We do this
+        // ONLY for the portrait restore — requesting it during the landscape
+        // presentation competes with SwiftUI's cover animation and caused the touch
+        // freezes the older code warned about.
+        if mask == .portrait {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in
+                orientLog.warning("setOrientation: portrait geometry update failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 }
 #endif
