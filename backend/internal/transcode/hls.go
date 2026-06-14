@@ -43,6 +43,16 @@ type HLSConfig struct {
 	NicePriority   int           // Nice priority (default: 10 = medium-low; 19 = lowest possible)
 	MaxConcurrent  int           // Max concurrent transcodes (default: 1)
 	ABRLadder      []ABRVariant  // Variants for adaptive bitrate (nil = single-variant)
+
+	// HWAccel selects the hardware encode path: "auto" (detect, fall back to
+	// software), "vaapi", "qsv", or "off". TASK-729: on Synology Intel NAS, VAAPI/QSV
+	// offloads H.264 encoding to the iGPU — ~5-10x less CPU than libx264, enabling
+	// simultaneous streams. Applies to the single-variant transcode path only; the
+	// ABR ladder stays on libx264 (multi-rung GPU scaling is unreliable across
+	// ffmpeg builds). Empty = "auto".
+	HWAccel string
+	// VAAPIDevice is the DRM render node for VAAPI (default "/dev/dri/renderD128").
+	VAAPIDevice string
 }
 
 // DefaultHLSConfig returns sensible defaults for NAS transcoding.
@@ -62,6 +72,10 @@ func DefaultHLSConfig() HLSConfig {
 // HLSGenerator handles HLS segment generation.
 type HLSGenerator struct {
 	config HLSConfig
+
+	// hwEncoder is the resolved hardware encoder family ("vaapi", "qsv", or "" for
+	// software). Determined once at construction from config.HWAccel + ffmpeg probe.
+	hwEncoder string
 
 	mu        sync.Mutex
 	active    int                     // Number of active transcodes
@@ -92,6 +106,7 @@ type HLSSession struct {
 	cmd            *exec.Cmd
 	cancel         context.CancelFunc
 	stopped        bool // true when StopSession has already decremented g.active
+	forceSoftware  bool // TASK-729: set on HW-failure retry to force the libx264 path
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -124,10 +139,87 @@ func NewHLSGenerator(config HLSConfig) *HLSGenerator {
 		config.MaxConcurrent = 1
 	}
 
-	return &HLSGenerator{
+	if config.VAAPIDevice == "" {
+		config.VAAPIDevice = "/dev/dri/renderD128"
+	}
+
+	g := &HLSGenerator{
 		config:   config,
 		sessions: make(map[string]*HLSSession),
 	}
+	g.hwEncoder = g.resolveHWEncoder()
+	if g.hwEncoder != "" {
+		log.Printf("[HLS] hardware encoding enabled: %s (device %s)", g.hwEncoder, config.VAAPIDevice)
+	} else {
+		log.Printf("[HLS] hardware encoding disabled — using software libx264")
+	}
+	return g
+}
+
+// resolveHWEncoder decides which hardware encoder to use based on config.HWAccel
+// and what the ffmpeg binary actually supports. Returns "vaapi", "qsv", or "".
+func (g *HLSGenerator) resolveHWEncoder() string {
+	mode := strings.ToLower(strings.TrimSpace(g.config.HWAccel))
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode == "off" || g.config.FFmpegPath == "" {
+		return ""
+	}
+
+	available := g.availableEncoders()
+	supports := func(name string) bool { return available[name] }
+
+	switch mode {
+	case "vaapi":
+		if supports("h264_vaapi") && g.vaapiDevicePresent() {
+			return "vaapi"
+		}
+		return ""
+	case "qsv":
+		if supports("h264_qsv") {
+			return "qsv"
+		}
+		return ""
+	case "auto":
+		// Prefer QSV (newer Intel SKUs, simpler pipeline) then VAAPI.
+		if supports("h264_qsv") {
+			return "qsv"
+		}
+		if supports("h264_vaapi") && g.vaapiDevicePresent() {
+			return "vaapi"
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// availableEncoders runs `ffmpeg -hide_banner -encoders` and returns the set of
+// encoder names present in the binary. Best-effort: on any error returns empty.
+func (g *HLSGenerator) availableEncoders() map[string]bool {
+	out := map[string]bool{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, g.config.FFmpegPath, "-hide_banner", "-encoders")
+	data, err := cmd.Output()
+	if err != nil {
+		return out
+	}
+	for _, enc := range []string{"h264_vaapi", "h264_qsv"} {
+		if strings.Contains(string(data), enc) {
+			out[enc] = true
+		}
+	}
+	return out
+}
+
+// vaapiDevicePresent reports whether the configured DRM render node exists.
+func (g *HLSGenerator) vaapiDevicePresent() bool {
+	if _, err := os.Stat(g.config.VAAPIDevice); err != nil {
+		return false
+	}
+	return true
 }
 
 // StartSession begins a new HLS transcoding session.
@@ -264,15 +356,9 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 	return rmErr
 }
 
-// runTranscode executes the FFmpeg command for transcoding, then converts any
-// subtitle tracks to WebVTT and rewrites the master playlist to reference them.
-func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) error {
-	if g.config.FFmpegPath == "" {
-		return fmt.Errorf("ffmpeg not found")
-	}
-
-	args := g.buildFFmpegArgs(session)
-
+// runFFmpegOnce builds and runs a single ffmpeg invocation for the session with
+// the given args, in its own process group, capturing stderr to ffmpeg.log.
+func (g *HLSGenerator) runFFmpegOnce(ctx context.Context, session *HLSSession, args []string) error {
 	var cmd *exec.Cmd
 	if g.config.NicePriority > 0 {
 		niceArgs := []string{"-n", fmt.Sprintf("%d", g.config.NicePriority), g.config.FFmpegPath}
@@ -300,11 +386,38 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 		cmd.Stderr = logFile
 	}
 
-	if err := cmd.Run(); err != nil {
+	return cmd.Run()
+}
+
+// runTranscode executes the FFmpeg command for transcoding, then converts any
+// subtitle tracks to WebVTT and rewrites the master playlist to reference them.
+func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) error {
+	if g.config.FFmpegPath == "" {
+		return fmt.Errorf("ffmpeg not found")
+	}
+
+	runErr := g.runFFmpegOnce(ctx, session, g.buildFFmpegArgs(session))
+	if runErr != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("ffmpeg failed: %w", err)
+		// TASK-729: if a hardware-encoded transcode failed at runtime (driver/surface
+		// issue that startup detection couldn't catch), retry once on software so the
+		// stream still plays. forceSoftware disables the HW path for this rebuild.
+		if g.hwEncoder != "" && session.Mode == FullTranscode && !session.UseABR {
+			log.Printf("[HLS] hardware transcode failed (%v) — retrying on software libx264", runErr)
+			session.forceSoftware = true
+			if err := os.RemoveAll(session.OutputDir); err == nil {
+				_ = os.MkdirAll(session.OutputDir, 0o755)
+			}
+			runErr = g.runFFmpegOnce(ctx, session, g.buildFFmpegArgs(session))
+		}
+	}
+	if runErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("ffmpeg failed: %w", runErr)
 	}
 
 	// For ABR sessions ffmpeg writes per-variant playlists but its auto-generated
@@ -421,27 +534,65 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 	segmentPath := filepath.Join(session.OutputDir, "segment_%05d.m4s")
 	initPath := filepath.Join(session.OutputDir, "init.mp4")
 
-	args := []string{
-		"-y",
-		"-i", session.VideoPath,
+	// HW init flags (e.g. VAAPI device) must precede -i, so build a prefix.
+	useHW := session.Mode == FullTranscode && g.hwEncoder != "" && !session.forceSoftware
+	var pre []string
+	if useHW && g.hwEncoder == "vaapi" {
+		pre = append(pre,
+			"-vaapi_device", g.config.VAAPIDevice,
+		)
+	}
+
+	args := []string{"-y"}
+	args = append(args, pre...)
+	args = append(args, "-i", session.VideoPath)
+
+	// Resolved encoder for this run — empty when software (incl. a forced retry).
+	enc := ""
+	if useHW {
+		enc = g.hwEncoder
 	}
 
 	switch session.Mode {
 	case RemuxOnly:
 		args = append(args, "-c:v", "copy")
 	case FullTranscode:
-		if session.MaxHeight > 0 {
+		switch {
+		case enc == "vaapi":
+			// Upload to GPU surfaces, optionally scale on the GPU, encode with VAAPI.
+			vf := "format=nv12,hwupload"
+			if session.MaxHeight > 0 {
+				vf = fmt.Sprintf("scale_vaapi=w=-2:h='min(ih\\,%d)':format=nv12", session.MaxHeight)
+				vf = "format=nv12|vaapi,hwupload," + vf
+			}
 			args = append(args,
-				"-vf", fmt.Sprintf("scale=-2:min(ih\\,%d)", session.MaxHeight),
+				"-vf", vf,
+				"-c:v", "h264_vaapi",
+				"-qp", fmt.Sprintf("%d", g.config.VideoCRF),
+			)
+		case enc == "qsv":
+			if session.MaxHeight > 0 {
+				args = append(args, "-vf", fmt.Sprintf("scale=-2:min(ih\\,%d)", session.MaxHeight))
+			}
+			args = append(args,
+				"-c:v", "h264_qsv",
+				"-global_quality", fmt.Sprintf("%d", g.config.VideoCRF),
+				"-pix_fmt", "nv12",
+			)
+		default:
+			if session.MaxHeight > 0 {
+				args = append(args,
+					"-vf", fmt.Sprintf("scale=-2:min(ih\\,%d)", session.MaxHeight),
+				)
+			}
+			args = append(args,
+				"-c:v", "libx264",
+				"-preset", g.config.VideoPreset,
+				"-crf", fmt.Sprintf("%d", g.config.VideoCRF),
+				"-threads", fmt.Sprintf("%d", g.config.Threads),
+				"-pix_fmt", "yuv420p",
 			)
 		}
-		args = append(args,
-			"-c:v", "libx264",
-			"-preset", g.config.VideoPreset,
-			"-crf", fmt.Sprintf("%d", g.config.VideoCRF),
-			"-threads", fmt.Sprintf("%d", g.config.Threads),
-			"-pix_fmt", "yuv420p",
-		)
 	default:
 		args = append(args, "-c:v", "copy")
 	}

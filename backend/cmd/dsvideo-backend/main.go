@@ -56,6 +56,10 @@ type Config struct {
 	FFmpegPath   string
 	FFprobePath  string
 	TranscodeDir string
+	// TASK-729: hardware transcode. HWAccel = auto|vaapi|qsv|off (default auto —
+	// detect and silently fall back to software). VAAPIDevice = DRM render node.
+	HWAccel     string
+	VAAPIDevice string
 
 	// Metadata settings
 	TMDbAPIKey    string
@@ -221,6 +225,8 @@ func main() {
 	hlsConfig := transcode.DefaultHLSConfig()
 	hlsConfig.FFmpegPath = cfg.FFmpegPath
 	hlsConfig.TempDir = cfg.TranscodeDir
+	hlsConfig.HWAccel = cfg.HWAccel
+	hlsConfig.VAAPIDevice = cfg.VAAPIDevice
 	hlsGenerator := transcode.NewHLSGenerator(hlsConfig)
 
 	cleanupConfig := transcode.DefaultCleanupConfig()
@@ -613,6 +619,8 @@ func loadConfig() Config {
 		FFmpegPath:   get("DSVIDEO_FFMPEG_PATH", ""),  // Empty = auto-detect
 		FFprobePath:  get("DSVIDEO_FFPROBE_PATH", ""), // Empty = auto-detect
 		TranscodeDir: get("DSVIDEO_TRANSCODE_DIR", filepath.Join(os.TempDir(), "dsvideo_transcode")),
+		HWAccel:      get("DSVIDEO_HW_ACCEL", "auto"),
+		VAAPIDevice:  get("DSVIDEO_VAAPI_DEVICE", "/dev/dri/renderD128"),
 
 		// Metadata settings
 		TMDbAPIKey:    get("DSVIDEO_TMDB_API_KEY", ""),
