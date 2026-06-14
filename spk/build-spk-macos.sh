@@ -114,6 +114,24 @@ fi
 
 echo "✅ Go binary built: $(ls -lh "$PACKAGE_DIR/backend/dsvideo-backend" | awk '{print $5}')"
 
+# TASK-750: bundle VAAPI-enabled ffmpeg/ffprobe (x64/Intel iGPU only). Built by
+# build-ffmpeg.sh and committed into DSVideoServer/bin/. start-stop-status prefers
+# these over the system ffmpeg so hardware transcode + trick-play engage. Missing =
+# ship anyway (server falls back to system ffmpeg + software), but warn.
+if [ "$SPK_ARCH" = "x64" ]; then
+    if [ -x "$SPK_DIR/bin/ffmpeg" ] && [ -x "$SPK_DIR/bin/ffprobe" ]; then
+        mkdir -p "$PACKAGE_DIR/bin"
+        cp "$SPK_DIR/bin/ffmpeg" "$PACKAGE_DIR/bin/ffmpeg"
+        cp "$SPK_DIR/bin/ffprobe" "$PACKAGE_DIR/bin/ffprobe"
+        chmod +x "$PACKAGE_DIR/bin/ffmpeg" "$PACKAGE_DIR/bin/ffprobe"
+        echo "✅ VAAPI ffmpeg/ffprobe bundled ($(ls -lh "$PACKAGE_DIR/bin/ffmpeg" | awk '{print $5}'))"
+    else
+        echo "⚠️  No bundled ffmpeg (DSVideoServer/bin/ffmpeg missing) — hardware"
+        echo "    transcode + trick-play will fall back to system ffmpeg / software."
+        echo "    Run ./build-ffmpeg.sh to bundle a VAAPI build."
+    fi
+fi
+
 # Copy ui directory into package contents (DSM reads dsmuidir from target/ui/)
 if [ -d "$SPK_DIR/ui" ]; then
     cp -r "$SPK_DIR/ui" "$PACKAGE_DIR/"

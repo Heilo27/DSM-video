@@ -58,6 +58,25 @@ chmod +x "$TARGET_DIR/target/backend/dsvideo-backend"
 mkdir -p "$TARGET_DIR/target/backend"
 mkdir -p "$TARGET_DIR/var"
 
+# TASK-750: bundle the VAAPI-enabled ffmpeg/ffprobe (x64 only — VAAPI is Intel iGPU).
+# Built separately by build-ffmpeg.sh and committed into DSVideoServer/bin/. The
+# start script prefers these over the system ffmpeg so hardware transcode + trick-play
+# engage. If they're missing we still ship — the server falls back to system ffmpeg
+# and software encode — but warn loudly so a release build doesn't silently omit them.
+if [ "$SPK_ARCH" = "x64" ]; then
+  if [ -x "$SPK_DIR/bin/ffmpeg" ] && [ -x "$SPK_DIR/bin/ffprobe" ]; then
+    echo "🎬 Bundling VAAPI ffmpeg/ffprobe..."
+    mkdir -p "$TARGET_DIR/target/bin"
+    cp "$SPK_DIR/bin/ffmpeg" "$TARGET_DIR/target/bin/ffmpeg"
+    cp "$SPK_DIR/bin/ffprobe" "$TARGET_DIR/target/bin/ffprobe"
+    chmod +x "$TARGET_DIR/target/bin/ffmpeg" "$TARGET_DIR/target/bin/ffprobe"
+  else
+    echo "⚠️  WARNING: DSVideoServer/bin/ffmpeg not found — hardware transcode and"
+    echo "    trick-play will fall back to the system ffmpeg (likely no VAAPI)."
+    echo "    Run ./build-ffmpeg.sh first to bundle a VAAPI-enabled ffmpeg."
+  fi
+fi
+
 echo ""
 echo "✅ SPK structure prepared at: $TARGET_DIR"
 echo ""

@@ -99,10 +99,14 @@ start() {
   export DSVIDEO_MOVIES_PATH="${DSVIDEO_MOVIES_PATH:-/volume1/video/Movies}"
   export DSVIDEO_TV_PATH="${DSVIDEO_TV_PATH:-/volume1/video/Shows}"
 
-  # FFmpeg/FFprobe paths - Synology ffmpeg is typically in these locations
-  # The server will auto-detect if not specified, but explicit paths are more reliable
+  # FFmpeg/FFprobe paths. TASK-750: prefer the ffmpeg we bundle in the package's
+  # bin/ dir — it's built with --enable-vaapi (and QSV where available) so hardware
+  # transcode and trick-play thumbnails can engage. The Synology system ffmpeg is
+  # usually compiled without VAAPI, so we only fall back to it.
+  PKG_FFMPEG="${BASE}/target/bin/ffmpeg"
+  PKG_FFPROBE="${BASE}/target/bin/ffprobe"
   if [ -z "${DSVIDEO_FFMPEG_PATH:-}" ]; then
-    for ffpath in /usr/bin/ffmpeg /var/packages/ffmpeg/target/bin/ffmpeg /volume1/@appstore/ffmpeg/bin/ffmpeg; do
+    for ffpath in "$PKG_FFMPEG" /usr/bin/ffmpeg /var/packages/ffmpeg/target/bin/ffmpeg /volume1/@appstore/ffmpeg/bin/ffmpeg; do
       if [ -x "$ffpath" ]; then
         export DSVIDEO_FFMPEG_PATH="$ffpath"
         break
@@ -110,12 +114,21 @@ start() {
     done
   fi
   if [ -z "${DSVIDEO_FFPROBE_PATH:-}" ]; then
-    for ffpath in /usr/bin/ffprobe /var/packages/ffmpeg/target/bin/ffprobe /volume1/@appstore/ffmpeg/bin/ffprobe; do
+    for ffpath in "$PKG_FFPROBE" /usr/bin/ffprobe /var/packages/ffmpeg/target/bin/ffprobe /volume1/@appstore/ffmpeg/bin/ffprobe; do
       if [ -x "$ffpath" ]; then
         export DSVIDEO_FFPROBE_PATH="$ffpath"
         break
       fi
     done
+  fi
+
+  # TASK-750: hardware-accelerated transcode. "auto" lets the server probe the
+  # ffmpeg above for h264_vaapi/h264_qsv and check the DRM render node — it silently
+  # falls back to software if neither is usable, so this is safe on any NAS. The
+  # render node is only present on Intel models with an iGPU.
+  export DSVIDEO_HW_ACCEL="${DSVIDEO_HW_ACCEL:-auto}"
+  if [ -z "${DSVIDEO_VAAPI_DEVICE:-}" ] && [ -e /dev/dri/renderD128 ]; then
+    export DSVIDEO_VAAPI_DEVICE="/dev/dri/renderD128"
   fi
 
   # Transcode temporary directory (stored in package var for persistence/cleanup)

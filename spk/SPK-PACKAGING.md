@@ -16,6 +16,34 @@ Output: `build/spk/DSVideoServer-{version}-{arch}.spk`
 
 ---
 
+## Hardware Transcode ffmpeg (TASK-750)
+
+The server can offload H.264 encoding to an Intel iGPU (VAAPI) — ~5–10× less CPU
+than software libx264 — and uses ffmpeg for trick-play thumbnails. This only
+engages with an ffmpeg compiled with `--enable-vaapi`, which Synology's system
+ffmpeg usually lacks. We therefore bundle our own.
+
+**One-time (needs Docker), refresh when you want a newer ffmpeg:**
+```bash
+cd spk/
+./build-ffmpeg.sh             # builds static VAAPI ffmpeg → DSVideoServer/bin/
+```
+This produces `DSVideoServer/bin/ffmpeg` and `…/ffprobe` (committed to the repo).
+`build-spk-macos.sh amd64` then bundles them into `target/bin/`, and
+`start-stop-status` prefers them over the system ffmpeg, exporting
+`DSVIDEO_HW_ACCEL=auto` + `DSVIDEO_VAAPI_DEVICE=/dev/dri/renderD128`.
+
+**Caveats:**
+- **Intel models only.** VAAPI needs an Intel iGPU + `/dev/dri/renderD128`. AMD
+  Ryzen models (DS923+, etc.) have no iGPU here — the server auto-detects this and
+  falls back to software. ARM models likewise.
+- `postinst` adds the package user to the render node's group so it can access the
+  iGPU. The VAAPI runtime driver (intel-media-driver / i965) must exist on the NAS.
+- If `DSVideoServer/bin/ffmpeg` is absent, the package still builds and runs — it
+  just falls back to the system ffmpeg and software encode (build prints a warning).
+
+---
+
 ## SPK File Structure
 
 An `.spk` file is a **plain tar archive** (NOT gzipped) containing:

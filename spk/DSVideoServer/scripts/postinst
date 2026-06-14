@@ -2,4 +2,18 @@
 # Post-installation script
 # nginx config is registered via web-config/nginx-static-config in conf/resource
 # DSM's privileged resource worker handles nginx injection automatically.
+
+# TASK-750: grant the package user access to the iGPU render node so hardware
+# transcode (VAAPI/QSV) can engage. Only applies on Intel models that expose
+# /dev/dri — harmless no-op elsewhere. The server falls back to software if this
+# doesn't take, so failure here is non-fatal.
+if [ -e /dev/dri/renderD128 ]; then
+  RENDER_GRP="$(stat -c '%G' /dev/dri/renderD128 2>/dev/null)"
+  if [ -n "${RENDER_GRP}" ] && [ "${RENDER_GRP}" != "UNKNOWN" ]; then
+    # DSM ships synogroup; fall back to addgroup on toolkits that have it.
+    synogroup --add "${RENDER_GRP}" DSVideoServer >/dev/null 2>&1 || \
+      addgroup DSVideoServer "${RENDER_GRP}" >/dev/null 2>&1 || true
+  fi
+fi
+
 exit 0

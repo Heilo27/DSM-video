@@ -1,0 +1,65 @@
+# TASK-750: build a static ffmpeg/ffprobe for Synology x86_64 with hardware
+# acceleration enabled (VAAPI for Intel iGPU H.264 encode, plus the QSV path where
+# libmfx is present). Produces /out/ffmpeg and /out/ffprobe — copy these into the
+# package's bin/ directory via build-ffmpeg.sh.
+#
+# Why static: the package runs as an unprivileged user against whatever shared libs
+# DSM happens to ship; a static build with bundled VAAPI avoids version skew and the
+# "engages only if the system ffmpeg has the encoders" problem.
+#
+# Usage (see build-ffmpeg.sh):
+#   docker build -f Dockerfile.ffmpeg -t dsvideo-ffmpeg .
+#   docker create --name ff dsvideo-ffmpeg && docker cp ff:/out ./ffmpeg-out
+#
+# NOTE: VAAPI runtime drivers (intel-media-driver / i965) live on the NAS, not in
+# this binary — we only need libva headers at build time. The render node must be
+# accessible at runtime (handled by postinst group membership).
+
+FROM ubuntu:22.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    autoconf automake build-essential cmake git libtool pkg-config \
+    nasm yasm wget xz-utils \
+    libva-dev libdrm-dev \
+    libx264-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Pin a stable ffmpeg release for reproducible packaging.
+ARG FFMPEG_VERSION=6.1.1
+RUN wget -q "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" && \
+    tar xf "ffmpeg-${FFMPEG_VERSION}.tar.xz"
+
+WORKDIR /src/ffmpeg-${FFMPEG_VERSION}
+
+# --enable-vaapi: Intel iGPU H.264 encode (h264_vaapi) + scale_vaapi.
+# libx264 stays in for the software fallback path the server uses when HW is absent.
+# Static linking keeps the binary self-contained on DSM.
+RUN ./configure \
+      --prefix=/out \
+      --pkg-config-flags="--static" \
+      --enable-gpl \
+      --enable-version3 \
+      --enable-libx264 \
+      --enable-vaapi \
+      --enable-libdrm \
+      --disable-debug \
+      --disable-doc \
+      --disable-ffplay \
+      --enable-static \
+      --disable-shared && \
+    make -j"$(nproc)" && \
+    make install
+
+# Collect just the two binaries we ship.
+RUN mkdir -p /artifacts && \
+    cp /out/bin/ffmpeg /artifacts/ffmpeg && \
+    cp /out/bin/ffprobe /artifacts/ffprobe && \
+    strip /artifacts/ffmpeg /artifacts/ffprobe && \
+    /artifacts/ffmpeg -hide_banner -encoders | grep -E "h264_vaapi" || \
+      (echo "ERROR: h264_vaapi not present in built ffmpeg" && exit 1)
+
+FROM scratch AS export
+COPY --from=build /artifacts/ /out/
