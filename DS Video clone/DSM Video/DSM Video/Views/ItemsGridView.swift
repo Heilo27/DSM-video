@@ -39,6 +39,10 @@ struct ItemsGridView: View {
   }()
   @State private var searchText: String = ""
   @State private var showFilterSheet: Bool = false
+  // TASK-741: hero zoom transition from a tapped poster into its detail (iOS 18+).
+  #if !os(tvOS)
+  @Namespace private var zoomNamespace
+  #endif
 
   private var displayedItems: [ItemSummary] {
     guard !searchText.isEmpty else { return sortedItems }
@@ -125,10 +129,12 @@ struct ItemsGridView: View {
           ForEach(displayedItems) { item in
             NavigationLink {
               ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+                .navigationTransition(.zoom(sourceID: item.id, in: zoomNamespace))
             } label: {
               ItemPosterCell(item: item)
             }
             .buttonStyle(.plain)
+            .matchedTransitionSource(id: item.id, in: zoomNamespace)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(itemAccessibilityLabel(item))
             .accessibilityHint("Opens video details")
