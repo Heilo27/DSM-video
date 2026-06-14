@@ -1118,6 +1118,7 @@ struct GestureVideoPlayer: View {
                             seek(to: resumePosition)
                             currentTime = resumePosition
                         }
+                        updateNowPlayingPlayback()
                     }
                 }
             }
@@ -1131,6 +1132,7 @@ struct GestureVideoPlayer: View {
                 if !isScrubbing {
                     currentTime = secs
                     onProgressUpdate?(currentTime, duration)
+                    updateNowPlayingPlayback()
                 }
             }
         }
@@ -1146,11 +1148,103 @@ struct GestureVideoPlayer: View {
 
         player?.rate = playbackRate
         scheduleHideControls()
+        setupNowPlaying()
+    }
+
+    // MARK: - Now Playing / Remote Commands (TASK-724)
+
+    /// Populate the system Now Playing info and register remote-command handlers so
+    /// Control Center, the Lock Screen, the Apple TV "Now Playing" pane, and Siri
+    /// ("pause", "skip back 30 seconds") all drive this player. Best-effort.
+    private func setupNowPlaying() {
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: itemTitle.isEmpty ? title : itemTitle
+        ]
+        if let year = itemYear {
+            info[MPMediaItemPropertyArtist] = String(year)
+        }
+        if duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
+        info[MPNowPlayingInfoPropertyPlaybackRate] = Double(player?.rate ?? 0)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        let center = MPRemoteCommandCenter.shared()
+        // Clear any handlers from a prior player instance before re-adding.
+        center.playCommand.removeTarget(nil)
+        center.pauseCommand.removeTarget(nil)
+        center.togglePlayPauseCommand.removeTarget(nil)
+        center.skipForwardCommand.removeTarget(nil)
+        center.skipBackwardCommand.removeTarget(nil)
+        center.changePlaybackPositionCommand.removeTarget(nil)
+
+        center.playCommand.isEnabled = true
+        center.playCommand.addTarget { [self] _ in
+            if !isPlaying { togglePlayPause() }
+            return .success
+        }
+        center.pauseCommand.isEnabled = true
+        center.pauseCommand.addTarget { [self] _ in
+            if isPlaying { togglePlayPause() }
+            return .success
+        }
+        center.togglePlayPauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.addTarget { [self] _ in
+            togglePlayPause()
+            return .success
+        }
+        center.skipForwardCommand.isEnabled = true
+        center.skipForwardCommand.preferredIntervals = [NSNumber(value: skipForwardSeconds)]
+        center.skipForwardCommand.addTarget { [self] _ in
+            skipForward()
+            return .success
+        }
+        center.skipBackwardCommand.isEnabled = true
+        center.skipBackwardCommand.preferredIntervals = [NSNumber(value: skipBackwardSeconds)]
+        center.skipBackwardCommand.addTarget { [self] _ in
+            skipBackward()
+            return .success
+        }
+        center.changePlaybackPositionCommand.isEnabled = true
+        center.changePlaybackPositionCommand.addTarget { [self] event in
+            guard let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            seek(to: e.positionTime, tight: true)
+            currentTime = e.positionTime
+            updateNowPlayingPlayback()
+            return .success
+        }
+    }
+
+    /// Refresh just the volatile Now Playing fields (position + rate). Cheap; called
+    /// from the periodic time observer.
+    private func updateNowPlayingPlayback() {
+        guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
+        // Use the player's actual rate as the source of truth — the isPlaying @State
+        // flag lags a play/pause toggle by one timeControlStatus callback.
+        let actualRate = Double(player?.rate ?? 0)
+        info[MPNowPlayingInfoPropertyPlaybackRate] = actualRate
+        if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// Remove Now Playing info and unregister command handlers on teardown.
+    private func teardownNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.removeTarget(nil)
+        center.pauseCommand.removeTarget(nil)
+        center.togglePlayPauseCommand.removeTarget(nil)
+        center.skipForwardCommand.removeTarget(nil)
+        center.skipBackwardCommand.removeTarget(nil)
+        center.changePlaybackPositionCommand.removeTarget(nil)
     }
 
     private func cleanup() {
         // Re-enable auto-lock / screensaver now that playback is ending.
         UIApplication.shared.isIdleTimerDisabled = false
+        teardownNowPlaying()
         #if os(iOS)
         if isPiPActive {
             pipController?.stopPictureInPicture()
@@ -1194,6 +1288,9 @@ struct GestureVideoPlayer: View {
             player?.rate = playbackRate
             scheduleHideControls() // Auto-hide when playing
         }
+        // Reflect the new play/pause state in Now Playing immediately (the time
+        // observer would otherwise lag by up to 0.5s, and won't tick while paused).
+        DispatchQueue.main.async { updateNowPlayingPlayback() }
     }
 
     /// Seek to a time position.
