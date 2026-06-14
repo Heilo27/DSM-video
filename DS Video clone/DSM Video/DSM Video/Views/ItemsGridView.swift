@@ -81,12 +81,9 @@ struct ItemsGridView: View {
           .padding(.top, 24)
           #endif
       } else if let error {
-        // FIX-18: retry button so users aren't stuck after a transient network error
-        VStack(spacing: 12) {
-          ContentUnavailableView("Couldn't load items", systemImage: "exclamationmark.triangle", description: Text(error))
-          Button("Retry") { Task { await load() } }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.dsAccent)
+        // FIX-18 / TASK-649: shared error+retry component.
+        ErrorRetryView(title: "Couldn't load items", message: error) {
+          Task { await load() }
         }
         .padding(.top, 24)
       } else {

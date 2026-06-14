@@ -179,12 +179,9 @@ private struct TVShowDetailSplitView: View {
             Spacer()
           }
         } else if let error {
-          ContentUnavailableView(
-            "Couldn't load seasons",
-            systemImage: "exclamationmark.triangle",
-            description: Text(error)
-          )
-          .foregroundStyle(.white)
+          ErrorRetryView(title: "Couldn't load seasons", message: error) {
+            Task { await load() }
+          }
           .padding(.top, 60)
         } else if seasons.isEmpty {
           // The seasons endpoint returns 200 {seasons: []} (not an error) when a show
@@ -948,21 +945,14 @@ private struct TVShowDetailScrollView: View {
             ProgressView("Loading").padding(.top, 32).frame(maxWidth: .infinity)
               .accessibilityLabel("Loading seasons, please wait")
           } else if let error {
-            ContentUnavailableView(
-              "Couldn't load seasons",
-              systemImage: "exclamationmark.triangle",
-              description: Text(error)
-            )
+            ErrorRetryView(title: "Couldn't load seasons", message: error) {
+              isLoading = false; Task { await load() }
+            }
             .padding(.top, 32)
           } else if seasons.isEmpty {
-            VStack(spacing: 16) {
-              ContentUnavailableView(
-                "No seasons found",
-                systemImage: "exclamationmark.triangle",
-                description: Text("Couldn't load episodes for this show.")
-              )
-              Button("Retry") { isLoading = false; Task { await load() } }
-                .buttonStyle(.bordered)
+            ErrorRetryView(title: "No seasons found",
+                           message: "Couldn't load episodes for this show.") {
+              isLoading = false; Task { await load() }
             }
             .padding(.top, 32)
             .frame(maxWidth: .infinity)
