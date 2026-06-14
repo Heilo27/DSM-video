@@ -627,6 +627,7 @@ struct ItemDetailView: View {
         durationSeconds.flatMap { $0 > 0 ? formatDuration($0) : nil },
         contentRating.flatMap { $0.isEmpty ? nil : $0 },
         starRating.flatMap { $0 > 0 ? "Rating \(String(format: "%.1f", $0)) out of 10" : nil },
+        { let b = detail?.qualityBadges ?? []; return b.isEmpty ? nil : b.joined(separator: ", ") }(),
         genres.isEmpty ? nil : genres.joined(separator: ", ")
       ].compactMap { $0 }.joined(separator: ", ")
 
@@ -658,6 +659,13 @@ struct ItemDetailView: View {
             .padding(.vertical, 5)
             .background(Color(white: 0.16))
             .clipShape(Capsule())
+          }
+          // TASK-728: quality/format badges (4K / HEVC / 5.1 / Atmos-ready), accent-
+          // tinted so they read as a distinct class from the neutral metadata pills.
+          if let d = detail {
+            ForEach(d.qualityBadges, id: \.self) { badge in
+              QualityBadge(text: badge)
+            }
           }
           ForEach(genres, id: \.self) { genre in
             MetadataPill(text: genre)
@@ -995,6 +1003,22 @@ private struct MetadataPill: View {
       .padding(.horizontal, 10)
       .padding(.vertical, 5)
       .background(Color(white: 0.16))
+      .clipShape(Capsule())
+  }
+}
+
+/// Accent-outlined pill for media quality/format badges (4K, HEVC, 5.1, Atmos-ready).
+/// Visually distinct from the neutral MetadataPill so format capability reads at a glance.
+private struct QualityBadge: View {
+  let text: String
+
+  var body: some View {
+    Text(text)
+      .font(.caption2.weight(.bold))
+      .foregroundStyle(Color.dsAccent)
+      .padding(.horizontal, 9)
+      .padding(.vertical, 4)
+      .overlay(Capsule().stroke(Color.dsAccent.opacity(0.6), lineWidth: 1))
       .clipShape(Capsule())
   }
 }

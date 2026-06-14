@@ -750,6 +750,10 @@ CREATE TABLE IF NOT EXISTS watchlist (
 		{"change_seq", "ALTER TABLE items ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0"},
 		// TASK-571: store show_folder_id at scan time so it is stable across TVPath config changes
 		{"show_folder_id", "ALTER TABLE items ADD COLUMN show_folder_id TEXT"},
+		// TASK-728: media specs for quality/format badges (4K/HDR/Atmos) on the client
+		{"video_width", "ALTER TABLE items ADD COLUMN video_width INTEGER"},
+		{"video_height", "ALTER TABLE items ADD COLUMN video_height INTEGER"},
+		{"audio_channels", "ALTER TABLE items ADD COLUMN audio_channels INTEGER"},
 	}
 	for _, m := range migrations {
 		var exists bool
@@ -1981,7 +1985,8 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		SELECT id, library_id, type, title, year, duration_seconds,
 		       original_title, overview, rating, genres, director, cast_names,
 		       content_rating, poster_path, backdrop_path, tmdb_id, imdb_id,
-		       show_name, season_number, episode_number, episode_title, change_seq
+		       show_name, season_number, episode_number, episode_title, change_seq,
+		       video_codec, audio_codec, container, video_width, video_height, audio_channels
 		FROM items WHERE id = ?`, id)
 
 	var itemID, libraryID, typ, title string
@@ -1990,11 +1995,14 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 	var contentRating, posterPath, backdropPath, imdbID sql.NullString
 	var showName, episodeTitle sql.NullString
 	var rating sql.NullFloat64
+	var videoCodec, audioCodec, container sql.NullString
+	var videoWidth, videoHeight, audioChannels sql.NullInt64
 
 	if err := row.Scan(&itemID, &libraryID, &typ, &title, &year, &duration,
 		&originalTitle, &overview, &rating, &genres, &director, &castNames,
 		&contentRating, &posterPath, &backdropPath, &tmdbID, &imdbID,
-		&showName, &seasonNum, &episodeNum, &episodeTitle, &changeSeq); err != nil {
+		&showName, &seasonNum, &episodeNum, &episodeTitle, &changeSeq,
+		&videoCodec, &audioCodec, &container, &videoWidth, &videoHeight, &audioChannels); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "not_found")
 			return
@@ -2046,6 +2054,14 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		"tmdbId":          nullIntToAny(tmdbID),
 		"imdbId":          nullStringToAny(imdbID),
 		"changeSeq":       nullIntToAny(changeSeq),
+		// TASK-728: media specs for client quality/format badges (4K/HDR/Atmos) and
+		// a tech-spec row. Null when the item hasn't been fully probed yet.
+		"videoCodec":    nullStringToAny(videoCodec),
+		"audioCodec":    nullStringToAny(audioCodec),
+		"container":     nullStringToAny(container),
+		"width":         nullIntToAny(videoWidth),
+		"height":        nullIntToAny(videoHeight),
+		"audioChannels": nullIntToAny(audioChannels),
 	}
 
 	// Add TV-specific fields
@@ -2881,9 +2897,10 @@ func (s *Server) updateCodecInfo(itemID string, probe *transcode.ProbeResult) {
 		return
 	}
 	_, err := s.db.Exec(
-		`UPDATE items SET video_codec = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ? WHERE id = ?`,
+		`UPDATE items SET video_codec = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
+		 video_width = ?, video_height = ?, audio_channels = ? WHERE id = ?`,
 		probe.VideoCodec, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
-		int(probe.DurationSecs), itemID,
+		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, itemID,
 	)
 	if err != nil {
 		log.Printf("Failed to update codec info for %s: %v", itemID, err)
@@ -4352,6 +4369,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		path                                string
 		parsed                              metadata.ParsedFilename
 		showFolderID                        sql.NullString
+		videoWidth, videoHeight, audioChannels sql.NullInt64
 	}
 	var batch []pendingRow
 
@@ -4372,8 +4390,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				s.cachedItemSeq.Store(seq)
 			}
 			if _, err := tx.Exec(
-				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET
 				   library_id=excluded.library_id,
 				   type=excluded.type,
@@ -4388,9 +4406,13 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
 				   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
 				   show_folder_id=COALESCE(excluded.show_folder_id, items.show_folder_id),
+				   video_width=COALESCE(excluded.video_width, items.video_width),
+				   video_height=COALESCE(excluded.video_height, items.video_height),
+				   audio_channels=COALESCE(excluded.audio_channels, items.audio_channels),
 				   change_seq=excluded.change_seq`,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
 				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
+				row.videoWidth, row.videoHeight, row.audioChannels,
 			); err != nil {
 				log.Printf("scan: upsert failed for %s: %v", row.path, err)
 			}
@@ -4452,6 +4474,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		var videoCodec, audioCodec, container sql.NullString
 		var duration sql.NullInt64
 		var needsTranscode sql.NullBool
+		var videoWidth, videoHeight, audioChannels sql.NullInt64
 
 		if s.prober != nil {
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -4464,6 +4487,17 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				needsTranscode = sql.NullBool{Bool: probe.NeedsTranscode, Valid: true}
 				if probe.DurationSecs > 0 {
 					duration = sql.NullInt64{Int64: int64(probe.DurationSecs), Valid: true}
+				}
+				// TASK-728: media specs for quality badges. Only the full probe has these;
+				// the quick-probe fallback below leaves them null (badges simply absent).
+				if probe.Width > 0 {
+					videoWidth = sql.NullInt64{Int64: int64(probe.Width), Valid: true}
+				}
+				if probe.Height > 0 {
+					videoHeight = sql.NullInt64{Int64: int64(probe.Height), Valid: true}
+				}
+				if probe.AudioChannels > 0 {
+					audioChannels = sql.NullInt64{Int64: int64(probe.AudioChannels), Valid: true}
 				}
 			}
 		}
@@ -4498,6 +4532,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			year: year, duration: duration, path: path, parsed: parsed,
 			videoCodec: videoCodec, audioCodec: audioCodec, container: container,
 			needsTranscode: needsTranscode, showFolderID: showFolderID,
+			videoWidth: videoWidth, videoHeight: videoHeight, audioChannels: audioChannels,
 		})
 
 		if len(batch) >= batchSize {

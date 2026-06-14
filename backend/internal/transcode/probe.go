@@ -29,6 +29,7 @@ type ProbeResult struct {
 	DurationSecs   float64   // Duration in seconds
 	Width          int       // Video width
 	Height         int       // Video height
+	AudioChannels  int       // Channel count of the primary audio stream (e.g. 2, 6, 8)
 	Bitrate        int64     // Overall bitrate in bps
 	NeedsTranscode bool      // Pre-computed flag for whether transcoding is needed
 	Chapters       []Chapter // Chapter list (may be empty)
@@ -144,6 +145,7 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 		case "audio":
 			if result.AudioCodec == "" { // Take first audio stream
 				result.AudioCodec = normalizeAudioCodec(stream.CodecName)
+				result.AudioChannels = stream.Channels
 			}
 		}
 	}

@@ -177,14 +177,63 @@ struct ItemDetail: Decodable, Identifiable {
   let images: Images
   let changeSeq: Int?
 
+  // TASK-728: media specs (nil until the server has fully probed the file).
+  let videoCodec: String?
+  let audioCodec: String?
+  let container: String?
+  let width: Int?
+  let height: Int?
+  let audioChannels: Int?
+
   init(id: String, type: String, title: String, originalTitle: String? = nil,
        year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
        rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
-       cast: [Person]? = nil, images: Images, changeSeq: Int? = nil) {
+       cast: [Person]? = nil, images: Images, changeSeq: Int? = nil,
+       videoCodec: String? = nil, audioCodec: String? = nil, container: String? = nil,
+       width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil) {
     self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
     self.year = year; self.durationSeconds = durationSeconds; self.contentRating = contentRating
     self.rating = rating; self.summary = summary; self.genres = genres
     self.cast = cast; self.images = images; self.changeSeq = changeSeq
+    self.videoCodec = videoCodec; self.audioCodec = audioCodec; self.container = container
+    self.width = width; self.height = height; self.audioChannels = audioChannels
+  }
+
+  // MARK: - Derived format badges
+
+  /// Short, capitalised quality/format badges for display, e.g. ["4K", "HDR-ready", "5.1"].
+  /// Derived from resolution, codec, and channel count. Empty when specs are unknown.
+  var qualityBadges: [String] {
+    var badges: [String] = []
+    if let w = width, let h = height {
+      let longEdge = max(w, h)
+      switch longEdge {
+      case 3840...:        badges.append("4K")
+      case 2560..<3840:    badges.append("1440p")
+      case 1900..<2560:    badges.append("1080p")
+      case 1200..<1900:    badges.append("720p")
+      default: break
+      }
+    }
+    // HEVC/AV1 commonly carry HDR; without color metadata we label the codec instead.
+    switch (videoCodec ?? "").lowercased() {
+    case "hevc", "h265": badges.append("HEVC")
+    case "av1":          badges.append("AV1")
+    default: break
+    }
+    if let ch = audioChannels {
+      switch ch {
+      case 8...:  badges.append("7.1")
+      case 6, 7:  badges.append("5.1")
+      default: break
+      }
+    }
+    switch (audioCodec ?? "").lowercased() {
+    case "truehd", "eac3": badges.append("Atmos-ready")
+    case "dts":            badges.append("DTS")
+    default: break
+    }
+    return badges
   }
 }
 
