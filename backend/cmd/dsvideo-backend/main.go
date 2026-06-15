@@ -236,6 +236,12 @@ func main() {
 	hlsConfig.TempDir = cfg.TranscodeDir
 	hlsConfig.HWAccel = cfg.HWAccel
 	hlsConfig.VAAPIDevice = cfg.VAAPIDevice
+	// An HLS transcode runs ffmpeg for the whole title, so each playing video holds
+	// a slot for its full duration. MaxConcurrent=1 meant a single lingering session
+	// (e.g. the user backed out without the client sending Stop) blocked ALL new
+	// playback with "transcode busy". Allow a few concurrent transcodes, and the
+	// generator evicts the oldest idle session when the cap is reached.
+	hlsConfig.MaxConcurrent = 3
 	hlsGenerator := transcode.NewHLSGenerator(hlsConfig)
 
 	cleanupConfig := transcode.DefaultCleanupConfig()

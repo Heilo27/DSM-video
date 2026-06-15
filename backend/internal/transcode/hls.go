@@ -229,17 +229,39 @@ func (g *HLSGenerator) vaapiDevicePresent() bool {
 func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode, maxHeight int, subtitles []SubtitleTrack) (*HLSSession, error) {
 	g.mu.Lock()
 
-	// Check if we've hit the concurrent limit
-	if g.active >= g.config.MaxConcurrent {
-		g.mu.Unlock()
-		return nil, fmt.Errorf("maximum concurrent transcodes reached (%d)", g.config.MaxConcurrent)
-	}
-
-	// Check if session already exists
+	// Check if session already exists (re-open of the same title). Do this BEFORE
+	// the concurrency check so resuming an existing session never reports "busy".
 	if existing, ok := g.sessions[sessionID]; ok {
 		existing.LastAccess = time.Now()
 		g.mu.Unlock()
 		return existing, nil
+	}
+
+	// Check if we've hit the concurrent limit. If so, try to reclaim a slot from
+	// the most-idle session: an HLS transcode holds its slot for the whole title,
+	// so a client that navigated away without sending Stop would otherwise block
+	// all new playback forever. Evict the oldest session idle past the grace window.
+	if g.active >= g.config.MaxConcurrent {
+		victimID := ""
+		var oldest time.Time
+		for id, s := range g.sessions {
+			if s.LastAccess.Before(oldest) || victimID == "" {
+				oldest = s.LastAccess
+				victimID = id
+			}
+		}
+		const idleGrace = 20 * time.Second
+		if victimID != "" && time.Since(oldest) > idleGrace {
+			g.mu.Unlock()
+			// StopSession takes the lock itself; call it outside our hold.
+			_ = g.StopSession(victimID)
+			g.mu.Lock()
+		}
+		// Re-check after the eviction attempt.
+		if g.active >= g.config.MaxConcurrent {
+			g.mu.Unlock()
+			return nil, fmt.Errorf("maximum concurrent transcodes reached (%d)", g.config.MaxConcurrent)
+		}
 	}
 
 	// Create output directory
