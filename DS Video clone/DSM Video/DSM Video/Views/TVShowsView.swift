@@ -71,6 +71,7 @@ struct TVShowsView: View {
   }()
   @State private var sortedShows: [TVShow] = []
   @State private var searchText: String = ""
+  @State private var showSearchSheet: Bool = false
 
   private var displayedShows: [TVShow] {
     guard !searchText.isEmpty else { return sortedShows }
@@ -191,28 +192,74 @@ struct TVShowsView: View {
           .padding(.vertical, 48)
         }
         #else
-        LazyVGrid(columns: columns, spacing: 12) {
-          ForEach(sortedShows) { show in
-            NavigationLink {
-              TVShowDetailView(show: show, library: library)
-            } label: {
-              TVShowPosterCell(show: show)
+        if displayedShows.isEmpty && !searchText.isEmpty {
+          ContentUnavailableView(
+            "No Results",
+            systemImage: "magnifyingglass",
+            description: Text("No shows match \"\(searchText)\"")
+          )
+          .foregroundStyle(.white)
+          .padding(.top, 60)
+        } else {
+          LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(displayedShows) { show in
+              NavigationLink {
+                TVShowDetailView(show: show, library: library)
+              } label: {
+                TVShowPosterCell(show: show)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
+              .accessibilityHint("Opens show details")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
-            .accessibilityHint("Opens show details")
           }
+          .padding(horizontalSizeClass == .regular ? 20 : 12)
         }
-        .padding(horizontalSizeClass == .regular ? 20 : 12)
         #endif
       }
     }
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(library.title)
+    #if !os(tvOS)
+    // Force white nav-bar content (the large title was rendering dim grey on black).
+    .toolbarColorScheme(.dark, for: .navigationBar)
+    #endif
     .task {
       await load()
     }
     #if !os(tvOS)
+    // Search is a magnifying-glass button in the nav bar that presents a search
+    // sheet, now that the dedicated Search tab is gone.
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Button { showSearchSheet = true } label: {
+          Image(systemName: "magnifyingglass")
+        }
+        .accessibilityLabel("Search TV shows")
+      }
+    }
+    .sheet(isPresented: $showSearchSheet) {
+      LibrarySearchSheet(
+        title: "Search TV shows",
+        items: sortedShows,
+        filter: { show, q in show.title.localizedCaseInsensitiveContains(q) }
+      ) { show in
+        TVShowDetailView(show: show, library: library)
+      } rowLabel: { show in
+        AnyView(
+          HStack(spacing: 12) {
+            TVShowPosterCell(show: show).frame(width: 46)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(show.title).foregroundStyle(.white).lineLimit(1)
+              if let y = show.year {
+                Text(String(y)).font(.caption).foregroundStyle(Color.dsTextSecondary)
+              }
+            }
+            Spacer()
+          }
+        )
+      }
+    }
     .refreshable {
       await load()
     }

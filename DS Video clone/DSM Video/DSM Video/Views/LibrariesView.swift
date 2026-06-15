@@ -3,6 +3,67 @@ import os.log
 
 private let loadLog = Logger(subsystem: "com.dsm.dsvideo", category: "LibraryLoad")
 
+#if !os(tvOS)
+// MARK: - LibrarySearchSheet
+
+/// A self-contained search sheet scoped to a single library. Presented from the
+/// magnifying-glass button in a library view's nav bar. Reuses the caller's data
+/// and destinations so search results push to the same detail screens as the grid.
+struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
+  let title: String
+  let items: [Item]
+  let filter: (Item, String) -> Bool
+  let destination: (Item) -> Destination
+  let rowLabel: (Item) -> AnyView
+
+  @Environment(\.dismiss) private var dismiss
+  @State private var query: String = ""
+  @FocusState private var fieldFocused: Bool
+
+  private var results: [Item] {
+    let q = query.trimmingCharacters(in: .whitespaces)
+    guard !q.isEmpty else { return [] }
+    return items.filter { filter($0, q) }
+  }
+
+  var body: some View {
+    NavigationStack {
+      Group {
+        if query.trimmingCharacters(in: .whitespaces).isEmpty {
+          ContentUnavailableView("Search", systemImage: "magnifyingglass",
+                                 description: Text("Type a title to search this library."))
+        } else if results.isEmpty {
+          ContentUnavailableView("No Results", systemImage: "magnifyingglass",
+                                 description: Text("No matches for \"\(query)\""))
+        } else {
+          List(results) { item in
+            NavigationLink {
+              destination(item)
+            } label: {
+              rowLabel(item)
+            }
+            .listRowBackground(Color.black)
+          }
+          .listStyle(.plain)
+          .scrollContentBackground(.hidden)
+        }
+      }
+      .background(Color.black.ignoresSafeArea())
+      .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: title)
+      .navigationTitle("Search")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbarColorScheme(.dark, for: .navigationBar)
+      .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button("Done") { dismiss() }
+        }
+      }
+    }
+    .preferredColorScheme(.dark)
+  }
+}
+#endif
+
 struct LibrariesView: View {
   @Environment(AppState.self) private var appState
   @State private var libraries: [Library] = []
@@ -32,21 +93,41 @@ struct LibrariesView: View {
       } else if libraries.isEmpty {
         ContentUnavailableView("No Libraries", systemImage: "square.grid.2x2", description: Text("No video libraries found on your server."))
       } else {
-        List(libraries) { lib in
-          NavigationLink {
-            if lib.kind == "tv" {
-              TVShowsView(library: lib)
-            } else {
-              ItemsGridView(library: lib)
+        // Each library is a labeled, clearly-bounded artwork card: a section
+        // title above ("Movies" / "TV Shows"), then a bordered box with a small
+        // poster collage and the item count.
+        ScrollView {
+          VStack(alignment: .leading, spacing: 28) {
+            ForEach(libraries) { lib in
+              VStack(alignment: .leading, spacing: 10) {
+                Text(lib.title)
+                  .font(.title.weight(.bold))
+                  .foregroundStyle(.white)
+                  .accessibilityAddTraits(.isHeader)
+
+                NavigationLink {
+                  if lib.kind == "tv" {
+                    TVShowsView(library: lib)
+                  } else {
+                    ItemsGridView(library: lib)
+                  }
+                } label: {
+                  LibraryCard(library: lib, height: 170)
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(lib.title)
+                .accessibilityHint("Opens \(lib.title)")
+              }
             }
-          } label: {
-            Label(lib.title, systemImage: libraryIcon(lib.kind))
           }
-          .accessibilityLabel(lib.title)
+          .padding(.horizontal, 16)
+          .padding(.vertical, 20)
         }
       }
     }
     .navigationTitle("Libraries")
+    .background(Color.black.ignoresSafeArea())
     .task { await load() }
     .refreshable { await load(force: true) }
     .onChange(of: appState.homeLibraries) { _, libs in
@@ -96,13 +177,203 @@ struct LibrariesView: View {
       self.error = errorMsg
     }
   }
+}
 
-  private func libraryIcon(_ kind: String) -> String {
-    switch kind {
+// MARK: - LibraryCard
+
+/// A tall artwork card for a single library. Loads a few recent posters to build
+/// a collage backdrop and shows the library's item count. Tapping it (via the
+/// enclosing NavigationLink) opens the library.
+private struct LibraryCard: View {
+  @Environment(AppState.self) private var appState
+  let library: Library
+  let height: CGFloat
+
+  @State private var posterIDs: [String] = []
+  @State private var demoAssets: [String] = []
+  @State private var itemCount: Int?
+  @State private var didLoad = false
+
+  private var icon: String {
+    switch library.kind {
     case "tv": return "tv"
     case "movies", "movie": return "film"
     case "home", "homevideo": return "house"
     default: return "play.rectangle"
+    }
+  }
+
+  private var countLabel: String? {
+    guard let n = itemCount, n > 0 else { return nil }
+    let noun: String
+    switch library.kind {
+    case "tv": noun = n == 1 ? "show" : "shows"
+    default: noun = n == 1 ? "title" : "titles"
+    }
+    return "\(n) \(noun)"
+  }
+
+  var body: some View {
+    ZStack(alignment: .bottomLeading) {
+      // Artwork collage backdrop
+      collage
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+
+      // Strong bottom gradient anchoring the footer so the count row stays
+      // legible over any artwork.
+      LinearGradient(
+        stops: [
+          .init(color: .clear, location: 0.45),
+          .init(color: .black.opacity(0.75), location: 0.8),
+          .init(color: .black.opacity(0.95), location: 1.0),
+        ],
+        startPoint: .top, endPoint: .bottom
+      )
+
+      // Footer: icon + item count, with a chevron affordance.
+      HStack(alignment: .center, spacing: 10) {
+        Image(systemName: icon)
+          .font(.system(size: 18, weight: .semibold))
+          .foregroundStyle(Color.dsAccent)
+          .accessibilityHidden(true)
+        if let countLabel {
+          Text(countLabel)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+        }
+        Spacer()
+        Image(systemName: "chevron.right")
+          .font(.footnote.weight(.semibold))
+          .foregroundStyle(.white.opacity(0.7))
+          .accessibilityHidden(true)
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 12)
+    }
+    .frame(height: height)
+    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .overlay(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .strokeBorder(Color.dsBorderStrong, lineWidth: 1)
+    )
+    // Make the ENTIRE card a single tap target. Without this, only the opaque
+    // rendered pixels (text/icons) register taps, so transparent gaps between
+    // collage tiles aren't tappable — which made parts of the card dead.
+    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    // TASK-693/698: redact in app switcher / screen recordings.
+    .privacySensitive()
+    #if os(iOS)
+    .hoverEffect(.lift)
+    #endif
+    .task { await loadArtwork() }
+  }
+
+  // MARK: Collage
+
+  @ViewBuilder
+  private var collage: some View {
+    if appState.isDemoMode {
+      tileGrid(demoAssets.map { CollageTile.asset($0) })
+    } else if !posterIDs.isEmpty {
+      tileGrid(posterIDs.map { CollageTile.remote($0) })
+    } else {
+      placeholderFill
+    }
+  }
+
+  private enum CollageTile {
+    case asset(String)
+    case remote(String)
+  }
+
+  /// Lay tiles out edge-to-edge. 1 tile fills; 2 split horizontally; 3–4 form a 2×2.
+  @ViewBuilder
+  private func tileGrid(_ tiles: [CollageTile]) -> some View {
+    if tiles.isEmpty {
+      placeholderFill
+    } else if tiles.count == 1 {
+      tileView(tiles[0])
+    } else if tiles.count <= 3 {
+      HStack(spacing: 2) {
+        ForEach(Array(tiles.prefix(2).enumerated()), id: \.offset) { _, t in tileView(t) }
+      }
+    } else {
+      let four = Array(tiles.prefix(4))
+      VStack(spacing: 2) {
+        HStack(spacing: 2) { tileView(four[0]); tileView(four[1]) }
+        HStack(spacing: 2) { tileView(four[2]); tileView(four[3]) }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func tileView(_ tile: CollageTile) -> some View {
+    Group {
+      switch tile {
+      case .asset(let name):
+        Image(name).resizable().scaledToFill()
+      case .remote(let id):
+        AuthenticatedImage(
+          url: appState.api.imageURL(id: id, width: 400),
+          token: appState.sessionToken,
+          usesTunnelCookie: appState.api.usesTunnelCookie
+        )
+        .scaledToFill()
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .clipped()
+  }
+
+  private var placeholderFill: some View {
+    Rectangle()
+      .fill(Color(white: 0.12))
+      .overlay(
+        Image(systemName: icon)
+          .font(.system(size: 56, weight: .regular))
+          .foregroundStyle(.white.opacity(0.18))
+          .accessibilityHidden(true)
+      )
+  }
+
+  // MARK: Load
+
+  private func loadArtwork() async {
+    guard !didLoad else { return }
+    didLoad = true
+
+    if appState.isDemoMode {
+      let items = library.kind == "tv" ? DemoData.tvItems : DemoData.movieItems
+      demoAssets = items.compactMap { DemoData.posterAssetNames[$0.id] }.prefix(4).map { $0 }
+      itemCount = items.count
+      return
+    }
+
+    do {
+      if library.kind == "tv" {
+        // TV: the shows endpoint gives one entry per show — an accurate show count
+        // (not episodes) and clean per-show posters, so no episode-dedup needed.
+        let resp = try await appState.api.tvShows(libraryId: library.id)
+        posterIDs = resp.shows.compactMap { $0.posterImageId }.prefix(4).map { $0 }
+        itemCount = resp.shows.count
+      } else {
+        // Movies: one entry per film. Dedup by item id defensively and take four.
+        let resp = try await appState.api.items(libraryId: library.id, limit: 40)
+        var seen = Set<String>()
+        var unique: [String] = []
+        for item in resp.items where seen.insert(item.id).inserted {
+          if let img = item.posterImageId ?? item.backdropImageId {
+            unique.append(img)
+            if unique.count == 4 { break }
+          }
+        }
+        posterIDs = unique
+        itemCount = resp.total
+      }
+    } catch {
+      loadLog.warning("LibraryCard: artwork load failed for \(library.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+      // Leave placeholder; card still works as a navigation target.
     }
   }
 }

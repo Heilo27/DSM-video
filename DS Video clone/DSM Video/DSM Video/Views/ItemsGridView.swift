@@ -35,10 +35,13 @@ struct ItemsGridView: View {
   @State private var error: String?
   @State private var sortOption: SortOption = {
     let raw = UserDefaults.standard.string(forKey: "dsReel.sortOption") ?? ""
-    return SortOption(rawValue: raw) ?? .addedNewest
+    let stored = SortOption(rawValue: raw) ?? .addedNewest
+    // .all no longer has a chip (removed for simplicity) — coerce any stale stored
+    // value to the default so the chip bar always shows an active selection.
+    return stored == .all ? .addedNewest : stored
   }()
   @State private var searchText: String = ""
-  @State private var showFilterSheet: Bool = false
+  @State private var showSearchSheet: Bool = false
 
   private var displayedItems: [ItemSummary] {
     guard !searchText.isEmpty else { return sortedItems }
@@ -146,29 +149,48 @@ struct ItemsGridView: View {
     }
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(library.title)
+    #if !os(tvOS)
+    // Force white nav-bar content (the large title was rendering dim grey on black).
+    .toolbarColorScheme(.dark, for: .navigationBar)
+    #endif
     .task { await load() }
     #if !os(tvOS)
-    .refreshable { await load() }
-    .sheet(isPresented: $showFilterSheet) {
-      NavigationStack {
-        ContentUnavailableView(
-          "Genre Filter",
-          systemImage: "line.3.horizontal.decrease.circle",
-          description: Text("Genre filtering coming in a future update.")
-        )
-        .navigationTitle("Filter")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-          ToolbarItem(placement: .topBarTrailing) {
-            Button("Done") { showFilterSheet = false }
-          }
+    // Search is a magnifying-glass button in the nav bar that presents a search
+    // sheet, now that the dedicated Search tab is gone.
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Button { showSearchSheet = true } label: {
+          Image(systemName: "magnifyingglass")
         }
+        .accessibilityLabel("Search \(library.title)")
       }
-      .presentationDetents([.medium])
     }
+    .sheet(isPresented: $showSearchSheet) {
+      LibrarySearchSheet(
+        title: "Search \(library.title)",
+        items: sortedItems,
+        filter: { item, q in item.title.localizedCaseInsensitiveContains(q) }
+      ) { item in
+        ItemDetailView(itemID: item.id, fallbackTitle: item.title)
+      } rowLabel: { item in
+        AnyView(
+          HStack(spacing: 12) {
+            ItemPosterCell(item: item).frame(width: 46)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(item.title).foregroundStyle(.white).lineLimit(1)
+              if let y = item.year {
+                Text(String(y)).font(.caption).foregroundStyle(Color.dsTextSecondary)
+              }
+            }
+            Spacer()
+          }
+        )
+      }
+    }
+    .refreshable { await load() }
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
-        SortChipBar(selection: $sortOption, showFilterSheet: $showFilterSheet)
+        SortChipBar(selection: $sortOption)
         if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
           Text("Showing cached content")
             .font(.caption2)
@@ -304,55 +326,82 @@ struct ItemsGridView: View {
 // MARK: - Sort Chip Bar (iOS/macOS only)
 
 #if !os(tvOS)
+/// A sort dimension that toggles direction when its chip is re-tapped. Some
+/// dimensions (All, Rating) have no direction — a single tap selects them.
+private struct SortDimension {
+  let name: String              // base label, e.g. "Added"
+  let ascending: SortOption?    // case for ascending / first-tap-reverse; nil = no direction
+  let descending: SortOption    // case for descending / default first tap
+
+  /// All cases this dimension owns (used to test whether it's the active group).
+  var cases: [SortOption] { ascending.map { [descending, $0] } ?? [descending] }
+}
+
+private let movieSortDimensions: [SortDimension] = [
+  SortDimension(name: "Added", ascending: .addedOldest,   descending: .addedNewest),
+  SortDimension(name: "Name",  ascending: .nameDesc,      descending: .nameAsc),
+  SortDimension(name: "Year",  ascending: .releaseOldest, descending: .releaseNewest),
+  SortDimension(name: "Rating", ascending: nil,           descending: .rating),
+]
+
 private struct SortChipBar: View {
   @Binding var selection: SortOption
-  @Binding var showFilterSheet: Bool
 
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
-        // Filter chip — always first, right-anchored visually
-        Button {
-          showFilterSheet = true
-        } label: {
-          Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(Color.dsTextSecondary)
-            .frame(minHeight: 44)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 14)
-            .background(
-              RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.dsSurface)
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Filter library")
-
-        ForEach(SortOption.allCases, id: \.self) { option in
-          Button {
-            selection = option
-          } label: {
-            Text(option.chipLabel)
-              .font(.subheadline.weight(.medium))
-              .foregroundStyle(selection == option ? Color.white : Color.dsTextSecondary)
-              .frame(minHeight: 44)
-              .padding(.horizontal, 12)
-              .padding(.vertical, 14)
-              .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                  .fill(selection == option ? Color.dsAccent : Color.dsSurface)
-              )
-          }
-          .buttonStyle(.plain)
-          .accessibilityLabel("Sort by \(option.rawValue)")
-          .accessibilityAddTraits(selection == option ? [.isButton, .isSelected] : .isButton)
+        ForEach(movieSortDimensions, id: \.name) { dim in
+          SortDimensionChip(dimension: dim, selection: $selection)
         }
       }
       .padding(.horizontal, 16)
       .padding(.vertical, 8)
     }
     .background(Color.black.opacity(0.95))
+  }
+}
+
+/// One chip per sort dimension. First tap selects (descending). If already
+/// selected and the dimension has a direction, the next tap flips ascending↔descending.
+private struct SortDimensionChip: View {
+  let dimension: SortDimension
+  @Binding var selection: SortOption
+
+  private var isActive: Bool { dimension.cases.contains(selection) }
+  private var isAscending: Bool { dimension.ascending == selection }
+
+  private var label: String {
+    guard dimension.ascending != nil else { return dimension.name }      // no-direction chip
+    guard isActive else { return dimension.name }                        // inactive: bare name
+    return "\(dimension.name) \(isAscending ? "↑" : "↓")"
+  }
+
+  var body: some View {
+    Button {
+      if isActive, let asc = dimension.ascending {
+        // Re-tap on the active directional chip flips direction.
+        selection = isAscending ? dimension.descending : asc
+      } else {
+        // First tap selects the default (descending) direction.
+        selection = dimension.descending
+      }
+    } label: {
+      Text(label)
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(isActive ? Color.white : Color.dsTextSecondary)
+        .frame(minHeight: 44)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
+        .background(
+          RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .fill(isActive ? Color.dsAccent : Color.dsSurface)
+        )
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(isActive && dimension.ascending != nil
+                        ? "Sorted by \(dimension.name), \(isAscending ? "ascending" : "descending"). Tap to reverse."
+                        : "Sort by \(dimension.name)")
+    .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
   }
 }
 #endif

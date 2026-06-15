@@ -20,9 +20,10 @@ struct MainView: View {
           LibrariesView()
             .tabItem { Label("LIBRARIES", systemImage: "square.grid.2x2") }
 
-          SearchView()
-            .tabItem { Label("SEARCH", systemImage: "magnifyingglass") }
-
+          // Search is no longer a dedicated tab — it lives as a magnifying-glass
+          // toolbar button inside each library view (Movies / TV Shows). Dropping
+          // it to 5 tabs keeps Watchlist + Settings at surface level instead of
+          // being collapsed into the system "More" tab.
           DownloadsView()
             .tabItem { Label("DOWNLOADS", systemImage: "arrow.down.circle") }
 
