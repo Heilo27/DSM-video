@@ -247,7 +247,7 @@ private struct SearchView: View {
             searches: recentSearches,
             onSelect: { query in
               searchText = query
-              Task { await search() }
+              Task { await search(commit: true) }
             },
             onRemove: { query in removeRecentSearch(query) },
             onClearAll: { recentSearchesRaw = "" }
@@ -272,7 +272,7 @@ private struct SearchView: View {
             .multilineTextAlignment(.center)
             .padding(.horizontal, 32)
           Button {
-            Task { await search() }
+            Task { await search(commit: true) }
           } label: {
             Text("Retry")
               .font(.subheadline.weight(.semibold))
@@ -312,8 +312,9 @@ private struct SearchView: View {
     .navigationTitle("Search")
     .searchable(text: $searchText, prompt: "Search videos")
     .onSubmit(of: .search) {
+      // Explicit submit — this is the only path that records a recent search.
       searchTask?.cancel()
-      searchTask = Task { await search() }
+      searchTask = Task { await search(commit: true) }
     }
     .onChange(of: searchText) { _, newValue in
       if newValue.isEmpty {
@@ -326,8 +327,10 @@ private struct SearchView: View {
         debounceTask?.cancel()
         debounceTask = Task {
           if (try? await Task.sleep(for: .milliseconds(400))) != nil {
+            // Live/debounced search as you type — show results but do NOT save the
+            // partial query to recent searches (only an explicit submit does).
             searchTask?.cancel()
-            searchTask = Task { await search() }
+            searchTask = Task { await search(commit: false) }
           }
         }
       }
@@ -353,7 +356,10 @@ private struct SearchView: View {
     }
   }
 
-  private func search() async {
+  /// commit == true only on explicit submit (return key / tapping a recent search),
+  /// which is the only case that records the query into recent searches. Live
+  /// debounced searches pass false so partial phrases aren't saved.
+  private func search(commit: Bool) async {
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard query.count >= 2 else { return }
 
@@ -368,7 +374,7 @@ private struct SearchView: View {
         $0.title.localizedCaseInsensitiveContains(query)
       }
       searchError = nil
-      saveRecentSearch(query)
+      if commit { saveRecentSearch(query) }
       return
     }
 
@@ -376,7 +382,7 @@ private struct SearchView: View {
       let response = try await appState.api.search(query: query, limit: 100)
       results = response.items
       searchError = nil
-      saveRecentSearch(query)
+      if commit { saveRecentSearch(query) }
     } catch {
       appState.handleConnectionFailure(error)
       results = []
