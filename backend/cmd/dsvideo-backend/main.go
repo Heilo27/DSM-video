@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -535,6 +536,15 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	// Playback streams don't require auth — session ID is the security token
 	r.Get("/playback/{sessionId}/stream", s.handlePlaybackStream)
 	r.Get("/playback/{sessionId}/master.m3u8", s.handleHLSFile("master.m3u8"))
+	// fMP4 HLS writes the init segment and the .m4s media segments at the session
+	// ROOT (init.mp4, segment_NNNNN.m4s, ABR v0_init.mp4 / v0_NNNNN.m4s), and the
+	// playlist references them as bare names — so they're requested at the session
+	// root, NOT under /segments/. Without these routes every fMP4 transcode 404s
+	// its init+segments → "Playback Failed: resource unavailable". The suffix
+	// routes are matched before the {variant}.m3u8 wildcard by chi.
+	r.Get("/playback/{sessionId}/init.mp4", s.handleHLSSegmentRoot)
+	r.Get("/playback/{sessionId}/{name}.m4s", s.handleHLSSegmentRoot)
+	r.Get("/playback/{sessionId}/{name}.ts", s.handleHLSSegmentRoot)
 	r.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
 	r.Get("/playback/{sessionId}/segments/{name}", s.handleHLSSegment)
 
@@ -3324,6 +3334,37 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 	}
 	ext := strings.ToLower(filepath.Ext(name))
 	allowed := map[string]bool{".m4s": true, ".ts": true, ".mp4": true, ".m3u8": true}
+	if !allowed[ext] {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	ps, ok := s.getSession(sessionID)
+	if !ok || ps.Kind != "hls" || ps.HLSDir == "" {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	fullPath := filepath.Join(ps.HLSDir, name)
+	if !strings.HasPrefix(filepath.Clean(fullPath)+"/", filepath.Clean(ps.HLSDir)+"/") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	http.ServeFile(w, r, fullPath)
+}
+
+// handleHLSSegmentRoot serves an fMP4 init segment or a media segment that lives
+// at the session root (init.mp4, segment_NNNNN.m4s, v0_init.mp4, v0_NNNNN.m4s,
+// or legacy .ts). The filename is the last path component of the request — chi's
+// {name} param drops the extension on suffix routes, so we use the URL path
+// directly rather than reconstructing from {name}.
+func (s *Server) handleHLSSegmentRoot(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+	name := path.Base(r.URL.Path)
+	if name == "." || name == "/" || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\") {
+		writeErr(w, http.StatusBadRequest, "invalid_segment")
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	allowed := map[string]bool{".m4s": true, ".ts": true, ".mp4": true}
 	if !allowed[ext] {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

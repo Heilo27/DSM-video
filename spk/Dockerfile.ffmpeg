@@ -1,19 +1,30 @@
-# TASK-750: build a static ffmpeg/ffprobe for Synology x86_64 with hardware
-# acceleration enabled (VAAPI for Intel iGPU H.264 encode, plus the QSV path where
-# libmfx is present). Produces /out/ffmpeg and /out/ffprobe — copy these into the
-# package's bin/ directory via build-ffmpeg.sh.
+# TASK-750 / playback-codec fix: build a FULLY STATIC ffmpeg/ffprobe for Synology
+# x86_64. Produces /out/ffmpeg and /out/ffprobe with ZERO shared-library
+# dependencies — copy these into the package's bin/ via build-ffmpeg.sh.
 #
-# Why static: the package runs as an unprivileged user against whatever shared libs
-# DSM happens to ship; a static build with bundled VAAPI avoids version skew and the
-# "engages only if the system ffmpeg has the encoders" problem.
+# WHY FULLY STATIC (not just --enable-static):
+#   The previous build used --enable-static --disable-shared, which only makes
+#   ffmpeg's OWN libs (libavcodec etc.) static — external libs (libx264, libva,
+#   libdrm) were still linked dynamically. On the NAS those .so files don't exist
+#   in the loader path, so the binary failed at startup ("libdrm.so.2: cannot open
+#   shared object file"). The server then fell back to Synology's system ffmpeg,
+#   which is built with --disable-decoder=aac,ac3,dts,h264,hevc (licensing). Any
+#   file whose audio/video needed decoding from those codecs failed to transcode →
+#   "Playback Failed: resource unavailable". A truly static binary carries every
+#   codec with it and runs regardless of what DSM ships.
+#
+# WHY NO VAAPI: libva/libdrm pull in a dynamic driver model that can't be linked
+# fully static cleanly. The server already runs the software path on this hardware
+# (the bundled HW binary never actually ran), so we trade VAAPI HW encode for a
+# binary that ACTUALLY RUNS and decodes everything. Software x264 encode stays.
+#
+# The codecs that matter here are DECODERS (read the source file), all native to
+# ffmpeg and enabled by default: aac, ac3, eac3, dts, truehd, h264, hevc, mp3.
+# x264 is the software H.264 ENCODER for the HLS output.
 #
 # Usage (see build-ffmpeg.sh):
 #   docker build -f Dockerfile.ffmpeg -t dsvideo-ffmpeg .
 #   docker create --name ff dsvideo-ffmpeg && docker cp ff:/out ./ffmpeg-out
-#
-# NOTE: VAAPI runtime drivers (intel-media-driver / i965) live on the NAS, not in
-# this binary — we only need libva headers at build time. The render node must be
-# accessible at runtime (handled by postinst group membership).
 
 FROM ubuntu:22.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
@@ -21,9 +32,29 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     autoconf automake build-essential cmake git libtool pkg-config \
     nasm yasm wget xz-utils \
-    libva-dev libdrm-dev \
-    libx264-dev \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Build x264 as a STATIC archive (Ubuntu's libx264-dev ships only the shared lib,
+# which is what made the previous binary dynamic). --enable-static + no --enable-shared
+# yields libx264.a for a self-contained link.
+ARG X264_REV=stable
+RUN git clone --depth 1 --branch "${X264_REV}" https://code.videolan.org/videolan/x264.git && \
+    cd x264 && \
+    ./configure --prefix=/opt/static --enable-static --disable-cli --disable-opencl && \
+    make -j"$(nproc)" && make install
+
+# NOTE: x265 (HEVC software ENCODER) is intentionally NOT built. The server
+# encodes H.264 (x264) for HLS output — it never encodes HEVC. HEVC DECODE (reading
+# HEVC source files) is a native ffmpeg decoder needing no external lib, so HEVC
+# sources still play. Dropping x265 removes a fragile static-pkg-config dependency.
+
+# Build LAME (mp3 encoder) static — used by some transcode targets.
+RUN wget -q "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz" && \
+    tar xf lame-3.100.tar.gz && cd lame-3.100 && \
+    ./configure --prefix=/opt/static --enable-static --disable-shared --disable-frontend && \
+    make -j"$(nproc)" && make install
 
 WORKDIR /src
 
@@ -34,17 +65,21 @@ RUN wget -q "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" && \
 
 WORKDIR /src/ffmpeg-${FFMPEG_VERSION}
 
-# --enable-vaapi: Intel iGPU H.264 encode (h264_vaapi) + scale_vaapi.
-# libx264 stays in for the software fallback path the server uses when HW is absent.
-# Static linking keeps the binary self-contained on DSM.
+# Fully static link: -extra-ldflags=-static forces the external libs (x264/x265/
+# lame) and libc to be baked in. We deliberately do NOT enable vaapi/libdrm — those
+# can't static-link cleanly and aren't used on this hardware. Native ffmpeg decoders
+# (aac, ac3, eac3, dts, truehd, h264, hevc, mp3) are on by default; that's the whole
+# point of this rebuild.
+ENV PKG_CONFIG_PATH=/opt/static/lib/pkgconfig
 RUN ./configure \
       --prefix=/out \
       --pkg-config-flags="--static" \
+      --extra-cflags="-I/opt/static/include" \
+      --extra-ldflags="-L/opt/static/lib -static" \
       --enable-gpl \
       --enable-version3 \
       --enable-libx264 \
-      --enable-vaapi \
-      --enable-libdrm \
+      --enable-libmp3lame \
       --disable-debug \
       --disable-doc \
       --disable-ffplay \
@@ -53,13 +88,25 @@ RUN ./configure \
     make -j"$(nproc)" && \
     make install
 
-# Collect just the two binaries we ship.
+# Collect the two binaries we ship and HARD-VERIFY they are static + have the
+# decoders that were the whole reason for this rebuild. The build fails loudly if
+# the binary is still dynamic or any required decoder is missing.
 RUN mkdir -p /artifacts && \
     cp /out/bin/ffmpeg /artifacts/ffmpeg && \
     cp /out/bin/ffprobe /artifacts/ffprobe && \
     strip /artifacts/ffmpeg /artifacts/ffprobe && \
-    /artifacts/ffmpeg -hide_banner -encoders | grep -E "h264_vaapi" || \
-      (echo "ERROR: h264_vaapi not present in built ffmpeg" && exit 1)
+    echo "=== static check ===" && \
+    ( ldd /artifacts/ffmpeg 2>&1 | grep -q "not a dynamic executable" || \
+      (echo "ERROR: ffmpeg is NOT statically linked" && ldd /artifacts/ffmpeg && exit 1) ) && \
+    echo "=== decoder check ===" && \
+    for dec in aac ac3 eac3 dca truehd h264 hevc mp3; do \
+      /artifacts/ffmpeg -hide_banner -decoders 2>/dev/null | grep -qwE "$dec" || \
+        (echo "ERROR: decoder '$dec' missing from built ffmpeg" && exit 1); \
+    done && \
+    echo "=== encoder check ===" && \
+    /artifacts/ffmpeg -hide_banner -encoders 2>/dev/null | grep -qw libx264 || \
+      (echo "ERROR: libx264 encoder missing" && exit 1) && \
+    echo "All checks passed."
 
 FROM scratch AS export
 COPY --from=build /artifacts/ /out/
