@@ -28,6 +28,11 @@ type TrickplayConfig struct {
 	IntervalSecs float64 // Seconds between thumbnails (default 10)
 	TileWidth    int     // Thumbnail width in px (default 160; height keeps aspect)
 	Columns      int     // Tiles per sprite row (default 10)
+	// NicePriority is the OS scheduling nice level for the trickplay ffmpeg pass.
+	// TASK-752: trickplay is a background convenience and must never starve live
+	// playback for CPU, so the caller passes 19 (lowest possible). 0 = run without
+	// a nice wrapper. Mirrors HLSConfig.NicePriority / runFFmpegOnce.
+	NicePriority int
 }
 
 // GenerateTrickplay produces a sprite sheet + WebVTT for scrubbing previews using a
@@ -90,7 +95,8 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, videoPath, outDir string
 	vf := fmt.Sprintf("fps=1/%g,scale=%d:-2,tile=%dx%d", interval, tileW, cols, rows)
 	genCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(genCtx, ffmpegPath,
+
+	ffArgs := []string{
 		"-v", "error",
 		"-y",
 		"-i", videoPath,
@@ -98,7 +104,17 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, videoPath, outDir string
 		"-frames:v", "1",
 		"-q:v", "5",
 		spritePath,
-	)
+	}
+	// TASK-752: run the trickplay ffmpeg at the lowest OS priority so it yields CPU
+	// to live-playback transcodes (which run at HLSConfig.NicePriority=10). Mirrors
+	// the `nice` wrapper in hls.go runFFmpegOnce. nice<=0 means run unwrapped.
+	var cmd *exec.Cmd
+	if cfg.NicePriority > 0 {
+		niceArgs := append([]string{"-n", fmt.Sprintf("%d", cfg.NicePriority), ffmpegPath}, ffArgs...)
+		cmd = exec.CommandContext(genCtx, "nice", niceArgs...)
+	} else {
+		cmd = exec.CommandContext(genCtx, ffmpegPath, ffArgs...)
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		_ = os.Remove(spritePath)
 		return nil, fmt.Errorf("ffmpeg trickplay: %w: %s", err, strings.TrimSpace(string(out)))

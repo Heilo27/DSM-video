@@ -62,6 +62,13 @@ type Config struct {
 	HWAccel     string
 	VAAPIDevice string
 
+	// MaxFFmpeg is the process-wide ceiling on concurrent ffmpeg invocations across
+	// ALL subsystems (HLS transcode, trickplay sprites, subtitle conversion). TASK-752:
+	// 0 = auto (max(1, NumCPU/2)). Overridable via DSVIDEO_MAX_FFMPEG. On the 4-core
+	// NAS auto yields 2 — sized to avoid the OOM/CPU-kill that produced intermittent
+	// "transcode busy" / "resource unavailable" playback failures under load.
+	MaxFFmpeg int
+
 	// Metadata settings
 	TMDbAPIKey    string
 	ImageCacheDir string
@@ -100,12 +107,18 @@ type Server struct {
 	progressMu sync.Mutex
 
 	// Trick-play generation guards (TASK-740). Lazy sprite generation runs ffmpeg,
-	// so concurrent requests for the same item must collapse to one job, and total
-	// concurrent generations must be capped so trick-play can't starve the transcode
-	// pipeline. Mirrors the metaInFlight / metaSemaphore pattern.
-	trickplayMu        sync.Mutex
-	trickplayInFlight  map[string]chan struct{} // itemID → closed when its job finishes
-	trickplaySemaphore chan struct{}            // caps concurrent ffmpeg sprite passes
+	// so concurrent requests for the same item must collapse to one job. The
+	// total-concurrency cap is no longer a separate trickplay semaphore — TASK-752
+	// routes trickplay through the shared ffmpegLimiter below so it shares ONE budget
+	// with HLS transcode and subtitle conversion.
+	trickplayMu       sync.Mutex
+	trickplayInFlight map[string]chan struct{} // itemID → closed when its job finishes
+
+	// ffmpegLimiter is the single, process-wide ffmpeg admission budget shared by HLS
+	// transcode, trickplay, and subtitle conversion (TASK-752). The HLSGenerator also
+	// holds a reference (injected at startup); the Server holds it for the trickplay
+	// path. Trickplay TryAcquires (yields when saturated); playback Acquires (waits).
+	ffmpegLimiter *transcode.FFmpegLimiter
 
 	// Token revocation list: jti → expiry unix timestamp.
 	// KNOWN LIMITATION: this list is in-memory only and is cleared on server restart.
@@ -244,6 +257,23 @@ func main() {
 	hlsConfig.MaxConcurrent = 3
 	hlsGenerator := transcode.NewHLSGenerator(hlsConfig)
 
+	// TASK-752: one shared ffmpeg admission budget across every subsystem that spawns
+	// ffmpeg. The old design had TWO uncoordinated pools (HLS MaxConcurrent=3 plus a
+	// separate size-2 trickplay semaphore, with subtitle conversion ungated), allowing
+	// 5+ concurrent ffmpeg processes on a 4-core/3.8GB box with no HW encoder. The
+	// kernel OOM/CPU-killed them and HLS playlist generation missed the client's 30s
+	// window → intermittent "transcode busy"/"resource unavailable". The shared budget
+	// caps TOTAL ffmpeg concurrency. Auto-size = max(1, NumCPU/2); override via
+	// DSVIDEO_MAX_FFMPEG. HLS session admission/eviction (MaxConcurrent) is unchanged;
+	// this gates actual process launches.
+	ffmpegBudget := cfg.MaxFFmpeg
+	if ffmpegBudget <= 0 {
+		ffmpegBudget = transcode.DefaultFFmpegConcurrency()
+	}
+	ffmpegLimiter := transcode.NewFFmpegLimiter(ffmpegBudget)
+	hlsGenerator.SetFFmpegLimiter(ffmpegLimiter)
+	log.Printf("[transcode] shared ffmpeg concurrency budget: %d", ffmpegBudget)
+
 	cleanupConfig := transcode.DefaultCleanupConfig()
 	cleanupConfig.TempDir = cfg.TranscodeDir
 	cleanupManager := transcode.NewCleanupManager(cleanupConfig, hlsGenerator)
@@ -283,8 +313,8 @@ func main() {
 		metaSemaphore:  make(chan struct{}, 5), // max 5 concurrent TMDb lookups
 		pairingCodes:   make(map[string]pairingEntry),
 
-		trickplayInFlight:  make(map[string]chan struct{}),
-		trickplaySemaphore: make(chan struct{}, 2), // max 2 concurrent sprite passes
+		trickplayInFlight: make(map[string]chan struct{}),
+		ffmpegLimiter:     ffmpegLimiter,
 	}
 
 	// Warm the in-memory revocation cache from rows loaded above.
@@ -655,6 +685,15 @@ func loadConfig() Config {
 		TranscodeDir: get("DSVIDEO_TRANSCODE_DIR", filepath.Join(os.TempDir(), "dsvideo_transcode")),
 		HWAccel:      get("DSVIDEO_HW_ACCEL", "auto"),
 		VAAPIDevice:  get("DSVIDEO_VAAPI_DEVICE", "/dev/dri/renderD128"),
+		// TASK-752: shared ffmpeg concurrency ceiling. Empty/0/invalid = auto-size
+		// from CPU count at startup. Set explicitly only to override the default.
+		MaxFFmpeg: func() int {
+			n, err := strconv.Atoi(get("DSVIDEO_MAX_FFMPEG", "0"))
+			if err != nil || n < 0 {
+				return 0
+			}
+			return n
+		}(),
 
 		// Metadata settings
 		TMDbAPIKey:    get("DSVIDEO_TMDB_API_KEY", ""),
@@ -3207,8 +3246,13 @@ func (s *Server) trickplayDir(itemID string) string {
 //   - singleflight: concurrent requests for the SAME item collapse to one ffmpeg
 //     job; later callers wait for the in-flight job instead of racing on the same
 //     output file.
-//   - semaphore: total concurrent generations are capped so trick-play can't
-//     starve the HLS transcode pipeline.
+//   - shared ffmpeg limiter (TASK-752): total concurrent ffmpeg work is capped by
+//     ONE process-wide budget shared with HLS transcode + subtitle conversion. Unlike
+//     live playback, trickplay YIELDS — it TryAcquires with a short timeout and backs
+//     off if the budget is saturated by playback, returning a normal failure that the
+//     handler maps to "trickplay_unavailable" (the client degrades gracefully). This
+//     enforces the invariant: playback always eventually gets a slot, trickplay never
+//     starves it.
 //
 // Returns the result of the (possibly shared) generation attempt.
 func (s *Server) generateTrickplayOnce(ctx context.Context, itemID, path, outDir string, dur float64) error {
@@ -3242,15 +3286,20 @@ func (s *Server) generateTrickplayOnce(ctx context.Context, itemID, path, outDir
 		close(done)
 	}()
 
-	// Cap total concurrent ffmpeg sprite passes.
-	select {
-	case s.trickplaySemaphore <- struct{}{}:
-		defer func() { <-s.trickplaySemaphore }()
-	case <-ctx.Done():
-		return ctx.Err()
+	// Draw from the shared ffmpeg budget, but YIELD to live playback: try for a slot
+	// only briefly. If playback has the budget saturated, back off and let the caller
+	// return "trickplay_unavailable" rather than blocking a slot the player needs.
+	const trickplayAcquireTimeout = 2 * time.Second
+	if !s.ffmpegLimiter.TryAcquire(ctx, trickplayAcquireTimeout) {
+		return fmt.Errorf("ffmpeg budget saturated — trickplay deferred")
 	}
+	defer s.ffmpegLimiter.Release()
 
-	_, err := transcode.GenerateTrickplay(ctx, s.cfg.FFmpegPath, path, outDir, dur, transcode.TrickplayConfig{})
+	// nice 19 = lowest OS priority, so even once trickplay holds a slot it yields CPU
+	// to the playback transcode running at nice 10.
+	_, err := transcode.GenerateTrickplay(ctx, s.cfg.FFmpegPath, path, outDir, dur, transcode.TrickplayConfig{
+		NicePriority: 19,
+	})
 	return err
 }
 
