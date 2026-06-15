@@ -395,8 +395,15 @@ final class AppState {
           lastError = error
         }
       }
+      // If a candidate actually reached the server, the server's own error is the
+      // truth — surface it. Only fall back to "couldn't find" when the failure was
+      // purely a connectivity/resolution miss (no server ever answered). Otherwise a
+      // real 401/403 (wrong password, or account lacks app permission) gets hidden
+      // behind a misleading "check the QuickConnect ID" message.
       let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-      if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+      if let apiErr = lastError as? APIError, apiErr.serverReached {
+        loginError = apiErr.userMessage
+      } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
         loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
       } else {
         loginError = (lastError as? APIError)?.userMessage ?? "Login failed. Check that DSVideoServer is running on your NAS."

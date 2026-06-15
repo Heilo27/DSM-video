@@ -403,8 +403,29 @@ enum APIError: Error {
     switch self {
     case .network: return "Network error."
     case .http(let code): return "Server error (\(code))."
-    case .server(let msg): return msg.replacingOccurrences(of: "_", with: " ")
+    case .server(let msg):
+      // Map known server error codes to friendly, actionable text.
+      switch msg {
+      case "permission_denied":
+        return "Your account isn't allowed to use this app. Ask the server owner to grant you access in DSM → Control Panel → Application Privileges."
+      case "invalid_credentials":
+        return "Incorrect username or password."
+      case "account_disabled":
+        return "This account is disabled. Ask the server owner to enable it."
+      default:
+        return msg.replacingOccurrences(of: "_", with: " ")
+      }
     case .invalidURL: return "Invalid server URL."
+    }
+  }
+
+  /// True when the failure came back from the server itself (it was reached and
+  /// answered), as opposed to a connectivity/DNS/resolution miss. Used so the
+  /// login flow surfaces a real auth error instead of a generic "couldn't find".
+  var serverReached: Bool {
+    switch self {
+    case .server, .http: return true
+    case .network, .invalidURL: return false
     }
   }
 }
