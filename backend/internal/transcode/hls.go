@@ -14,6 +14,15 @@ import (
 	"time"
 )
 
+// defaultTranscodeMaxHeight is the resolution ceiling applied to FullTranscode
+// sessions that arrive with no explicit quality cap (maxHeight == 0). 720p is the
+// most a 4-core/3.8GB software-only NAS can sustain at realtime on a single
+// libx264 rung. It also guards against upscaling: the single-variant scale filter
+// is scale=-2:min(ih,720), so a sub-720p source keeps its native height. See the
+// ABR-disable note in StartSession for why ABR (which had a 1080p upscaling rung)
+// was retired on this hardware.
+const defaultTranscodeMaxHeight = 720
+
 // ABRVariant describes one rung of the adaptive bitrate ladder.
 type ABRVariant struct {
 	Height     int    // Max output height in pixels (e.g. 480, 720, 1080)
@@ -293,9 +302,35 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 	// session.cancel below) provides explicit cleanup via StopSession.
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// ABR is enabled when: full transcode mode, no explicit quality cap, and
-	// the config has a ladder defined. RemuxOnly can't resize without re-encode.
-	useABR := mode == FullTranscode && maxHeight == 0 && len(g.config.ABRLadder) > 0
+	// ABR is DISABLED. Confirmed live on the NAS (smoke test, 2026-06): the
+	// multi-variant fMP4 HLS muxer crashes on FullTranscode inputs whose video
+	// codec is not h264/hevc (e.g. mpeg4/XVID AVI, ~395 items in the library).
+	// The 3-rung ladder feeds one mpeg4 stream through `split -> libx264 ×3` and
+	// the muxer fails the var_stream_map header write:
+	//   [hls] Variant stream info update failed with status ffffffea
+	//   [out#0/hls] Could not write header (incorrect codec parameters ?)
+	//   Conversion failed!  -> 0 segments, no master.m3u8, client 503.
+	// The ABR path also has NO copy/hw->software fallback (unlike single-variant),
+	// so the session just dies. And the ladder was never realistic on this 4-core
+	// /3.8GB software-only NAS anyway — three concurrent libx264 rungs (one of
+	// which UPSCALES low-res sources to 1080p) can't sustain realtime here.
+	//
+	// Fix: force every session through the robust single-variant path — the same
+	// proven muxer config RemuxOnly and quality-capped transcodes already use. The
+	// ABR code (buildABRArgs / writeMasterPlaylist) is left in place but unreached
+	// so a future hardware-accelerated box can re-enable it.
+	useABR := false
+
+	// For FullTranscode sessions that previously would have gone ABR (no explicit
+	// quality cap, maxHeight == 0), apply a NAS-appropriate 720p ceiling so the
+	// single-variant path scales down to 720p max. The scale filter is
+	// `scale=-2:min(ih,720)`, so a 360p source is NOT upscaled (min picks 360) and
+	// a 1080p source is downscaled to 720 — a 4-core software-only NAS can sustain
+	// a single 720p libx264 rung where it could not sustain the ABR ladder.
+	// Only FullTranscode is capped; RemuxOnly/copy and DirectPlay are untouched.
+	if mode == FullTranscode && maxHeight == 0 {
+		maxHeight = defaultTranscodeMaxHeight
+	}
 
 	session := &HLSSession{
 		SessionID:      sessionID,
