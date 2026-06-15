@@ -77,9 +77,24 @@ type HLSGenerator struct {
 	// software). Determined once at construction from config.HWAccel + ffmpeg probe.
 	hwEncoder string
 
+	// limiter is the SHARED, process-wide ffmpeg admission budget (TASK-752). Every
+	// ffmpeg launch from this generator — the main transcode pass AND the per-track
+	// subtitle conversion passes — acquires a slot here so HLS work is counted in the
+	// same budget as trickplay. The g.active/MaxConcurrent accounting above still
+	// governs HLS *session* admission (and idle-session eviction); the limiter governs
+	// actual *ffmpeg process* concurrency across all subsystems. May be nil in tests.
+	limiter *FFmpegLimiter
+
 	mu        sync.Mutex
 	active    int                     // Number of active transcodes
 	sessions  map[string]*HLSSession  // Active HLS sessions
+}
+
+// SetFFmpegLimiter injects the shared ffmpeg admission budget. Called once at
+// startup (see main) so HLS, trickplay, and subtitle conversion all draw from one
+// pool. Safe to call with nil to disable shared limiting (tests).
+func (g *HLSGenerator) SetFFmpegLimiter(l *FFmpegLimiter) {
+	g.limiter = l
 }
 
 // SubtitleTrack describes an external subtitle file to include in HLS output.
@@ -381,6 +396,18 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 // runFFmpegOnce builds and runs a single ffmpeg invocation for the session with
 // the given args, in its own process group, capturing stderr to ffmpeg.log.
 func (g *HLSGenerator) runFFmpegOnce(ctx context.Context, session *HLSSession, args []string) error {
+	// TASK-752: acquire a slot in the SHARED ffmpeg budget before spawning the
+	// process. This is the only place an HLS ffmpeg process is actually launched
+	// (both the initial pass and the HW-failure software retry route through here),
+	// so it's the right choke point. Live playback uses the blocking Acquire — it
+	// always eventually gets a slot — while trickplay yields (see generateTrickplayOnce).
+	// Acquire is context-aware so a cancelled playback won't deadlock waiting on a
+	// saturated budget. The slot is held for the full ffmpeg run and released on exit.
+	if err := g.limiter.Acquire(ctx); err != nil {
+		return err
+	}
+	defer g.limiter.Release()
+
 	var cmd *exec.Cmd
 	if g.config.NicePriority > 0 {
 		niceArgs := []string{"-n", fmt.Sprintf("%d", g.config.NicePriority), g.config.FFmpegPath}
@@ -491,10 +518,21 @@ func (g *HLSGenerator) addSubtitleRenditions(ctx context.Context, session *HLSSe
 			vttPath,
 		)
 
+		// TASK-752: subtitle conversion is also an ffmpeg pass and was previously
+		// ungated entirely — it could push total ffmpeg processes past the budget
+		// while a transcode was running. Draw from the shared limiter like everything
+		// else. These passes run after the main transcode for the same session, so a
+		// blocking Acquire is fine (the session already proved it can get a slot).
+		if err := g.limiter.Acquire(ctx); err != nil {
+			log.Printf("[HLS] subtitle convert aborted (track %d %s): %v", i, sub.Language, err)
+			return
+		}
 		subCmd := exec.CommandContext(ctx, g.config.FFmpegPath, ffArgs...)
 		subCmd.Stdout = io.Discard
 		subCmd.Stderr = io.Discard
-		if err := subCmd.Run(); err != nil {
+		err := subCmd.Run()
+		g.limiter.Release()
+		if err != nil {
 			log.Printf("[HLS] subtitle convert failed (track %d %s): %v", i, sub.Language, err)
 			continue
 		}
@@ -565,7 +603,10 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 		)
 	}
 
-	args := []string{"-y"}
+	// -fflags +genpts regenerates presentation timestamps for sources with missing
+	// or broken PTS. Combined with -avoid_negative_ts on the output, this keeps the
+	// fMP4 muxer from emitting segments with corrupt timing.
+	args := []string{"-y", "-fflags", "+genpts"}
 	args = append(args, pre...)
 	args = append(args, "-i", session.VideoPath)
 
@@ -577,7 +618,36 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 
 	switch session.Mode {
 	case RemuxOnly:
-		args = append(args, "-c:v", "copy")
+		// IMPORTANT: do NOT "-c:v copy" here. RemuxOnly sources are H.264-in-MKV,
+		// and many such files carry non-monotonic / duplicate DTS in the elementary
+		// stream. Copying preserves those broken timestamps into the fMP4 HLS output,
+		// which AVPlayer rejects with "resource unavailable" — the failure was
+		// reproducible on exactly these files (e.g. mkv episodes with duplicate DTS).
+		// Re-encoding the video regenerates clean, monotonic timestamps. It costs CPU
+		// vs a copy, but a file that plays beats a file that 404s its segments.
+		// (When HW encode is available and not force-disabled, use it.)
+		switch {
+		case enc == "vaapi":
+			args = append(args,
+				"-vf", "format=nv12,hwupload",
+				"-c:v", "h264_vaapi",
+				"-qp", fmt.Sprintf("%d", g.config.VideoCRF),
+			)
+		case enc == "qsv":
+			args = append(args,
+				"-c:v", "h264_qsv",
+				"-global_quality", fmt.Sprintf("%d", g.config.VideoCRF),
+				"-pix_fmt", "nv12",
+			)
+		default:
+			args = append(args,
+				"-c:v", "libx264",
+				"-preset", g.config.VideoPreset,
+				"-crf", fmt.Sprintf("%d", g.config.VideoCRF),
+				"-threads", fmt.Sprintf("%d", g.config.Threads),
+				"-pix_fmt", "yuv420p",
+			)
+		}
 	case FullTranscode:
 		switch {
 		case enc == "vaapi":
@@ -622,9 +692,14 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 	args = append(args,
 		"-map", "0:v:0",
 		"-map", "0:a:0?",
-		"-c:a", "libmp3lame",
+		// AAC, not MP3: fMP4/CMAF segments expect AAC audio, and MP3-in-fMP4 is a
+		// second source of "resource unavailable" on some players. AAC is also what
+		// Apple devices want natively.
+		"-c:a", "aac",
 		"-b:a", g.config.AudioBitrate,
 		"-ac", "2",
+		// Normalize start timestamps so the first segment doesn't carry negative ts.
+		"-avoid_negative_ts", "make_zero",
 	)
 
 	segDur := g.config.SegmentSeconds
@@ -672,7 +747,7 @@ func (g *HLSGenerator) buildABRArgs(session *HLSSession) []string {
 	threads := g.config.Threads
 	n := len(ladder)
 
-	args := []string{"-y", "-i", session.VideoPath}
+	args := []string{"-y", "-fflags", "+genpts", "-i", session.VideoPath}
 
 	// filter_complex: split + scale each rung
 	splitOut := ""
@@ -700,12 +775,14 @@ func (g *HLSGenerator) buildABRArgs(session *HLSSession) []string {
 		)
 	}
 
-	// Single audio stream shared across all variants
+	// Single audio stream shared across all variants. AAC (not MP3) — fMP4/CMAF
+	// segments expect AAC and it's what Apple devices play natively.
 	args = append(args,
 		"-map", "0:a:0?",
-		"-c:a", "libmp3lame",
+		"-c:a", "aac",
 		"-b:a", g.config.AudioBitrate,
 		"-ac", "2",
+		"-avoid_negative_ts", "make_zero",
 	)
 
 	// var_stream_map tells ffmpeg which video+audio streams form each variant group
