@@ -663,7 +663,7 @@ struct GestureVideoPlayer: View {
                     currentTime = 0
                     if isPlaying { scheduleHideControls() }
                 } label: {
-                    Image(systemName: "gobackward.end")
+                    Image(systemName: "backward.end.fill")
                         .font(.system(size: 20))
                         .foregroundStyle(.white)
                         .frame(minWidth: 44, minHeight: 44)
@@ -731,7 +731,7 @@ struct GestureVideoPlayer: View {
                     currentTime = t
                     if isPlaying { scheduleHideControls() }
                 } label: {
-                    Image(systemName: "goforward.end")
+                    Image(systemName: "forward.end.fill")
                         .font(.system(size: 20))
                         .foregroundStyle(.white)
                         .frame(minWidth: 44, minHeight: 44)
