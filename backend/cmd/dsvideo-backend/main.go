@@ -98,6 +98,14 @@ type Server struct {
 	// Serializes progress writes to avoid SQLite busy-timeout under concurrent playback.
 	progressMu sync.Mutex
 
+	// Trick-play generation guards (TASK-740). Lazy sprite generation runs ffmpeg,
+	// so concurrent requests for the same item must collapse to one job, and total
+	// concurrent generations must be capped so trick-play can't starve the transcode
+	// pipeline. Mirrors the metaInFlight / metaSemaphore pattern.
+	trickplayMu        sync.Mutex
+	trickplayInFlight  map[string]chan struct{} // itemID → closed when its job finishes
+	trickplaySemaphore chan struct{}            // caps concurrent ffmpeg sprite passes
+
 	// Token revocation list: jti → expiry unix timestamp.
 	// KNOWN LIMITATION: this list is in-memory only and is cleared on server restart.
 	// Any tokens revoked before a restart (e.g. via logout) will be re-accepted by a
@@ -267,6 +275,9 @@ func main() {
 		metaInFlight:   make(map[string]bool),
 		metaSemaphore:  make(chan struct{}, 5), // max 5 concurrent TMDb lookups
 		pairingCodes:   make(map[string]pairingEntry),
+
+		trickplayInFlight:  make(map[string]chan struct{}),
+		trickplaySemaphore: make(chan struct{}, 2), // max 2 concurrent sprite passes
 	}
 
 	// Warm the in-memory revocation cache from rows loaded above.
@@ -532,14 +543,16 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	r.Get("/tmdb/image", s.handleTMDbImageProxy)
 	r.Get("/version", s.handleVersion)
 
-	// TASK-740: trick-play scrubbing previews. The .vtt request lazily generates the
-	// sprite + VTT (cached per item); the sprite is then served from the same dir.
-	r.Get("/trickplay/{itemId}/trickplay.vtt", s.handleTrickplayVTT)
-	r.Get("/trickplay/{itemId}/trickplay.jpg", s.handleTrickplaySprite)
-
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
 		r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
+
+		// TASK-740: trick-play scrubbing previews. The .vtt request lazily generates
+		// the sprite + VTT (cached per item) via ffmpeg, so it MUST be authenticated —
+		// an unauthenticated generation trigger lets anyone spin up arbitrary ffmpeg
+		// jobs and DoS the NAS. The client sends the Bearer token on both requests.
+		r.Get("/trickplay/{itemId}/trickplay.vtt", s.handleTrickplayVTT)
+		r.Get("/trickplay/{itemId}/trickplay.jpg", s.handleTrickplaySprite)
 
 		// Pairing generate requires auth — caller's identity seeds the tvOS token
 		r.Post("/auth/pairing/generate", s.handlePairingGenerate)
@@ -1010,6 +1023,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	dsmUser, err := s.authenticateDSM(r.Context(), req.Username, req.Password, req.OTP, "")
 	if err != nil {
 		log.Printf("DSM auth failed (username redacted): %v", err)
+		// Distinguish a permission denial (correct password, account not authorized
+		// for this app) from a bad password so the client can guide the user to
+		// DSM → Application Privileges instead of telling them their password is wrong.
+		if _, ok := err.(*dsmPermissionError); ok {
+			writeErr(w, http.StatusForbidden, "permission_denied")
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials")
 		return
 	}
@@ -1045,6 +1065,14 @@ type dsmTwoFactorError struct {
 }
 
 func (e *dsmTwoFactorError) Error() string { return "2fa_required" }
+
+// dsmPermissionError is returned when DSM accepts the credentials but denies the
+// account permission to use this application (DSM error 402). Distinct from
+// invalid credentials so the client can tell the user it's a permissions issue,
+// not a wrong password.
+type dsmPermissionError struct{}
+
+func (e *dsmPermissionError) Error() string { return "permission_denied" }
 
 // authenticateDSM validates credentials against Synology DSM WebAPI.
 // Uses auth.cgi (DSM legacy endpoint) instead of entry.cgi to avoid a
@@ -1163,6 +1191,11 @@ func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, d
 			return nil, fmt.Errorf("invalid credentials")
 		case 401:
 			return nil, fmt.Errorf("account disabled")
+		case 402:
+			// DSM authenticated the password but the account lacks permission to
+			// use this application. Standard (non-admin) DSM users hit this until
+			// they're granted access in DSM → Control Panel → Application Privileges.
+			return nil, &dsmPermissionError{}
 		case 403:
 			// Carry the raw DSM response so the caller can relay it verbatim
 			// to the client — the DS Video app needs any extra fields (did, etc.)
@@ -3154,6 +3187,57 @@ func (s *Server) trickplayDir(itemID string) string {
 	return filepath.Join(s.cfg.TranscodeDir, "trickplay", sanitizeID(itemID))
 }
 
+// generateTrickplayOnce runs sprite generation for an item with two guards:
+//   - singleflight: concurrent requests for the SAME item collapse to one ffmpeg
+//     job; later callers wait for the in-flight job instead of racing on the same
+//     output file.
+//   - semaphore: total concurrent generations are capped so trick-play can't
+//     starve the HLS transcode pipeline.
+//
+// Returns the result of the (possibly shared) generation attempt.
+func (s *Server) generateTrickplayOnce(ctx context.Context, itemID, path, outDir string, dur float64) error {
+	// Fast path: already generated.
+	if _, err := os.Stat(filepath.Join(outDir, "trickplay.vtt")); err == nil {
+		return nil
+	}
+
+	s.trickplayMu.Lock()
+	if done, inflight := s.trickplayInFlight[itemID]; inflight {
+		s.trickplayMu.Unlock()
+		// Another request is already generating this item — wait for it.
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if _, err := os.Stat(filepath.Join(outDir, "trickplay.vtt")); err == nil {
+			return nil
+		}
+		return fmt.Errorf("trickplay generation failed (shared job)")
+	}
+	done := make(chan struct{})
+	s.trickplayInFlight[itemID] = done
+	s.trickplayMu.Unlock()
+
+	defer func() {
+		s.trickplayMu.Lock()
+		delete(s.trickplayInFlight, itemID)
+		s.trickplayMu.Unlock()
+		close(done)
+	}()
+
+	// Cap total concurrent ffmpeg sprite passes.
+	select {
+	case s.trickplaySemaphore <- struct{}{}:
+		defer func() { <-s.trickplaySemaphore }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	_, err := transcode.GenerateTrickplay(ctx, s.cfg.FFmpegPath, path, outDir, dur, transcode.TrickplayConfig{})
+	return err
+}
+
 // handleTrickplayVTT lazily generates (and caches) the sprite + VTT for an item,
 // then serves the VTT. Generation is best-effort; failures return 404 so the client
 // simply shows no scrub preview.
@@ -3177,7 +3261,7 @@ func (s *Server) handleTrickplayVTT(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	outDir := s.trickplayDir(itemID)
-	if _, err := transcode.GenerateTrickplay(r.Context(), s.cfg.FFmpegPath, path, outDir, dur, transcode.TrickplayConfig{}); err != nil {
+	if err := s.generateTrickplayOnce(r.Context(), itemID, path, outDir, dur); err != nil {
 		log.Printf("[trickplay] generate failed for %s: %v", itemID, err)
 		writeErr(w, http.StatusNotFound, "trickplay_unavailable")
 		return
