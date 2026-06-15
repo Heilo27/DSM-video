@@ -1114,6 +1114,15 @@ struct GestureVideoPlayer: View {
     // MARK: - Player Controls
 
     private func setupPlayer() {
+        // C1: If a player already exists (e.g. the view re-appeared because PiP
+        // is restoring to full screen), don't rebuild it — that would tear down
+        // the live AVPlayer driving the PiP window and reset playback to 0.
+        // Just re-arm the idle timer and return; the existing observers/Now Playing
+        // were preserved through the PiP-aware cleanup().
+        if player != nil {
+            UIApplication.shared.isIdleTimerDisabled = true
+            return
+        }
         didSetupPlayer = true
         // Keep the screen awake during playback. Without this, tvOS shows the
         // screensaver and iOS auto-locks during long, interaction-free stretches
@@ -1363,14 +1372,27 @@ struct GestureVideoPlayer: View {
     }
 
     private func cleanup() {
+        #if os(iOS)
+        // C1: Entering Picture-in-Picture dismisses the full-screen player view,
+        // which fires .onDisappear → cleanup(). If we tore everything down here,
+        // PiP would die the instant it started (and the idle timer / Now Playing
+        // would be wiped out from under it). When PiP is live, do only the
+        // non-destructive UI-timer cleanup and bail — the player, observers,
+        // audio session, idle timer, Now Playing, and the PiP controller all stay
+        // alive so playback continues in the floating window. The real teardown
+        // runs on the next cleanup() after PiP stops and the view dismisses for real.
+        if isPiPActive {
+            hideControlsTask?.cancel()
+            hideVolumeIndicatorTask?.cancel()
+            skipHideTask?.cancel()
+            controlsHideTask?.cancel()
+            return
+        }
+        #endif
         // Re-enable auto-lock / screensaver now that playback is ending.
         UIApplication.shared.isIdleTimerDisabled = false
         teardownNowPlaying()
         #if os(iOS)
-        if isPiPActive {
-            pipController?.stopPictureInPicture()
-            // isPiPActive will be set false by the delegate
-        }
         pipController?.delegate = nil
         pipController = nil
         pipDelegate = nil
