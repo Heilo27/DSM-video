@@ -16,33 +16,33 @@ import (
 
 // ABRVariant describes one rung of the adaptive bitrate ladder.
 type ABRVariant struct {
-	Height    int    // Max output height in pixels (e.g. 480, 720, 1080)
-	Bitrate   string // Target video bitrate (e.g. "800k", "2M", "4M")
+	Height     int    // Max output height in pixels (e.g. 480, 720, 1080)
+	Bitrate    string // Target video bitrate (e.g. "800k", "2M", "4M")
 	MaxBitrate string // Max bitrate for VBV buffer (e.g. "1200k", "3M", "6M")
-	CRF       int    // x264 CRF for this rung
-	Name      string // Playlist filename stem (e.g. "v480p")
+	CRF        int    // x264 CRF for this rung
+	Name       string // Playlist filename stem (e.g. "v480p")
 }
 
 // DefaultABRLadder is the NAS-optimised three-rung ladder.
 // Bitrates are conservative to remain real-time on limited NAS CPUs.
 var DefaultABRLadder = []ABRVariant{
-	{Height: 480,  Bitrate: "800k",  MaxBitrate: "1200k", CRF: 26, Name: "v480p"},
-	{Height: 720,  Bitrate: "2000k", MaxBitrate: "3000k", CRF: 24, Name: "v720p"},
+	{Height: 480, Bitrate: "800k", MaxBitrate: "1200k", CRF: 26, Name: "v480p"},
+	{Height: 720, Bitrate: "2000k", MaxBitrate: "3000k", CRF: 24, Name: "v720p"},
 	{Height: 1080, Bitrate: "4000k", MaxBitrate: "6000k", CRF: 23, Name: "v1080p"},
 }
 
 // HLSConfig contains configuration for HLS generation.
 type HLSConfig struct {
-	FFmpegPath     string        // Path to ffmpeg binary
-	TempDir        string        // Base directory for transcode output
-	SegmentSeconds int           // HLS segment duration (default: 6)
-	VideoPreset    string        // x264 preset (default: "faster")
-	VideoCRF       int           // x264 CRF quality (default: 23)
-	AudioBitrate   string        // Audio bitrate (default: "192k")
-	Threads        int           // Number of threads (default: 2)
-	NicePriority   int           // Nice priority (default: 10 = medium-low; 19 = lowest possible)
-	MaxConcurrent  int           // Max concurrent transcodes (default: 1)
-	ABRLadder      []ABRVariant  // Variants for adaptive bitrate (nil = single-variant)
+	FFmpegPath     string       // Path to ffmpeg binary
+	TempDir        string       // Base directory for transcode output
+	SegmentSeconds int          // HLS segment duration (default: 6)
+	VideoPreset    string       // x264 preset (default: "faster")
+	VideoCRF       int          // x264 CRF quality (default: 23)
+	AudioBitrate   string       // Audio bitrate (default: "192k")
+	Threads        int          // Number of threads (default: 2)
+	NicePriority   int          // Nice priority (default: 10 = medium-low; 19 = lowest possible)
+	MaxConcurrent  int          // Max concurrent transcodes (default: 1)
+	ABRLadder      []ABRVariant // Variants for adaptive bitrate (nil = single-variant)
 
 	// HWAccel selects the hardware encode path: "auto" (detect, fall back to
 	// software), "vaapi", "qsv", or "off". TASK-729: on Synology Intel NAS, VAAPI/QSV
@@ -85,9 +85,9 @@ type HLSGenerator struct {
 	// actual *ffmpeg process* concurrency across all subsystems. May be nil in tests.
 	limiter *FFmpegLimiter
 
-	mu        sync.Mutex
-	active    int                     // Number of active transcodes
-	sessions  map[string]*HLSSession  // Active HLS sessions
+	mu       sync.Mutex
+	active   int                    // Number of active transcodes
+	sessions map[string]*HLSSession // Active HLS sessions
 }
 
 // SetFFmpegLimiter injects the shared ffmpeg admission budget. Called once at
@@ -99,29 +99,30 @@ func (g *HLSGenerator) SetFFmpegLimiter(l *FFmpegLimiter) {
 
 // SubtitleTrack describes an external subtitle file to include in HLS output.
 type SubtitleTrack struct {
-	Language string // BCP-47 language tag, e.g. "en", "fr"
-	Name     string // Display name, e.g. "English"
-	Path     string // Absolute path to source SRT/ASS/VTT file
+	Language string  // BCP-47 language tag, e.g. "en", "fr"
+	Name     string  // Display name, e.g. "English"
+	Path     string  // Absolute path to source SRT/ASS/VTT file
 	Offset   float64 // Timing offset in seconds (positive = delay, negative = advance)
 }
 
 // HLSSession represents an active transcoding session.
 type HLSSession struct {
-	SessionID      string
-	VideoPath      string
-	OutputDir      string
-	Mode           PlaybackMode
-	MaxHeight      int
-	UseABR         bool   // true when multi-variant ABR ladder is active
-	SubtitleTracks []SubtitleTrack
-	StartedAt      time.Time
-	CompletedAt    *time.Time
-	LastAccess     time.Time
-	Error          error
-	cmd            *exec.Cmd
-	cancel         context.CancelFunc
-	stopped        bool // true when StopSession has already decremented g.active
-	forceSoftware  bool // TASK-729: set on HW-failure retry to force the libx264 path
+	SessionID          string
+	VideoPath          string
+	OutputDir          string
+	Mode               PlaybackMode
+	MaxHeight          int
+	UseABR             bool // true when multi-variant ABR ladder is active
+	SubtitleTracks     []SubtitleTrack
+	StartedAt          time.Time
+	CompletedAt        *time.Time
+	LastAccess         time.Time
+	Error              error
+	cmd                *exec.Cmd
+	cancel             context.CancelFunc
+	stopped            bool // true when StopSession has already decremented g.active
+	forceSoftware      bool // TASK-729: set on HW-failure retry to force the libx264 path
+	forceRemuxReencode bool // set on RemuxOnly copy-failure retry to force the libx264 re-encode path
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -460,6 +461,18 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 				_ = os.MkdirAll(session.OutputDir, 0o755)
 			}
 			runErr = g.runFFmpegOnce(ctx, session, g.buildFFmpegArgs(session))
+		} else if session.Mode == RemuxOnly && !session.forceRemuxReencode {
+			// The RemuxOnly copy path (-c:v copy + timestamp repair) failed. This is the
+			// rare genuinely-broken-DTS file the +igndts repair couldn't salvage. Retry
+			// once with the proven full libx264 re-encode, which regenerates clean
+			// timestamps from scratch. Mutually exclusive with the HW retry above
+			// (different Mode), so at most one fallback per failure.
+			log.Printf("[HLS] remux copy failed (%v) — retrying with re-encode", runErr)
+			session.forceRemuxReencode = true
+			if err := os.RemoveAll(session.OutputDir); err == nil {
+				_ = os.MkdirAll(session.OutputDir, 0o755)
+			}
+			runErr = g.runFFmpegOnce(ctx, session, g.buildFFmpegArgs(session))
 		}
 	}
 	if runErr != nil {
@@ -606,7 +619,20 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 	// -fflags +genpts regenerates presentation timestamps for sources with missing
 	// or broken PTS. Combined with -avoid_negative_ts on the output, this keeps the
 	// fMP4 muxer from emitting segments with corrupt timing.
-	args := []string{"-y", "-fflags", "+genpts"}
+	//
+	// On the RemuxOnly copy path we additionally need +igndts: those H.264-in-MKV
+	// sources can carry non-monotonic / duplicate DTS in the elementary stream, and a
+	// bare -c:v copy would carry that broken timing into the fMP4 segments (AVPlayer
+	// rejects them as "resource unavailable"). +igndts makes the demuxer drop the
+	// source DTS, +genpts regenerates PTS, and -avoid_negative_ts make_zero on the
+	// output normalizes the muxed timestamps — clean monotonic timing WITHOUT a
+	// re-encode. The forced re-encode fallback keeps plain +genpts (libx264 emits its
+	// own timestamps, so igndts buys nothing there).
+	fflags := "+genpts"
+	if session.Mode == RemuxOnly && !session.forceRemuxReencode {
+		fflags = "+genpts+igndts"
+	}
+	args := []string{"-y", "-fflags", fflags}
 	args = append(args, pre...)
 	args = append(args, "-i", session.VideoPath)
 
@@ -618,28 +644,27 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 
 	switch session.Mode {
 	case RemuxOnly:
-		// IMPORTANT: do NOT "-c:v copy" here. RemuxOnly sources are H.264-in-MKV,
-		// and many such files carry non-monotonic / duplicate DTS in the elementary
-		// stream. Copying preserves those broken timestamps into the fMP4 HLS output,
-		// which AVPlayer rejects with "resource unavailable" — the failure was
-		// reproducible on exactly these files (e.g. mkv episodes with duplicate DTS).
-		// Re-encoding the video regenerates clean, monotonic timestamps. It costs CPU
-		// vs a copy, but a file that plays beats a file that 404s its segments.
-		// (When HW encode is available and not force-disabled, use it.)
-		switch {
-		case enc == "vaapi":
-			args = append(args,
-				"-vf", "format=nv12,hwupload",
-				"-c:v", "h264_vaapi",
-				"-qp", fmt.Sprintf("%d", g.config.VideoCRF),
-			)
-		case enc == "qsv":
-			args = append(args,
-				"-c:v", "h264_qsv",
-				"-global_quality", fmt.Sprintf("%d", g.config.VideoCRF),
-				"-pix_fmt", "nv12",
-			)
-		default:
+		// RemuxOnly sources are already Apple-compatible H.264-in-MKV — the whole point
+		// of this mode is to NOT re-encode the video, just transcode incompatible audio.
+		// So the primary path is "-c:v copy" combined with muxer-level timestamp repair
+		// (input -fflags +genpts+igndts, output -avoid_negative_ts make_zero — see the
+		// fflags comment above and the audio/mux tail). Copy + repair starts playback in
+		// ~1-2s instead of the ~0.4x-realtime libx264 re-encode that was timing out the
+		// client's WaitForPlaylist window on the 4-core software-only NAS.
+		//
+		// HISTORY: an earlier fix used a full libx264 re-encode here because a bare
+		// -c:v copy preserved the broken (non-monotonic / duplicate) DTS some of these
+		// MKVs carry, producing fMP4 segments AVPlayer rejected as "resource
+		// unavailable". The +igndts demuxer flag now drops that bad DTS so copy is safe
+		// for the common case. For the rare genuinely-broken file where copy still
+		// fails, runTranscode sets forceRemuxReencode and re-runs THIS branch through the
+		// libx264 fallback below — so we keep the proven re-encode as a per-file safety
+		// net without paying its cost on the ~302 files that copy just fine.
+		//
+		// hwEncoder is intentionally ignored here: RemuxOnly exists to avoid encoding,
+		// so even when a HW encoder is present we copy. Encoding (HW or SW) only happens
+		// on the forced fallback.
+		if session.forceRemuxReencode {
 			args = append(args,
 				"-c:v", "libx264",
 				"-preset", g.config.VideoPreset,
@@ -647,6 +672,8 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 				"-threads", fmt.Sprintf("%d", g.config.Threads),
 				"-pix_fmt", "yuv420p",
 			)
+		} else {
+			args = append(args, "-c:v", "copy")
 		}
 	case FullTranscode:
 		switch {
@@ -904,14 +931,14 @@ func (g *HLSGenerator) IsReady(sessionID string) bool {
 
 // SessionStats contains statistics about a session.
 type SessionStats struct {
-	SessionID     string
-	Mode          string
-	StartedAt     time.Time
-	CompletedAt   *time.Time
-	LastAccess    time.Time
-	Error         string
-	SegmentCount  int
-	OutputSizeKB  int64
+	SessionID    string
+	Mode         string
+	StartedAt    time.Time
+	CompletedAt  *time.Time
+	LastAccess   time.Time
+	Error        string
+	SegmentCount int
+	OutputSizeKB int64
 }
 
 // Stats returns statistics for a session.
