@@ -176,13 +176,18 @@ struct TVShowsView: View {
           .padding(.top, 60)
         } else {
           LazyVGrid(columns: columns, spacing: 44) {
-            ForEach(displayedShows) { show in
+            // Key on gridID (id + title), NOT id: two distinct shows can share one
+            // folder and therefore an `id` (e.g. both Daredevils under Daredevil/),
+            // which would collapse the duplicate cells and blank one. Matches the iOS
+            // branch; detail navigation still uses show.id for the API lookup.
+            ForEach(displayedShows, id: \.gridID) { show in
               NavigationLink {
                 TVShowDetailView(show: show, library: library)
               } label: {
                 TVShowPosterCell(show: show)
               }
               .buttonStyle(.card)
+              .id(show.gridID)
               .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")\(show.seasonCount.map { ", \($0) season\($0 == 1 ? "" : "s")" } ?? "")")
               .accessibilityHint("Opens show details")
             }
