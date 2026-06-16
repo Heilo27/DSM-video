@@ -132,7 +132,18 @@ struct AuthenticatedImage: View {
   @State private var image: Image?
   @State private var isLoading: Bool = false
   @State private var didFail: Bool = false
+  // Monotonic load generation. Captured at the start of each loadIfNeeded() and
+  // re-checked before every @State write, so a fetch that completes AFTER its cell
+  // was recycled to a different URL (fast flinging) is discarded instead of writing
+  // a stale poster into the reused cell.
+  @State private var loadGeneration: Int = 0
   #endif
+
+  // Composite identity for the load task: a token refresh keeps the same URL, so a
+  // task keyed on url alone would not re-fire and a cell that hit a 401 before the
+  // refresh would stay stuck on the broken-image glyph. Keying on url + token makes
+  // the load restart when either changes.
+  private var loadKey: String { "\(url?.absoluteString ?? "")|\(token ?? "")" }
 
   var body: some View {
     #if canImport(UIKit)
@@ -172,18 +183,16 @@ struct AuthenticatedImage: View {
           }
       }
     }
-    .task(id: url) {
-      // Keyed on url: SwiftUI cancels and restarts this task whenever the cell is
-      // reused with a different URL, so a recycled cell always loads its own poster.
+    .task(id: loadKey) {
+      // Keyed on url + token: SwiftUI cancels and restarts this task whenever the
+      // cell is reused with a different URL OR the auth token changes (e.g. after a
+      // refresh), so a recycled cell always loads its own poster and a cell that hit
+      // a 401 retries once the new token is available.
       await loadIfNeeded()
     }
-    .onChange(of: url) { oldURL, newURL in
-      // Reload whenever the URL actually changes to a different non-nil value.
-      // Covers nil→URL (QC ID resolved after reconnect) AND URL→different-URL
-      // (metadata refresh bumps a ?v= cache-buster, and cell recycling swaps the
-      // URL to a different show) — reset state so loadIfNeeded()'s `image == nil`
-      // guard passes and we fetch the new URL instead of showing the stale one.
-      guard oldURL != newURL else { return }
+    .onChange(of: loadKey) { _, _ in
+      // URL or token changed — reset state so loadIfNeeded()'s `image == nil` guard
+      // passes and we fetch fresh instead of showing the stale poster / stuck glyph.
       image = nil
       didFail = false
       isLoading = false
@@ -193,22 +202,27 @@ struct AuthenticatedImage: View {
   private func loadIfNeeded() async {
     guard let url, !isLoading, image == nil else { return }
 
+    // Capture this load's generation. Every @State write below is gated on it still
+    // being current, so a completion that lands after the cell was recycled to a
+    // different URL/token is dropped instead of writing a stale image.
+    loadGeneration += 1
+    let generation = loadGeneration
+    let isCurrent = { generation == loadGeneration }
+
     // Single actor turn: cache hit, join in-flight, or signal new fetch needed.
     // This eliminates the TOCTOU window that existed between two separate awaits.
     let outcome = await ImageCache.shared.fetchOrJoin(for: url)
 
     if let cached = outcome.cached {
-      image = Image(uiImage: cached)
+      if isCurrent() { image = Image(uiImage: cached) }
       return
     }
 
     if let existingTask = outcome.task {
       // Join in-flight — someone else is already fetching this URL
-      if let result = await existingTask.value {
-        image = Image(uiImage: result)
-      } else {
-        didFail = true
-      }
+      let result = await existingTask.value
+      guard isCurrent() else { return }
+      if let result { image = Image(uiImage: result) } else { didFail = true }
       return
     }
 
@@ -255,6 +269,10 @@ struct AuthenticatedImage: View {
     let result = await fetchTask.value
     await ImageCache.shared.clearInFlightTask(for: url)
 
+    // Drop the result if this cell was recycled to a different URL/token while the
+    // fetch was in flight — the image is cached for whoever needs it, but we must not
+    // write it into a cell that has since moved on.
+    guard isCurrent() else { return }
     isLoading = false
 
     if let uiImage = result {
@@ -293,11 +311,10 @@ struct AuthenticatedImage: View {
           }
       }
     }
-    .task(id: url) {
+    .task(id: loadKey) {
       await loadIfNeeded()
     }
-    .onChange(of: url) { oldURL, newURL in
-      guard oldURL != newURL else { return }
+    .onChange(of: loadKey) { _, _ in
       image = nil
       didFail = false
       isLoading = false
@@ -307,19 +324,23 @@ struct AuthenticatedImage: View {
   private func loadIfNeeded() async {
     guard let url, !isLoading, image == nil else { return }
 
+    // See the UIKit body: gate every @State write on this generation so a stale
+    // completion (cell recycled mid-fetch) is dropped instead of writing a wrong image.
+    loadGeneration += 1
+    let generation = loadGeneration
+    let isCurrent = { generation == loadGeneration }
+
     let outcome = await MacImageCache.shared.fetchOrJoin(for: url)
 
     if let cached = outcome.cached {
-      image = Image(nsImage: cached)
+      if isCurrent() { image = Image(nsImage: cached) }
       return
     }
 
     if let existingTask = outcome.task {
-      if let result = await existingTask.value {
-        image = Image(nsImage: result)
-      } else {
-        didFail = true
-      }
+      let result = await existingTask.value
+      guard isCurrent() else { return }
+      if let result { image = Image(nsImage: result) } else { didFail = true }
       return
     }
 
@@ -358,6 +379,7 @@ struct AuthenticatedImage: View {
     }
     await MacImageCache.shared.clearInFlightTask(for: url)
 
+    guard isCurrent() else { return }
     isLoading = false
 
     if let nsImage = result {
