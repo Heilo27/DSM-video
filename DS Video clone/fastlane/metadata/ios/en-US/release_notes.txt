@@ -1,3 +1,8 @@
-Bug fixes and performance improvements.
+This update focuses on a smoother, more reliable library and playback experience.
 
-Streaming over WAN is smoother — the app now buffers aggressively in the background and resumes automatically when your connection recovers.
+• Fixed TV show posters that could appear blank or shift position while scrolling, and posters that occasionally overflowed onto neighboring shows.
+• Shows that share a folder (such as a series and its spin-off) now appear as separate, correctly-rendered entries.
+• Improved playback reliability for MKV and AVI titles when paired with the latest server update — fewer "playback failed" interruptions.
+• More dependable artwork loading throughout the app, including after reconnecting.
+
+Thanks for using DSM Video. Keep the feedback coming.

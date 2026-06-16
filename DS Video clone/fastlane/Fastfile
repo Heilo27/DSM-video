@@ -41,13 +41,35 @@ platform :ios do
     )
   end
 
+  # Archive the Release build and upload the binary to App Store Connect / TestFlight.
+  # The metadata/submit lanes use skip_binary_upload, so this lane is what actually
+  # gets the .ipa to ASC. Version/build come from the project (currently 1.3.0 / 1).
+  lane :build_and_upload do
+    build_app(
+      project:        "DSM Video.xcodeproj",
+      scheme:         "DSM Video",
+      configuration:  "Release",
+      export_method:  "app-store",
+      clean:          true,
+      output_directory: "build",
+      output_name:    "DSM Video.ipa",
+      xcargs:         "-allowProvisioningUpdates"
+    )
+    upload_to_testflight(
+      api_key:             api_key,
+      app_identifier:      IOS_BUNDLE_ID,
+      skip_waiting_for_build_processing: true,
+      skip_submission:     true
+    )
+  end
+
   # Submit existing iOS build for review
   lane :submit do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
-      app_version:         "1.2.3",
-      build_number:        "4",
+      app_version:         "1.3.0",
+      build_number:        "1",
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
