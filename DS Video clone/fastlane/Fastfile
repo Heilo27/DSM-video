@@ -45,6 +45,11 @@ platform :ios do
   # The metadata/submit lanes use skip_binary_upload, so this lane is what actually
   # gets the .ipa to ASC. Version/build come from the project (currently 1.3.0 / 1).
   lane :build_and_upload do
+    # The "DSM Video" iOS scheme is now SHARED (xcshareddata/xcschemes/DSM Video.xcscheme)
+    # pointing at the iOS app target. Previously it was an implicit user scheme fastlane
+    # couldn't see, so fastlane silently fell back to the only shared scheme — the tvOS
+    # one — and produced "DSM Video tvOS.app" at 1.3.2 (a closed ASC train). With the
+    # shared iOS scheme, this archives the iOS app target (HeiloProjects.DSReel, 1.3.0).
     build_app(
       project:        "DSM Video.xcodeproj",
       scheme:         "DSM Video",
@@ -68,7 +73,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
-      app_version:         "1.3.0",
+      app_version:         "1.3.3",
       build_number:        "1",
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
@@ -137,4 +142,60 @@ platform :ios do
     )
   end
 
+end
+
+platform :ios do
+  lane :verify_build do
+    n = latest_testflight_build_number(
+      api_key: api_key,
+      app_identifier: IOS_BUNDLE_ID,
+      version: "1.3.0"
+    )
+    UI.message("LATEST_1_3_0_BUILD=#{n}")
+  end
+end
+
+platform :ios do
+  lane :upload_existing_ipa do
+    upload_to_testflight(
+      api_key: api_key,
+      app_identifier: IOS_BUNDLE_ID,
+      ipa: "build/DSM Video.ipa",
+      skip_waiting_for_build_processing: true,
+      skip_submission: true
+    )
+    UI.success("UPLOAD_LANE_DONE")
+  end
+end
+
+platform :ios do
+  lane :list_builds do
+    require 'spaceship'
+    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+      key_id: JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))["keyId"],
+      issuer_id: JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))["issuerId"],
+      filepath: File.expand_path(JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))["privateKeyPath"])
+    )
+    app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+    builds = app.get_builds(includes: "preReleaseVersion", limit: 8)
+    builds.each do |b|
+      v = b.pre_release_version&.version
+      UI.message("BUILD ver=#{v} build=#{b.version} state=#{b.processing_state} uploaded=#{b.uploaded_date}")
+    end
+  end
+end
+
+platform :ios do
+  lane :asc_state do
+    require 'spaceship'
+    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
+    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+      key_id: cfg["keyId"], issuer_id: cfg["issuerId"],
+      filepath: File.expand_path(cfg["privateKeyPath"]))
+    app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+    UI.message("=== LIVE / EDIT versions ===")
+    app.get_app_store_versions(includes: "build", limit: 10).each do |v|
+      UI.message("APPSTORE ver=#{v.version_string} state=#{v.app_store_state} platform=#{v.platform}")
+    end
+  end
 end
