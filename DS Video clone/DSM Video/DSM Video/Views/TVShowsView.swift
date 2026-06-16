@@ -202,20 +202,20 @@ struct TVShowsView: View {
           .padding(.top, 60)
         } else {
           LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(displayedShows) { show in
+            // Key on gridID (id + title), NOT id: two distinct shows can share a
+            // folder and therefore an `id` (e.g. both Daredevils under Daredevil/).
+            // A grid keyed on the duplicate id collapses those cells and one renders
+            // black depending on scroll position — the "Daredevil blanks when too much
+            // in view" bug. gridID makes each show a distinct cell; detail navigation
+            // still uses show.id for the seasons/episodes API lookup.
+            ForEach(displayedShows, id: \.gridID) { show in
               NavigationLink {
                 TVShowDetailView(show: show, library: library)
               } label: {
                 TVShowPosterCell(show: show)
               }
               .buttonStyle(.plain)
-              // Stable identity so SwiftUI never blank-recycles a cell into a different
-              // show as it scrolls. Combined with the AuthenticatedImage loader fix
-              // (loader on the outer view, not the placeholder branch), this stops the
-              // "blank + untappable mid-viewport, only renders near the scroll edge"
-              // behaviour: the cell keeps its identity and reloads its own poster
-              // instead of inheriting a recycled cell's collapsed/blank state.
-              .id(show.id)
+              .id(show.gridID)
               .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
               .accessibilityHint("Opens show details")
             }
@@ -443,27 +443,41 @@ private struct TVShowPosterCell: View {
 
   var body: some View {
     ZStack(alignment: .bottom) {
-      // Poster image
-      if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
-        Image(assetName)
-          .resizable()
-          .scaledToFill()
-      } else if let id = show.posterImageId {
-        AuthenticatedImage(
-          url: appState.api.imageURL(id: id, width: 400, version: show.metadataVersion),
-          token: appState.sessionToken,
-          usesTunnelCookie: appState.api.usesTunnelCookie
-        )
-        .scaledToFill()
-      } else {
-        Color(white: 0.08)
-          .overlay(
+      // Size anchor: a content-independent 2:3 spacer defines the cell's frame so the
+      // ZStack's height NEVER depends on the poster or title. Without this, the ZStack
+      // took its size from its content — an unloaded AuthenticatedImage collapsed the
+      // cell to the title height (the "blank spot"), and when the image loaded mid-
+      // scroll the cell grew and shoved everything below it down (the "Daredevil
+      // glitches and slides into the blank spot" reflow). The spacer makes every cell
+      // identical and stable regardless of load state, so the grid can't reflow.
+      Color.clear
+        .aspectRatio(2.0 / 3.0, contentMode: .fit)
+
+      // Poster image — fills the anchored frame and clips. Filling a fixed frame
+      // (not .scaledToFill() on an unconstrained image) also stops wide/landscape
+      // posters from overflowing and covering neighbouring cells.
+      Color(white: 0.08)
+        .overlay {
+          if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
+            Image(assetName)
+              .resizable()
+              .scaledToFill()
+          } else if let id = show.posterImageId {
+            AuthenticatedImage(
+              url: appState.api.imageURL(id: id, width: 400, version: show.metadataVersion),
+              token: appState.sessionToken,
+              usesTunnelCookie: appState.api.usesTunnelCookie
+            )
+            .scaledToFill()
+          } else {
             Image(systemName: "tv.fill")
               .font(.system(size: 36))
               .foregroundStyle(.white.opacity(0.25))
               .accessibilityHidden(true)
-          )
-      }
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
 
       // Bottom gradient
       LinearGradient(
@@ -491,7 +505,8 @@ private struct TVShowPosterCell: View {
       .padding(.horizontal, 10)
       .padding(.bottom, 10)
     }
-    .aspectRatio(2.0 / 3.0, contentMode: .fit)
+    // The Color.clear spacer (first ZStack layer) fixes the 2:3 size; the ZStack
+    // just fills the column width the grid hands it.
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }

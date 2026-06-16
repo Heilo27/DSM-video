@@ -124,6 +124,15 @@ struct TVShow: Decodable, Identifiable, Hashable {
   let addedAt: String?
   let metadataVersion: Int?
 
+  /// Stable identity for list/grid rendering. `id` is the folder name, which the
+  /// detail view passes to the seasons/episodes endpoints — but two distinct shows
+  /// can share one folder (e.g. "Marvel's Daredevil" and "Daredevil: Born Again"
+  /// both under Daredevil/), giving them the SAME `id`. A LazyVGrid keyed on `id`
+  /// then collapses the duplicate cells and one renders blank depending on scroll
+  /// position. Key the grid on this composite instead so each show is distinct,
+  /// while detail navigation still uses `id` for the API lookup.
+  var gridID: String { "\(id)\u{001F}\(title)" }
+
   init(id: String, title: String, year: Int?, seasonCount: Int?, episodeCount: Int?,
        posterImageId: String?, lastWatchedAt: String?, addedAt: String?, metadataVersion: Int? = nil) {
     self.id = id; self.title = title; self.year = year; self.seasonCount = seasonCount
