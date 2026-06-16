@@ -199,3 +199,21 @@ platform :ios do
     end
   end
 end
+
+platform :ios do
+  # Create (if needed) the 1.3.3 App Store version record and push its metadata.
+  # The binary upload does NOT create the store-version record; deliver must, or
+  # metadata push fails with "Cannot find edit app store version".
+  lane :create_version_and_metadata do
+    deliver(
+      api_key:             api_key,
+      app_identifier:      IOS_BUNDLE_ID,
+      app_version:         "1.3.3",
+      metadata_path:       "metadata/ios",
+      skip_binary_upload:  true,
+      skip_screenshots:    true,
+      force:               true,
+      run_precheck_before_submit: false
+    )
+  end
+end
