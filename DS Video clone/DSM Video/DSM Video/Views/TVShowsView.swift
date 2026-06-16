@@ -209,6 +209,13 @@ struct TVShowsView: View {
                 TVShowPosterCell(show: show)
               }
               .buttonStyle(.plain)
+              // Stable identity so SwiftUI never blank-recycles a cell into a different
+              // show as it scrolls. Combined with the AuthenticatedImage loader fix
+              // (loader on the outer view, not the placeholder branch), this stops the
+              // "blank + untappable mid-viewport, only renders near the scroll edge"
+              // behaviour: the cell keeps its identity and reloads its own poster
+              // instead of inheriting a recycled cell's collapsed/blank state.
+              .id(show.id)
               .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
               .accessibilityHint("Opens show details")
             }
