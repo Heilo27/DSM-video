@@ -144,6 +144,14 @@ struct AuthenticatedImage: View {
 
   #if canImport(UIKit)
   private var uiKitBody: some View {
+    // The .task / .onChange modifiers MUST live on the outer Group, NOT inside the
+    // `else` (placeholder) branch. In a LazyVGrid, cells are recycled as they scroll;
+    // when a recycled cell lands on the `if let image` branch with a stale or nil
+    // image, a .task attached only to the placeholder never re-fires — the cell shows
+    // blank (and its NavigationLink loses a clean hit-test) until you scroll past it
+    // and force a full re-layout. Attaching the loader to the Group makes it fire for
+    // every cell state, fixing the "black, untappable mid-scroll, reappears after you
+    // scroll past" bug.
     Group {
       if let image {
         image
@@ -162,20 +170,23 @@ struct AuthenticatedImage: View {
                 .accessibilityLabel("Image unavailable")
             }
           }
-          .task { await loadIfNeeded() }
-          .onChange(of: url) { oldURL, newURL in
-            // Reload whenever the URL actually changes to a different non-nil value.
-            // Covers nil→URL (QC ID resolved after reconnect) AND URL→different-URL
-            // (metadata refresh bumps a ?v= cache-buster) — the latter previously
-            // stuck on the stale poster because loadIfNeeded()'s `image == nil` guard
-            // short-circuited. Reset state so the guard passes and we fetch the new URL.
-            guard oldURL != newURL, newURL != nil else { return }
-            image = nil
-            didFail = false
-            isLoading = false
-            Task { await loadIfNeeded() }
-          }
       }
+    }
+    .task(id: url) {
+      // Keyed on url: SwiftUI cancels and restarts this task whenever the cell is
+      // reused with a different URL, so a recycled cell always loads its own poster.
+      await loadIfNeeded()
+    }
+    .onChange(of: url) { oldURL, newURL in
+      // Reload whenever the URL actually changes to a different non-nil value.
+      // Covers nil→URL (QC ID resolved after reconnect) AND URL→different-URL
+      // (metadata refresh bumps a ?v= cache-buster, and cell recycling swaps the
+      // URL to a different show) — reset state so loadIfNeeded()'s `image == nil`
+      // guard passes and we fetch the new URL instead of showing the stale one.
+      guard oldURL != newURL else { return }
+      image = nil
+      didFail = false
+      isLoading = false
     }
   }
 
@@ -260,6 +271,8 @@ struct AuthenticatedImage: View {
   /// On macOS, manually fetch with auth headers — AsyncImage(url:) cannot pass custom headers
   /// and will receive HTTP 401 from Video Station / REST endpoints that require auth.
   private var macOSBody: some View {
+    // .task / .onChange on the outer Group (not the placeholder branch) so a recycled
+    // cell always loads its own image. See the UIKit body for the full rationale.
     Group {
       if let image {
         image
@@ -278,17 +291,16 @@ struct AuthenticatedImage: View {
                 .accessibilityLabel("Image unavailable")
             }
           }
-          .task { await loadIfNeeded() }
-          .onChange(of: url) { oldURL, newURL in
-            // Reload on any change to a different non-nil URL (nil→URL or a bumped
-            // ?v= cache-buster after a metadata refresh). See the UIKit body for detail.
-            guard oldURL != newURL, newURL != nil else { return }
-            image = nil
-            didFail = false
-            isLoading = false
-            Task { await loadIfNeeded() }
-          }
       }
+    }
+    .task(id: url) {
+      await loadIfNeeded()
+    }
+    .onChange(of: url) { oldURL, newURL in
+      guard oldURL != newURL else { return }
+      image = nil
+      didFail = false
+      isLoading = false
     }
   }
 
