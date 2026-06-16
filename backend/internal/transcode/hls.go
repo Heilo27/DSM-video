@@ -459,7 +459,13 @@ func (g *HLSGenerator) runFFmpegOnce(ctx context.Context, session *HLSSession, a
 	// and would otherwise survive as an orphan until the 5-minute cleanup tick.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	// Publish session.cmd under g.mu: StopSession reads it under the same lock to kill
+	// the process group. The playSessions reaper and the /playback/{id}/stop endpoint
+	// (TASK-754) can now call StopSession at any time, so this write must be
+	// synchronized — an unguarded write here races the locked read in StopSession.
+	g.mu.Lock()
 	session.cmd = cmd
+	g.mu.Unlock()
 	cmd.Stdout = io.Discard
 
 	logPath := filepath.Join(session.OutputDir, "ffmpeg.log")

@@ -173,6 +173,10 @@ type PlaySession struct {
 	Kind         string // "direct" | "hls" | "remux"
 	HLSDir       string
 	CreatedAt    time.Time
+	// LastAccess is bumped every time getSession reads this entry (segment/playlist
+	// fetch). The playSessions reaper (P0-1) uses it as the idle clock so an actively
+	// playing session is never evicted mid-stream — only ones idle past the grace window.
+	LastAccess   time.Time
 	PlaybackMode transcode.PlaybackMode
 	Transcoding  bool
 }
@@ -339,6 +343,51 @@ func main() {
 	// Start cleanup manager
 	cleanupManager.Start(context.Background())
 	defer cleanupManager.Stop()
+
+	// P0-1: reap idle playSessions. The map was written on every /playback but NEVER
+	// deleted (no stop path), so each play leaked one entry forever → slow OOM on the
+	// 3.8GB box. The HLS CleanupManager already reaps the generator's own session map +
+	// temp dirs on a tick; this loop is its sibling for the HTTP-layer playSessions map.
+	// Every 5 min we collect entries idle (no segment/playlist fetch) past the grace
+	// window UNDER the lock, then tear down each victim's transcode OUTSIDE the lock —
+	// StopSession takes the generator's own lock, so calling it while holding s.mu would
+	// nest two locks and risk a deadlock. A well-behaved client also releases promptly
+	// via POST /playback/{id}/stop; this is the safety net for clients that just vanish.
+	go func() {
+		const playSessionIdleGrace = 30 * time.Minute
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			// Phase 1: collect victim IDs (and their kind) under the lock, delete the
+			// map entries, but do NOT call StopSession here — keep the critical section
+			// pure map work and never nest the generator lock inside s.mu.
+			var hlsVictims []string
+			s.mu.Lock()
+			for id, ps := range s.playSessions {
+				if now.Sub(ps.LastAccess) <= playSessionIdleGrace {
+					continue
+				}
+				if ps.Kind == "hls" {
+					hlsVictims = append(hlsVictims, id)
+				}
+				delete(s.playSessions, id)
+			}
+			s.mu.Unlock()
+
+			// Phase 2: tear down each HLS transcode + temp dir OUTSIDE the lock.
+			for _, id := range hlsVictims {
+				if s.hlsGenerator != nil {
+					if err := s.hlsGenerator.StopSession(id); err != nil {
+						log.Printf("[playSessions] reaper StopSession %s: %v", id, err)
+					}
+				}
+			}
+			if n := len(hlsVictims); n > 0 {
+				log.Printf("[playSessions] reaped %d idle HLS session(s)", n)
+			}
+		}
+	}()
 
 	// Periodically purge expired in-memory caches:
 	//   - revokedTokens: entries past their JWT exp timestamp
@@ -582,6 +631,10 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 
 	// Playback streams don't require auth — session ID is the security token
 	r.Get("/playback/{sessionId}/stream", s.handlePlaybackStream)
+	// P0-1: explicit release so a well-behaved client frees its session (and any HLS
+	// transcode + temp dir) immediately instead of waiting on the idle reaper. Same auth
+	// model as the stream routes — the session ID is the credential. Idempotent.
+	r.Post("/playback/{sessionId}/stop", s.handlePlaybackStop)
 	r.Get("/playback/{sessionId}/master.m3u8", s.handleHLSFile("master.m3u8"))
 	// fMP4 HLS writes the init segment and the .m4s media segments at the session
 	// ROOT (init.mp4, segment_NNNNN.m4s, ABR v0_init.mp4 / v0_NNNNN.m4s), and the
@@ -2707,6 +2760,17 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// P1-4: verify the file actually exists before doing anything else. The 216 orphaned
+	// .mkv rows (external library conversion renamed files out from under the DB) pointed
+	// HLS-mode items at a missing file: StartSession would spawn a transcode that never
+	// produced master.m3u8, and the client hung ~30s in WaitForPlaylist before a 503.
+	// Stat the SAME path that gets played downstream (StartSession / ps.Path use `path`,
+	// not cleanedPath) so a renamed/missing file fails fast and cleanly with 404.
+	if _, err := os.Stat(path); err != nil {
+		writeErr(w, http.StatusNotFound, "media_missing")
+		return
+	}
+
 	// Determine playback mode based on codec info
 	var playbackMode transcode.PlaybackMode
 	var probeResult *transcode.ProbeResult
@@ -2798,6 +2862,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		ItemID:       itemID,
 		Path:         path,
 		CreatedAt:    time.Now(),
+		LastAccess:   time.Now(),
 		PlaybackMode: playbackMode,
 	}
 
@@ -3373,6 +3438,19 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 		}
 	}
 
+	// P1-2: the web-client realtime remux path spawned ffmpeg directly, bypassing the
+	// shared ffmpegLimiter entirely — reopening the TASK-752 oversubscription bug (5+
+	// concurrent ffmpeg on a 4-core/3.8GB box with no HW encoder). Draw from the shared
+	// budget before launching. Use the REQUEST context: this ffmpeg streams for the whole
+	// request, so when the client disconnects the context cancels, Acquire unblocks (if
+	// still waiting) and the deferred Release frees the slot. Placed AFTER the ffmpeg-not-
+	// found fallback above so a direct-serve (no-ffmpeg) request never consumes a slot.
+	if err := s.ffmpegLimiter.Acquire(r.Context()); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
+		return
+	}
+	defer s.ffmpegLimiter.Release()
+
 	// Build ffmpeg command: remux to fragmented MP4 for streaming
 	// -c:v copy = don't re-encode video (fast!)
 	// -c:a aac = transcode audio to AAC (browser-compatible)
@@ -3624,10 +3702,42 @@ func (s *Server) handleHLSSegmentRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSession(sessionID string) (PlaySession, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// P0-1: bump LastAccess on every read so the playSessions reaper treats an actively
+	// streaming session as live. This needs a write to the map value, so take the full
+	// lock rather than RLock (PlaySession is a value, not a pointer — we re-store it).
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ps, ok := s.playSessions[sessionID]
+	if ok {
+		ps.LastAccess = time.Now()
+		s.playSessions[sessionID] = ps
+	}
 	return ps, ok
+}
+
+// handlePlaybackStop releases a play session immediately at the client's request (P0-1).
+// It removes the entry from playSessions under the lock and, for HLS-kind sessions, tears
+// down the transcode + temp dir via StopSession OUTSIDE the lock (StopSession takes the
+// generator's own lock — don't nest it inside s.mu). Idempotent: an unknown or already-
+// reaped session is a no-op and still returns 204, so a client may safely call it on every
+// teardown without racing the idle reaper.
+func (s *Server) handlePlaybackStop(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+
+	s.mu.Lock()
+	ps, ok := s.playSessions[sessionID]
+	if ok {
+		delete(s.playSessions, sessionID)
+	}
+	s.mu.Unlock()
+
+	if ok && ps.Kind == "hls" && s.hlsGenerator != nil {
+		if err := s.hlsGenerator.StopSession(sessionID); err != nil {
+			log.Printf("[playSessions] stop endpoint StopSession %s: %v", sessionID, err)
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // -------------------------
