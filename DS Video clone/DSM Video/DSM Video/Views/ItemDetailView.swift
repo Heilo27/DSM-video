@@ -1052,6 +1052,10 @@ private struct PlayerSheet: View {
   @State private var playbackURL: URL?
   @State private var error: String?
   @State private var resumePosition: Double = 0
+  // Full runtime handed to the player so its scrubber is correct even while the HLS
+  // transcode is still generating (a live-window playlist under-reports duration).
+  // From the playback response's durationSeconds, falling back to the item's own.
+  @State private var playbackDuration: Double = 0
   @State private var isOffline: Bool = false
   @State private var chapters: [Chapter] = []
   @State private var subtitleOffset: Double = 0
@@ -1085,6 +1089,7 @@ private struct PlayerSheet: View {
           url: url,
           title: title,
           resumePosition: resumePosition,
+          serverDuration: playbackDuration,
           chapters: chapters,
           itemID: itemID,
           itemTitle: title,
@@ -1376,6 +1381,7 @@ private struct PlayerSheet: View {
       if FileManager.default.fileExists(atPath: downloaded.videoPath) {
         isOffline = true
         resumePosition = forceFromBeginning ? 0 : Double(downloaded.resumePositionSeconds)
+        playbackDuration = Double(downloaded.durationSeconds)
         playbackURL = localURL
         return
       }
@@ -1393,6 +1399,7 @@ private struct PlayerSheet: View {
       resumeOverrideSeconds = 0
       resumeOverrideDuration = 0
       chapters = info.chapters ?? []
+      playbackDuration = Double(info.durationSeconds ?? 0)
       playbackURL = url
     } catch {
       appState.handleConnectionFailure(error)
@@ -1407,6 +1414,7 @@ private struct PlayerSheet: View {
           resumeOverrideSeconds = 0
           resumeOverrideDuration = 0
           chapters = info.chapters ?? []
+          playbackDuration = Double(info.durationSeconds ?? 0)
           playbackURL = url
           appState.clearNetworkError()
           return

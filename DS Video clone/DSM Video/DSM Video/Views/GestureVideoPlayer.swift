@@ -25,6 +25,11 @@ struct GestureVideoPlayer: View {
     let url: URL
     let title: String
     var resumePosition: Double = 0
+    /// Authoritative full runtime from the server (scan-time probe). A live-window HLS
+    /// playlist only reports the duration transcoded so far, so playerItem.duration is
+    /// too short while transcoding and the scrubber pins to the end. When this is set
+    /// and larger than playerItem.duration, the player uses it instead. 0 = unknown.
+    var serverDuration: Double = 0
     var chapters: [Chapter] = []
     var itemID: String = ""
     var itemTitle: String = ""
@@ -1188,15 +1193,29 @@ struct GestureVideoPlayer: View {
             }
             .store(in: &cancellables)
 
-        // Observe duration and seek to resume position when ready
+        // Seed the scrubber with the server's full runtime immediately, before the
+        // playlist's duration is known. For a live-window HLS transcode, playerItem's
+        // duration only reflects what's been generated so far, so without this the
+        // scrubber starts pinned to the end.
+        if serverDuration > 0 {
+            duration = serverDuration
+        }
+
+        // Observe duration and seek to resume position when ready. Use the LARGER of
+        // the playlist duration and the server's known full runtime: a live-window HLS
+        // playlist under-reports duration while transcoding (it only knows the segments
+        // written so far), so trusting playerItem.duration alone makes the scrubber jump
+        // to the end. Once the transcode finishes (or for direct play) playerItem's
+        // duration matches the server's and max() is a no-op.
         playerItem.publisher(for: \.duration)
             .receive(on: DispatchQueue.main)
             .sink { dur in
                 if dur.isNumeric {
                     let secs = CMTimeGetSeconds(dur)
                     Task { @MainActor in
-                        duration = secs
-                        if !hasResumedPosition && resumePosition > 0 && resumePosition < secs {
+                        duration = max(secs, serverDuration)
+                        let effective = duration
+                        if !hasResumedPosition && resumePosition > 0 && resumePosition < effective {
                             hasResumedPosition = true
                             seek(to: resumePosition)
                             currentTime = resumePosition

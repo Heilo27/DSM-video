@@ -260,6 +260,12 @@ struct PlaybackInfo: Decodable {
   let streamUrl: URL?
   let hlsMasterUrl: URL?
   let resumePositionSeconds: Int
+  // Authoritative full runtime from the server's scan-time probe. A live-window HLS
+  // playlist only reports the duration transcoded so far (the file transcodes at ~5x
+  // realtime, so most isn't written at playback start), which makes AVPlayer's scrubber
+  // pin to the end. The player falls back to this when it's larger than the item's
+  // reported duration. Optional for backward compatibility with older servers.
+  let durationSeconds: Int?
   let chapters: [Chapter]?
   let quality: String?
 }

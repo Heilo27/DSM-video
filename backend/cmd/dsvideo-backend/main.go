@@ -2726,10 +2726,17 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	var path string
 	var videoCodec, audioCodec, container sql.NullString
 	var needsTranscode sql.NullBool
+	// durationSeconds is the authoritative full runtime from the scan-time probe. We
+	// return it in the playback response so the client can show a correct scrubber
+	// even while transcoding: a live-window HLS playlist only reports the duration
+	// generated SO FAR (the file transcodes at ~5x realtime, so most isn't written at
+	// playback start), which made AVPlayer's scrubber pin to the end. The client uses
+	// this value instead of playerItem.duration when it's larger.
+	var itemDuration sql.NullInt64
 	err := s.db.QueryRow(
-		"SELECT path, video_codec, audio_codec, container, needs_transcode FROM items WHERE id = ?",
+		"SELECT path, video_codec, audio_codec, container, needs_transcode, duration_seconds FROM items WHERE id = ?",
 		itemID,
-	).Scan(&path, &videoCodec, &audioCodec, &container, &needsTranscode)
+	).Scan(&path, &videoCodec, &audioCodec, &container, &needsTranscode, &itemDuration)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "not_found")
@@ -2778,6 +2785,30 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	if videoCodec.Valid && audioCodec.Valid && container.Valid {
 		// Use stored codec info
 		playbackMode = transcode.DecidePlayback(videoCodec.String, audioCodec.String, container.String)
+
+		// Stale-metadata guard: a wrong FullTranscode decision is catastrophic on this
+		// software-only NAS — re-encoding an already-H.264 file runs slower than realtime,
+		// so master.m3u8 misses the client's 30s window and playback 503s. This is exactly
+		// what the library conversion produces: it rewrites files mpeg4→h264 but the DB row
+		// keeps the old "mpeg4" codec, so the server tries to transcode a file that should
+		// DirectPlay. (Wrong DirectPlay/Remux decisions are cheap and fail fast, so we only
+		// pay the verification cost on the expensive branch.) Re-probe to confirm; if the
+		// real codecs disagree, use the truth and self-heal the DB so the next play is fast.
+		if playbackMode == transcode.FullTranscode && s.prober != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			if pr, err := s.prober.Probe(ctx, path); err == nil {
+				verified := transcode.DecidePlaybackFromProbe(pr)
+				if verified != transcode.FullTranscode {
+					log.Printf("[Playback] stale metadata for %s: DB said %s/%s/%s (transcode) but probe says %s/%s/%s (%s) — using probe + healing DB",
+						itemID, videoCodec.String, audioCodec.String, container.String,
+						pr.VideoCodec, pr.AudioCodec, pr.Container, verified)
+					probeResult = pr
+					playbackMode = verified
+					go s.updateCodecInfo(itemID, pr)
+				}
+			}
+			cancel()
+		}
 	} else {
 		// Fall back to quick probe (file extension heuristics)
 		probeResult = transcode.ProbeQuick(path)
@@ -2978,6 +3009,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			"subtitles":             subtitleInfo,
 			"audioTracks":           []any{},
 			"resumePositionSeconds": resumePos,
+			"durationSeconds":       nullIntToAny(itemDuration),
 			"transcoding":           ps.Kind == "remux",
 			"chapters":              chapterList,
 			"quality":               qualityOut,
@@ -2991,6 +3023,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"subtitles":             subtitleInfo,
 		"audioTracks":           []any{},
 		"resumePositionSeconds": resumePos,
+		"durationSeconds":       nullIntToAny(itemDuration),
 		"transcoding":           true,
 		"transcodeMode":         playbackMode.String(),
 		"chapters":              chapterList,
