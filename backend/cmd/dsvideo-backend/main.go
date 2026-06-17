@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"dsvideo/backend/internal/metadata"
+	"dsvideo/backend/internal/normalize"
 	"dsvideo/backend/internal/transcode"
 
 	"github.com/go-chi/chi/v5"
@@ -79,6 +80,15 @@ type Config struct {
 	// on the network forge a session. Default false — only enable on a trusted LAN
 	// where a specific DS Video client misbehaves, and never when port-forwarded.
 	AllowUnvalidatedDSVideo bool
+
+	// TASK-755 auto-normalize. When enabled, non-DirectPlay files found by the scanner
+	// are converted to MP4+H.264/HEVC+AAC in the background (idle-aware, one at a time)
+	// so playback is always instant. Originals are moved to OriginalsDir after a verified
+	// conversion and reclaimed NormalizeRetentionDays later.
+	AutoNormalize          bool
+	OriginalsDir           string // backup tree for converted-away originals
+	NormalizeRetentionDays int    // days to keep originals before the reaper deletes them
+	NormalizeMaxHeight     int    // re-encode resolution cap (never upscales)
 }
 
 type Server struct {
@@ -94,6 +104,12 @@ type Server struct {
 	prober         *transcode.Prober
 	hlsGenerator   *transcode.HLSGenerator
 	cleanupManager *transcode.CleanupManager
+
+	// TASK-755 auto-normalize. nil when DSVIDEO_AUTO_NORMALIZE is off. The scanner
+	// Enqueues non-DirectPlay items here; the worker converts them in the background
+	// (idle-aware, sharing the ffmpegLimiter) and self-heals the DB on success. The
+	// playback handler consults its IsConverting set for the tiny mid-swap 409 window.
+	normalizeWorker *normalize.NormalizeWorker
 
 	// Metadata components
 	tmdbMu        sync.RWMutex
@@ -168,11 +184,11 @@ type pairingEntry struct {
 }
 
 type PlaySession struct {
-	ItemID       string
-	Path         string
-	Kind         string // "direct" | "hls" | "remux"
-	HLSDir       string
-	CreatedAt    time.Time
+	ItemID    string
+	Path      string
+	Kind      string // "direct" | "hls" | "remux"
+	HLSDir    string
+	CreatedAt time.Time
 	// LastAccess is bumped every time getSession reads this entry (segment/playlist
 	// fetch). The playSessions reaper (P0-1) uses it as the idle clock so an actively
 	// playing session is never evicted mid-stream — only ones idle past the grace window.
@@ -230,7 +246,10 @@ func main() {
 	}
 	var warmRows *sql.Rows
 	// warmRevokedTokens is populated into s.revokedTokens after s is constructed below.
-	type revokedRow struct{ jti string; expiresAt int64 }
+	type revokedRow struct {
+		jti       string
+		expiresAt int64
+	}
 	var revokedCache []revokedRow
 	if warmRows, err = db.Query(`SELECT jti, expires_at FROM revoked_tokens WHERE expires_at >= ?`, now); err != nil {
 		log.Printf("revoked_tokens warm load: %v", err)
@@ -330,6 +349,73 @@ func main() {
 		trickplayInFlight:  make(map[string]chan struct{}),
 		subExtractInFlight: make(map[string]chan struct{}),
 		ffmpegLimiter:      ffmpegLimiter,
+	}
+
+	// TASK-755: construct the auto-normalize worker (gated on DSVIDEO_AUTO_NORMALIZE).
+	// It is built here, next to the other transcode components, so it can share the
+	// ONE ffmpegLimiter and reference the HLS generator + playSessions for idle
+	// detection. The worker's goroutine and retention reaper are started below
+	// alongside the other background loops.
+	if cfg.AutoNormalize {
+		// Resolve concrete ffmpeg/ffprobe paths. The HLS config uses cfg.FFmpegPath
+		// (which may be empty → auto-detect); mirror that resolution for the worker so
+		// it launches the SAME bundled binaries, not whatever a bare "ffmpeg" resolves to.
+		normFFmpeg := cfg.FFmpegPath
+		if normFFmpeg == "" {
+			if p, ferr := findFFmpeg(); ferr == nil {
+				normFFmpeg = p
+			}
+		}
+		normFFprobe := prober.FFprobePath // already resolved by NewProber above
+
+		if normFFmpeg == "" || normFFprobe == "" {
+			log.Printf("[normalize] auto-normalize enabled but ffmpeg/ffprobe not found (ffmpeg=%q ffprobe=%q) — disabling", normFFmpeg, normFFprobe)
+		} else {
+			// Idle = no live HLS transcode AND no playSession touched in the last 60s.
+			// Background normalization only starts when nobody is watching, so a re-encode
+			// can never steal CPU/ffmpeg slots from a viewer. The 60s grace covers the gap
+			// between a client pausing/seeking and its next segment fetch.
+			const playbackIdleGrace = 60 * time.Second
+			isIdle := func() bool {
+				if s.hlsGenerator != nil && s.hlsGenerator.ActiveSessions() != 0 {
+					return false
+				}
+				now := time.Now()
+				s.mu.RLock()
+				defer s.mu.RUnlock()
+				for _, ps := range s.playSessions {
+					if now.Sub(ps.LastAccess) < playbackIdleGrace {
+						return false
+					}
+				}
+				return true
+			}
+			// Codec-update callback: re-probe the new file and update the DB so
+			// needs_transcode flips to 0 and change_seq bumps (clients see DirectPlay).
+			// Worf P0-2: a different-path conversion (.mkv→.mp4) moves the file, so we
+			// repoint the item's `path` column to newPath on the SAME id. The id stays
+			// hex(originalPath) — re-keying would orphan progress/watchlist FKs — but the
+			// playback handler resolves the file via the path column, so the existing item
+			// now plays the converted file and no duplicate row appears on the next scan.
+			updateCodec := func(itemID, newPath string) {
+				if s.prober == nil {
+					return
+				}
+				pctx, pcancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer pcancel()
+				if pr, perr := s.prober.Probe(pctx, newPath); perr == nil {
+					s.updateCodecInfoRepath(itemID, newPath, pr)
+				} else {
+					log.Printf("[normalize] post-convert re-probe failed for %s: %v", itemID, perr)
+				}
+			}
+			s.normalizeWorker = normalize.NewNormalizeWorker(
+				normFFmpeg, normFFprobe, cfg.OriginalsDir, cfg.NormalizeMaxHeight,
+				ffmpegLimiter, isIdle, updateCodec,
+			)
+			log.Printf("[normalize] auto-normalize enabled (originals=%s retention=%dd maxHeight=%d)",
+				cfg.OriginalsDir, cfg.NormalizeRetentionDays, cfg.NormalizeMaxHeight)
+		}
 	}
 
 	// Warm the in-memory revocation cache from rows loaded above.
@@ -471,6 +557,24 @@ func main() {
 			}
 		}
 	}()
+
+	// TASK-755: start the auto-normalize worker goroutine and its hourly retention
+	// reaper. Gated on the worker having been constructed above (auto-normalize on +
+	// ffmpeg/ffprobe found). Both run for the process lifetime on a background context.
+	if s.normalizeWorker != nil {
+		s.normalizeWorker.Start(context.Background())
+		// Worf P2-5 (TASK-755): the retention reaper deletes everything older than N days
+		// under OriginalsDir. DSVIDEO_ORIGINALS_DIR is user-overridable; if it's empty, a
+		// filesystem root, or a media root (or a parent of one), the reaper would delete the
+		// user's actual movies. Validate before arming it: on failure we still let the worker
+		// run conversions (originals are backed up safely) but REFUSE to start the reaper, so
+		// backups simply accumulate rather than risk nuking the library.
+		if reason := validateOriginalsDir(cfg.OriginalsDir, cfg.MoviesPath, cfg.TVPath, cfg.HomePath); reason != "" {
+			log.Printf("[normalize] retention reaper DISABLED — unsafe originals dir %q: %s", cfg.OriginalsDir, reason)
+		} else {
+			s.normalizeWorker.StartRetentionReaper(context.Background(), cfg.NormalizeRetentionDays)
+		}
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -729,9 +833,36 @@ func loadConfig() Config {
 		}
 		return def
 	}
+	getBool := func(key string, def bool) bool {
+		v := strings.TrimSpace(os.Getenv(key))
+		if v == "" {
+			return def
+		}
+		return strings.EqualFold(v, "true") || v == "1"
+	}
+	getInt := func(key string, def int) int {
+		n, err := strconv.Atoi(get(key, ""))
+		if err != nil || n <= 0 {
+			return def
+		}
+		return n
+	}
 
 	// Defaults are developer-friendly; SPK install should override via env/config.
 	port := get("DSVIDEO_PORT", "8080")
+
+	// TASK-755: default the originals backup tree to a sibling of the video library
+	// so it lives on the same volume (rename-into-backup is then instant/atomic) but
+	// OUTSIDE any indexed root (the scanner SkipDirs it). Prefer the dirname of
+	// MoviesPath (e.g. /volume1/video/Movies → /volume1/video/_dsvideo_originals);
+	// fall back to the TV path's parent, else a temp dir for dev. Overridable.
+	originalsDefault := filepath.Join(os.TempDir(), "_dsvideo_originals")
+	if mp := strings.TrimSpace(os.Getenv("DSVIDEO_MOVIES_PATH")); mp != "" {
+		originalsDefault = filepath.Join(filepath.Dir(filepath.Clean(mp)), "_dsvideo_originals")
+	} else if tp := strings.TrimSpace(os.Getenv("DSVIDEO_TV_PATH")); tp != "" {
+		originalsDefault = filepath.Join(filepath.Dir(filepath.Clean(tp)), "_dsvideo_originals")
+	}
+
 	return Config{
 		ListenAddr: ":" + port,
 		BaseURL:    get("DSVIDEO_BASE_URL", "http://localhost:"+port),
@@ -766,6 +897,12 @@ func loadConfig() Config {
 		// Security — default false. Opt in only with an explicit "1"/"true".
 		AllowUnvalidatedDSVideo: strings.EqualFold(get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", ""), "true") ||
 			get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", "") == "1",
+
+		// TASK-755 auto-normalize — on by default so a fresh NAS self-heals to all-DirectPlay.
+		AutoNormalize:          getBool("DSVIDEO_AUTO_NORMALIZE", true),
+		OriginalsDir:           get("DSVIDEO_ORIGINALS_DIR", originalsDefault),
+		NormalizeRetentionDays: getInt("DSVIDEO_NORMALIZE_RETENTION_DAYS", 7),
+		NormalizeMaxHeight:     getInt("DSVIDEO_NORMALIZE_MAX_HEIGHT", 720),
 	}
 }
 
@@ -2091,9 +2228,9 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 
 	// Drain rows to a slice first so the cursor is closed before the batch progress query.
 	type jwRow struct {
-		id, typ, title, addedAt         string
-		year, duration                  sql.NullInt64
-		rating                          sql.NullFloat64
+		id, typ, title, addedAt            string
+		year, duration                     sql.NullInt64
+		rating                             sql.NullFloat64
 		posterPath, backdropPath, overview sql.NullString
 	}
 	var rawRows []jwRow
@@ -2778,6 +2915,19 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TASK-755: if auto-normalize is mid-swap on this exact item — the brief window
+	// where the original is being moved aside and the new .mp4 renamed into place —
+	// the file on disk is in flux. Return 409 {"status":"converting"} so the client
+	// retries in a moment rather than opening a file that's about to be replaced.
+	// IMPORTANT: IsConverting is ONLY true during that tiny mid-swap window, NOT for
+	// the whole encode. While an item is merely queued or actively encoding it stays
+	// OUT of the set, so normal on-demand playback (the existing transcode path) keeps
+	// working — slowly — and the 409 window stays a couple of filesystem renames long.
+	if s.normalizeWorker != nil && s.normalizeWorker.IsConverting(itemID) {
+		writeJSON(w, http.StatusConflict, map[string]any{"status": "converting"})
+		return
+	}
+
 	// Determine playback mode based on codec info
 	var playbackMode transcode.PlaybackMode
 	var probeResult *transcode.ProbeResult
@@ -3340,19 +3490,81 @@ func (s *Server) scheduleEmbeddedSubExtract(itemID, videoPath string, streamInde
 	}()
 }
 
-// updateCodecInfo updates the codec info for an item in the database.
+// updateCodecInfo updates the codec info for an item in the database, bumping
+// change_seq so delta-sync (WHERE change_seq > since) tells clients the file's codec
+// changed. Worf P1-3 (TASK-755): the prior version omitted change_seq, so an item that
+// auto-normalize flipped to DirectPlay never propagated — clients kept transcoding the
+// converted file forever. We now allocate the next item_seq via incrementSeq (the same
+// mechanism the scanner and tmdb paths use) and write it.
 func (s *Server) updateCodecInfo(itemID string, probe *transcode.ProbeResult) {
 	if probe == nil {
 		return
 	}
+	seq := s.incrementSeq("item_seq")
 	_, err := s.db.Exec(
 		`UPDATE items SET video_codec = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
-		 video_width = ?, video_height = ?, audio_channels = ? WHERE id = ?`,
+		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
 		probe.VideoCodec, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
-		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, itemID,
+		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
 	)
 	if err != nil {
 		log.Printf("Failed to update codec info for %s: %v", itemID, err)
+	}
+}
+
+// updateCodecInfoRepath is the auto-normalize variant of updateCodecInfo. Worf P0-2
+// (TASK-755): a different-path conversion (e.g. Movie.mkv → Movie.mp4) moves the file to
+// a NEW path. The item id is derived from the path (id = "it_"+hex(cleanPath) via
+// itemIDFromPath), so the converted file's correct id is hex(newPath), not the row's
+// current hex(originalPath).
+//
+// Two cases, decided by comparing the row's current id to itemIDFromPath(newPath):
+//
+//   - DIFFERENT path (id changes): re-key the row to hex(newPath) AND migrate every loose
+//     item_id FK reference (progress/watchlist/downloads/playlist_items), in one tx, via
+//     normalize.RekeyAndMigrate. This is the O'Brien residual-defect fix: merely repointing
+//     `path` on the old id left the row keyed hex(.mkv) while the file lived at .mp4, so the
+//     next library rescan — which derives id from path — upserted a SECOND row keyed
+//     hex(.mp4) (a duplicate item for one file). Re-keying to hex(.mp4) means the rescan
+//     finds this row by that id and updates it in place: no duplicate. If the re-key tx
+//     fails for any reason it rolls back and we fall through to the path-only repoint
+//     below, preserving the 404 fix.
+//
+//   - SAME path (id unchanged, e.g. an mp4 remux that stays Movie.mp4): nothing to re-key;
+//     the simple path+codec+change_seq UPDATE on the existing id is correct.
+//
+// newPath is the on-disk path of the converted file.
+func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.ProbeResult) {
+	if probe == nil {
+		return
+	}
+	cleanPath := filepath.Clean(newPath)
+	newID := itemIDFromPath(cleanPath)
+
+	// Different-path conversion → re-key + migrate FK rows in one transaction.
+	if newID != itemID {
+		seq := s.incrementSeq("item_seq")
+		if err := normalize.RekeyAndMigrate(s.db, itemID, newID, cleanPath, probe, seq); err != nil {
+			log.Printf("[normalize] re-key %s -> %s (%s) failed, falling back to path-only repoint: %v",
+				itemID, newID, cleanPath, err)
+			// Fall through to the path-only repoint so the 404 fix still lands even if
+			// re-keying failed. A burned item_seq is harmless — delta-sync only relies
+			// on change_seq monotonicity, not contiguity.
+		} else {
+			return
+		}
+	}
+
+	// Same-path conversion (or re-key fallback): repoint path + codec on the existing id.
+	seq := s.incrementSeq("item_seq")
+	_, err := s.db.Exec(
+		`UPDATE items SET path = ?, video_codec = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
+		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
+		cleanPath, probe.VideoCodec, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
+		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
+	)
+	if err != nil {
+		log.Printf("Failed to repoint+update codec info for %s -> %s: %v", itemID, cleanPath, err)
 	}
 }
 
@@ -3949,21 +4161,21 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type syncItem struct {
-		ID              string  `json:"id"`
-		LibraryID       string  `json:"libraryId"`
-		Type            string  `json:"type"`
-		Title           string  `json:"title"`
-		Year            *int    `json:"year,omitempty"`
-		DurationSeconds *int    `json:"durationSeconds,omitempty"`
-		AddedAt         string  `json:"addedAt"`
-		Rating          *float64 `json:"rating,omitempty"`
-		PosterImageID   *string  `json:"posterImageId,omitempty"`
-		BackdropImageID *string  `json:"backdropImageId,omitempty"`
-		ShowName        *string  `json:"showName,omitempty"`
-		ShowFolderID    *string  `json:"showFolderId,omitempty"`
-		SeasonNumber    *int    `json:"seasonNumber,omitempty"`
-		EpisodeNumber   *int    `json:"episodeNumber,omitempty"`
-		ChangeSeq       int64   `json:"changeSeq"`
+		ID              string          `json:"id"`
+		LibraryID       string          `json:"libraryId"`
+		Type            string          `json:"type"`
+		Title           string          `json:"title"`
+		Year            *int            `json:"year,omitempty"`
+		DurationSeconds *int            `json:"durationSeconds,omitempty"`
+		AddedAt         string          `json:"addedAt"`
+		Rating          *float64        `json:"rating,omitempty"`
+		PosterImageID   *string         `json:"posterImageId,omitempty"`
+		BackdropImageID *string         `json:"backdropImageId,omitempty"`
+		ShowName        *string         `json:"showName,omitempty"`
+		ShowFolderID    *string         `json:"showFolderId,omitempty"`
+		SeasonNumber    *int            `json:"seasonNumber,omitempty"`
+		EpisodeNumber   *int            `json:"episodeNumber,omitempty"`
+		ChangeSeq       int64           `json:"changeSeq"`
 		Progress        *map[string]any `json:"progress,omitempty"`
 	}
 
@@ -3989,14 +4201,34 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		if rowid > maxRowid {
 			maxRowid = rowid
 		}
-		if year.Valid { v := int(year.Int64); item.Year = &v }
-		if dur.Valid { v := int(dur.Int64); item.DurationSeconds = &v }
-		if rating.Valid { item.Rating = &rating.Float64 }
-		if poster.Valid && poster.String != "" { item.PosterImageID = &item.ID }
-		if backdrop.Valid && backdrop.String != "" { item.BackdropImageID = &item.ID }
-		if showName.Valid { item.ShowName = &showName.String }
-		if seasonNum.Valid { v := int(seasonNum.Int64); item.SeasonNumber = &v }
-		if episodeNum.Valid { v := int(episodeNum.Int64); item.EpisodeNumber = &v }
+		if year.Valid {
+			v := int(year.Int64)
+			item.Year = &v
+		}
+		if dur.Valid {
+			v := int(dur.Int64)
+			item.DurationSeconds = &v
+		}
+		if rating.Valid {
+			item.Rating = &rating.Float64
+		}
+		if poster.Valid && poster.String != "" {
+			item.PosterImageID = &item.ID
+		}
+		if backdrop.Valid && backdrop.String != "" {
+			item.BackdropImageID = &item.ID
+		}
+		if showName.Valid {
+			item.ShowName = &showName.String
+		}
+		if seasonNum.Valid {
+			v := int(seasonNum.Int64)
+			item.SeasonNumber = &v
+		}
+		if episodeNum.Valid {
+			v := int(episodeNum.Int64)
+			item.EpisodeNumber = &v
+		}
 		if showFolderIDCol.Valid && showFolderIDCol.String != "" {
 			folderID := showFolderIDCol.String
 			item.ShowFolderID = &folderID
@@ -4999,13 +5231,13 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 	// duration short so concurrent HTTP readers are not blocked during a full scan.
 	const batchSize = 50
 	type pendingRow struct {
-		id, libraryID, typ, title, addedAt string
-		year, duration                      sql.NullInt64
-		videoCodec, audioCodec, container   sql.NullString
-		needsTranscode                      sql.NullBool
-		path                                string
-		parsed                              metadata.ParsedFilename
-		showFolderID                        sql.NullString
+		id, libraryID, typ, title, addedAt     string
+		year, duration                         sql.NullInt64
+		videoCodec, audioCodec, container      sql.NullString
+		needsTranscode                         sql.NullBool
+		path                                   string
+		parsed                                 metadata.ParsedFilename
+		showFolderID                           sql.NullString
 		videoWidth, videoHeight, audioChannels sql.NullInt64
 	}
 	var batch []pendingRow
@@ -5077,6 +5309,22 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		}
 
 		if d.IsDir() {
+			// TASK-755: never descend into the auto-normalize backup tree. Originals
+			// moved there after conversion must NOT be re-indexed (they'd resurrect the
+			// non-DirectPlay rows we just replaced). Match both the configured originals
+			// dir and the conventional basename so a custom DSVIDEO_ORIGINALS_DIR is also
+			// skipped.
+			if s.cfg.OriginalsDir != "" && filepath.Clean(path) == filepath.Clean(s.cfg.OriginalsDir) {
+				return filepath.SkipDir
+			}
+			if d.Name() == "_dsvideo_originals" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// TASK-755: skip in-progress conversion temps (".<stem>.converting.mp4"). Indexing
+		// a half-written temp created the ghost-row bug; the dotfile name is the marker.
+		if strings.HasPrefix(d.Name(), ".") && strings.HasSuffix(d.Name(), ".converting.mp4") {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
@@ -5144,6 +5392,16 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			audioCodec = sql.NullString{String: quickProbe.AudioCodec, Valid: true}
 			container = sql.NullString{String: quickProbe.Container, Valid: true}
 			needsTranscode = sql.NullBool{Bool: quickProbe.NeedsTranscode, Valid: true}
+		}
+
+		// TASK-755: hand non-DirectPlay files to the auto-normalize worker. Enqueue is
+		// deduplicated and non-blocking, so calling it on every scan is cheap — already
+		// queued/in-progress items are ignored, and the worker re-decides against the
+		// live file before doing any work (so a file converted by a prior run or by
+		// convert-library.sh is skipped). `root` is the media root for this library,
+		// used by the worker to preserve the relative path under the backup tree.
+		if s.normalizeWorker != nil && needsTranscode.Valid && needsTranscode.Bool {
+			s.normalizeWorker.Enqueue(id, path, root)
 		}
 
 		var year sql.NullInt64
@@ -5953,6 +6211,42 @@ func nullStringToAny(v sql.NullString) any {
 	return v.String
 }
 
+// validateOriginalsDir checks that the auto-normalize backup dir is safe for the
+// retention reaper to recursively delete from. Worf P2-5 (TASK-755): the reaper deletes
+// everything older than N days under this dir, so it must never be empty, a filesystem
+// root, equal to any media root, or a PARENT of any media root (which would put the
+// library under the reaper's blast radius). Returns "" when safe, else a human-readable
+// reason the caller logs while disabling the reaper.
+func validateOriginalsDir(originalsDir string, mediaRoots ...string) string {
+	od := strings.TrimSpace(originalsDir)
+	if od == "" {
+		return "originals dir is empty"
+	}
+	cleanOD := filepath.Clean(od)
+	// A filesystem root (e.g. "/" or a Windows volume root) cleans to a path whose parent
+	// is itself. Refuse — reaping from root is catastrophic.
+	if parent := filepath.Dir(cleanOD); parent == cleanOD {
+		return "originals dir is a filesystem root"
+	}
+	for _, mr := range mediaRoots {
+		mr = strings.TrimSpace(mr)
+		if mr == "" {
+			continue
+		}
+		cleanMR := filepath.Clean(mr)
+		if cleanOD == cleanMR {
+			return fmt.Sprintf("originals dir equals media root %q", cleanMR)
+		}
+		// originals dir is a parent of (or identical to) a media root → the media root
+		// lives under the reaper. filepath.Rel gives a non-".." relative path when cleanMR
+		// is at or below cleanOD.
+		if rel, err := filepath.Rel(cleanOD, cleanMR); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Sprintf("originals dir is a parent of media root %q", cleanMR)
+		}
+	}
+	return ""
+}
+
 func itemIDFromPath(path string) string {
 	// Deterministic but stable: hex of cleaned path.
 	clean := filepath.Clean(path)
@@ -6057,15 +6351,15 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type showInfo struct {
-		folderName      string
-		displayName     string
-		year            sql.NullInt64
-		poster          string
-		firstID         string
-		count           int
-		seasons         map[int]bool
-		newestAdded     string // ISO8601 — MAX(added_at) across episodes
-		maxChangeSeq    int64  // max change_seq across episodes — used as image cache-buster
+		folderName   string
+		displayName  string
+		year         sql.NullInt64
+		poster       string
+		firstID      string
+		count        int
+		seasons      map[int]bool
+		newestAdded  string // ISO8601 — MAX(added_at) across episodes
+		maxChangeSeq int64  // max change_seq across episodes — used as image cache-buster
 	}
 
 	showMap := map[string]*showInfo{}
@@ -6335,9 +6629,9 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	// issuing nested QueryRow calls exhausts the connection pool under concurrent
 	// season requests, causing all requests to deadlock.
 	type episodeRow struct {
-		id, typ, title, addedAt string
-		year, duration, seasonNum, episodeNum sql.NullInt64
-		rating                                sql.NullFloat64
+		id, typ, title, addedAt                string
+		year, duration, seasonNum, episodeNum  sql.NullInt64
+		rating                                 sql.NullFloat64
 		posterPath, backdropPath, episodeTitle sql.NullString
 	}
 	var rawRows []episodeRow
