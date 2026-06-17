@@ -511,6 +511,160 @@
       transition: width 0.3s;
     }
 
+    /* Home rails (horizontal scrolling) */
+    .rail { margin-bottom: 36px; }
+    .rail-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .rail-title { font-size: 18px; font-weight: 600; }
+    .rail-scroll {
+      display: flex;
+      gap: 16px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 8px;
+      scroll-snap-type: x proximity;
+      -webkit-overflow-scrolling: touch;
+    }
+    .rail-scroll::-webkit-scrollbar { height: 6px; }
+    .rail-scroll > .video-card {
+      flex: 0 0 160px;
+      width: 160px;
+      scroll-snap-align: start;
+    }
+
+    /* Header bar with search */
+    .content-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .search-box {
+      position: relative;
+      flex: 1;
+      max-width: 420px;
+    }
+    .search-box svg {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      color: var(--text-tertiary);
+      pointer-events: none;
+    }
+    .search-input {
+      width: 100%;
+      padding: 10px 36px 10px 40px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      color: var(--text-primary);
+      font-size: 14px;
+      transition: border-color var(--transition);
+    }
+    .search-input:focus { outline: none; border-color: var(--accent); }
+    .search-input::placeholder { color: var(--text-tertiary); }
+    .search-clear {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 22px;
+      height: 22px;
+      border: none;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      border-radius: 50%;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .search-clear.visible { display: flex; }
+    .search-clear svg { position: static; transform: none; width: 12px; height: 12px; }
+
+    /* Sort control */
+    .sort-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .sort-control label { font-size: 13px; color: var(--text-tertiary); }
+    .sort-select {
+      padding: 8px 12px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .sort-select:focus { outline: none; border-color: var(--accent); }
+
+    /* Player overlay menus (subtitle / quality) */
+    .player-menus { display: flex; align-items: center; gap: 8px; }
+    .player-menu-wrap { position: relative; }
+    .player-menu-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 14px;
+      background: rgba(255,255,255,0.15);
+      backdrop-filter: blur(10px);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background var(--transition);
+    }
+    .player-menu-btn:hover { background: rgba(255,255,255,0.25); }
+    .player-menu-btn svg { width: 16px; height: 16px; }
+    .player-menu {
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 6px;
+      min-width: 160px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      box-shadow: var(--shadow);
+      display: none;
+      overflow: hidden;
+      z-index: 20;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .player-menu.visible { display: block; }
+    .player-menu-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 16px;
+      font-size: 14px;
+      color: var(--text-primary);
+      cursor: pointer;
+      border: none;
+      background: none;
+      width: 100%;
+      text-align: left;
+    }
+    .player-menu-item:hover { background: var(--bg-hover); }
+    .player-menu-item.active { color: var(--accent); }
+    .player-menu-item .check { width: 16px; height: 16px; flex-shrink: 0; opacity: 0; }
+    .player-menu-item.active .check { opacity: 1; }
+
     /* Folder Grid */
     .folder-grid {
       display: grid;
@@ -1060,6 +1214,13 @@
       <div class="sidebar-divider"></div>
 
       <div class="sidebar-section">
+        <button class="sidebar-item" id="nav-home" onclick="navigateTo('home')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+          </svg>
+          Home
+        </button>
         <button class="sidebar-item" id="nav-downloads" onclick="navigateTo('downloads')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -1138,7 +1299,24 @@
     <!-- Main -->
     <div class="main-area">
       <main class="main-content" id="main-content">
-        <!-- Content loaded dynamically -->
+        <!-- Search bar (always visible at top of content) -->
+        <div class="content-header">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" class="search-input" id="search-input" placeholder="Search your library..."
+                   oninput="onSearchInput(this.value)" autocomplete="off">
+            <button class="search-clear" id="search-clear" onclick="clearSearch()" title="Clear">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="view-content">
+          <!-- View content loaded dynamically -->
+        </div>
       </main>
     </div>
   </div>
@@ -1148,6 +1326,28 @@
     <div class="player-header">
       <h2 class="player-title" id="player-title">Video Title</h2>
       <div style="display:flex;align-items:center;gap:12px">
+        <div class="player-menus">
+          <div class="player-menu-wrap" id="subtitle-menu-wrap" style="display:none">
+            <button class="player-menu-btn" onclick="togglePlayerMenu(event, 'subtitle-menu')" title="Subtitles">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="5" width="20" height="14" rx="2"/>
+                <line x1="6" y1="13" x2="10" y2="13"/><line x1="14" y1="13" x2="18" y2="13"/>
+                <line x1="6" y1="16" x2="13" y2="16"/>
+              </svg>
+              CC
+            </button>
+            <div class="player-menu" id="subtitle-menu"></div>
+          </div>
+          <div class="player-menu-wrap" id="quality-menu-wrap">
+            <button class="player-menu-btn" onclick="togglePlayerMenu(event, 'quality-menu')" title="Quality">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+              </svg>
+              <span id="quality-menu-label">Auto</span>
+            </button>
+            <div class="player-menu" id="quality-menu"></div>
+          </div>
+        </div>
         <button class="btn-next-episode" id="btn-next-episode" onclick="playNextEpisode()">
           Next Episode
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1275,7 +1475,15 @@
       settings: {},
       // TV show playback tracking
       currentShowData: null,
-      currentEpisodeId: null
+      currentEpisodeId: null,
+      // Sort preference for library/grid views
+      sortBy: localStorage.getItem('ds_video_sort') || 'addedDesc',
+      // Search state
+      searchTimer: null,
+      searchActive: false,
+      viewBeforeSearch: null,
+      // Current playback context (for quality re-request)
+      playback: null
     };
 
     // Detect embedded mode
@@ -1326,8 +1534,7 @@
       detectEmbeddedMode();
       if (state.token && state.baseURL) {
         showApp();
-        const lastLib = localStorage.getItem('ds_video_last_library') || 'movies';
-        navigateTo(lastLib);
+        navigateTo('home');
       }
       document.getElementById('login-form').addEventListener('submit', handleLogin);
       if (!state.isEmbedded) {
@@ -1342,6 +1549,7 @@
       document.addEventListener('click', () => {
         document.getElementById('context-menu').classList.remove('visible');
         document.getElementById('user-dropdown').classList.remove('visible');
+        document.querySelectorAll('.player-menu').forEach(m => m.classList.remove('visible'));
       });
     });
 
@@ -1403,8 +1611,7 @@
         document.getElementById('otp').value = '';
 
         showApp();
-        const lastLib = localStorage.getItem('ds_video_last_library') || 'movies';
-        navigateTo(lastLib);
+        navigateTo('home');
       } catch (error) {
         errorDiv.textContent = error.message;
         errorDiv.classList.add('visible');
@@ -1459,6 +1666,14 @@
       state.currentFilter = opts.filter || 'all';
       state.currentFolder = opts.folder || null;
 
+      // Leaving a non-search view clears any active search
+      if (view !== 'search') {
+        state.searchActive = false;
+        const si = document.getElementById('search-input');
+        if (si && document.activeElement !== si) si.value = '';
+        document.getElementById('search-clear').classList.remove('visible');
+      }
+
       // Update sidebar active state
       document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
       const sidebarView = view === 'detail' ? 'movies' : view === 'showDetail' ? 'tv' : view;
@@ -1471,6 +1686,7 @@
       }
 
       switch (view) {
+        case 'home': loadHome(); break;
         case 'movies': loadLibrary('lib_movies', 'Movies'); break;
         case 'tv': loadShows(); break;
         case 'detail': showItemDetail(opts.id); break;
@@ -1478,13 +1694,14 @@
         case 'downloads': loadDownloads(); break;
         case 'playlists': loadPlaylists(); break;
         case 'playlist': loadPlaylistDetail(opts.id); break;
-        default: loadLibrary('lib_movies', 'Movies');
+        case 'search': runSearch(opts.query); break;
+        default: loadHome();
       }
     }
 
     // Library Items with Filters
     async function loadLibrary(libraryId, libraryTitle) {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
 
       if (state.currentFilter === 'byFolder' && !state.currentFolder) {
         // Show folder listing
@@ -1539,6 +1756,7 @@
       content.innerHTML = `
         <div class="section-header">
           <h2 class="section-title">${escapeHtml(libraryTitle)}</h2>
+          ${renderSortControl()}
         </div>
         ${renderFilterBar(libraryId === 'lib_movies' ? 'movies' : 'tv')}
         ${state.currentFolder ? `
@@ -1584,6 +1802,227 @@
       `;
     }
 
+    // ---- Sort control (C) ----
+    const SORT_OPTIONS = [
+      { id: 'addedDesc', label: 'Recently Added' },
+      { id: 'addedAsc', label: 'Oldest' },
+      { id: 'nameAsc', label: 'Name A–Z' },
+      { id: 'nameDesc', label: 'Name Z–A' },
+      { id: 'yearDesc', label: 'Year (Newest)' },
+      { id: 'yearAsc', label: 'Year (Oldest)' },
+      { id: 'ratingDesc', label: 'Rating' }
+    ];
+
+    function renderSortControl() {
+      return `
+        <div class="sort-control">
+          <label for="sort-select">Sort</label>
+          <select class="sort-select" id="sort-select" onchange="applySort(this.value)">
+            ${SORT_OPTIONS.map(o => `
+              <option value="${o.id}" ${state.sortBy === o.id ? 'selected' : ''}>${o.label}</option>
+            `).join('')}
+          </select>
+        </div>
+      `;
+    }
+
+    function applySort(sortBy) {
+      state.sortBy = sortBy;
+      localStorage.setItem('ds_video_sort', sortBy);
+      // Re-render the current grid in place without re-fetching.
+      const grid = document.querySelector('#view-content .video-grid');
+      if (grid) {
+        grid.innerHTML = sortItems(state.items).map(item => renderVideoCard(item)).join('');
+      }
+    }
+
+    function sortItems(items) {
+      const sorted = [...items];
+      const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+      const num = (v) => (typeof v === 'number' ? v : 0);
+      const ts = (v) => (v ? Date.parse(v) || 0 : 0);
+      switch (state.sortBy) {
+        case 'addedAsc': sorted.sort((a, b) => ts(a.addedAt) - ts(b.addedAt)); break;
+        case 'nameAsc': sorted.sort(byTitle); break;
+        case 'nameDesc': sorted.sort((a, b) => byTitle(b, a)); break;
+        case 'yearDesc': sorted.sort((a, b) => num(b.year) - num(a.year)); break;
+        case 'yearAsc': sorted.sort((a, b) => num(a.year) - num(b.year)); break;
+        case 'ratingDesc': sorted.sort((a, b) => num(b.rating) - num(a.rating)); break;
+        case 'addedDesc':
+        default: sorted.sort((a, b) => ts(b.addedAt) - ts(a.addedAt)); break;
+      }
+      return sorted;
+    }
+
+    // ---- Home screen with rails (A) ----
+    function renderRail(title, items, opts = {}) {
+      if (!items || items.length === 0) return '';
+      return `
+        <div class="rail">
+          <div class="rail-header">
+            <h3 class="rail-title">${escapeHtml(title)}</h3>
+          </div>
+          <div class="rail-scroll">
+            ${items.map(item => renderVideoCard(item, opts)).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    async function loadHome() {
+      const content = document.getElementById('view-content');
+      content.innerHTML = `
+        <div class="section-header">
+          <h2 class="section-title">Home</h2>
+        </div>
+        <div class="loading"><div class="spinner"></div></div>
+      `;
+
+      try {
+        // Trigger a background scan, then load items + progress in parallel.
+        api('/api/v1/libraries').catch(() => {});
+        const [moviesData, progressData] = await Promise.all([
+          api('/api/v1/items?libraryId=lib_movies').catch(() => ({ items: [] })),
+          api('/api/v1/progress/all').catch(() => ({ progress: {} }))
+        ]);
+
+        const items = moviesData.items || [];
+        const progressMap = (progressData && progressData.progress) || {};
+        const byId = {};
+        items.forEach(it => { byId[it.id] = it; });
+
+        // Build progress-derived rails.
+        const continueWatching = [];
+        const recentlyWatched = [];
+        Object.keys(progressMap).forEach(id => {
+          const p = progressMap[id];
+          const base = byId[id];
+          if (!base || !p || !p.durationSeconds) return;
+          const pct = p.positionSeconds / p.durationSeconds;
+          // Attach progress so the card renders a progress bar.
+          const enriched = { ...base, progress: {
+            positionSeconds: p.positionSeconds,
+            durationSeconds: p.durationSeconds,
+            updatedAt: p.updatedAt
+          } };
+          if (pct > 0 && pct < 0.95) {
+            continueWatching.push(enriched);
+          } else if (pct >= 0.95) {
+            recentlyWatched.push(enriched);
+          }
+        });
+        const byUpdatedDesc = (a, b) =>
+          (Date.parse(b.progress.updatedAt) || 0) - (Date.parse(a.progress.updatedAt) || 0);
+        continueWatching.sort(byUpdatedDesc);
+        recentlyWatched.sort(byUpdatedDesc);
+
+        // Recently Added: newest by addedAt.
+        const recentlyAdded = [...items]
+          .sort((a, b) => (Date.parse(b.addedAt) || 0) - (Date.parse(a.addedAt) || 0))
+          .slice(0, 20);
+
+        const rails = [
+          renderRail('Continue Watching', continueWatching.slice(0, 20), { resume: true }),
+          renderRail('Recently Added', recentlyAdded),
+          renderRail('Recently Watched', recentlyWatched.slice(0, 20))
+        ].filter(Boolean).join('');
+
+        const railsEl = `
+          <div class="section-header">
+            <h2 class="section-title">Home</h2>
+          </div>
+          ${rails || `
+            <div class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="23 7 16 12 23 17 23 7"/>
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+              </svg>
+              <h3>Nothing here yet</h3>
+              <p>Browse your Movies and TV libraries to get started</p>
+            </div>`}
+        `;
+        content.innerHTML = railsEl;
+      } catch (error) {
+        content.innerHTML = `
+          <div class="section-header"><h2 class="section-title">Home</h2></div>
+          <div class="empty-state"><h3>Failed to load home</h3><p>${error.message}</p></div>`;
+      }
+    }
+
+    // ---- Search (B) ----
+    function onSearchInput(value) {
+      const clearBtn = document.getElementById('search-clear');
+      clearBtn.classList.toggle('visible', value.length > 0);
+      if (state.searchTimer) clearTimeout(state.searchTimer);
+      const q = value.trim();
+      if (q === '') {
+        // Empty box returns to the prior view.
+        if (state.searchActive) {
+          state.searchActive = false;
+          navigateTo(state.viewBeforeSearch || 'home');
+        }
+        return;
+      }
+      state.searchTimer = setTimeout(() => {
+        if (!state.searchActive) {
+          // Remember where we came from so clearing restores it.
+          state.viewBeforeSearch = state.currentView;
+          state.searchActive = true;
+        }
+        navigateTo('search', { query: q });
+      }, 300);
+    }
+
+    function clearSearch() {
+      const input = document.getElementById('search-input');
+      input.value = '';
+      document.getElementById('search-clear').classList.remove('visible');
+      if (state.searchTimer) clearTimeout(state.searchTimer);
+      state.searchActive = false;
+      navigateTo(state.viewBeforeSearch || 'home');
+    }
+
+    async function runSearch(query) {
+      const content = document.getElementById('view-content');
+      const q = (query || '').trim();
+      if (!q) { navigateTo(state.viewBeforeSearch || 'home'); return; }
+
+      content.innerHTML = `
+        <div class="section-header">
+          <h2 class="section-title">Search</h2>
+        </div>
+        <div class="loading"><div class="spinner"></div></div>
+      `;
+
+      try {
+        const data = await api(`/api/v1/search?q=${encodeURIComponent(q)}&limit=50&offset=0`);
+        // Guard against a stale response landing after the box was cleared.
+        if (!state.searchActive) return;
+        state.items = data.items || [];
+        const loadingEl = content.querySelector('.loading');
+        content.querySelector('.section-title').textContent =
+          `Search results for “${q}” (${data.total || state.items.length})`;
+        if (state.items.length === 0) {
+          loadingEl.outerHTML = `
+            <div class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              <h3>No results</h3>
+              <p>Nothing matched “${escapeHtml(q)}”</p>
+            </div>`;
+        } else {
+          loadingEl.outerHTML = `
+            <div class="video-grid">
+              ${state.items.map(item => renderVideoCard(item)).join('')}
+            </div>`;
+        }
+      } catch (error) {
+        content.querySelector('.loading').outerHTML = `
+          <div class="empty-state"><h3>Search failed</h3><p>${error.message}</p></div>`;
+      }
+    }
+
     function renderVideoGrid(container) {
       const loadingEl = container.querySelector('.loading');
       if (state.items.length === 0) {
@@ -1600,19 +2039,23 @@
 
       const gridHTML = `
         <div class="video-grid">
-          ${state.items.map(item => renderVideoCard(item)).join('')}
+          ${sortItems(state.items).map(item => renderVideoCard(item)).join('')}
         </div>
       `;
       if (loadingEl) loadingEl.outerHTML = gridHTML;
     }
 
-    function renderVideoCard(item) {
+    function renderVideoCard(item, opts = {}) {
       const progressPct = item.progress
         ? Math.min(100, Math.round((item.progress.positionSeconds / item.progress.durationSeconds) * 100))
         : 0;
+      // Continue Watching cards resume playback on click instead of opening detail.
+      const onClick = opts.resume
+        ? `playVideo('${item.id}', '${escapeAttr(item.title)}')`
+        : `navigateTo('detail', {id:'${item.id}'})`;
 
       return `
-        <div class="video-card" onclick="navigateTo('detail', {id:'${item.id}'})">
+        <div class="video-card" onclick="${onClick}">
           <div class="card-actions" onclick="event.stopPropagation()">
             <button class="card-action-btn" onclick="showCardMenu(event, '${item.id}', '${escapeAttr(item.title)}')" title="More actions">
               <svg viewBox="0 0 24 24" fill="currentColor">
@@ -1710,6 +2153,18 @@
           </svg>
           Add to Playlist
         </button>
+        <button class="context-menu-item" onclick="markWatched('${itemId}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          Mark as Watched
+        </button>
+        <button class="context-menu-item" onclick="markUnwatched('${itemId}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/>
+          </svg>
+          Mark as Unwatched
+        </button>
       `;
 
       const rect = event.currentTarget.getBoundingClientRect();
@@ -1719,9 +2174,77 @@
       event.stopPropagation();
     }
 
+    // ---- Mark watched / unwatched (F) ----
+    // Resolve a usable duration for an item from whatever data we already hold.
+    function durationForItem(itemId) {
+      const it = state.items.find(i => i.id === itemId);
+      if (it) {
+        if (it.progress && it.progress.durationSeconds) return it.progress.durationSeconds;
+        if (it.durationSeconds) return it.durationSeconds;
+      }
+      return 0;
+    }
+
+    async function postProgress(itemId, positionSeconds, durationSeconds, playState) {
+      // Matches the player's progress-post payload shape exactly.
+      return api(`/api/v1/items/${itemId}/progress`, {
+        method: 'POST',
+        body: JSON.stringify({
+          positionSeconds: Math.floor(positionSeconds),
+          durationSeconds: Math.floor(durationSeconds),
+          state: playState
+        })
+      });
+    }
+
+    async function markWatched(itemId, durationSeconds) {
+      document.getElementById('context-menu').classList.remove('visible');
+      const dur = durationSeconds || durationForItem(itemId);
+      // Optimistic UI: reflect 100% progress on the card and in cached state.
+      const it = state.items.find(i => i.id === itemId);
+      if (it) it.progress = { positionSeconds: dur, durationSeconds: dur, updatedAt: new Date().toISOString() };
+      updateCardProgress(itemId, 100);
+      try {
+        await postProgress(itemId, dur || 1, dur || 1, 'finished');
+      } catch (e) {}
+    }
+
+    async function markUnwatched(itemId) {
+      document.getElementById('context-menu').classList.remove('visible');
+      const dur = durationForItem(itemId);
+      const it = state.items.find(i => i.id === itemId);
+      if (it) it.progress = null;
+      updateCardProgress(itemId, 0);
+      try {
+        await postProgress(itemId, 0, dur, 'playing');
+      } catch (e) {}
+    }
+
+    // Optimistically update a card's progress bar in the current grid/rail.
+    function updateCardProgress(itemId, pct) {
+      const cards = document.querySelectorAll(`#view-content .video-card`);
+      cards.forEach(card => {
+        const handler = card.getAttribute('onclick') || '';
+        if (!handler.includes(`'${itemId}'`)) return;
+        const poster = card.querySelector('.video-poster');
+        let bar = card.querySelector('.video-progress');
+        if (pct <= 0) {
+          if (bar) bar.remove();
+          return;
+        }
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'video-progress';
+          bar.innerHTML = `<div class="video-progress-bar"></div>`;
+          poster.appendChild(bar);
+        }
+        bar.querySelector('.video-progress-bar').style.width = pct + '%';
+      });
+    }
+
     // Downloads
     async function loadDownloads() {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
       content.innerHTML = `
         <div class="section-header">
           <h2 class="section-title">Downloaded</h2>
@@ -1759,7 +2282,7 @@
 
     // Playlists
     async function loadPlaylists() {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
       content.innerHTML = `
         <div class="playlist-header">
           <h2 class="section-title">Playlists</h2>
@@ -1805,7 +2328,7 @@
     }
 
     async function loadPlaylistDetail(playlistId) {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
       content.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
 
       try {
@@ -1977,7 +2500,7 @@
 
     // TV Shows
     async function loadShows() {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
       content.innerHTML = `
         <div class="section-header">
           <h2 class="section-title">TV Shows</h2>
@@ -2013,7 +2536,7 @@
 
     // Item Detail Page (Movies)
     async function showItemDetail(itemId) {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
       content.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
 
       try {
@@ -2064,10 +2587,20 @@
                 ${item.summary ? `<div class="detail-overview">${escapeHtml(item.summary)}</div>` : ''}
                 ${item.director ? `<div class="detail-credits">Director: <span>${escapeHtml(item.director)}</span></div>` : ''}
                 ${item.cast && item.cast.length ? `<div class="detail-credits">Cast: <span>${item.cast.map(c => escapeHtml(c.name)).join(', ')}</span></div>` : ''}
-                <button class="btn-play" onclick="playVideo('${itemId}', '${escapeAttr(item.title)}')">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                  Play
-                </button>
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                  <button class="btn-play" onclick="playVideo('${itemId}', '${escapeAttr(item.title)}')">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    Play
+                  </button>
+                  <button class="btn btn-secondary btn-sm" style="width:auto" onclick="markWatched('${itemId}', ${item.durationSeconds || 0})">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                    Mark Watched
+                  </button>
+                  <button class="btn btn-secondary btn-sm" style="width:auto" onclick="markUnwatched('${itemId}')">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>
+                    Mark Unwatched
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -2084,7 +2617,7 @@
 
     // TV Show Detail Page
     async function showShowDetail(showName, folderName) {
-      const content = document.getElementById('main-content');
+      const content = document.getElementById('view-content');
       content.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
 
       try {
@@ -2096,6 +2629,7 @@
         const posterId = data.images && data.images.poster && data.images.poster.id;
         const seasons = data.seasons || [];
         const activeSeason = seasons.length > 0 ? seasons[0].seasonNumber : 1;
+        state.currentSeason = activeSeason;
 
         content.innerHTML = `
           <div class="detail-page">
@@ -2166,6 +2700,7 @@
     }
 
     function switchSeason(seasonNum) {
+      state.currentSeason = seasonNum;
       // Update tabs
       document.querySelectorAll('.season-tab').forEach(tab => {
         tab.classList.toggle('active', parseInt(tab.textContent.replace('Season ', '')) === seasonNum);
@@ -2173,6 +2708,50 @@
       // Update episode list
       const season = state.currentShowData.seasons.find(s => s.seasonNumber === seasonNum);
       document.getElementById('episode-list').innerHTML = renderEpisodeList(season);
+    }
+
+    // Episode context menu (mark watched / unwatched)
+    function showEpisodeMenu(event, episodeId, durationSeconds, watched) {
+      event.stopPropagation();
+      const menu = document.getElementById('context-menu');
+      menu.innerHTML = watched
+        ? `<button class="context-menu-item" onclick="markEpisode('${episodeId}', ${durationSeconds}, false)">
+             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>
+             Mark as Unwatched
+           </button>`
+        : `<button class="context-menu-item" onclick="markEpisode('${episodeId}', ${durationSeconds}, true)">
+             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+             Mark as Watched
+           </button>`;
+      const rect = event.currentTarget.getBoundingClientRect();
+      menu.style.top = rect.bottom + 4 + 'px';
+      menu.style.left = Math.min(rect.left, window.innerWidth - 200) + 'px';
+      menu.classList.add('visible');
+    }
+
+    async function markEpisode(episodeId, durationSeconds, watched) {
+      document.getElementById('context-menu').classList.remove('visible');
+      // Optimistically update the cached show data and re-render the season.
+      if (state.currentShowData && state.currentShowData.seasons) {
+        for (const season of state.currentShowData.seasons) {
+          const ep = (season.episodes || []).find(e => e.id === episodeId);
+          if (ep) {
+            ep.watched = watched;
+            ep.progress = watched
+              ? { positionSeconds: durationSeconds, durationSeconds: durationSeconds }
+              : null;
+            break;
+          }
+        }
+        const activeSeason = state.currentShowData.seasons.find(s => s.seasonNumber === state.currentSeason)
+          || state.currentShowData.seasons[0];
+        const listEl = document.getElementById('episode-list');
+        if (listEl && activeSeason) listEl.innerHTML = renderEpisodeList(activeSeason);
+      }
+      try {
+        await postProgress(episodeId, watched ? (durationSeconds || 1) : 0, durationSeconds || 0,
+          watched ? 'finished' : 'playing');
+      } catch (e) {}
     }
 
     function renderEpisodeList(season) {
@@ -2209,6 +2788,14 @@
                     <div class="episode-progress-fill" style="width:${progressPct}%"></div>
                   </div>
                 ` : '')}
+                <div class="card-actions" style="position:static;opacity:1" onclick="event.stopPropagation()">
+                  <button class="card-action-btn" style="background:var(--bg-tertiary)"
+                          onclick="showEpisodeMenu(event, '${ep.id}', ${ep.durationSeconds || 0}, ${watched ? 'true' : 'false'})" title="More actions">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                      <circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/>
+                    </svg>
+                  </button>
+                </div>
               </div>
             `;
           }).join('')}
@@ -2254,7 +2841,7 @@
     }
 
     // Video Player
-    async function playVideo(itemId, title) {
+    async function playVideo(itemId, title, quality) {
       const modal = document.getElementById('player-modal');
       const video = document.getElementById('video-player');
       const titleEl = document.getElementById('player-title');
@@ -2272,8 +2859,14 @@
 
       if (state.hls) { state.hls.destroy(); state.hls = null; }
 
+      // Track playback context for quality / subtitle switching.
+      // A quality switch passes an explicit resume position via state.playback.pendingResume.
+      const pendingResume = (state.playback && state.playback.pendingResume) || 0;
+
       try {
-        const data = await api(`/api/v1/items/${itemId}/playback?client=web`);
+        let pbUrl = `/api/v1/items/${itemId}/playback?client=web`;
+        if (quality && quality !== 'auto') pbUrl += `&quality=${quality}`;
+        const data = await api(pbUrl);
         let rawUrl = data.hlsMasterUrl || data.streamUrl;
         if (!rawUrl) throw new Error('No playback URL available');
 
@@ -2285,10 +2878,23 @@
           if (rawUrl.startsWith('/')) url = state.baseURL + rawUrl;
         }
 
+        const resumeAt = pendingResume || data.resumePositionSeconds || 0;
+
+        // Stash context and build the subtitle / quality menus.
+        state.playback = {
+          itemId,
+          title,
+          quality: quality || 'auto',
+          subtitles: data.subtitles || [],
+          isHls: url.includes('.m3u8'),
+          pendingResume: 0
+        };
+        buildPlayerMenus(data);
+
         if (url.includes('.m3u8')) {
           if (Hls.isSupported()) {
             state.hls = new Hls({
-              startPosition: data.resumePositionSeconds || 0,
+              startPosition: resumeAt,
               maxBufferLength: 60,          // Buffer up to 60s ahead (default: 30)
               maxMaxBufferLength: 120,      // Allow up to 120s when bandwidth allows
               backBufferLength: 30,         // Keep 30s behind current position
@@ -2297,15 +2903,20 @@
             });
             state.hls.loadSource(url);
             state.hls.attachMedia(video);
-            state.hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+            state.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+              // hls.js disables subtitle renditions by default; keep Off until chosen.
+              state.hls.subtitleTrack = -1;
+              if (typeof state.hls.subtitleDisplay !== 'undefined') state.hls.subtitleDisplay = false;
+              video.play();
+            });
           } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             video.src = url;
-            if (data.resumePositionSeconds) video.currentTime = data.resumePositionSeconds;
+            if (resumeAt) video.currentTime = resumeAt;
             video.play();
           }
         } else {
           video.src = url;
-          if (data.resumePositionSeconds) video.currentTime = data.resumePositionSeconds;
+          if (resumeAt) video.currentTime = resumeAt;
           video.play();
         }
 
@@ -2369,7 +2980,94 @@
       video.onended = null;
       modal.classList.remove('visible');
       document.getElementById('btn-next-episode').classList.remove('visible');
+      // Hide player overlay menus
+      document.getElementById('subtitle-menu').classList.remove('visible');
+      document.getElementById('quality-menu').classList.remove('visible');
+      document.getElementById('subtitle-menu-wrap').style.display = 'none';
+      state.playback = null;
       document.body.style.overflow = '';
+    }
+
+    // ---- Player overlay menus: subtitles (D) + quality (E) ----
+    function togglePlayerMenu(event, menuId) {
+      event.stopPropagation();
+      const menu = document.getElementById(menuId);
+      const isOpen = menu.classList.contains('visible');
+      // Close all player menus first
+      document.querySelectorAll('.player-menu').forEach(m => m.classList.remove('visible'));
+      if (!isOpen) menu.classList.add('visible');
+    }
+
+    function buildPlayerMenus(data) {
+      // --- Subtitles (D) ---
+      const subWrap = document.getElementById('subtitle-menu-wrap');
+      const subMenu = document.getElementById('subtitle-menu');
+      const subs = (data && data.subtitles) || [];
+      // hls.js subtitle renditions only exist for HLS playback.
+      if (subs.length > 0 && state.playback && state.playback.isHls) {
+        subWrap.style.display = '';
+        const check = `<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>`;
+        subMenu.innerHTML = `
+          <button class="player-menu-item active" onclick="selectSubtitle(-1)">
+            <span>Off</span>${check}
+          </button>
+          ${subs.map((s, i) => {
+            const label = s.name || s.language || `Track ${i + 1}`;
+            return `<button class="player-menu-item" onclick="selectSubtitle(${i})">
+              <span>${escapeHtml(label)}</span>${check}
+            </button>`;
+          }).join('')}
+        `;
+      } else {
+        subWrap.style.display = 'none';
+        subMenu.innerHTML = '';
+      }
+
+      // --- Quality (E) ---
+      const qualMenu = document.getElementById('quality-menu');
+      const qualLabel = document.getElementById('quality-menu-label');
+      const current = (state.playback && state.playback.quality) || 'auto';
+      const QUALITIES = [
+        { id: 'auto', label: 'Auto' },
+        { id: '1080', label: '1080p' },
+        { id: '720', label: '720p' },
+        { id: '480', label: '480p' }
+      ];
+      const cur = QUALITIES.find(q => q.id === current);
+      qualLabel.textContent = cur ? cur.label : 'Auto';
+      const check = `<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>`;
+      qualMenu.innerHTML = QUALITIES.map(q => `
+        <button class="player-menu-item ${q.id === current ? 'active' : ''}" onclick="selectQuality('${q.id}')">
+          <span>${q.label}</span>${check}
+        </button>
+      `).join('');
+    }
+
+    function selectSubtitle(index) {
+      document.getElementById('subtitle-menu').classList.remove('visible');
+      if (state.hls) {
+        state.hls.subtitleTrack = index;
+        if (typeof state.hls.subtitleDisplay !== 'undefined') {
+          state.hls.subtitleDisplay = index >= 0;
+        }
+      }
+      // Reflect active state in the menu.
+      document.querySelectorAll('#subtitle-menu .player-menu-item').forEach((el, i) => {
+        // First item is "Off" (-1), then tracks 0..n.
+        el.classList.toggle('active', (i - 1) === index);
+      });
+    }
+
+    function selectQuality(quality) {
+      document.getElementById('quality-menu').classList.remove('visible');
+      if (!state.playback) return;
+      if (state.playback.quality === quality) return;
+      const video = document.getElementById('video-player');
+      // Resume from the live position after re-requesting at the new quality.
+      const resumeAt = Math.floor(video.currentTime || 0);
+      const { itemId, title } = state.playback;
+      state.playback.pendingResume = resumeAt;
+      playVideo(itemId, title, quality);
     }
 
     // Utilities
