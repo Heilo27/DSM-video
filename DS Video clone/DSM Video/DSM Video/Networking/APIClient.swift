@@ -384,6 +384,15 @@ struct APIClient {
       throw APIError.network
     }
     if !(200...299).contains(httpResp.statusCode) {
+      // 409 from /playback means the server is mid-converting this file to a
+      // DirectPlay format (auto-normalize, TASK-755). Surface it as a distinct,
+      // non-error state so the UI can show an informational "being prepared, check
+      // back later" message instead of a red failure.
+      if httpResp.statusCode == 409,
+         let conv = try? Self.decoder.decode(ConvertingResponse.self, from: data),
+         conv.status == "converting" {
+        throw APIError.converting
+      }
       if let apiErr = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
         throw APIError.server(apiErr.error)
       }
@@ -398,10 +407,15 @@ enum APIError: Error {
   case http(Int)
   case server(String)
   case invalidURL
+  // The server is currently converting this title to a smooth-playback format
+  // (auto-normalize). Not a failure — an informational, transient state.
+  case converting
 
   var userMessage: String {
     switch self {
     case .network: return "Network error."
+    case .converting:
+      return "This video is being prepared for smooth playback. Check back in a few minutes."
     case .http(let code): return "Server error (\(code))."
     case .server(let msg):
       // Map known server error codes to friendly, actionable text.
@@ -424,7 +438,7 @@ enum APIError: Error {
   /// login flow surfaces a real auth error instead of a generic "couldn't find".
   var serverReached: Bool {
     switch self {
-    case .server, .http: return true
+    case .server, .http, .converting: return true
     case .network, .invalidURL: return false
     }
   }
@@ -432,6 +446,13 @@ enum APIError: Error {
 
 struct APIErrorResponse: Decodable {
   let error: String
+}
+
+/// 409 body from /playback when the server is mid-converting the title to a
+/// DirectPlay format (auto-normalize, TASK-755). Distinct from APIErrorResponse
+/// so a "converting" state isn't shown as a hard error.
+struct ConvertingResponse: Decodable {
+  let status: String
 }
 
 /// Used as a placeholder response type for endpoints that return any JSON but whose value we discard.

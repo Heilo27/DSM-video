@@ -1401,6 +1401,12 @@ private struct PlayerSheet: View {
       chapters = info.chapters ?? []
       playbackDuration = Double(info.durationSeconds ?? 0)
       playbackURL = url
+    } catch APIError.converting {
+      // Server is auto-normalizing this title (TASK-755). Show the informational
+      // message; the server was reached, so don't treat it as a connection failure
+      // or attempt a reconnect. The user can retry in a few minutes.
+      self.error = APIError.converting.userMessage
+      return
     } catch {
       appState.handleConnectionFailure(error)
       // If this was a network failure and the server is a QuickConnect ID,
