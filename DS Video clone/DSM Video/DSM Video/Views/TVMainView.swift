@@ -53,10 +53,10 @@ struct TVLoginView: View {
                 .overlay(
                   Image(systemName: "play.fill")
                     .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.dsAccentOn)
                     .offset(x: 3)
                 )
-              Text("DSM Video")
+              Text(AppInfo.displayName)
                 .font(.system(size: 72, weight: .bold))
                 .foregroundStyle(.white)
                 .tracking(-1)
@@ -765,7 +765,7 @@ private struct TVPortraitCard: View {
         // Watched badge
         if let progress = item.progress, progress.durationSeconds > 0 {
           let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= 0.95 {
+          if frac >= PlaybackProgress.watchedThreshold {
             VStack {
               HStack {
                 Spacer()
@@ -819,10 +819,20 @@ private struct TVSettingsView: View {
   @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
   @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
   @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
+  // Theme selection (Classic / Nitrate). Shared key with the app entry and iOS Settings.
+  @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
 
   var body: some View {
     NavigationStack {
       Form {
+        Section("Appearance") {
+          Picker("Theme", selection: $themeIDRaw) {
+            ForEach(ThemeID.allCases) { id in
+              Text(id.displayName).tag(id.rawValue)
+            }
+          }
+        }
+
         Section("Playback") {
           Picker("Video Quality", selection: Binding(
             get: { appState.qualityCap },

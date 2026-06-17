@@ -94,8 +94,7 @@ struct ItemsGridView: View {
         let gridPadding: CGFloat = horizontalSizeClass == .regular ? 20 : 12
         #endif
         if items.isEmpty && !isLoading && error == nil {
-          ContentUnavailableView("No Videos", systemImage: "film.stack", description: Text("This library has no videos yet."))
-            .foregroundStyle(.white)
+          DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
         }
         if displayedItems.isEmpty && !searchText.isEmpty {
           ContentUnavailableView(
@@ -348,16 +347,12 @@ private struct SortChipBar: View {
   @Binding var selection: SortOption
 
   var body: some View {
-    ScrollView(.horizontal, showsIndicators: false) {
-      HStack(spacing: 8) {
-        ForEach(movieSortDimensions, id: \.name) { dim in
-          SortDimensionChip(dimension: dim, selection: $selection)
-        }
+    // A20: render through the shared SortChip component (consistent pill radius + style).
+    SortChipScroller {
+      ForEach(movieSortDimensions, id: \.name) { dim in
+        SortDimensionChip(dimension: dim, selection: $selection)
       }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 8)
     }
-    .background(Color.black.opacity(0.95))
   }
 }
 
@@ -377,7 +372,13 @@ private struct SortDimensionChip: View {
   }
 
   var body: some View {
-    Button {
+    SortChip(
+      label: label,
+      isActive: isActive,
+      accessibilityLabel: isActive && dimension.ascending != nil
+        ? "Sorted by \(dimension.name), \(isAscending ? "ascending" : "descending"). Tap to reverse."
+        : "Sort by \(dimension.name)"
+    ) {
       if isActive, let asc = dimension.ascending {
         // Re-tap on the active directional chip flips direction.
         selection = isAscending ? dimension.descending : asc
@@ -385,23 +386,7 @@ private struct SortDimensionChip: View {
         // First tap selects the default (descending) direction.
         selection = dimension.descending
       }
-    } label: {
-      Text(label)
-        .font(.subheadline.weight(.medium))
-        .foregroundStyle(isActive ? Color.white : Color.dsTextSecondary)
-        .frame(minHeight: 44)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 14)
-        .background(
-          RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .fill(isActive ? Color.dsAccent : Color.dsSurface)
-        )
     }
-    .buttonStyle(.plain)
-    .accessibilityLabel(isActive && dimension.ascending != nil
-                        ? "Sorted by \(dimension.name), \(isAscending ? "ascending" : "descending"). Tap to reverse."
-                        : "Sort by \(dimension.name)")
-    .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
   }
 }
 #endif
@@ -448,7 +433,7 @@ struct ItemPosterCell: View {
       .overlay(alignment: .topTrailing) {
         if let progress = item.progress, progress.durationSeconds > 0 {
           let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= 0.95 {
+          if frac >= PlaybackProgress.watchedThreshold {
             Circle()
               .fill(Color.dsSuccess)
               .frame(width: 22, height: 22)
@@ -492,7 +477,7 @@ struct ItemPosterCell: View {
       .clipped()
     } else {
       Rectangle()
-        .fill(Color(white: 0.06))
+        .fill(Color.dsSurface)
         .frame(width: width, height: height)
         .overlay(
           Image(systemName: "film.fill")

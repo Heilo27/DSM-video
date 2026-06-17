@@ -9,9 +9,8 @@ struct LoginView: View {
 
   #if !os(tvOS)
   @State private var showPairing: Bool = false
-  @State private var showSettings: Bool = false
-  @State private var showAbout: Bool = false
   @State private var showBonjourScan: Bool = false
+  @State private var showMoreWays: Bool = false
   #endif
   @State private var showQuickConnect: Bool = false
   @State private var showOfflineDownloads: Bool = false
@@ -30,7 +29,13 @@ struct LoginView: View {
       DSReelBrandColor.background
         .ignoresSafeArea()
 
-      VStack(spacing: 16) {
+      // Wrap the whole form in a ScrollView so it can't clip vertically at the
+      // largest Dynamic Type sizes (previously the password field / Connect CTA
+      // could slide under the nav bar). GeometryReader + minHeight keeps the
+      // Spacer-based vertical centering identical at normal type sizes.
+      GeometryReader { geo in
+        ScrollView {
+          VStack(spacing: 16) {
         Spacer(minLength: 24)
 
         // Logomark — red circle with play triangle
@@ -40,20 +45,24 @@ struct LoginView: View {
             .frame(width: 80, height: 80)
           Image(systemName: "play.fill")
             .font(.system(size: 32))
-            .foregroundStyle(.white)
+            .foregroundStyle(Color.dsAccentOn)
             .offset(x: 3) // optical centering for play triangle
         }
         .accessibilityHidden(true) // "DSM Video" text label below serves the same purpose
         .padding(.bottom, 4)
 
         VStack(spacing: 6) {
-          Text("DSM Video")
+          Text(AppInfo.displayName)
             .font(.largeTitle.weight(.semibold))
             .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
 
           Text("Your NAS, beautifully.")
             .font(.subheadline)
             .foregroundStyle(.white.opacity(0.9))
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
         }
 
         VStack(spacing: 0) {
@@ -148,8 +157,8 @@ struct LoginView: View {
           Toggle(appState.useHTTPS ? "HTTPS: On" : "HTTPS: Off", isOn: $appState.useHTTPS)
           Toggle(appState.rememberMe ? "Remember me: On" : "Remember me: Off", isOn: $appState.rememberMe)
         }
-        .tint(.white)
-        .foregroundStyle(.white.opacity(0.75))
+        .tint(Color.dsAccent)
+        .foregroundStyle(.white.opacity(0.85))
         .padding(.horizontal, 24)
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
         #endif
@@ -159,7 +168,7 @@ struct LoginView: View {
         } label: {
           if appState.isLoggingIn {
             ProgressView("Connecting")
-              .tint(.white)
+              .tint(Color.dsAccentOn)
               .frame(maxWidth: .infinity, minHeight: 56)
           } else {
             Text("Connect")
@@ -168,7 +177,7 @@ struct LoginView: View {
           }
         }
         .background(Color.dsAccent)
-        .foregroundStyle(.white)
+        .foregroundStyle(Color.dsAccentOn)
         .clipShape(Capsule())
         #if os(tvOS)
         .frame(maxWidth: 600)
@@ -192,70 +201,74 @@ struct LoginView: View {
         }
 
         #if !os(tvOS)
-        HStack(spacing: 12) {
-          Rectangle().fill(Color.white.opacity(0.2)).frame(height: 1)
-          Text("or").font(.subheadline).foregroundStyle(.white.opacity(0.45))
-          Rectangle().fill(Color.white.opacity(0.2)).frame(height: 1)
+        // Single disclosure hiding the alternate connection methods so the
+        // returning-user form stays clean (A4). QuickConnect / Bonjour / Pair
+        // live behind this toggle; Settings & About moved post-login.
+        DisclosureGroup(isExpanded: $showMoreWays) {
+          VStack(spacing: 4) {
+            Button {
+              showQuickConnect = true
+            } label: {
+              Label("Connect via QuickConnect", systemImage: "arrow.right.circle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .accessibilityLabel("Connect via QuickConnect")
+
+            Button {
+              showBonjourScan = true
+            } label: {
+              Label("Find Server on Network", systemImage: "network")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+
+            Button {
+              showPairing = true
+            } label: {
+              Label("Pair with Apple TV", systemImage: "appletv")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+
+            Link(destination: URL(string: "https://heiloprojects.com/dsmvideo/#server") ?? URL(string: "https://heiloprojects.com")!) {
+              Label("Get DSVideoServer for your NAS", systemImage: "server.rack")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 44)
+            }
+            .contentShape(Rectangle())
+          }
+        } label: {
+          Text("More ways to connect")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.85))
         }
+        .tint(.white)
         .padding(.horizontal, 24)
         .padding(.top, 8)
-        .accessibilityHidden(true)
-
-        Button {
-          showQuickConnect = true
-        } label: {
-          Text("Connect via QuickConnect")
-            .font(.headline.weight(.semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: 56)
-            .background(Color(white: 0.2))
-            .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 24)
         .frame(maxWidth: horizontalSizeClass == .regular ? 528 : .infinity)
-        .accessibilityLabel("Connect via QuickConnect")
-        #endif
 
-        #if !os(tvOS)
-        Button {
-          showBonjourScan = true
-        } label: {
-          Label("Find Server on Network", systemImage: "network")
-            .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.75))
-            .frame(minHeight: 44)
-        }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .padding(.top, 4)
-
-        Button {
-          showPairing = true
-        } label: {
-          Label("Pair with Apple TV", systemImage: "appletv")
-            .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.75))
-            .frame(minHeight: 44)
-        }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .padding(.top, 8)
-
-        Link(destination: URL(string: "https://heiloprojects.com/dsmvideo/#server") ?? URL(string: "https://heiloprojects.com")!) {
-          Label("Get DSVideoServer for your NAS", systemImage: "server.rack")
-            .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.75))
-            .frame(minHeight: 44)
-        }
-        .contentShape(Rectangle())
-        .padding(.top, 4)
-
+        // Pre-login Offline/Downloads link — only relevant when content is
+        // saved on-device and no session is active.
         if hasDownloads {
           Button {
             showOfflineDownloads = true
           } label: {
-            Label("Watch Downloaded Videos", systemImage: "arrow.down.circle.fill")
+            Label("Offline / Downloads", systemImage: "arrow.down.circle.fill")
               .font(.subheadline)
               .foregroundStyle(.white.opacity(0.75))
               .frame(minHeight: 44)
@@ -268,44 +281,13 @@ struct LoginView: View {
         #endif
 
         Spacer(minLength: 24)
-
-        #if !os(tvOS)
-        HStack {
-          Button { showSettings = true } label: {
-            Image(systemName: "gearshape")
-              .frame(width: 44, height: 44)
-          }
-          .accessibilityLabel("Settings")
-          Spacer()
-          Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
-            .font(.footnote)
-            .foregroundStyle(.white.opacity(0.75))
-          Spacer()
-          Button { showAbout = true } label: {
-            Image(systemName: "info.circle")
-              .frame(width: 44, height: 44)
-          }
-          .accessibilityLabel("About DSM Video")
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 24)
-        .padding(.bottom, 16)
-        #endif
       }
+      .frame(minHeight: geo.size.height)
       #if !os(tvOS)
       .sheet(isPresented: $showPairing) {
         PairingCodeView()
           .environment(appState)
           .presentationDetents([.medium, .large])
-      }
-      .sheet(isPresented: $showSettings) {
-        NavigationStack {
-          SettingsView()
-            .environment(appState)
-        }
-      }
-      .sheet(isPresented: $showAbout) {
-        AboutView()
       }
       .sheet(isPresented: $showBonjourScan) {
         BonjourScanSheet { selectedURL in
@@ -328,6 +310,8 @@ struct LoginView: View {
         QuickConnectSheet(useHTTPS: appState.useHTTPS) { quickConnectID in
           // Keep the bare QuickConnect ID in the address field — login() resolves it.
           appState.baseURL = quickConnectID
+        }
+      }
         }
       }
     }
@@ -442,7 +426,7 @@ private struct AboutView: View {
           .foregroundStyle(Color.dsAccent)
 
         VStack(spacing: 8) {
-          Text("DSM Video")
+          Text(AppInfo.displayName)
             .font(.title.bold())
           Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
             .font(.subheadline)

@@ -183,7 +183,38 @@ final class AppState {
     if storedToken != nil {
       Task { @MainActor [weak self] in await self?.checkTokenExpiryOnLaunch() }
     }
+
+    #if DEBUG
+    // UI-TEST DEMO HOOK: lets screenshot/UI-test tooling boot straight into demo content
+    // without typing into TextFields. ONLY fires when the explicit launch arg / env var is
+    // present — it does not change normal launch behavior, and the whole block is compiled
+    // out of release builds. Sims run Debug, which is what the QA tooling targets.
+    //   Launch argument: -UITestDemoMode   (or)   environment: UITEST_DEMO=1
+    if AppState.isUITestDemoLaunch {
+      bootstrapDemoMode()
+    }
+    #endif
   }
+
+  #if DEBUG
+  /// True when the process was launched with the demo hook explicitly requested.
+  /// Gated to DEBUG builds; the launch-arg/env-var check is the real guard.
+  static var isUITestDemoLaunch: Bool {
+    ProcessInfo.processInfo.arguments.contains("-UITestDemoMode")
+      || ProcessInfo.processInfo.environment["UITEST_DEMO"] == "1"
+  }
+
+  /// Synchronously enters demo mode at launch — same content path as the
+  /// appledemo / dsvideo2024 credentials, but with no network and no typing.
+  /// Setting sessionToken = "demo" makes RootView render MainView immediately.
+  private func bootstrapDemoMode() {
+    username = "appledemo"
+    homeLibraries = DemoData.libraries
+    let demoItems = DemoData.movieItems + DemoData.tvItems
+    recomputeHomeRails(from: demoItems)
+    sessionToken = "demo"
+  }
+  #endif
 
   // MARK: - JWT Expiry (SEC-02)
 

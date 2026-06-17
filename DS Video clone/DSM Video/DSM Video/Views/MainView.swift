@@ -93,6 +93,9 @@ private struct SplitView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
     }
+    // Tint the whole split view so the sidebar selection highlight and row icons
+    // use the theme accent (red for Classic / amber for Nitrate) instead of system blue.
+    .tint(Color.dsAccent)
   }
 
   @ViewBuilder
@@ -177,7 +180,7 @@ private struct SidebarView: View {
         SidebarSectionHeader("Settings")
       }
     }
-    .navigationTitle("DSM Video")
+    .navigationTitle(AppInfo.displayName)
     .task { await loadLibraries() }
   }
 
@@ -241,7 +244,7 @@ private struct SearchView: View {
     let content = ScrollView {
       if searchText.isEmpty && !hasSearched {
         if recentSearches.isEmpty {
-          ContentUnavailableView("Search Videos", systemImage: "magnifyingglass", description: Text("Enter a title to search your library"))
+          DSContentUnavailable(title: "Search Videos", systemImage: "magnifyingglass", description: "Enter a title to search your library")
             .padding(.top, 60)
         } else {
           RecentSearchesView(
@@ -287,7 +290,7 @@ private struct SearchView: View {
         }
         .padding(.top, 60)
       } else if hasSearched && results.isEmpty {
-        ContentUnavailableView("No Results", systemImage: "magnifyingglass", description: Text("No videos match \"\(searchText)\""))
+        DSContentUnavailable(title: "No Results", systemImage: "magnifyingglass", description: "No videos match \"\(searchText)\"")
           .padding(.top, 60)
       } else if !results.isEmpty {
         LazyVStack(spacing: 0) {
@@ -587,12 +590,11 @@ struct WatchlistView: View {
     NavigationStack {
       Group {
         if appState.watchlistItems.isEmpty {
-          ContentUnavailableView(
-            "No Watchlist Items",
+          DSContentUnavailable(
+            title: "No Watchlist Items",
             systemImage: "bookmark",
-            description: Text("Tap the bookmark button on any video to save it here.")
+            description: "Tap the bookmark button on any video to save it here."
           )
-          .foregroundStyle(.white)
         } else {
           ScrollView {
             LazyVGrid(columns: columns, spacing: 12) {
@@ -657,7 +659,7 @@ struct DownloadsView: View {
   var body: some View {
     let content = Group {
       if downloads.isEmpty && inProgressIDs.isEmpty {
-        ContentUnavailableView("No Downloads", systemImage: "arrow.down.circle", description: Text("Downloaded videos will appear here for offline viewing"))
+        DSContentUnavailable(title: "No Downloads", systemImage: "arrow.down.circle", description: "Downloaded videos will appear here for offline viewing")
       } else {
         ScrollView {
           VStack(spacing: 16) {
@@ -1031,7 +1033,7 @@ private struct DownloadedItemCell: View {
         // Resume progress bar — only shown when there is a meaningful resume position
         if item.resumePositionSeconds > 0 && item.durationSeconds > 0 {
           let frac = min(1.0, Double(item.resumePositionSeconds) / Double(item.durationSeconds))
-          if frac < 0.95 {
+          if frac < PlaybackProgress.watchedThreshold {
             VStack(spacing: 0) {
               Spacer()
               GeometryReader { barGeo in
@@ -1112,13 +1114,29 @@ struct SettingsView: View {
   @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
   @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
   @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
+  // Theme selection (Classic / Nitrate). Shared key with the app entry.
+  @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
   var isEmbedded: Bool = false
+
+  // A15: confirm destructive logout. A14: confirm Change Server (returns to onboarding).
+  @State private var showLogoutConfirm = false
+  @State private var showChangeServerConfirm = false
 
   var body: some View {
     @Bindable var appState = appState
 
     let form = Form {
       Section {
+        // A14: read-only connected-server display + Change Server (mirrors tvOS).
+        LabeledContent("Connected To", value: appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
+        if !appState.username.isEmpty {
+          LabeledContent("Signed in as", value: appState.username)
+        }
+        Button {
+          showChangeServerConfirm = true
+        } label: {
+          Label("Change Server", systemImage: "arrow.triangle.2.circlepath")
+        }
         HStack {
           Text("Default Port")
           Spacer()
@@ -1154,6 +1172,14 @@ struct SettingsView: View {
         Text("Downloads")
       } footer: {
         Text("When on, downloads pause on cellular and resume once you're back on Wi-Fi. Recommended to avoid large data charges.")
+      }
+
+      Section("Appearance") {
+        Picker("Theme", selection: $themeIDRaw) {
+          ForEach(ThemeID.allCases) { id in
+            Text(id.displayName).tag(id.rawValue)
+          }
+        }
       }
 
       #if !os(tvOS)
@@ -1216,10 +1242,26 @@ struct SettingsView: View {
       }
 
       Section {
-        Button("Logout", role: .destructive) { appState.logout() }
+        Button("Logout", role: .destructive) { showLogoutConfirm = true }
       }
     }
     .navigationTitle("Settings")
+    // A15: confirm before signing out.
+    .confirmationDialog("Log out of \(AppInfo.displayName)?",
+                        isPresented: $showLogoutConfirm, titleVisibility: .visible) {
+      Button("Log Out", role: .destructive) { appState.logout() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("You'll need to sign in again to access your library.")
+    }
+    // A14: Change Server returns to onboarding (logout clears the saved server).
+    .confirmationDialog("Change Server?",
+                        isPresented: $showChangeServerConfirm, titleVisibility: .visible) {
+      Button("Change Server", role: .destructive) { appState.logout() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("This signs you out and returns to setup so you can connect to a different server.")
+    }
 
     if isEmbedded {
       form
@@ -1314,7 +1356,7 @@ struct HowToView: View {
         HowToStep(
           number: nil,
           title: "Gesture Controls",
-          detail: "Swipe left or right anywhere on the video to scrub — a full swipe covers 30 minutes. Swipe up or down to adjust volume. Pinch or double-tap to toggle fill and fit."
+          detail: "Tap the center of the video to play or pause; tap the left or right edge to skip back or forward 15 seconds. Swipe left or right to scrub — a full swipe covers 30 minutes. Swipe up or down to adjust volume. Double-tap to show or hide the playback controls, and use the fill/fit button in the top bar to switch between filling the screen and showing the whole frame."
         )
         HowToStep(
           number: nil,

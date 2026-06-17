@@ -5,6 +5,7 @@ struct ItemDetailView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.theme) private var theme
   @State private var downloadManager = DownloadManager.shared
   let itemID: String
   let fallbackTitle: String
@@ -144,7 +145,7 @@ struct ItemDetailView: View {
         // Panel anchored to bottom — capped so hero image always dominates the top
         contentPanel
           .background(.ultraThinMaterial)
-          .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: theme.radiusLg, style: .continuous))
           // Fade the very top edge of the panel into the hero image
           .mask(
             LinearGradient(
@@ -227,12 +228,20 @@ struct ItemDetailView: View {
       playFromBeginning = false
       showPlayer = true
     } label: {
-      Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
+      HStack(spacing: 6) {
+        Image(systemName: "play.fill")
+        Text("Play")
+        if isDownloaded {
+          Image(systemName: "arrow.down.circle.fill")
+            .font(.subheadline)
+            .accessibilityHidden(true)
+        }
+      }
         .font(.headline.weight(.semibold))
-        .foregroundStyle(.white)
+        .foregroundStyle(Color.dsAccentOn)
         .frame(width: 260, height: 54)
         .background(Color.dsAccent.brightness(focused ? 0.12 : 0))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
@@ -254,8 +263,8 @@ struct ItemDetailView: View {
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 260, height: 54)
-        .background(focused ? Color(white: 0.35) : Color(white: 0.22))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(focused ? Color.dsSurfaceRaised : Color.dsSurfaceHigh)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
@@ -281,8 +290,8 @@ struct ItemDetailView: View {
         .font(.system(size: 22, weight: .semibold))
         .foregroundStyle(inList ? Color.dsAccent : .white)
         .frame(width: 54, height: 54)
-        .background(focused ? Color(white: 0.35) : Color(white: 0.18))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(focused ? Color.dsSurfaceRaised : Color.dsSurfaceHigh)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
@@ -350,17 +359,25 @@ struct ItemDetailView: View {
               playFromBeginning = false
               showPlayer = true
             } label: {
-              Label(isDownloaded ? "Play (Downloaded)" : "Play", systemImage: "play.fill")
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(Color.dsAccent)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+              HStack(spacing: 6) {
+                Image(systemName: "play.fill")
+                Text("Play")
+                if isDownloaded {
+                  Image(systemName: "arrow.down.circle.fill")
+                    .font(.subheadline)
+                    .accessibilityHidden(true)
+                }
+              }
+              .font(.headline.weight(.semibold))
+              .foregroundStyle(Color.dsAccentOn)
+              .frame(maxWidth: .infinity)
+              .frame(height: 44)
+              .background(Color.dsAccent)
+              .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             }
             .buttonStyle(.plain)
             .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
-            .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
+            .accessibilityLabel(isDownloaded ? "Play \(detail?.title ?? fallbackTitle), downloaded" : "Play \(detail?.title ?? fallbackTitle)")
 
             if savedPositionSeconds > 0 {
               Button {
@@ -372,8 +389,8 @@ struct ItemDetailView: View {
                   .foregroundStyle(.white)
                   .frame(maxWidth: .infinity)
                   .frame(height: 44)
-                  .background(Color(white: 0.25))
-                  .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                  .background(Color.dsSurfaceHigh)
+                  .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
@@ -437,8 +454,8 @@ struct ItemDetailView: View {
               .padding(.vertical, 10)
               .frame(maxWidth: .infinity, minHeight: 52)
               #endif
-              .background(Color(white: 0.12))
-              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+              .background(Color.dsSurfaceHigh)
+              .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
@@ -463,8 +480,8 @@ struct ItemDetailView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .background(Color(white: 0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(Color.dsSurface)
+            .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             .accessibilityLabel("End of season — no more episodes in this season")
           }
 
@@ -495,16 +512,6 @@ struct ItemDetailView: View {
               .font(.body)
               .foregroundStyle(.white.opacity(0.88))
               .fixedSize(horizontal: false, vertical: true)
-          }
-
-          if let director = detail?.cast?.first(where: { $0.role == "Director" }) {
-            HStack(spacing: 4) {
-              Text("Dir.")
-                .foregroundStyle(Color.dsTextSecondary)
-              Text(director.name)
-                .foregroundStyle(Color.dsTextSecondary)
-            }
-            .font(.subheadline)
           }
 
           if let cast = detail?.cast, !cast.isEmpty {
@@ -608,7 +615,7 @@ struct ItemDetailView: View {
     } else {
       // No backdrop — gradient placeholder with title overlay
       LinearGradient(
-        colors: [Color(white: 0.15), Color.black],
+        colors: [Color.dsSurfaceRaised, Color.black],
         startPoint: .top,
         endPoint: .bottom
       )
@@ -668,7 +675,7 @@ struct ItemDetailView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Color(white: 0.16))
+            .background(Color.dsSurfaceRaised)
             .clipShape(Capsule())
           }
           // TASK-728: quality/format badges (4K / HEVC / 5.1 / Atmos-ready), accent-
@@ -718,7 +725,7 @@ struct ItemDetailView: View {
         if isDownloading {
           ZStack {
             Circle()
-              .stroke(Color(white: 0.3), lineWidth: 2)
+              .stroke(Color.dsBorderStrong, lineWidth: 2)
             Circle()
               .trim(from: 0, to: min(1.0, max(0.0, downloadProgress)))
               .stroke(Color.dsAccent, lineWidth: 2)
@@ -735,8 +742,8 @@ struct ItemDetailView: View {
       }
       .frame(width: 52, height: 52)
     }
-    .background(Color(white: 0.12))
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .background(Color.dsSurfaceHigh)
+    .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
     .disabled(isStartingDownload && !isDownloading)
     .accessibilityLabel(isStartingDownload ? "Starting download" : (isDownloaded ? "Remove download" : (isDownloading ? "Cancel download" : "Download")))
     .accessibilityValue(isDownloading && downloadProgress > 0 && downloadProgress < 1 ? "\(Int(downloadProgress * 100)) percent downloaded" : "")
@@ -771,8 +778,8 @@ struct ItemDetailView: View {
         .foregroundStyle(isInWatchlist ? Color.dsAccent : .white)
         .frame(width: 52, height: 52)
     }
-    .background(Color(white: 0.12))
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .background(Color.dsSurfaceHigh)
+    .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
     .disabled(detail == nil)
     .accessibilityLabel(isInWatchlist ? "Remove from Watchlist" : "Add to Watchlist")
   }
@@ -781,24 +788,72 @@ struct ItemDetailView: View {
 
   @ViewBuilder
   private func castSection(cast: [ItemDetail.Person]) -> some View {
-    ScrollView(.horizontal, showsIndicators: false) {
-      HStack(alignment: .center, spacing: 0) {
-        Text("Cast: ")
-          .font(.headline)
-          .foregroundStyle(.white)
-          .accessibilityAddTraits(.isHeader)
+    // A9: horizontal avatar scroll. The director is folded in as the first entry
+    // (role labeled "Director"); remaining cast follow in order, director de-duped.
+    let director = cast.first(where: { $0.role == "Director" })
+    let others = cast.filter { $0.role != "Director" }
+    let ordered: [ItemDetail.Person] = {
+      guard let director else { return others }
+      return [ItemDetail.Person(id: director.id, name: director.name, role: "Director", imageId: director.imageId)] + others
+    }()
 
-        ForEach(Array(cast.enumerated()), id: \.offset) { idx, person in
-          let separator = idx < cast.count - 1 ? ",  " : ""
-          Text("\(person.name)\(separator)")
-            .font(.headline.weight(.regular))
-            .foregroundStyle(.white.opacity(0.75))
-            .fixedSize()
-            .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
+    VStack(alignment: .leading, spacing: 10) {
+      Text("Cast & Crew")
+        .font(.headline)
+        .foregroundStyle(.white)
+        .accessibilityAddTraits(.isHeader)
+
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(alignment: .top, spacing: 14) {
+          ForEach(Array(ordered.enumerated()), id: \.offset) { _, person in
+            castAvatar(person)
+          }
+        }
+        .padding(.vertical, 2)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func castAvatar(_ person: ItemDetail.Person) -> some View {
+    let avatarSize: CGFloat = 64
+    VStack(spacing: 6) {
+      Group {
+        if let imageId = person.imageId,
+           let url = appState.api.imageURL(id: imageId, width: 200, version: detail?.changeSeq) {
+          AuthenticatedImage(
+            url: url,
+            token: appState.sessionToken,
+            usesTunnelCookie: appState.api.usesTunnelCookie
+          )
+          .scaledToFill()
+        } else {
+          Color.dsSurfaceHigh
+            .overlay(
+              Image(systemName: "person.fill")
+                .font(.title2)
+                .foregroundStyle(.white.opacity(0.4))
+            )
         }
       }
-      .padding(.vertical, 2)
+      .frame(width: avatarSize, height: avatarSize)
+      .clipShape(Circle())
+      .overlay(Circle().strokeBorder(Color.dsBorderSubtle, lineWidth: 0.5))
+
+      Text(person.name)
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.white)
+        .lineLimit(1)
+      if let role = person.role, !role.isEmpty {
+        Text(role)
+          .font(.caption2)
+          .foregroundStyle(Color.dsTextSecondary)
+          .lineLimit(1)
+      }
     }
+    .frame(width: 84)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
   }
 
   // MARK: - Data
@@ -1014,7 +1069,7 @@ private struct MetadataPill: View {
       .foregroundStyle(.white.opacity(0.85))
       .padding(.horizontal, 10)
       .padding(.vertical, 5)
-      .background(Color(white: 0.16))
+      .background(Color.dsSurfaceRaised)
       .clipShape(Capsule())
   }
 }
@@ -1041,6 +1096,7 @@ private struct PlayerSheet: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.theme) private var theme
   let itemID: String
   let title: String
   var itemYear: Int? = nil
@@ -1317,7 +1373,7 @@ private struct PlayerSheet: View {
           } label: {
             Text("Play Now")
               .font(.headline)
-              .foregroundStyle(.white)
+              .foregroundStyle(Color.dsAccentOn)
               .padding(.horizontal, 24)
               .padding(.vertical, 10)
               .background(Color.dsAccent, in: Capsule())
@@ -1338,7 +1394,7 @@ private struct PlayerSheet: View {
         }
       }
       .padding(28)
-      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
       .padding(.horizontal, 32)
       .padding(.bottom, 60)
     }
@@ -1435,6 +1491,7 @@ private struct PlayerSheet: View {
 
 #if os(tvOS)
 private struct _NextEpisodeOverlayView: View {
+  @Environment(\.theme) private var theme
   let next: ItemSummary
   let countdown: Int
   let onPlayNow: () -> Void
@@ -1464,7 +1521,7 @@ private struct _NextEpisodeOverlayView: View {
           Button(action: onPlayNow) {
             Text("Play Now")
               .font(.headline)
-              .foregroundStyle(.white)
+              .foregroundStyle(Color.dsAccentOn)
               .padding(.horizontal, 28)
               .padding(.vertical, 14)
               .background(Color.dsAccent, in: Capsule())
@@ -1494,7 +1551,7 @@ private struct _NextEpisodeOverlayView: View {
         .focusScope(ns)
       }
       .padding(28)
-      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
       .padding(.horizontal, 32)
       .padding(.bottom, 60)
     }

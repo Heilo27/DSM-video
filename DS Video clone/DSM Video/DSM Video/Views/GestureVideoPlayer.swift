@@ -117,7 +117,7 @@ struct GestureVideoPlayer: View {
     // TASK-740: loaded trick-play sprite + cue table for scrub previews.
     @State private var trickplay: Trickplay?
 
-    private let skipForwardSeconds: Double = 30
+    private let skipForwardSeconds: Double = 15
     private let skipBackwardSeconds: Double = 15
     // TASK-734: d-pad left/right seek step on tvOS. Kept symmetric and small for
     // fine-scrubbing; named so it sits alongside the skip-button constants.
@@ -712,7 +712,7 @@ struct GestureVideoPlayer: View {
                 .focused($focusedControl, equals: .playPause)
                 #endif
 
-                // Forward 30s
+                // Forward 15s
                 Button {
                     let t = min(duration, currentTime + skipForwardSeconds)
                     seek(to: t)
@@ -720,7 +720,7 @@ struct GestureVideoPlayer: View {
                     showSkipAnimation(direction: .forward)
                     if isPlaying { scheduleHideControls() }
                 } label: {
-                    Image(systemName: "goforward.30")
+                    Image(systemName: "goforward.15")
                         .font(.system(size: 35))
                         .foregroundStyle(.white)
                         .frame(minWidth: 55, minHeight: 55)
@@ -965,7 +965,7 @@ struct GestureVideoPlayer: View {
     private func skipBubble(direction: SkipDirection) -> some View {
         let secs = direction == .backward ? skipBackwardSeconds : skipForwardSeconds
         return VStack(spacing: 4) {
-            Image(systemName: direction == .backward ? "gobackward.15" : "goforward.30")
+            Image(systemName: direction == .backward ? "gobackward.15" : "goforward.15")
                 .font(.title)
                 .accessibilityLabel(direction == .backward ? "Skip backward" : "Skip forward")
             Text("\(Int(secs)) sec")
@@ -2086,7 +2086,7 @@ private struct SubtitleAudioPickerView: View {
                 .foregroundStyle(.primary)
             Spacer()
             Image(systemName: "checkmark")
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color.dsAccent)
                 .opacity(isSelected ? 1 : 0)
                 .accessibilityHidden(!isSelected)
                 .accessibilityLabel("Selected")
@@ -2167,7 +2167,7 @@ private struct SubtitleDownloadSheet: View {
                                 HStack(spacing: 8) {
                                     Text(result.language.uppercased())
                                         .font(.caption.weight(.medium))
-                                        .foregroundStyle(Color.accentColor)
+                                        .foregroundStyle(Color.dsAccent)
                                     Text("\(result.downloadCount) downloads")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)

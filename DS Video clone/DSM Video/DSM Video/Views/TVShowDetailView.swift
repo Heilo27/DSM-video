@@ -296,7 +296,7 @@ private struct TVShowDetailSplitView: View {
         let hasInProgress = resp.items.contains { ep in
           guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
           let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          return frac > 0.02 && frac < 0.95
+          return frac > 0.02 && frac < PlaybackProgress.watchedThreshold
         }
         if hasInProgress { break }
       } catch is CancellationError {
@@ -321,7 +321,7 @@ private struct TVShowDetailSplitView: View {
       for ep in entry.episodes {
         if let prog = ep.progress, prog.durationSeconds > 0 {
           let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          if frac > 0.02 && frac < 0.95 {
+          if frac > 0.02 && frac < PlaybackProgress.watchedThreshold {
             // Track the *latest* in-progress episode (overwrite as we walk forward)
             inProgressEp = ep
             inProgressSeason = entry.season
@@ -329,7 +329,7 @@ private struct TVShowDetailSplitView: View {
             // the next unwatched episode after the in-progress block is what matters
             firstUnwatchedEp = nil
             firstUnwatchedSeason = nil
-          } else if frac >= 0.95 {
+          } else if frac >= PlaybackProgress.watchedThreshold {
             // TASK-657: Fully watched — advance the firstUnwatched cursor past this ep.
             // Without this, a show where S1 is 100% done kept pointing firstUnwatched
             // at S1E1 (or nowhere) rather than S2E1.
@@ -632,7 +632,7 @@ private struct TVEpisodeRow: View {
       // Progress indicator (tvOS)
       if let prog = ep.progress, prog.durationSeconds > 0 {
         let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
-        if frac >= 0.95 {
+        if frac >= PlaybackProgress.watchedThreshold {
           Circle()
             .fill(Color.dsSuccess)
             .frame(width: 32, height: 32)
@@ -920,6 +920,7 @@ private struct StillWatchingOverlay: View {
 private struct TVShowDetailScrollView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  @Environment(\.theme) private var theme
   let show: TVShow
   let library: Library
   var highlightEpisodeID: String? = nil
@@ -931,6 +932,31 @@ private struct TVShowDetailScrollView: View {
   @State private var showMetadataFixer = false
   @State private var metadataFixApplied = false
 
+  // A7: resume resolution mirroring the tvOS path. Resolves a "Resume S2·E3" /
+  // "Play S1·E1" target so iOS gets a top-level Play/Resume button under the header.
+  @State private var resume: ResumeTarget?
+  @State private var resumeNav: ResumeTarget?
+  @State private var isResolvingResume = false
+
+  /// A resolved resume point: the season's full episode list plus the index to open at.
+  private struct ResumeTarget: Identifiable, Hashable {
+    let seasonNumber: Int
+    let seasonIndex: Int
+    let episodes: [ItemSummary]
+    let index: Int
+    let isResume: Bool   // true = in-progress (Resume), false = unwatched (Play)
+    var id: String { episodes.indices.contains(index) ? episodes[index].id : "\(seasonNumber)-\(index)" }
+
+    static func == (lhs: ResumeTarget, rhs: ResumeTarget) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+  }
+
+  private var resumeLabel: String {
+    guard let resume else { return "" }
+    let verb = resume.isResume ? "Resume" : "Play"
+    return "\(verb) S\(resume.seasonNumber)·E\(resume.episodes[resume.index].episodeNumber ?? (resume.index + 1))"
+  }
+
   private var headerHeight: CGFloat {
     horizontalSizeClass == .regular ? 320 : 220
   }
@@ -939,6 +965,8 @@ private struct TVShowDetailScrollView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 0) {
         showHeader
+
+        resumeButton
 
         VStack(alignment: .leading, spacing: 0) {
           if isLoading && seasons.isEmpty {
@@ -973,6 +1001,17 @@ private struct TVShowDetailScrollView: View {
     .background(Color.black.ignoresSafeArea())
     .navigationTitle(show.title)
     .task { await load() }
+    .navigationDestination(item: $resumeNav) { target in
+      EpisodeDetailView(
+        episodes: target.episodes,
+        initialIndex: target.index,
+        show: show,
+        library: library,
+        allSeasons: seasons,
+        currentSeasonIndex: target.seasonIndex,
+        autoPlay: true
+      )
+    }
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
     .toolbarBackground(.visible, for: .navigationBar)
@@ -1026,7 +1065,7 @@ private struct TVShowDetailScrollView: View {
         .clipped()
         .accessibilityHidden(true)
       } else {
-        Color(white: 0.08)
+        Color.dsSurface
           .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
           .overlay(
             Image(systemName: "tv.fill")
@@ -1069,10 +1108,38 @@ private struct TVShowDetailScrollView: View {
     }
   }
 
+  @ViewBuilder
+  private var resumeButton: some View {
+    if let resume {
+      Button {
+        resumeNav = resume
+      } label: {
+        HStack(spacing: 8) {
+          Image(systemName: resume.isResume ? "play.fill" : "play.circle.fill")
+            .font(.headline)
+          Text(resumeLabel)
+            .font(.headline)
+        }
+        .foregroundStyle(Color.dsAccentOn)
+        .frame(maxWidth: .infinity, minHeight: 50)
+        .background(Color.dsAccent)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
+      }
+      .buttonStyle(.plain)
+      .padding(.horizontal, 16)
+      .padding(.top, 12)
+      .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
+      .frame(maxWidth: .infinity, alignment: .center)
+      .accessibilityLabel(resumeLabel)
+      .accessibilityHint(resume.isResume ? "Resumes the next episode where you left off" : "Plays the first episode")
+    }
+  }
+
   private func load() async {
     guard !isLoading else { return }
     if appState.isDemoMode {
       seasons = DemoData.seasons(for: show.id)
+      await resolveResume()
       return
     }
     isLoading = true
@@ -1083,10 +1150,96 @@ private struct TVShowDetailScrollView: View {
       showLog.info("load: got \(resp.seasons.count) seasons")
       seasons = resp.seasons
       error = nil
+      await resolveResume()
     } catch {
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       showLog.error("load: failed — \(msg, privacy: .public)")
       if seasons.isEmpty { self.error = msg }
+    }
+  }
+
+  /// Resolve the resume point for the top-level button. Mirrors the tvOS
+  /// `resolveResumePoint` algorithm: latest in-progress episode → the episode
+  /// after it (Resume); otherwise first unwatched episode (Play). Stores the
+  /// owning season's full episode list + index so the button can navigate.
+  private func resolveResume() async {
+    guard !seasons.isEmpty, !isResolvingResume else { return }
+    isResolvingResume = true
+    defer { isResolvingResume = false }
+
+    let scanLimit = min(5, seasons.count)
+    let seasonsToScan = Array(seasons.prefix(scanLimit))
+
+    var results: [(season: TVSeason, episodes: [ItemSummary])] = []
+    for s in seasonsToScan {
+      guard !Task.isCancelled else { return }
+      if appState.isDemoMode {
+        results.append((s, DemoData.episodes(for: show.id, season: s.seasonNumber)))
+      } else {
+        do {
+          let resp = try await appState.api.tvShowEpisodes(
+            showId: show.id, season: s.seasonNumber, libraryId: library.id)
+          results.append((s, resp.items))
+          let hasInProgress = resp.items.contains { ep in
+            guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
+            let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
+            return frac > 0.02 && frac < PlaybackProgress.watchedThreshold
+          }
+          if hasInProgress { break }
+        } catch is CancellationError {
+          return
+        } catch {
+          results.append((s, []))
+        }
+      }
+    }
+    guard !Task.isCancelled else { return }
+
+    func target(season: TVSeason, episodes: [ItemSummary], index: Int, isResume: Bool) -> ResumeTarget {
+      let sIdx = seasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
+      return ResumeTarget(seasonNumber: season.seasonNumber, seasonIndex: sIdx,
+                          episodes: episodes, index: index, isResume: isResume)
+    }
+
+    // Locate latest in-progress episode and the episode after it.
+    var inProgress: (season: TVSeason, episodes: [ItemSummary], idx: Int)?
+    var firstUnwatched: (season: TVSeason, episodes: [ItemSummary], idx: Int)?
+
+    for entry in results {
+      for (i, ep) in entry.episodes.enumerated() {
+        if let prog = ep.progress, prog.durationSeconds > 0 {
+          let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
+          if frac > 0.02 && frac < PlaybackProgress.watchedThreshold {
+            inProgress = (entry.season, entry.episodes, i)
+            firstUnwatched = nil
+          } else if frac >= PlaybackProgress.watchedThreshold {
+            firstUnwatched = nil
+          }
+        } else if firstUnwatched == nil {
+          firstUnwatched = (entry.season, entry.episodes, i)
+        }
+      }
+    }
+
+    if let ip = inProgress {
+      // The episode after the in-progress one is the resume point.
+      if ip.idx + 1 < ip.episodes.count {
+        resume = target(season: ip.season, episodes: ip.episodes, index: ip.idx + 1, isResume: true)
+      } else if let nextEntry = results.first(where: { $0.season.seasonNumber > ip.season.seasonNumber && !$0.episodes.isEmpty }) {
+        resume = target(season: nextEntry.season, episodes: nextEntry.episodes, index: 0, isResume: true)
+      } else {
+        // In-progress episode is the last available — resume it directly.
+        resume = target(season: ip.season, episodes: ip.episodes, index: ip.idx, isResume: true)
+      }
+      return
+    }
+    if let fu = firstUnwatched {
+      resume = target(season: fu.season, episodes: fu.episodes, index: fu.idx, isResume: false)
+      return
+    }
+    // Fallback: everything watched (or no progress data) — offer S1·E1 as Play.
+    if let first = results.first(where: { !$0.episodes.isEmpty }) {
+      resume = target(season: first.season, episodes: first.episodes, index: 0, isResume: false)
     }
   }
 }
@@ -1270,7 +1423,7 @@ private struct iOSEpisodeRow: View {
 
       if let prog = ep.progress, prog.durationSeconds > 0 {
         let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
-        if frac >= 0.95 {
+        if frac >= PlaybackProgress.watchedThreshold {
           Image(systemName: "checkmark.circle.fill")
             .font(.caption.weight(.semibold))
             .foregroundStyle(Color.dsSuccess)

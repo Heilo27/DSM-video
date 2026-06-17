@@ -81,9 +81,21 @@ struct DS_Video_cloneApp: App {
     @State private var appState = AppState()
     @Environment(\.scenePhase) private var scenePhase
 
+    // Persisted theme selection. Default = Classic (byte-identical to the prior look).
+    @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
+
+    /// Resolve the persisted raw value to a concrete Theme, defaulting to Classic.
+    var activeTheme: Theme {
+        (ThemeID(rawValue: themeIDRaw) ?? .classic) == .redesign ? .redesign : .classic
+    }
+
     init() {
         // TASK-739: register subtitle-appearance defaults before any player reads them.
         SubtitleStyle.registerDefaults()
+        // Seed the active theme before any view body reads a token accessor.
+        let raw = UserDefaults.standard.string(forKey: "dsReel.theme") ?? ThemeID.classic.rawValue
+        let theme: Theme = (ThemeID(rawValue: raw) ?? .classic) == .redesign ? .redesign : .classic
+        MainActor.assumeIsolated { ThemeHolder.shared.current = theme }
     }
     // Track the prior phase so we only refresh on a real background→active return,
     // not on initial launch (RootView's own .task already does the cold load).
@@ -93,6 +105,10 @@ struct DS_Video_cloneApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
+                .environment(\.theme, activeTheme)
+                .onChange(of: themeIDRaw) { _, _ in
+                    ThemeHolder.shared.current = activeTheme
+                }
                 .onOpenURL { url in
                     // Handle dsvideo://item/{id} deep links from the Top Shelf extension
                     guard url.scheme == "dsvideo",

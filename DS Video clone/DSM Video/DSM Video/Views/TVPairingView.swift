@@ -34,7 +34,7 @@ struct TVPairingView: View {
             .overlay(
               Image(systemName: "iphone.and.arrow.right.inward")
                 .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.dsAccentOn)
             )
             .accessibilityHidden(true)
 

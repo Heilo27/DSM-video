@@ -2,31 +2,38 @@ import SwiftUI
 
 // MARK: - Color Design Tokens
 
+// Token accessors now resolve through the active Theme (ThemeHolder.shared.current).
+// They are read inside View bodies, so SwiftUI tracks the @Observable access and
+// re-renders on theme swap. Values for the Classic theme are byte-identical to the
+// previous literals — see Theme.classic.
+@MainActor
 extension Color {
     // Backgrounds
-    static let dsBackground      = Color(hex: "#000000")
-    static let dsSurface         = Color(hex: "#111111")  // cards, inputs
-    static let dsSurfaceHigh     = Color(hex: "#1C1C1E")  // elevated elements
-    static let dsSurfaceRaised   = Color(hex: "#2C2C2E")  // current-state legacy
+    static var dsBackground:    Color { ThemeHolder.shared.current.background }
+    static var dsSurface:       Color { ThemeHolder.shared.current.surface }       // cards, inputs
+    static var dsSurfaceHigh:   Color { ThemeHolder.shared.current.surfaceHigh }   // elevated elements
+    static var dsSurfaceRaised: Color { ThemeHolder.shared.current.surfaceRaised } // current-state legacy
 
     // Accent
-    static let dsAccent          = Color(hex: "#D1262F")  // primary red
+    static var dsAccent:        Color { ThemeHolder.shared.current.accent }        // primary red
+    /// Foreground color to place ON accent fills (Classic = white).
+    static var dsAccentOn:      Color { ThemeHolder.shared.current.accentOn }
 
     // Status / semantic
-    static let dsSuccess         = Color(hex: "#32D583")  // watched badge, complete
-    static let dsError           = Color(hex: "#E85A4F")  // error banner
-    static let dsWarning         = Color(hex: "#FFB547")  // star ratings
+    static var dsSuccess:       Color { ThemeHolder.shared.current.success }       // watched badge, complete
+    static var dsError:         Color { ThemeHolder.shared.current.error }         // error banner
+    static var dsWarning:       Color { ThemeHolder.shared.current.warning }       // star ratings
 
     // Text
-    static let dsTextPrimary     = Color.white
-    static let dsTextSecondary   = Color.white.opacity(0.75)
-    static let dsTextTertiary    = Color.white.opacity(0.55)   // was 0.45 (4.0:1); now 4.8:1 on black
-    static let dsTextMuted       = Color(hex: "#8E8E93")       // WCAG AA: ~4.6:1 on black
-    static let dsTextInactive    = Color(hex: "#737373")       // WCAG AA: ~4.6:1 on black
+    static var dsTextPrimary:   Color { ThemeHolder.shared.current.textPrimary }
+    static var dsTextSecondary: Color { ThemeHolder.shared.current.textSecondary }
+    static var dsTextTertiary:  Color { ThemeHolder.shared.current.textTertiary }
+    static var dsTextMuted:     Color { ThemeHolder.shared.current.textMuted }
+    static var dsTextInactive:  Color { ThemeHolder.shared.current.textInactive }
 
     // Borders / separators
-    static let dsBorderSubtle    = Color(hex: "#2A2A2E")
-    static let dsBorderStrong    = Color(hex: "#3A3A40")
+    static var dsBorderSubtle:  Color { ThemeHolder.shared.current.borderSubtle }
+    static var dsBorderStrong:  Color { ThemeHolder.shared.current.borderStrong }
 }
 
 // MARK: - Hex Color Initializer
@@ -53,17 +60,18 @@ extension Color {
 // Custom sizes (dsLargeTitle, dsScreenTitle) use system(size:) but are large enough
 // to qualify as "large text" (≥18pt) so WCAG AA requires only 3:1 contrast.
 
+@MainActor
 extension Font {
-    static let dsLargeTitle    = Font.largeTitle.weight(.bold)
-    static let dsTitle2        = Font.title2.weight(.bold)
-    static let dsHeadline      = Font.headline
-    static let dsBody          = Font.body
-    static let dsSubheadline   = Font.subheadline
-    static let dsSubheadlineSB = Font.subheadline.weight(.semibold)
-    static let dsFootnote      = Font.footnote
-    static let dsCaption       = Font.caption
-    static let dsCaption2      = Font.caption.weight(.semibold)
+    static var dsLargeTitle:    Font { ThemeHolder.shared.current.fontLargeTitle }
+    static var dsTitle2:        Font { ThemeHolder.shared.current.fontTitle2 }
+    static var dsHeadline:      Font { ThemeHolder.shared.current.fontHeadline }
+    static var dsBody:          Font { ThemeHolder.shared.current.fontBody }
+    static var dsSubheadline:   Font { ThemeHolder.shared.current.fontSubheadline }
+    static var dsSubheadlineSB: Font { ThemeHolder.shared.current.fontSubheadlineSB }
+    static var dsFootnote:      Font { ThemeHolder.shared.current.fontFootnote }
+    static var dsCaption:       Font { ThemeHolder.shared.current.fontCaption }
+    static var dsCaption2:      Font { ThemeHolder.shared.current.fontCaption2 }
 
     // Screen titles (used across all main views)
-    static let dsScreenTitle   = Font.system(size: 26, weight: .bold)
+    static var dsScreenTitle:   Font { ThemeHolder.shared.current.fontScreenTitle }
 }

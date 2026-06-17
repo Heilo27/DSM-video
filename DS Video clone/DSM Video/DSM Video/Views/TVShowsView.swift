@@ -405,37 +405,23 @@ private struct TVShowSortChipBar: View {
   @Binding var selection: TVShowSortOption
 
   var body: some View {
-    ScrollView(.horizontal, showsIndicators: false) {
-      HStack(spacing: 8) {
-        ForEach(TVShowSortOption.displayedChips, id: \.self) { chip in
-          let isActive = selection.primaryOfPair == chip
-          let label = isActive ? selection.chipLabel : chip.chipLabel
-          Button {
-            if isActive, let next = selection.toggled {
-              selection = next
-            } else {
-              selection = chip
-            }
-          } label: {
-            Text(label)
-              .font(.subheadline.weight(.medium))
-              .foregroundStyle(isActive ? Color.white : Color.dsTextSecondary)
-              .frame(minHeight: 44)
-              .padding(.horizontal, 12)
-              .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                  .fill(isActive ? Color.dsAccent : Color.dsSurface)
-              )
+    // A20: shared SortChip component — same pill radius + styling as the Movies grid.
+    SortChipScroller {
+      ForEach(TVShowSortOption.displayedChips, id: \.self) { chip in
+        let isActive = selection.primaryOfPair == chip
+        SortChip(
+          label: isActive ? selection.chipLabel : chip.chipLabel,
+          isActive: isActive,
+          accessibilityLabel: "Sort by \(chip.rawValue)"
+        ) {
+          if isActive, let next = selection.toggled {
+            selection = next
+          } else {
+            selection = chip
           }
-          .buttonStyle(.plain)
-          .accessibilityLabel("Sort by \(chip.rawValue)")
-          .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
         }
       }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 8)
     }
-    .background(Color.black.opacity(0.95))
   }
 }
 #endif
@@ -461,7 +447,7 @@ private struct TVShowPosterCell: View {
       // Poster image — fills the anchored frame and clips. Filling a fixed frame
       // (not .scaledToFill() on an unconstrained image) also stops wide/landscape
       // posters from overflowing and covering neighbouring cells.
-      Color(white: 0.08)
+      Color.dsSurface
         .overlay {
           if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
             Image(assetName)

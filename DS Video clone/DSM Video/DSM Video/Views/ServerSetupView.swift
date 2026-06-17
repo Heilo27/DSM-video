@@ -71,78 +71,97 @@ private struct SetupWelcomeScreen: View {
     ZStack {
       Color.dsBackground.ignoresSafeArea()
 
-      VStack(spacing: 0) {
-        Spacer()
+      // ScrollView so the centered hero + cards can't clip vertically at the
+      // largest Dynamic Type sizes. GeometryReader gives the inner VStack a
+      // minHeight equal to the viewport so the Spacers still center content at
+      // normal sizes; when content grows past the viewport it scrolls instead.
+      GeometryReader { geo in
+        ScrollView {
+          VStack(spacing: 0) {
+            Spacer(minLength: 0)
 
-        VStack(spacing: 8) {
-          ZStack {
-            Circle()
-              .fill(Color.dsAccent)
-              .frame(width: 72, height: 72)
-            Image(systemName: "play.fill")
-              .font(.system(size: 28))
-              .foregroundStyle(.white)
-              .offset(x: 3)
+            VStack(spacing: 8) {
+              ZStack {
+                Circle()
+                  .fill(Color.dsAccent)
+                  .frame(width: 72, height: 72)
+                Image(systemName: "play.fill")
+                  .font(.system(size: 28))
+                  .foregroundStyle(Color.dsAccentOn)
+                  .offset(x: 3)
+              }
+              .accessibilityHidden(true)
+              .padding(.bottom, 8)
+
+              Text(AppInfo.displayName)
+                .font(.largeTitle.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+              Text("Your NAS, beautifully.")
+                .font(.subheadline)
+                .foregroundStyle(Color.dsTextSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+              Text("Let's get you connected.")
+                .font(.footnote)
+                .foregroundStyle(Color.dsTextMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+            }
+
+            Spacer().frame(height: 40)
+
+            VStack(spacing: 12) {
+              NavigationLink(value: SetupRoute.lanScan) {
+                SetupModeCard(
+                  icon: "wifi",
+                  title: "On your home network",
+                  subtitle: "I'm on the same WiFi as my NAS"
+                )
+              }
+
+              NavigationLink(value: SetupRoute.wanMethods) {
+                SetupModeCard(
+                  icon: "globe",
+                  title: "Away from home",
+                  subtitle: "I'm on mobile data or a different network"
+                )
+              }
+            }
+            .padding(.horizontal, 24)
+
+            Spacer(minLength: 0)
+
+            #if !os(tvOS)
+            Button {
+              // Skip wizard — go straight to manual credentials for power users
+            } label: {
+              Text("Already have a server address?")
+                .font(.footnote)
+                .foregroundStyle(Color.dsTextMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink(value: SetupRoute.credentials) {
+              Text("Enter it manually")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.dsAccent)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 44)
+            }
+            .padding(.bottom, 24)
+            #endif
           }
-          .accessibilityHidden(true)
-          .padding(.bottom, 8)
-
-          Text("DSM Video")
-            .font(.largeTitle.weight(.semibold))
-            .foregroundStyle(.white)
-
-          Text("Your NAS, beautifully.")
-            .font(.subheadline)
-            .foregroundStyle(Color.dsTextSecondary)
-
-          Text("Let's get you connected.")
-            .font(.footnote)
-            .foregroundStyle(Color.dsTextMuted)
-            .padding(.top, 2)
+          .frame(minHeight: geo.size.height)
         }
-
-        Spacer().frame(height: 40)
-
-        VStack(spacing: 12) {
-          NavigationLink(value: SetupRoute.lanScan) {
-            SetupModeCard(
-              icon: "wifi",
-              title: "On your home network",
-              subtitle: "I'm on the same WiFi as my NAS"
-            )
-          }
-
-          NavigationLink(value: SetupRoute.wanMethods) {
-            SetupModeCard(
-              icon: "globe",
-              title: "Away from home",
-              subtitle: "I'm on mobile data or a different network"
-            )
-          }
-        }
-        .padding(.horizontal, 24)
-
-        Spacer()
-
-        #if !os(tvOS)
-        Button {
-          // Skip wizard — go straight to manual credentials for power users
-        } label: {
-          Text("Already have a server address?")
-            .font(.footnote)
-            .foregroundStyle(Color.dsTextMuted)
-            .frame(minHeight: 44)
-        }
-        .buttonStyle(.plain)
-
-        NavigationLink(value: SetupRoute.credentials) {
-          Text("Enter it manually")
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(Color.dsAccent)
-            .frame(minHeight: 44)
-        }
-        .padding(.bottom, 24)
-        #endif
       }
     }
     .navigationBarHidden(true)
@@ -165,12 +184,14 @@ private struct SetupModeCard: View {
         Text(title)
           .font(.headline)
           .foregroundStyle(.white)
+          .fixedSize(horizontal: false, vertical: true)
         Text(subtitle)
           .font(.subheadline)
           .foregroundStyle(Color.dsTextSecondary)
+          .fixedSize(horizontal: false, vertical: true)
       }
 
-      Spacer()
+      Spacer(minLength: 8)
 
       Image(systemName: "chevron.right")
         .font(.system(size: 14, weight: .semibold))
@@ -260,12 +281,14 @@ private struct SetupLANFoundScreen: View {
                     Text(server.name)
                       .font(.headline)
                       .foregroundStyle(.white)
+                      .fixedSize(horizontal: false, vertical: true)
                     Text(server.baseURL)
                       .font(.caption)
                       .foregroundStyle(Color.dsTextMuted)
+                      .fixedSize(horizontal: false, vertical: true)
                   }
 
-                  Spacer()
+                  Spacer(minLength: 8)
 
                   Image(systemName: "chevron.right")
                     .font(.system(size: 13, weight: .semibold))
@@ -332,9 +355,11 @@ private struct SetupLANManualScreen: View {
               Text("Couldn't find a server automatically")
                 .font(.headline)
                 .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
               Text("Make sure your NAS is powered on and connected to the same WiFi network as this device.")
                 .font(.subheadline)
                 .foregroundStyle(Color.dsTextSecondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
           }
           .padding(16)
@@ -377,11 +402,11 @@ private struct SetupLANManualScreen: View {
             NavigationLink(value: SetupRoute.credentials) {
               ZStack {
                 if isProbing {
-                  ProgressView().tint(.white)
+                  ProgressView().tint(Color.dsAccentOn)
                 } else {
                   Text("Connect")
                     .font(.headline)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(canContinue ? Color.dsAccentOn : Color.dsTextMuted)
                 }
               }
               .frame(maxWidth: .infinity, minHeight: 52)
@@ -491,28 +516,32 @@ private struct WANMethodCard: View {
           Text(title)
             .font(.headline)
             .foregroundStyle(.white)
+            .fixedSize(horizontal: false, vertical: true)
           if recommended {
             Text("Recommended")
               .font(.system(size: 11, weight: .semibold))
-              .foregroundStyle(.white)
+              .foregroundStyle(Color.dsAccentOn)
               .padding(.horizontal, 8)
               .padding(.vertical, 3)
               .background(Color.dsAccent)
               .clipShape(Capsule())
+              .fixedSize()
           }
         }
         Text(subtitle)
           .font(.subheadline)
           .foregroundStyle(Color.dsTextSecondary)
+          .fixedSize(horizontal: false, vertical: true)
         if let detail {
           Text(detail)
             .font(.footnote)
             .foregroundStyle(Color.dsTextMuted)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 2)
         }
       }
 
-      Spacer()
+      Spacer(minLength: 8)
 
       Image(systemName: "chevron.right")
         .font(.system(size: 13, weight: .semibold))
@@ -602,7 +631,7 @@ private struct SetupWANTailscaleScreen: View {
           NavigationLink(value: SetupRoute.credentials) {
             Text("Continue")
               .font(.headline)
-              .foregroundStyle(.white)
+              .foregroundStyle(canContinue ? Color.dsAccentOn : Color.dsTextMuted)
               .frame(maxWidth: .infinity, minHeight: 52)
               .background(canContinue ? Color.dsAccent : Color.dsSurface)
               .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -635,7 +664,7 @@ private struct TailscaleStep: View {
         Circle().fill(Color.dsAccent).frame(width: 26, height: 26)
         Text("\(number)")
           .font(.system(size: 13, weight: .semibold))
-          .foregroundStyle(.white)
+          .foregroundStyle(Color.dsAccentOn)
       }
       VStack(alignment: .leading, spacing: 3) {
         Text(title)
@@ -704,7 +733,7 @@ private struct SetupWANDirectScreen: View {
           NavigationLink(value: SetupRoute.credentials) {
             Text("Continue")
               .font(.headline)
-              .foregroundStyle(.white)
+              .foregroundStyle(canContinue ? Color.dsAccentOn : Color.dsTextMuted)
               .frame(maxWidth: .infinity, minHeight: 52)
               .background(canContinue ? Color.dsAccent : Color.dsSurface)
               .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -792,7 +821,7 @@ private struct SetupWANQuickConnectScreen: View {
           NavigationLink(value: SetupRoute.credentials) {
             Text("Continue")
               .font(.headline)
-              .foregroundStyle(.white)
+              .foregroundStyle(canContinue ? Color.dsAccentOn : Color.dsTextMuted)
               .frame(maxWidth: .infinity, minHeight: 52)
               .background(canContinue ? Color.dsAccent : Color.dsSurface)
               .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1014,11 +1043,11 @@ struct SetupCredentialsScreen: View {
           } label: {
             ZStack {
               if isConnecting {
-                ProgressView().tint(.white)
+                ProgressView().tint(Color.dsAccentOn)
               } else {
                 Text("Connect")
                   .font(.headline)
-                  .foregroundStyle(.white)
+                  .foregroundStyle(canConnect ? Color.dsAccentOn : Color.dsTextMuted)
               }
             }
             .frame(maxWidth: .infinity, minHeight: 52)
