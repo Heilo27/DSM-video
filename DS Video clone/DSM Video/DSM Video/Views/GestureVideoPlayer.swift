@@ -86,6 +86,15 @@ struct GestureVideoPlayer: View {
     @State private var lastScrubPressAt: Date = .distantPast
     @State private var scrubStepRepeat: Int = 0
 
+    // TASK: coalesced seeking. AVPlayer cancels an in-flight seek when a new one
+    // arrives; with ±2s tolerance on transcoded HLS, rapid skip-button taps each
+    // land back near the same segment boundary and playback thrashes instead of
+    // advancing. Serialise seeks: while one is running, only remember the LATEST
+    // requested target and fire it once the current seek completes.
+    @State private var isSeekInProgress: Bool = false
+    @State private var pendingSeekTarget: Double? = nil
+    @State private var pendingSeekTight: Bool = false
+
     @State private var isAdjustingVolume: Bool = false
     @State private var volumeLevel: Float = 0.5
     @State private var volumeStartLevel: Float = 0.5
@@ -1469,12 +1478,48 @@ struct GestureVideoPlayer: View {
     ///   With 2s HLS segments keyframes are at most 2s away, so this lands accurately
     ///   without the multi-segment overshoot that .positiveInfinity caused.
     private func seek(to time: Double, tight: Bool = false) {
+        // Coalesce rapid seeks. If a seek is already running, just record the
+        // latest target (overwriting any earlier pending one) and bail — the
+        // completion handler will drain to it. This prevents AVPlayer from
+        // cancelling/restarting seeks on every tap, which thrashed the HLS
+        // position instead of accumulating the skips.
+        guard !isSeekInProgress else {
+            pendingSeekTarget = time
+            pendingSeekTight = tight
+            return
+        }
+
+        isSeekInProgress = true
         let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        let toleranceBefore: CMTime
+        let toleranceAfter: CMTime
         if tight {
-            player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            toleranceBefore = .zero
+            toleranceAfter = .zero
         } else {
             let tol = CMTime(seconds: 2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-            player?.seek(to: cmTime, toleranceBefore: tol, toleranceAfter: tol)
+            toleranceBefore = tol
+            toleranceAfter = tol
+        }
+
+        guard let player else {
+            // No player yet — clear state so a later seek isn't permanently blocked.
+            isSeekInProgress = false
+            return
+        }
+
+        player.seek(to: cmTime, toleranceBefore: toleranceBefore, toleranceAfter: toleranceAfter) { _ in
+            // Completion fires on an arbitrary queue; hop to the main actor to
+            // touch @State and to drain any pending target safely.
+            Task { @MainActor in
+                isSeekInProgress = false
+                if let next = pendingSeekTarget {
+                    let nextTight = pendingSeekTight
+                    pendingSeekTarget = nil
+                    pendingSeekTight = false
+                    seek(to: next, tight: nextTight)
+                }
+            }
         }
     }
 

@@ -411,9 +411,9 @@ actor LocalStore {
          OR p.duration_seconds = 0
          OR CAST(p.position_seconds AS REAL) / p.duration_seconds < 0.05
       ORDER BY i.added_at DESC
-      LIMIT 20
+      LIMIT 500
     """
-    var items = fetchItems(sql: sql, deduplicateByShow: true, maxCount: 10)
+    var items = fetchItems(sql: sql, deduplicateByShow: true, maxCount: 8)
     items = fillShowPosters(items)
     return items
   }
@@ -447,9 +447,9 @@ actor LocalStore {
       WHERE p.duration_seconds > 0
         AND CAST(p.position_seconds AS REAL) / p.duration_seconds >= 0.95
       ORDER BY p.updated_at DESC
-      LIMIT 20
+      LIMIT 500
     """
-    return fetchItems(sql: sql, deduplicateByShow: true, maxCount: 10)
+    return fetchItems(sql: sql, deduplicateByShow: true, maxCount: 8)
   }
 
   private func fetchItems(sql: String, deduplicateByShow: Bool, maxCount: Int) -> [ItemSummary] {

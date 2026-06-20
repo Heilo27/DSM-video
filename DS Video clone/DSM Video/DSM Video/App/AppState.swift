@@ -829,21 +829,21 @@ final class AppState {
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(10))
 
-    let recentlyWatched = deduplicated(
+    let recentlyWatched = Array(deduplicated(
       allItems
         .filter { item in
           guard let p = item.progress, p.durationSeconds > 0 else { return false }
           return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.95
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
-    )
+    ).prefix(8))
 
     let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
     let justAdded = Array(deduplicatedByShow(
       allItems
         .filter { !watchedIDs.contains($0.id) }
         .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    ).prefix(10))
+    ).prefix(8))
 
     return (continueWatching, justAdded, recentlyWatched)
   }
