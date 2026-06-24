@@ -641,10 +641,22 @@ final class AppState {
         let hasLAN = !self.lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasWAN = !self.wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if hasLAN && hasWAN && self.sessionToken != nil && path.status == .satisfied {
-          Task { @MainActor [weak self] in
-            guard let self, !self.isReconnecting else { return }
-            homeLog.info("networkMonitor: path changed with dual addresses — re-probing")
-            _ = await self.reconnect()
+          // Run the re-probe inline on this @MainActor task and AWAIT it so the
+          // refresh post happens only after reconnect() resolves. The previous
+          // nested fire-and-forget Task let the handler return before reconnect
+          // finished, so the LAN↔WAN switch landed but nothing refreshed.
+          guard !self.isReconnecting else { return }
+          homeLog.info("networkMonitor: path changed with dual addresses — re-probing")
+          // A LAN→WAN switch stays online→online, so the offline→online post above
+          // never fires. Detect the address change via reconnect()'s effect on
+          // baseURL/api and post .networkDidReconnect ourselves so the listening
+          // views (LibrariesView/MainView) reload libraries and streams.
+          let addressBefore = self.api.baseURL.absoluteString
+          let switched = await self.reconnect()
+          let addressAfter = self.api.baseURL.absoluteString
+          if switched && addressBefore != addressAfter {
+            homeLog.info("networkMonitor: effective address changed \(addressBefore) → \(addressAfter) — posting networkDidReconnect")
+            NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
           }
         }
       }

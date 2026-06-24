@@ -266,7 +266,9 @@ private struct TVShowDetailSplitView: View {
   //   - An episode with no progress is firstUnwatched only if no fully-watched or
   //     in-progress episode has been seen yet in this season.
   //   After scanning:
-  //   - If inProgressEp found: resume point is the episode immediately after it.
+  //   - If inProgressEp found: resume point IS that episode (resumes from its saved
+  //     position). Advancing to the next episode only happens for fully-watched
+  //     episodes, via the firstUnwatched cursor.
   //   - Else: resume point is firstUnwatchedEp (first episode with no progress at all).
   //
   // TASK-654: capped to scanLimit seasons; sequential fetch exits early on first
@@ -347,20 +349,10 @@ private struct TVShowDetailSplitView: View {
       }
     }
 
-    // After the in-progress episode, the *next* episode is the resume point
+    // A partially-watched episode resumes ITSELF (from its saved position), not the
+    // next one. Advancing to the next episode is handled separately for fully-watched
+    // episodes via the firstUnwatched cursor below.
     if let ipEp = inProgressEp, let ipSeason = inProgressSeason {
-      var foundNext = false
-      outer: for entry in results where entry.season >= ipSeason {
-        for ep in entry.episodes {
-          if foundNext {
-            resolvedHighlightEpisodeID = ep.id
-            resolvedHighlightSeason = entry.season
-            return
-          }
-          if ep.id == ipEp.id { foundNext = true }
-        }
-      }
-      // In-progress episode is the last one scanned — open on it directly
       resolvedHighlightEpisodeID = ipEp.id
       resolvedHighlightSeason = ipSeason
       return
@@ -1131,7 +1123,7 @@ private struct TVShowDetailScrollView: View {
       .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
       .frame(maxWidth: .infinity, alignment: .center)
       .accessibilityLabel(resumeLabel)
-      .accessibilityHint(resume.isResume ? "Resumes the next episode where you left off" : "Plays the first episode")
+      .accessibilityHint(resume.isResume ? "Resumes the episode where you left off" : "Plays the first episode")
     }
   }
 
@@ -1159,9 +1151,9 @@ private struct TVShowDetailScrollView: View {
   }
 
   /// Resolve the resume point for the top-level button. Mirrors the tvOS
-  /// `resolveResumePoint` algorithm: latest in-progress episode → the episode
-  /// after it (Resume); otherwise first unwatched episode (Play). Stores the
-  /// owning season's full episode list + index so the button can navigate.
+  /// `resolveResumePoint` algorithm: latest in-progress episode resumes itself
+  /// (Resume); otherwise first unwatched episode (Play). Stores the owning
+  /// season's full episode list + index so the button can navigate.
   private func resolveResume() async {
     guard !seasons.isEmpty, !isResolvingResume else { return }
     isResolvingResume = true
@@ -1222,15 +1214,10 @@ private struct TVShowDetailScrollView: View {
     }
 
     if let ip = inProgress {
-      // The episode after the in-progress one is the resume point.
-      if ip.idx + 1 < ip.episodes.count {
-        resume = target(season: ip.season, episodes: ip.episodes, index: ip.idx + 1, isResume: true)
-      } else if let nextEntry = results.first(where: { $0.season.seasonNumber > ip.season.seasonNumber && !$0.episodes.isEmpty }) {
-        resume = target(season: nextEntry.season, episodes: nextEntry.episodes, index: 0, isResume: true)
-      } else {
-        // In-progress episode is the last available — resume it directly.
-        resume = target(season: ip.season, episodes: ip.episodes, index: ip.idx, isResume: true)
-      }
+      // A partially-watched episode resumes ITSELF (from its saved position), not the
+      // next one. Advancing to the next episode is handled separately for fully-watched
+      // episodes via the firstUnwatched cursor below.
+      resume = target(season: ip.season, episodes: ip.episodes, index: ip.idx, isResume: true)
       return
     }
     if let fu = firstUnwatched {
