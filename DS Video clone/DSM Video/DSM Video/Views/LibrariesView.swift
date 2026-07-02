@@ -476,8 +476,20 @@ struct LibraryHomeView: View {
       // Retry homeLoad when app returns to foreground — catches cases where the
       // background retry exhausted or the relay URL expired while backgrounded.
       guard newPhase == .active, appState.sessionToken != nil else { return }
-      loadLog.info("LibraryHomeView: scenePhase became active — triggering homeLoad")
-      Task { await appState.homeLoad() }
+      loadLog.info("LibraryHomeView: scenePhase became active — revalidating connection then homeLoad")
+      // Revalidate FIRST: if we left the LAN while backgrounded, the stored LAN IP is
+      // now dead and homeLoad()'s in-memory path would only fire a silent heartbeat at
+      // it. revalidateConnection() re-probes and runs the LAN→WAN cascade if needed,
+      // switching to WAN before we try to load. If it switches, it posts
+      // networkDidReconnect which itself triggers homeLoad — so only load here when the
+      // address was already good (avoids a double load).
+      Task {
+        // On .switched, revalidateConnection() posts networkDidReconnect which already
+        // drives homeLoad — don't load twice. On .stillGood/.failed, load here.
+        if await appState.revalidateConnection() != .switched {
+          await appState.homeLoad()
+        }
+      }
     }
     .background(Color.black.ignoresSafeArea())
 

@@ -574,6 +574,48 @@ final class AppState {
     return false
   }
 
+  /// Fast liveness check on the CURRENT address; runs the full LAN→WAN→relay
+  /// cascade only if the address we're on has gone dead. This is the piece that
+  /// makes "leave the house" work without a sign-out: on foreground, NWPathMonitor
+  /// often never fires for a backgrounded app, and homeLoad()'s in-memory path only
+  /// runs a silent heartbeat — neither re-runs the cascade. This does.
+  ///
+  enum RevalidateResult {
+    case stillGood       // current address is live — caller should proceed as normal
+    case switched        // moved to a new address; networkDidReconnect already posted
+    case failed          // no reachable address found
+  }
+
+  /// Returns how the revalidation resolved so the caller knows whether it still needs
+  /// to trigger a load itself. On `.switched` this method already posts
+  /// networkDidReconnect (which drives homeLoad), so the caller must NOT load again.
+  func revalidateConnection() async -> RevalidateResult {
+    guard sessionToken != nil, !isDemoMode else { return .failed }
+    guard api.baseURL != AppState.fallbackURL else {
+      // Never resolved (QC ID) — go straight to the full cascade.
+      return await reconnect() ? .switched : .failed
+    }
+    // Only worth re-probing when we actually have a second address to fall back to.
+    let hasLAN = !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let hasWAN = !wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    guard hasLAN || hasWAN else { return .stillGood }
+
+    // Quick 2s probe of the address we think we're on.
+    if (try? await api.serverVersion(timeout: 2)) != nil {
+      return .stillGood  // current address still live — nothing to do
+    }
+    homeLog.info("revalidateConnection: current address \(self.api.baseURL) is unreachable — running cascade")
+    let before = api.baseURL.absoluteString
+    guard await reconnect() else { return .failed }
+    if api.baseURL.absoluteString != before {
+      homeLog.info("revalidateConnection: switched \(before) → \(self.api.baseURL) — posting networkDidReconnect")
+      NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
+      return .switched
+    }
+    // reconnect() re-verified the same address (transient blip recovered) — treat as good.
+    return .stillGood
+  }
+
   /// Retries QC resolution in the background every ~8s for up to 5 minutes.
   /// On success: clears serverUnreachable and triggers a fresh homeLoad.
   /// Called when homeLoad() can't reach the server on cold start.
@@ -1147,8 +1189,16 @@ final class AppState {
         homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
       }
     } catch {
-      // Heartbeat failures are silent — server may be temporarily unreachable
-      homeLog.debug("heartbeat: failed — \(error.localizedDescription)")
+      // Heartbeat failures are usually transient. But a persistent failure here is the
+      // signal that we've moved off the network the current address lives on (e.g. left
+      // the LAN mid-session and NWPathMonitor didn't deliver a path update). Re-probe:
+      // if the current address is dead, revalidateConnection() runs the LAN→WAN cascade
+      // and switches us over so the next heartbeat lands. Guard against piling up behind
+      // an in-flight reconnect.
+      homeLog.debug("heartbeat: failed — \(error.localizedDescription); revalidating")
+      if !isReconnecting {
+        _ = await revalidateConnection()
+      }
     }
   }
 
