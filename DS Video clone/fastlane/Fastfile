@@ -26,6 +26,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
+      app_version:         "1.3.3",
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
