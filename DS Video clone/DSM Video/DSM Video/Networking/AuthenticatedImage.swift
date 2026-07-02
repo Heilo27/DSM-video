@@ -137,6 +137,13 @@ struct AuthenticatedImage: View {
   // was recycled to a different URL (fast flinging) is discarded instead of writing
   // a stale poster into the reused cell.
   @State private var loadGeneration: Int = 0
+  // The loadKey the currently-displayed `image` was fetched for. When loadKey changes
+  // (e.g. baseURL flips LAN→WAN on reconnect, or the token refreshes — neither of which
+  // changes the actual poster), we keep showing this image and refetch in the
+  // background, swapping only when the new fetch succeeds. This prevents the
+  // "poster vanishes a few seconds after launch" flash and stops a transient
+  // refetch failure from leaving a permanently-blank cell.
+  @State private var loadedKey: String?
   #endif
 
   // Composite identity for the load task: a token refresh keeps the same URL, so a
@@ -191,16 +198,23 @@ struct AuthenticatedImage: View {
       await loadIfNeeded()
     }
     .onChange(of: loadKey) { _, _ in
-      // URL or token changed — reset state so loadIfNeeded()'s `image == nil` guard
-      // passes and we fetch fresh instead of showing the stale poster / stuck glyph.
-      image = nil
+      // URL or token changed. Do NOT blank `image` — during a LAN→WAN reconnect the
+      // baseURL (and token) change but the poster is identical, so clearing here just
+      // flashes the cell empty and, if the refetch transiently fails, strands it blank.
+      // Instead clear only the failure/loading flags and let loadIfNeeded() refetch;
+      // it swaps `image` in place once the new key resolves. `loadedKey != loadKey`
+      // is what lets it run despite a non-nil `image`.
       didFail = false
       isLoading = false
     }
   }
 
   private func loadIfNeeded() async {
-    guard let url, !isLoading, image == nil else { return }
+    // Refetch when there's no image yet OR the current image belongs to a stale key
+    // (recycled cell / reconnect). `loadedKey == loadKey` with a non-nil image means
+    // we're already showing the right poster — nothing to do.
+    guard let url, !isLoading, (image == nil || loadedKey != loadKey) else { return }
+    let keyAtStart = loadKey
 
     // Capture this load's generation. Every @State write below is gated on it still
     // being current, so a completion that lands after the cell was recycled to a
@@ -214,7 +228,7 @@ struct AuthenticatedImage: View {
     let outcome = await ImageCache.shared.fetchOrJoin(for: url)
 
     if let cached = outcome.cached {
-      if isCurrent() { image = Image(uiImage: cached) }
+      if isCurrent() { image = Image(uiImage: cached); loadedKey = keyAtStart }
       return
     }
 
@@ -222,7 +236,8 @@ struct AuthenticatedImage: View {
       // Join in-flight — someone else is already fetching this URL
       let result = await existingTask.value
       guard isCurrent() else { return }
-      if let result { image = Image(uiImage: result) } else { didFail = true }
+      if let result { image = Image(uiImage: result); loadedKey = keyAtStart }
+      else if image == nil { didFail = true }  // don't hide a good poster on a reconnect refetch miss
       return
     }
 
@@ -277,7 +292,10 @@ struct AuthenticatedImage: View {
 
     if let uiImage = result {
       image = Image(uiImage: uiImage)
-    } else {
+      loadedKey = keyAtStart
+    } else if image == nil {
+      // Only surface failure if we have nothing to show. A reconnect refetch that
+      // misses must leave the existing poster in place, not blank the cell.
       didFail = true
     }
   }
@@ -315,14 +333,16 @@ struct AuthenticatedImage: View {
       await loadIfNeeded()
     }
     .onChange(of: loadKey) { _, _ in
-      image = nil
+      // See the UIKit body: don't blank `image` on a key change (LAN→WAN reconnect
+      // keeps the same poster) — just clear the flags and let loadIfNeeded() swap in place.
       didFail = false
       isLoading = false
     }
   }
 
   private func loadIfNeeded() async {
-    guard let url, !isLoading, image == nil else { return }
+    guard let url, !isLoading, (image == nil || loadedKey != loadKey) else { return }
+    let keyAtStart = loadKey
 
     // See the UIKit body: gate every @State write on this generation so a stale
     // completion (cell recycled mid-fetch) is dropped instead of writing a wrong image.
@@ -333,14 +353,15 @@ struct AuthenticatedImage: View {
     let outcome = await MacImageCache.shared.fetchOrJoin(for: url)
 
     if let cached = outcome.cached {
-      if isCurrent() { image = Image(nsImage: cached) }
+      if isCurrent() { image = Image(nsImage: cached); loadedKey = keyAtStart }
       return
     }
 
     if let existingTask = outcome.task {
       let result = await existingTask.value
       guard isCurrent() else { return }
-      if let result { image = Image(nsImage: result) } else { didFail = true }
+      if let result { image = Image(nsImage: result); loadedKey = keyAtStart }
+      else if image == nil { didFail = true }
       return
     }
 
@@ -384,7 +405,8 @@ struct AuthenticatedImage: View {
 
     if let nsImage = result {
       image = Image(nsImage: nsImage)
-    } else {
+      loadedKey = keyAtStart
+    } else if image == nil {
       didFail = true
     }
   }
