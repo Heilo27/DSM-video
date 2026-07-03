@@ -1548,7 +1548,8 @@ private struct EpisodeDetailView: View {
       nextSeasonEpisodes = resp.items
     } catch {
       // Non-fatal: "Next Episode" cross-season button simply won't appear if fetch fails.
-      // User can still navigate manually via the season list.
+      // User can still navigate manually via the season list. (TASK-767: log for diagnosis.)
+      showLog.debug("prefetchNextSeason: failed — \(error.localizedDescription)")
     }
   }
 }

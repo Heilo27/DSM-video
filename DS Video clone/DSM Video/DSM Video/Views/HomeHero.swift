@@ -10,6 +10,7 @@ import SwiftUI
 
 struct HomeHero: View {
   @Environment(AppState.self) private var appState
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   /// Candidate items to feature (typically Just Added). The hero picks the first few
   /// that have a usable backdrop/poster.
@@ -68,6 +69,11 @@ struct HomeHero: View {
           Text(metadata(for: current))
             .font(.dsCaption.monospaced())
             .foregroundStyle(Color.dsTextSecondary)
+            // At accessibility sizes the single line can't hold year • runtime • rating
+            // without truncating and silently dropping the rating (TASK-786). Let it wrap
+            // to as many lines as needed so every field stays visible.
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+            .fixedSize(horizontal: false, vertical: true)
 
           buttonRow
             .padding(.top, 4)
@@ -122,31 +128,56 @@ struct HomeHero: View {
     }
   }
 
+  @ViewBuilder
   private var buttonRow: some View {
-    HStack(spacing: 10) {
-      // Play — filled accent with glow.
-      NavigationLink {
-        ItemDetailView(itemID: current.id, fallbackTitle: current.title, autoPlay: true)
-      } label: {
-        Label("Play", systemImage: "play.fill")
-          .font(.subheadline.weight(.bold))
-          .foregroundStyle(Color.dsAccentOn)
-          .padding(.horizontal, 22)
-          .padding(.vertical, 11)
-          .background(Color.dsAccent, in: Capsule())
-          .shadow(color: Color.dsAccentGlow, radius: 12, y: 4)
+    // At accessibility text sizes the scaled labels ("Play" / "Watchlist") overflow a
+    // side-by-side row and truncate to "P…" / "W…" (TASK-784). Stack vertically and let
+    // each button stretch full-width so the labels always render in full. At default
+    // sizes the layout is unchanged: glowing red Play + glass Watchlist, side by side.
+    if dynamicTypeSize.isAccessibilitySize {
+      VStack(alignment: .leading, spacing: 10) {
+        playButton
+        watchlistButton
       }
-      .buttonStyle(.plain)
-
-      // Watchlist — outlined glass.
-      Label("Watchlist", systemImage: "plus")
-        .font(.subheadline.weight(.semibold))
-        .foregroundStyle(Color.dsTextPrimary)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 11)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(Color.dsBorderStrong, lineWidth: 1))
+    } else {
+      HStack(spacing: 10) {
+        playButton
+        watchlistButton
+      }
     }
+  }
+
+  // Play — filled accent with glow.
+  private var playButton: some View {
+    NavigationLink {
+      ItemDetailView(itemID: current.id, fallbackTitle: current.title, autoPlay: true)
+    } label: {
+      Label("Play", systemImage: "play.fill")
+        .font(.subheadline.weight(.bold))
+        .foregroundStyle(Color.dsAccentOn)
+        .lineLimit(nil)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 11)
+        .background(Color.dsAccent, in: Capsule())
+        .shadow(color: Color.dsAccentGlow, radius: 12, y: 4)
+    }
+    .buttonStyle(.plain)
+  }
+
+  // Watchlist — outlined glass.
+  private var watchlistButton: some View {
+    Label("Watchlist", systemImage: "plus")
+      .font(.subheadline.weight(.semibold))
+      .foregroundStyle(Color.dsTextPrimary)
+      .lineLimit(nil)
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil)
+      .padding(.horizontal, 18)
+      .padding(.vertical, 11)
+      .background(.ultraThinMaterial, in: Capsule())
+      .overlay(Capsule().stroke(Color.dsBorderStrong, lineWidth: 1))
   }
 
   private var dots: some View {

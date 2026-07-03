@@ -62,6 +62,22 @@ struct ActiveDownload: Identifiable {
   let task: URLSessionDownloadTask
 }
 
+/// TASK-782: surfaces a genuine (non-pause) download failure to the UI so the row
+/// shows "Download failed" + a retry/dismiss affordance instead of silently vanishing.
+struct FailedDownload: Identifiable {
+  let id: String
+  let title: String
+  /// Enough context to re-issue the download without the caller re-resolving the URL.
+  let videoURL: URL?
+  let posterURL: URL?
+  let token: String?
+  let year: Int?
+  let durationSeconds: Int
+  /// Permanent failures (e.g. disk full) can't be retried by a network retry — tell the user.
+  let isPermanent: Bool
+  let message: String
+}
+
 @MainActor
 @Observable
 final class DownloadManager: NSObject {
@@ -73,6 +89,10 @@ final class DownloadManager: NSObject {
   private(set) var downloadProgress: [String: Double] = [:]
   /// In-memory map of itemId → resume data blob for paused downloads.
   private(set) var pausedDownloads: [String: Data] = [:]
+  /// TASK-782: itemId → failure record for genuinely-failed downloads. Populated in the
+  /// non-pause error branch and the moveItem-catch so the Downloads UI can show a
+  /// "Download failed — retry" row rather than the row silently disappearing.
+  private(set) var failedDownloads: [String: FailedDownload] = [:]
 
   private var backgroundSession: URLSession
   private var downloadTasks: [URLSessionDownloadTask: String] = [:]
@@ -116,6 +136,9 @@ final class DownloadManager: NSObject {
     guard activeDownloads[itemId] == nil else { return }
     guard !isDownloaded(itemId: itemId) else { return }
 
+    // Clear any prior failure record — this itemId is being (re)started.
+    failedDownloads.removeValue(forKey: itemId)
+
     var request = URLRequest(url: videoURL)
     // Video Station embeds the SID as a `_sid=` query parameter in the URL itself.
     // In that case no Authorization header is needed — the credential is already in the URL.
@@ -150,6 +173,7 @@ final class DownloadManager: NSObject {
     // Clean up all state regardless of whether download was active or paused
     pendingDownloadInfo.removeValue(forKey: itemId)
     pausedDownloads.removeValue(forKey: itemId)
+    failedDownloads.removeValue(forKey: itemId)
     removePersistedResumeData(for: itemId)
   }
 
@@ -189,6 +213,34 @@ final class DownloadManager: NSObject {
   /// Returns the display title for a paused download (sourced from pendingDownloadInfo).
   func pausedDownloadTitle(itemId: String) -> String? {
     pendingDownloadInfo[itemId]?.title
+  }
+
+  // MARK: - TASK-782: failed-download surface
+
+  func isFailed(itemId: String) -> Bool {
+    failedDownloads[itemId] != nil
+  }
+
+  /// Re-issue a previously-failed download from its captured metadata. No-op for a
+  /// permanent failure (e.g. disk full) — retrying the network can't fix that.
+  func retryFailedDownload(itemId: String) {
+    guard let failure = failedDownloads[itemId], !failure.isPermanent,
+          let videoURL = failure.videoURL else { return }
+    failedDownloads.removeValue(forKey: itemId)
+    startDownload(
+      itemId: itemId,
+      title: failure.title,
+      year: failure.year,
+      videoURL: videoURL,
+      posterURL: failure.posterURL,
+      token: failure.token,
+      durationSeconds: failure.durationSeconds
+    )
+  }
+
+  /// Dismiss a failure row without retrying.
+  func dismissFailedDownload(itemId: String) {
+    failedDownloads.removeValue(forKey: itemId)
   }
 
   /// Pause an active download, capturing resume data so it can be continued later.
@@ -284,7 +336,8 @@ final class DownloadManager: NSObject {
         )
         UserDefaults.standard.removeObject(forKey: storageKey) // only remove after successful write
       } catch {
-        // Write failed — keep UserDefaults intact for next launch
+        // Write failed — keep UserDefaults intact for next launch (TASK-767: log so it's diagnosable)
+        log.error("persistDownloadedItems: file write failed, retaining UserDefaults fallback — \(error.localizedDescription)")
       }
     }
 
@@ -543,6 +596,14 @@ final class DownloadManager: NSObject {
       try fm.moveItem(at: tempURL, to: videoPath)
     } catch {
       try? fm.removeItem(at: tempURL)
+      // TASK-782: surface the failure instead of silently dropping the row. A failed
+      // move at this stage is almost always out-of-space — permanent, so no retry.
+      failedDownloads[itemId] = FailedDownload(
+        id: itemId, title: info.title, videoURL: info.videoURL,
+        posterURL: info.posterURL, token: info.token, year: info.year,
+        durationSeconds: info.durationSeconds, isPermanent: true,
+        message: "Couldn't save the file. Free up space and try again."
+      )
       activeDownloads.removeValue(forKey: itemId)
       downloadProgress.removeValue(forKey: itemId)
       pendingDownloadInfo.removeValue(forKey: itemId)
@@ -706,7 +767,18 @@ extension DownloadManager: URLSessionDownloadDelegate {
         downloadTasks.removeValue(forKey: downloadTask)
         // Note: pendingDownloadInfo is intentionally kept when pausing so resumeDownload can access it
         if nsError.code != NSURLErrorCancelled || resumeData == nil {
-          // Genuine failure (not a pause) — clean up pendingDownloadInfo too
+          // Genuine failure (not a pause). TASK-782: surface it so the Downloads UI
+          // shows "Download failed — retry" rather than the row silently vanishing.
+          // A user-initiated cancel (code == Cancelled) is not a failure and is skipped.
+          if nsError.code != NSURLErrorCancelled, let info = pendingDownloadInfo[itemId] {
+            failedDownloads[itemId] = FailedDownload(
+              id: itemId, title: info.title, videoURL: info.videoURL,
+              posterURL: info.posterURL, token: info.token, year: info.year,
+              durationSeconds: info.durationSeconds, isPermanent: false,
+              message: "Download failed. Check your connection and retry."
+            )
+          }
+          // Clean up pendingDownloadInfo too (failedDownloads now carries the retry context).
           pendingDownloadInfo.removeValue(forKey: itemId)
         }
       }

@@ -1446,7 +1446,8 @@ struct GestureVideoPlayer: View {
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
-                // best-effort deactivation; nothing actionable on failure
+                // Best-effort deactivation; nothing actionable on failure (TASK-767: log for diagnosis).
+                orientLog.debug("AVAudioSession.setActive(false) failed on teardown — \(error.localizedDescription)")
             }
         }
         #endif

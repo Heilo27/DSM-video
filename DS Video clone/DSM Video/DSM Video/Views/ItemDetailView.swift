@@ -282,7 +282,7 @@ struct ItemDetailView: View {
       let summary = ItemSummary(
         id: d.id, type: d.type, title: d.title, year: d.year,
         durationSeconds: d.durationSeconds, addedAt: "",
-        rating: d.rating, posterImageId: d.images.poster.id
+        rating: d.rating, posterImageId: d.images?.poster.id
       )
       Task { await appState.toggleWatchlist(item: summary) }
     } label: {
@@ -576,7 +576,7 @@ struct ItemDetailView: View {
         .overlay(alignment: .topTrailing) {
           if !appState.isDemoMode,
              (detail?.summary == nil || detail?.summary?.isEmpty == true),
-             detail?.images.backdrop.id == nil {
+             detail?.images?.backdrop.id == nil {
             Button {
               showMetadataFixer = true
             } label: {
@@ -640,7 +640,7 @@ struct ItemDetailView: View {
 
   @ViewBuilder
   private var backdropImage: some View {
-    if let backdropId = detail?.images.backdrop.id ?? detail?.images.backdrop.mapperId {
+    if let backdropId = detail?.images?.backdrop.id ?? detail?.images?.backdrop.mapperId {
       AuthenticatedImage(
         url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq),
         token: appState.sessionToken,
@@ -808,7 +808,7 @@ struct ItemDetailView: View {
         durationSeconds: d.durationSeconds,
         addedAt: "",
         rating: d.rating,
-        posterImageId: d.images.poster.id
+        posterImageId: d.images?.poster.id
       )
       Haptics.play(.selection)
       Task { await appState.toggleWatchlist(item: summary) }
@@ -937,7 +937,7 @@ struct ItemDetailView: View {
 
       // Get poster URL if available
       var posterURL: URL? = nil
-      if let posterId = detail?.images.poster.id {
+      if let posterId = detail?.images?.poster.id {
         posterURL = appState.api.imageURL(id: posterId, width: 400)
       }
 

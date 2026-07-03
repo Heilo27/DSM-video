@@ -337,7 +337,15 @@ struct APIClient {
   ) async throws -> T {
     do {
       return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
-    } catch let urlError as URLError where [.timedOut, .networkConnectionLost, .notConnectedToInternet].contains(urlError.code) {
+    } catch let urlError as URLError where [
+      .timedOut, .networkConnectionLost, .notConnectedToInternet,
+      // TASK-788: LAN→WAN auto-switch produces a transient .cannotConnectToHost /
+      // .cannotFindHost / .dnsLookupFailed on the first request after the network
+      // changes (old LAN IP unreachable, or WAN host not yet resolving). A single
+      // bounded retry papers over the blip while the reconnect cascade catches up —
+      // handleConnectionFailure already treats these as serverUnreachable.
+      .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed
+    ].contains(urlError.code) {
       try await Task.sleep(nanoseconds: 1_000_000_000)
       return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
     }

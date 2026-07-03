@@ -123,7 +123,11 @@ struct DS_Video_cloneApp: App {
             // the initial cold load handles that.
             guard newPhase == .active else { return }
             if didBecomeActiveOnce {
-                Task { await appState.foregroundRefresh() }
+                // TASK-787: single foreground owner — revalidate connection (LAN→WAN
+                // cascade if the stored address went stale while backgrounded) then
+                // refresh once. Replaces the old split where LibrariesView ALSO ran
+                // revalidate+homeLoad on the same .active event.
+                Task { await appState.foregroundReconnectAndRefresh() }
             } else {
                 didBecomeActiveOnce = true
             }

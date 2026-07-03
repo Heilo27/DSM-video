@@ -281,10 +281,20 @@ struct ItemsGridView: View {
       var allItems: [ItemSummary] = []
       var offset = 0
       let pageSize = 200
+      // TASK-790: app-side safety valves so a misbehaving/regressed server (total that
+      // never converges, or overlapping pages that never satisfy the total break) can't
+      // paginate forever. 50 pages × 200 = 10k items is well past any real library.
+      let maxPages = 50
+      var seenIDs = Set<String>()
 
-      while true {
+      for _ in 0..<maxPages {
         let response = try await appState.api.items(libraryId: library.id, limit: pageSize, offset: offset)
         allItems.append(contentsOf: response.items)
+
+        // Break if the page returned no NEW ids — guards against a server that keeps
+        // returning full but overlapping pages (which would never trip the total check).
+        let newIDs = response.items.filter { seenIDs.insert($0.id).inserted }
+        if newIDs.isEmpty { break }
 
         if response.items.count < pageSize || allItems.count >= response.total {
           break

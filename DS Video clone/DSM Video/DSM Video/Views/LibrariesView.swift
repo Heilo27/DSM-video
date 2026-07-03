@@ -382,7 +382,7 @@ private struct LibraryCard: View {
 
 struct LibraryHomeView: View {
   @Environment(AppState.self) private var appState
-  @Environment(\.scenePhase) private var scenePhase
+  // TASK-787: scenePhase handling moved to the app-level owner; no longer needed here.
 
   /// Pass `true` when this view is embedded inside an existing NavigationStack
   /// (e.g. the iPad split-view detail column) to avoid nesting stacks.
@@ -462,6 +462,15 @@ struct LibraryHomeView: View {
           }
           .ignoresSafeArea()
         }
+        // TASK-789: on Cinematic the floating glass tab bar overlaps the scroll content,
+        // occluding the last rail's card title/year labels. Add a bottom inset equal to
+        // the floating tab bar height so the final row clears the glass. Classic keeps the
+        // standard opaque tab bar (content already sits above it) — leave it untouched.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+          if ThemeHolder.shared.current.usesCinematicChrome {
+            Color.clear.frame(height: 64)
+          }
+        }
       }
     }
     .preferredColorScheme(.dark)
@@ -489,25 +498,11 @@ struct LibraryHomeView: View {
       loadLog.info("LibraryHomeView: networkDidReconnect — triggering homeLoad")
       Task { await appState.homeLoad() }
     }
-    .onChange(of: scenePhase) { _, newPhase in
-      // Retry homeLoad when app returns to foreground — catches cases where the
-      // background retry exhausted or the relay URL expired while backgrounded.
-      guard newPhase == .active, appState.sessionToken != nil else { return }
-      loadLog.info("LibraryHomeView: scenePhase became active — revalidating connection then homeLoad")
-      // Revalidate FIRST: if we left the LAN while backgrounded, the stored LAN IP is
-      // now dead and homeLoad()'s in-memory path would only fire a silent heartbeat at
-      // it. revalidateConnection() re-probes and runs the LAN→WAN cascade if needed,
-      // switching to WAN before we try to load. If it switches, it posts
-      // networkDidReconnect which itself triggers homeLoad — so only load here when the
-      // address was already good (avoids a double load).
-      Task {
-        // On .switched, revalidateConnection() posts networkDidReconnect which already
-        // drives homeLoad — don't load twice. On .stillGood/.failed, load here.
-        if await appState.revalidateConnection() != .switched {
-          await appState.homeLoad()
-        }
-      }
-    }
+    // TASK-787: foreground revalidate+refresh is now owned solely by the app-level
+    // scenePhase handler (DS_Video_cloneApp → appState.foregroundReconnectAndRefresh()).
+    // The duplicate handler that lived here raced the same home-* flags on the same
+    // .active event; it has been removed. networkDidReconnect (above) still drives a
+    // homeLoad when the coordinator switches address.
     .background(Color.black.ignoresSafeArea())
 
     if isEmbedded {

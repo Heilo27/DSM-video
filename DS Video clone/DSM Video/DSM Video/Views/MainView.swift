@@ -656,15 +656,25 @@ struct DownloadsView: View {
     return all.sorted()
   }
 
+  // TASK-782: genuinely-failed downloads, shown in their own "Failed" section with retry.
+  private var failedDownloadIDs: [String] {
+    Array(downloadManager.failedDownloads.keys).sorted()
+  }
+
   var body: some View {
     let content = Group {
-      if downloads.isEmpty && inProgressIDs.isEmpty {
+      if downloads.isEmpty && inProgressIDs.isEmpty && failedDownloadIDs.isEmpty {
         DSContentUnavailable(title: "No Downloads", systemImage: "arrow.down.circle", description: "Downloaded videos will appear here for offline viewing")
       } else {
         ScrollView {
           VStack(spacing: 16) {
             // Storage indicator
             storageSection
+
+            // Failed downloads (TASK-782) — surfaced so a failure isn't silent.
+            if !failedDownloadIDs.isEmpty {
+              failedDownloadsSection
+            }
 
             // Active and paused downloads
             if !inProgressIDs.isEmpty {
@@ -712,6 +722,9 @@ struct DownloadsView: View {
     }
     .onChange(of: downloadManager.pausedDownloads.count) { _, _ in
       loadDownloads()
+      loadStorageInfo()
+    }
+    .onChange(of: downloadManager.failedDownloads.count) { _, _ in
       loadStorageInfo()
     }
     .fullScreenCover(isPresented: $showPlayer, onDismiss: { showPlayer = false }) {
@@ -796,6 +809,74 @@ struct DownloadsView: View {
   // MARK: - Active Downloads Section
 
   @ViewBuilder
+  // TASK-782: renders each failed download with its reason and a Retry (transient) or
+  // dismiss (permanent) affordance, so a failure is never silent.
+  private var failedDownloadsSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Failed")
+        .font(.headline)
+        .foregroundStyle(Color.dsTextPrimary)
+        .padding(.horizontal)
+
+      VStack(spacing: 0) {
+        ForEach(failedDownloadIDs, id: \.self) { itemID in
+          if let failure = downloadManager.failedDownloads[itemID] {
+            HStack(spacing: 12) {
+              Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+              VStack(alignment: .leading, spacing: 2) {
+                Text(failure.title)
+                  .font(.subheadline.weight(.semibold))
+                  .foregroundStyle(Color.dsTextPrimary)
+                  .lineLimit(1)
+                Text(failure.message)
+                  .font(.caption)
+                  .foregroundStyle(Color.dsTextSecondary)
+                  .lineLimit(2)
+              }
+              Spacer()
+              if failure.isPermanent {
+                Button {
+                  downloadManager.dismissFailedDownload(itemId: itemID)
+                } label: {
+                  Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(Color.dsTextSecondary)
+                    .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss failed download \(failure.title)")
+              } else {
+                Button {
+                  downloadManager.retryFailedDownload(itemId: itemID)
+                } label: {
+                  Text("Retry")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.dsAccent)
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 8)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Retry download \(failure.title)")
+              }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            if itemID != failedDownloadIDs.last {
+              Divider()
+                .background(Color.dsSurface)
+                .padding(.horizontal)
+            }
+          }
+        }
+      }
+      .background(Color.dsSurface.opacity(0.5))
+      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .padding(.horizontal)
+    }
+  }
+
   private var activeDownloadsSection: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Downloading")

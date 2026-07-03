@@ -183,7 +183,10 @@ struct ItemDetail: Decodable, Identifiable {
   let summary: String?
   let genres: [String]?
   let cast: [Person]?
-  let images: Images
+  // TASK-783: optional so an item whose server response omits the `images`
+  // envelope (freshly-scanned / not-yet-TMDb-matched item, or an older server)
+  // still decodes and opens — the detail view falls back to placeholder art.
+  let images: Images?
   let changeSeq: Int?
 
   // TASK-728: media specs (nil until the server has fully probed the file).
@@ -197,7 +200,7 @@ struct ItemDetail: Decodable, Identifiable {
   init(id: String, type: String, title: String, originalTitle: String? = nil,
        year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
        rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
-       cast: [Person]? = nil, images: Images, changeSeq: Int? = nil,
+       cast: [Person]? = nil, images: Images? = nil, changeSeq: Int? = nil,
        videoCodec: String? = nil, audioCodec: String? = nil, container: String? = nil,
        width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil) {
     self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
