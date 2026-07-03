@@ -447,6 +447,8 @@ struct ItemPosterCell: View {
           }
         }
       }
+      // Ambient elevation on the Cinematic theme; no-op on flat themes.
+      .dsCardDepth(cornerRadius: 10)
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))

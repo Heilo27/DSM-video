@@ -420,6 +420,11 @@ struct LibraryHomeView: View {
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
+            // Cinematic hero (full-bleed). Renders only on the Cinematic theme — on
+            // Classic / Nitrate HomeHero is an EmptyView, so the layout below is
+            // exactly the prior top-rail arrangement. Featured from Just Added.
+            HomeHero(items: appState.homeJustAdded)
+
             // TASK-742: these are curated, finite, mixed-library lists — a "See All"
             // that dumps the user into a single library grid is misleading, so they
             // carry no See-All. Full browsing lives in the Libraries tab.
@@ -446,12 +451,24 @@ struct LibraryHomeView: View {
               )
             }
           }
-          .padding(.vertical, 16)
+          .padding(.top, ThemeHolder.shared.current.usesCinematicChrome ? 0 : 16)
+          .padding(.bottom, 16)
+        }
+        .background(alignment: .top) {
+          // Atmospheric light streaks sit behind all content (no-op on flat themes).
+          ZStack(alignment: .top) {
+            Color.dsBackground
+            AtmosphereBackground().frame(height: 560)
+          }
+          .ignoresSafeArea()
         }
       }
     }
     .preferredColorScheme(.dark)
     .navigationTitle("Home")
+    // On Cinematic the hero owns the top edge — hide the nav bar so the backdrop runs
+    // full-bleed under the status bar. Flat themes keep the standard "Home" title.
+    .toolbar(ThemeHolder.shared.current.usesCinematicChrome ? .hidden : .automatic, for: .navigationBar)
     .task { await appState.homeLoad() }
     .refreshable { await appState.homeForceRefresh() }
     // TASK-302: announce to VoiceOver once when content rails first appear
@@ -567,6 +584,8 @@ private struct ContinueWatchingCard: View {
     }
     .frame(width: 200, height: 120)
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    // Ambient elevation on the Cinematic theme; no-op on flat themes.
+    .dsCardDepth(cornerRadius: 10)
     // TASK-693/698: redact in app switcher / screen recordings.
     .privacySensitive()
     #if os(iOS)

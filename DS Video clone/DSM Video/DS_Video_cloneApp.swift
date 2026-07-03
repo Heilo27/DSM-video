@@ -86,7 +86,7 @@ struct DS_Video_cloneApp: App {
 
     /// Resolve the persisted raw value to a concrete Theme, defaulting to Classic.
     var activeTheme: Theme {
-        (ThemeID(rawValue: themeIDRaw) ?? .classic) == .redesign ? .redesign : .classic
+        ThemeID.theme(forRaw: themeIDRaw)
     }
 
     init() {
@@ -94,8 +94,7 @@ struct DS_Video_cloneApp: App {
         SubtitleStyle.registerDefaults()
         // Seed the active theme before any view body reads a token accessor.
         let raw = UserDefaults.standard.string(forKey: "dsReel.theme") ?? ThemeID.classic.rawValue
-        let theme: Theme = (ThemeID(rawValue: raw) ?? .classic) == .redesign ? .redesign : .classic
-        MainActor.assumeIsolated { ThemeHolder.shared.current = theme }
+        MainActor.assumeIsolated { ThemeHolder.shared.current = ThemeID.theme(forRaw: raw) }
     }
     // Track the prior phase so we only refresh on a real background→active return,
     // not on initial launch (RootView's own .task already does the cold load).
