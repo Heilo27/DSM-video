@@ -146,7 +146,15 @@ struct ItemsGridView: View {
         }
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(alignment: .top) {
+      // Themed ground + cinematic atmosphere streaks (no-op on flat themes, where
+      // dsBackground is pure black and AtmosphereBackground renders nothing).
+      ZStack(alignment: .top) {
+        Color.dsBackground
+        AtmosphereBackground().frame(height: 400)
+      }
+      .ignoresSafeArea()
+    }
     .navigationTitle(library.title)
     #if !os(tvOS)
     // Force white nav-bar content (the large title was rendering dim grey on black).

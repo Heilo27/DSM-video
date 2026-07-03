@@ -594,6 +594,46 @@ struct ItemDetailView: View {
             .padding(10)
           }
         }
+        // Cinematic-only: a scrim + display-font title over the backdrop so the Detail
+        // hero speaks the same language as the Home hero. No-op on flat themes, which
+        // keep the plain backdrop + nav title.
+        .overlay {
+          if ThemeHolder.shared.current.usesCinematicChrome {
+            // Position the title/eyebrow in the visible band just above where the frosted
+            // content panel starts (the panel covers the bottom ~42% of the header). A
+            // GeometryReader keeps it above the panel's top edge on any screen size.
+            GeometryReader { geo in
+              let panelTop = geo.size.height - max(260, geo.size.height * 0.42)
+              ZStack(alignment: .bottomLeading) {
+                LinearGradient(
+                  stops: [.init(color: .clear, location: 0.4),
+                          .init(color: Color.dsBackground.opacity(0.85), location: 1.0)],
+                  startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: panelTop + 30)
+                .frame(maxHeight: .infinity, alignment: .top)
+
+                VStack(alignment: .leading, spacing: 6) {
+                  Text((detail?.type ?? "") == "tvshow" ? "SERIES" : "FEATURE")
+                    .font(.dsEyebrow)
+                    .tracking(2)
+                    .foregroundStyle(Color.dsAccent)
+                  Text(detail?.title ?? fallbackTitle)
+                    .font(.dsDisplay)
+                    .foregroundStyle(Color.dsTextPrimary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.6)
+                    .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
+                }
+                .padding(.horizontal, 20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(.bottom, geo.size.height - panelTop + 16)
+              }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+          }
+        }
         #endif
     }
   }
