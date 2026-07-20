@@ -5,9 +5,7 @@
       "title": "DSVideoServer",
       "desc": "Self-hosted video server for DSM Video",
       "icon": "images/DSVideoServer_{0}.png",
-      "url": "/",
-      "port": 8090,
-      "protocol": "http",
+      "url": "/dsvideo/",
       "allUsers": true,
       "grantPrivilege": "local"
     }

@@ -1487,11 +1487,16 @@
     };
 
     // Detect embedded mode
+    // When DSM's nginx serves us under /dsvideo/ (the QuickConnect-compatible
+    // path), the prefix must be preserved in baseURL — otherwise every API call
+    // targets /api/v1/... instead of /dsvideo/api/v1/... and misses the proxy.
     function detectEmbeddedMode() {
       const path = window.location.pathname;
       if (path.startsWith('/dsvideo') || path === '/') {
         state.isEmbedded = true;
-        state.baseURL = window.location.origin;
+        state.baseURL = path.startsWith('/dsvideo')
+          ? window.location.origin + '/dsvideo'
+          : window.location.origin;
         document.getElementById('server-group').classList.add('hidden');
         document.getElementById('server').removeAttribute('required');
       }
@@ -1506,7 +1511,9 @@
       infoDiv.textContent = 'Resolving QuickConnect...';
       infoDiv.classList.add('visible');
       try {
-        const apiBase = state.isEmbedded ? window.location.origin : '';
+        // Use state.baseURL, not window.location.origin — baseURL carries the
+        // /dsvideo prefix when served through DSM's nginx.
+        const apiBase = state.isEmbedded ? state.baseURL : '';
         if (apiBase) {
           const response = await fetch(`${apiBase}/api/v1/auth/quickconnect/resolve`, {
             method: 'POST',
