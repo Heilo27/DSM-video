@@ -292,7 +292,10 @@ private struct TVHomeView: View {
       TVPairingView()
         .environment(appState)
     }
-    .sheet(isPresented: $showSearch) {
+    // fullScreenCover, not sheet: on tvOS a sheet renders as a small centred card, so
+    // pushing ItemDetailView from a search result confined the detail page — hero art,
+    // metadata and the Play/Start Over buttons — to that card's bounds.
+    .fullScreenCover(isPresented: $showSearch) {
       TVSearchView()
         .environment(appState)
     }
