@@ -1476,7 +1476,9 @@ private struct PlayerSheet: View {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)
       if FileManager.default.fileExists(atPath: downloaded.videoPath) {
         isOffline = true
-        resumePosition = forceFromBeginning ? 0 : Double(downloaded.resumePositionSeconds)
+        resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+          positionSeconds: downloaded.resumePositionSeconds,
+          durationSeconds: downloaded.durationSeconds))
         playbackDuration = Double(downloaded.durationSeconds)
         playbackURL = localURL
         return
@@ -1491,7 +1493,9 @@ private struct PlayerSheet: View {
         error = "No playable URL."
         return
       }
-      resumePosition = forceFromBeginning ? 0 : Double(max(info.resumePositionSeconds, resumeOverrideSeconds))
+      resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+        positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
+        durationSeconds: info.durationSeconds ?? 0))
       resumeOverrideSeconds = 0
       resumeOverrideDuration = 0
       chapters = info.chapters ?? []
@@ -1512,7 +1516,9 @@ private struct PlayerSheet: View {
           let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
           let url = info.streamUrl ?? info.hlsMasterUrl
           guard let url else { self.error = "No playable URL."; return }
-          resumePosition = forceFromBeginning ? 0 : Double(max(info.resumePositionSeconds, resumeOverrideSeconds))
+          resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+            positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
+            durationSeconds: info.durationSeconds ?? 0))
           resumeOverrideSeconds = 0
           resumeOverrideDuration = 0
           chapters = info.chapters ?? []

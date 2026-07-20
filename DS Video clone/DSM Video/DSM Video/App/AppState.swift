@@ -957,8 +957,11 @@ final class AppState {
       allItems
         .filter { item in
           guard let p = item.progress, p.durationSeconds > 0, p.positionSeconds > 0 else { return false }
-          let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
-          return frac >= 0.05 && frac < 0.95
+          // Finished items belong in Recently Watched, not Continue Watching — use the
+          // shared rule so the rails agree with what playback will actually resume.
+          guard !PlaybackProgress.isFinished(
+            positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds) else { return false }
+          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.05
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(10))
@@ -967,7 +970,8 @@ final class AppState {
       allItems
         .filter { item in
           guard let p = item.progress, p.durationSeconds > 0 else { return false }
-          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.95
+          return PlaybackProgress.isFinished(
+            positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds)
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(8))

@@ -356,15 +356,24 @@ actor LocalStore {
     }
   }
 
+  /// Resumable position for an item, or 0 if there is nothing to resume.
+  ///
+  /// Returns 0 for finished items (see `PlaybackProgress.isFinished`) so that playing a
+  /// completed title starts from the beginning instead of dropping the viewer into the
+  /// closing credits. Suppressing it here rather than at each call site keeps the resume
+  /// seek, the "Start Over" button's visibility, and the progress rings in agreement.
   func getProgressSeconds(itemId: String) -> Int {
     guard let db else { return 0 }
     var stmt: OpaquePointer?
-    let sql = "SELECT position_seconds FROM progress WHERE item_id=? LIMIT 1"
+    let sql = "SELECT position_seconds, duration_seconds FROM progress WHERE item_id=? LIMIT 1"
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
     defer { sqlite3_finalize(stmt) }
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
     guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
-    return Int(sqlite3_column_int(stmt, 0))
+    let position = Int(sqlite3_column_int(stmt, 0))
+    let duration = Int(sqlite3_column_int(stmt, 1))
+    if PlaybackProgress.isFinished(positionSeconds: position, durationSeconds: duration) { return 0 }
+    return position
   }
 
   // MARK: - Rails Queries
