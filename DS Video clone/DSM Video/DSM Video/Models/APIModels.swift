@@ -271,6 +271,38 @@ struct PlaybackInfo: Decodable {
   let durationSeconds: Int?
   let chapters: [Chapter]?
   let quality: String?
+  // TASK-828: semantic subtitle metadata from the server's /playback response.
+  // Additive — older servers omit it, so it's optional. The player still discovers
+  // the actual text renditions from the HLS manifest; this array supplies the
+  // "full vs forced vs image" semantics AVFoundation can't infer, plus which single
+  // forced track should auto-enable (translation of foreign scenes).
+  let subtitles: [Subtitle]?
+}
+
+/// A single subtitle track as described by the frozen `/playback subtitles[]` contract
+/// (TASK-826). Matched to the player's AVMediaSelectionOptions by `language` (and `forced`
+/// characteristic), not by array index — image subs occupy a slot but produce no rendition.
+struct Subtitle: Decodable, Hashable {
+  /// HLS subtitle rendition playlist URL. `""` for image subs and direct/remux responses.
+  let url: String
+  /// BCP-47-ish lowercased tag (`"en"`, `"de"`); `"und"` when unknown.
+  let language: String
+  /// Human display label; already carries a `(Forced)` suffix for forced tracks.
+  let name: String
+  /// `"full"` | `"forced"` | `"image"`.
+  let type: String
+  /// True for translation-only/forced tracks.
+  let forced: Bool
+  /// Source-flagged default. Advisory.
+  let `default`: Bool
+  /// At most one track per item. When true, the client turns this track ON at
+  /// playback start with no user action (foreign-scene translation case).
+  let autoEnable: Bool
+
+  enum Kind: String { case full, forced, image, unknown }
+  var kind: Kind { Kind(rawValue: type) ?? .unknown }
+  /// Image subs are surfaced but never fetched/selectable.
+  var isImage: Bool { kind == .image }
 }
 
 // MARK: - Progress

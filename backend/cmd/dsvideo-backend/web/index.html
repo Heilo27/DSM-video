@@ -664,6 +664,24 @@
     .player-menu-item.active { color: var(--accent); }
     .player-menu-item .check { width: 16px; height: 16px; flex-shrink: 0; opacity: 0; }
     .player-menu-item.active .check { opacity: 1; }
+    /* Disabled (image / bitmap) subtitle rows: shown but not selectable. */
+    .player-menu-item.disabled { color: var(--text-tertiary); cursor: default; }
+    .player-menu-item.disabled:hover { background: none; }
+    .player-menu-item .item-note { font-size: 11px; color: var(--text-tertiary); margin-left: 8px; }
+    /* Section heading inside a player menu (e.g. "Subtitles", "Translation"). */
+    .player-menu-heading {
+      padding: 8px 16px 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-tertiary);
+    }
+    .player-menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+    /* "Translating foreign dialogue" auto-forced state — distinct from user subs-on. */
+    .player-menu-btn.translating { background: rgba(255,255,255,0.28); }
+    .player-menu-item.forced-row { font-size: 13px; }
+    .player-menu-item.forced-row .item-note { display: block; margin: 2px 0 0; }
 
     /* Folder Grid */
     .folder-grid {
@@ -1328,13 +1346,13 @@
       <div style="display:flex;align-items:center;gap:12px">
         <div class="player-menus">
           <div class="player-menu-wrap" id="subtitle-menu-wrap" style="display:none">
-            <button class="player-menu-btn" onclick="togglePlayerMenu(event, 'subtitle-menu')" title="Subtitles">
+            <button class="player-menu-btn" id="subtitle-menu-btn" onclick="togglePlayerMenu(event, 'subtitle-menu')" title="Subtitles">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="2" y="5" width="20" height="14" rx="2"/>
                 <line x1="6" y1="13" x2="10" y2="13"/><line x1="14" y1="13" x2="18" y2="13"/>
                 <line x1="6" y1="16" x2="13" y2="16"/>
               </svg>
-              CC
+              <span id="subtitle-menu-label">CC</span>
             </button>
             <div class="player-menu" id="subtitle-menu"></div>
           </div>
@@ -2888,11 +2906,22 @@
         const resumeAt = pendingResume || data.resumePositionSeconds || 0;
 
         // Stash context and build the subtitle / quality menus.
+        // Subtitle model (see subtitle-api-contract.md):
+        //   subtitles[]  — raw JSON tracks (full / forced / image).
+        //   forcedTrack  — the single autoEnable:true forced track, if any.
+        //   selectedSub  — user's explicit choice: -1 = Off, else JSON index. null = untouched.
+        //   forcedActive — forced translation track currently auto-showing (NOT "subs on").
+        //   hlsIdByJson  — map JSON index -> hls.js subtitle track id (resolved from manifest).
+        const subs = data.subtitles || [];
         state.playback = {
           itemId,
           title,
           quality: quality || 'auto',
-          subtitles: data.subtitles || [],
+          subtitles: subs,
+          forcedTrack: subs.findIndex(s => s && s.autoEnable && s.type === 'forced' && s.url),
+          selectedSub: null,
+          forcedActive: false,
+          hlsIdByJson: {},
           isHls: url.includes('.m3u8'),
           pendingResume: 0
         };
@@ -2911,10 +2940,16 @@
             state.hls.loadSource(url);
             state.hls.attachMedia(video);
             state.hls.on(Hls.Events.MANIFEST_PARSED, () => {
-              // hls.js disables subtitle renditions by default; keep Off until chosen.
+              // hls.js disables subtitle renditions by default; keep Off until we decide.
               state.hls.subtitleTrack = -1;
               if (typeof state.hls.subtitleDisplay !== 'undefined') state.hls.subtitleDisplay = false;
               video.play();
+            });
+            // Once hls.js has parsed the SUBTITLES renditions, map them back to our
+            // JSON tracks (by URL / language) and apply the forced auto-enable.
+            state.hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+              resolveSubtitleTrackMap();
+              applyAutoEnableSubtitle();
             });
           } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             video.src = url;
@@ -2991,6 +3026,11 @@
       document.getElementById('subtitle-menu').classList.remove('visible');
       document.getElementById('quality-menu').classList.remove('visible');
       document.getElementById('subtitle-menu-wrap').style.display = 'none';
+      // Reset the CC button's translation state so it doesn't carry across plays.
+      const subBtn = document.getElementById('subtitle-menu-btn');
+      const subLabel = document.getElementById('subtitle-menu-label');
+      if (subBtn) { subBtn.classList.remove('translating'); subBtn.title = 'Subtitles'; }
+      if (subLabel) subLabel.textContent = 'CC';
       state.playback = null;
       document.body.style.overflow = '';
     }
@@ -3007,28 +3047,7 @@
 
     function buildPlayerMenus(data) {
       // --- Subtitles (D) ---
-      const subWrap = document.getElementById('subtitle-menu-wrap');
-      const subMenu = document.getElementById('subtitle-menu');
-      const subs = (data && data.subtitles) || [];
-      // hls.js subtitle renditions only exist for HLS playback.
-      if (subs.length > 0 && state.playback && state.playback.isHls) {
-        subWrap.style.display = '';
-        const check = `<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>`;
-        subMenu.innerHTML = `
-          <button class="player-menu-item active" onclick="selectSubtitle(-1)">
-            <span>Off</span>${check}
-          </button>
-          ${subs.map((s, i) => {
-            const label = s.name || s.language || `Track ${i + 1}`;
-            return `<button class="player-menu-item" onclick="selectSubtitle(${i})">
-              <span>${escapeHtml(label)}</span>${check}
-            </button>`;
-          }).join('')}
-        `;
-      } else {
-        subWrap.style.display = 'none';
-        subMenu.innerHTML = '';
-      }
+      renderSubtitleMenu();
 
       // --- Quality (E) ---
       const qualMenu = document.getElementById('quality-menu');
@@ -3050,19 +3069,179 @@
       `).join('');
     }
 
+    // Render the subtitle menu from the current playback subtitle model.
+    // Two concepts kept visually distinct:
+    //   • "Subtitles" section — full dialogue tracks. Manual, default Off.
+    //   • Forced/translation track — auto-enabled, shown as its own row that does
+    //     NOT count as the user turning subtitles on. Listed under "Translation".
+    //   • Image (bitmap) tracks — listed greyed & disabled, never fetched.
+    function renderSubtitleMenu() {
+      const subWrap = document.getElementById('subtitle-menu-wrap');
+      const subMenu = document.getElementById('subtitle-menu');
+      const pb = state.playback;
+      const subs = (pb && pb.subtitles) || [];
+      // hls.js subtitle renditions only exist for HLS playback.
+      if (!subs.length || !pb || !pb.isHls) {
+        subWrap.style.display = 'none';
+        subMenu.innerHTML = '';
+        return;
+      }
+      subWrap.style.display = '';
+      const check = `<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+      const fullSubs = [];
+      const forcedSubs = [];
+      const imageSubs = [];
+      subs.forEach((s, i) => {
+        const entry = { s, i };
+        if (s.type === 'image' || !s.url) imageSubs.push(entry);
+        else if (s.type === 'forced' || s.forced) forcedSubs.push(entry);
+        else fullSubs.push(entry);
+      });
+
+      // A full track is "on" only when the user explicitly picked it. The forced
+      // auto-enable never lights up the "Subtitles" section as active.
+      const sel = pb.selectedSub; // -1 Off, index, or null (untouched)
+      const offActive = (sel === -1) || (sel === null && !pb.forcedActive);
+      let html = `<div class="player-menu-heading">Subtitles</div>`;
+      html += `<button class="player-menu-item ${offActive ? 'active' : ''}" onclick="selectSubtitle(-1)">
+        <span>Off</span>${check}</button>`;
+      fullSubs.forEach(({ s, i }) => {
+        const label = s.name || languageLabel(s.language) || `Track ${i + 1}`;
+        const active = sel === i;
+        html += `<button class="player-menu-item ${active ? 'active' : ''}" onclick="selectSubtitle(${i})">
+          <span>${escapeHtml(label)}</span>${check}</button>`;
+      });
+
+      // Translation (forced) section — presented separately from "Subtitles".
+      if (forcedSubs.length) {
+        html += `<div class="player-menu-divider"></div>`;
+        html += `<div class="player-menu-heading">Translation</div>`;
+        forcedSubs.forEach(({ s, i }) => {
+          const label = s.name || `${languageLabel(s.language)} (Forced)`;
+          // Active when the user picked it, or when it's auto-showing and the
+          // user hasn't overridden the selection.
+          const active = sel === i || (sel === null && pb.forcedActive && i === pb.forcedTrack);
+          const note = (i === pb.forcedTrack) ? `<span class="item-note">Foreign dialogue</span>` : '';
+          html += `<button class="player-menu-item forced-row ${active ? 'active' : ''}" onclick="selectSubtitle(${i})">
+            <span>${escapeHtml(label)}${note}</span>${check}</button>`;
+        });
+      }
+
+      // Image (bitmap) subs — surfaced but disabled; server never renders them.
+      if (imageSubs.length) {
+        html += `<div class="player-menu-divider"></div>`;
+        imageSubs.forEach(({ s, i }) => {
+          const label = s.name || languageLabel(s.language) || `Track ${i + 1}`;
+          html += `<div class="player-menu-item disabled" title="Image-based subtitles are not supported">
+            <span>${escapeHtml(label)}<span class="item-note">Image · unavailable</span></span></div>`;
+        });
+      }
+
+      subMenu.innerHTML = html;
+      updateSubtitleButtonState();
+    }
+
+    // Map each renderable JSON subtitle track to its hls.js subtitle track id.
+    // Necessary because image subs occupy a JSON slot but produce no HLS
+    // rendition, so JSON index != hls.js track index. Match on URL, then language.
+    function resolveSubtitleTrackMap() {
+      const pb = state.playback;
+      if (!pb || !state.hls) return;
+      const hlsTracks = state.hls.subtitleTracks || [];
+      const map = {};
+      const usedHls = new Set();
+      const tail = (u) => (u || '').split('/').pop().split('?')[0];
+      pb.subtitles.forEach((s, i) => {
+        if (!s.url) return; // image / no rendition
+        let hid = -1;
+        // Primary: match the rendition playlist filename (subtitle_<n>.m3u8).
+        const want = tail(s.url);
+        for (let t = 0; t < hlsTracks.length; t++) {
+          if (usedHls.has(t)) continue;
+          const ht = hlsTracks[t];
+          const hu = ht.url || (ht.details && ht.details.url) || '';
+          if (want && tail(hu) === want) { hid = t; break; }
+        }
+        // Fallback: match by language + forced flag, first unused.
+        if (hid === -1) {
+          for (let t = 0; t < hlsTracks.length; t++) {
+            if (usedHls.has(t)) continue;
+            const ht = hlsTracks[t];
+            const langMatch = !s.language || s.language === 'und' || (ht.lang || '').toLowerCase() === s.language;
+            const forcedMatch = (!!ht.forced) === (!!s.forced);
+            if (langMatch && forcedMatch) { hid = t; break; }
+          }
+        }
+        if (hid !== -1) { map[i] = hid; usedHls.add(hid); }
+      });
+      pb.hlsIdByJson = map;
+    }
+
+    // Apply the forced auto-enable at playback start, unless the user already
+    // made an explicit choice. This shows the translation track WITHOUT marking
+    // the "Subtitles" section as on.
+    function applyAutoEnableSubtitle() {
+      const pb = state.playback;
+      if (!pb || !state.hls) return;
+      if (pb.selectedSub !== null) return; // user already chose — don't override
+      const idx = pb.forcedTrack;
+      if (idx == null || idx < 0) return;
+      const hid = pb.hlsIdByJson[idx];
+      if (hid == null) return;
+      state.hls.subtitleTrack = hid;
+      if (typeof state.hls.subtitleDisplay !== 'undefined') state.hls.subtitleDisplay = true;
+      pb.forcedActive = true;
+      renderSubtitleMenu();
+    }
+
+    // index: -1 = Off, else the JSON subtitles[] index the user explicitly picked.
     function selectSubtitle(index) {
       document.getElementById('subtitle-menu').classList.remove('visible');
+      const pb = state.playback;
+      if (!pb) return;
+      // Ignore clicks on image (non-renderable) tracks.
+      if (index >= 0) {
+        const s = pb.subtitles[index];
+        if (!s || !s.url || s.type === 'image') return;
+      }
+      pb.selectedSub = index;              // user has now made an explicit choice
+      pb.forcedActive = false;             // explicit choice supersedes auto-forced
       if (state.hls) {
-        state.hls.subtitleTrack = index;
+        const hid = index < 0 ? -1 : (pb.hlsIdByJson[index] != null ? pb.hlsIdByJson[index] : -1);
+        state.hls.subtitleTrack = hid;
         if (typeof state.hls.subtitleDisplay !== 'undefined') {
-          state.hls.subtitleDisplay = index >= 0;
+          state.hls.subtitleDisplay = hid >= 0;
         }
       }
-      // Reflect active state in the menu.
-      document.querySelectorAll('#subtitle-menu .player-menu-item').forEach((el, i) => {
-        // First item is "Off" (-1), then tracks 0..n.
-        el.classList.toggle('active', (i - 1) === index);
-      });
+      renderSubtitleMenu();
+    }
+
+    // Reflect the "translating foreign dialogue" state on the CC button. This is
+    // deliberately distinct from a user having turned subtitles on.
+    function updateSubtitleButtonState() {
+      const btn = document.getElementById('subtitle-menu-btn');
+      const label = document.getElementById('subtitle-menu-label');
+      const pb = state.playback;
+      if (!btn || !label || !pb) return;
+      const translating = pb.selectedSub === null && pb.forcedActive;
+      btn.classList.toggle('translating', translating);
+      label.textContent = translating ? 'CC · Translating' : 'CC';
+      btn.title = translating
+        ? 'Auto-translating foreign dialogue — subtitles are off'
+        : 'Subtitles';
+    }
+
+    // Best-effort human label for a BCP-47-ish tag (used when name is absent).
+    function languageLabel(lang) {
+      if (!lang || lang === 'und') return '';
+      try {
+        if (typeof Intl !== 'undefined' && Intl.DisplayNames) {
+          const dn = new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' });
+          return dn.of(lang) || lang;
+        }
+      } catch (e) {}
+      return lang;
     }
 
     function selectQuality(quality) {

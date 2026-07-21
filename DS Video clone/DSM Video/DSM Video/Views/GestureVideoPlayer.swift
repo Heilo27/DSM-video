@@ -31,6 +31,10 @@ struct GestureVideoPlayer: View {
     /// and larger than playerItem.duration, the player uses it instead. 0 = unknown.
     var serverDuration: Double = 0
     var chapters: [Chapter] = []
+    // TASK-828: server-supplied subtitle semantics (full/forced/image + autoEnable).
+    // Empty for offline downloads and older servers; the player then falls back to
+    // plain AVFoundation behaviour (all subs off, manual selection only).
+    var subtitles: [Subtitle] = []
     var itemID: String = ""
     var itemTitle: String = ""
     var itemYear: Int? = nil
@@ -120,6 +124,10 @@ struct GestureVideoPlayer: View {
     // and is deferred — the current lifecycle (onAppear/onDisappear) is correct.
     @State private var cancellables = Set<AnyCancellable>()
     @State private var hasResumedPosition: Bool = false
+    // TASK-828: guard so the forced/translation track is auto-enabled exactly once per
+    // item load. readyToPlay can fire more than once (e.g. after a stall), and we must
+    // not re-assert the selection after the user has changed it themselves.
+    @State private var didApplyForcedSubtitle: Bool = false
     @State private var showCaptionsPicker: Bool = false
     @State private var didSetupPlayer: Bool = false
     @State private var subtitleOffsetSeconds: Double = 0
@@ -261,6 +269,7 @@ struct GestureVideoPlayer: View {
                     SubtitleAudioPickerView(
                         player: player,
                         chapters: chapters,
+                        subtitles: subtitles,
                         itemTitle: itemTitle,
                         itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
@@ -275,6 +284,7 @@ struct GestureVideoPlayer: View {
                     SubtitleAudioPickerView(
                         player: player,
                         chapters: chapters,
+                        subtitles: subtitles,
                         itemTitle: itemTitle,
                         itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
@@ -289,6 +299,7 @@ struct GestureVideoPlayer: View {
                     SubtitleAudioPickerView(
                         player: player,
                         chapters: chapters,
+                        subtitles: subtitles,
                         itemTitle: itemTitle,
                         itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
@@ -1197,6 +1208,7 @@ struct GestureVideoPlayer: View {
                     // asset default if no preference is stored or no track matches.
                     Task { @MainActor in
                         applyPreferredAudioLanguage(to: item)
+                        applyAutoEnabledForcedSubtitle(to: item)
                     }
                 }
             }
@@ -1581,6 +1593,55 @@ struct GestureVideoPlayer: View {
         }
     }
 
+    /// TASK-828: auto-enable the single forced/translation subtitle track the server
+    /// flagged with `autoEnable:true`, at playback start, WITHOUT any user action.
+    ///
+    /// This is the "A Bridge Too Far" case — the German/French scenes in an otherwise
+    /// English film. It is deliberately NOT surfaced to the user as "subtitles were
+    /// turned on": there is no toast, no persisted preference, no menu state change the
+    /// user initiated. It simply selects the correct forced AVMediaSelectionOption so
+    /// foreign dialogue is translated. Full subtitles are never touched here — they stay
+    /// off until the user picks them.
+    ///
+    /// Uses BOTH signals per the contract: the server's `autoEnable`/`language`/`type`
+    /// fields decide *whether* to enable and *which language*, and AVFoundation's native
+    /// `.containsOnlyForcedSubtitles` characteristic on the legible group locates the
+    /// matching forced rendition (delivered with FORCED=YES in the HLS manifest).
+    private func applyAutoEnabledForcedSubtitle(to item: AVPlayerItem) {
+        guard !didApplyForcedSubtitle else { return }
+        // Only one forced track ever carries autoEnable (contract guarantee).
+        guard let forcedMeta = subtitles.first(where: { $0.autoEnable && $0.forced && !$0.isImage }) else {
+            didApplyForcedSubtitle = true
+            return
+        }
+        didApplyForcedSubtitle = true
+        let wantLang = forcedMeta.language.lowercased()
+        Task {
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
+
+            // Prefer options AVFoundation itself marks as forced-only, then match language.
+            let forcedOptions = group.options.filter {
+                $0.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
+            }
+            func langMatches(_ opt: AVMediaSelectionOption) -> Bool {
+                guard wantLang != "und", !wantLang.isEmpty else { return true }
+                let tag = (opt.extendedLanguageTag ?? opt.locale?.identifier ?? "").lowercased()
+                return tag == wantLang || tag.hasPrefix(wantLang + "-") || wantLang.hasPrefix(tag)
+            }
+
+            let match = forcedOptions.first(where: langMatches)
+                ?? forcedOptions.first
+                // Fallback if the manifest didn't tag FORCED but the server told us the
+                // display name (already suffixed "(Forced)") — match by name/language.
+                ?? group.options.first(where: { opt in
+                    opt.displayName == forcedMeta.name && langMatches(opt)
+                })
+
+            guard let match else { return }
+            await MainActor.run { item.select(match, in: group) }
+        }
+    }
+
     private func scheduleHideControls() {
         // TASK-211: Keep controls always visible when VoiceOver is running to prevent dead zones
         #if os(iOS)
@@ -1915,6 +1976,9 @@ struct AirPlayButton: UIViewRepresentable {
 private struct SubtitleAudioPickerView: View {
     let player: AVPlayer
     var chapters: [Chapter] = []
+    // TASK-828: server subtitle semantics, used to split the list into Forced /
+    // Full / (greyed) Image and to label the auto-enabled forced track.
+    var subtitles: [Subtitle] = []
     var itemTitle: String = ""
     var itemYear: Int? = nil
     var onOffsetChange: ((Double) -> Void)? = nil
@@ -1996,27 +2060,65 @@ private struct SubtitleAudioPickerView: View {
         }
     }
 
+    // TASK-828: match a server metadata entry to a live AVMediaSelectionOption.
+    // Forced tracks: prefer the AVFoundation forced characteristic, then language.
+    // Full tracks: language + NOT forced-characteristic. Language uses loose prefix
+    // matching because tags vary ("de" vs "de-DE").
+    private func metadata(for option: AVMediaSelectionOption) -> Subtitle? {
+        let optForced = option.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
+        let optLang = (option.extendedLanguageTag ?? option.locale?.identifier ?? "").lowercased()
+        func langMatches(_ meta: Subtitle) -> Bool {
+            let m = meta.language.lowercased()
+            guard m != "und", !m.isEmpty, !optLang.isEmpty else { return true }
+            return optLang == m || optLang.hasPrefix(m + "-") || m.hasPrefix(optLang)
+        }
+        // Exact display-name match wins when the server label matches AVFoundation's.
+        if let byName = subtitles.first(where: { !$0.isImage && $0.name == option.displayName }) {
+            return byName
+        }
+        return subtitles.first {
+            !$0.isImage && $0.forced == optForced && langMatches($0)
+        }
+    }
+
     @ViewBuilder
     private var subtitleSection: some View {
         if let group = subtitleGroup {
             let noneSelected = currentSelection?.selectedMediaOption(in: group) == nil
+            // "None" applies to full subtitles; forced/translation is handled separately
+            // and auto-managed, so keep the off control at the top of the list.
             Button {
                 player.currentItem?.select(nil, in: group)
                 currentSelection = player.currentItem?.currentMediaSelection
             } label: {
-                trackRow(name: "None", isSelected: noneSelected)
+                trackRow(name: "Off", isSelected: noneSelected)
             }
             .buttonStyle(.plain)
 
-            ForEach(group.options, id: \.self) { option in
-                let isSelected = currentSelection?.selectedMediaOption(in: group) == option
-                Button {
-                    player.currentItem?.select(option, in: group)
-                    currentSelection = player.currentItem?.currentMediaSelection
-                } label: {
-                    trackRow(name: option.displayName, isSelected: isSelected)
-                }
-                .buttonStyle(.plain)
+            // Partition the live options by the server's semantics. Options with no
+            // metadata (offline/older server) fall into `full` so nothing disappears.
+            let forcedOptions = group.options.filter { metadata(for: $0)?.forced == true }
+            let fullOptions = group.options.filter { metadata(for: $0)?.forced != true }
+
+            // Forced / translation tracks — labelled as translation, not "subtitles",
+            // because these carry only the foreign-scene dialogue.
+            ForEach(forcedOptions, id: \.self) { option in
+                subtitleOptionRow(option, in: group, forced: true)
+            }
+
+            ForEach(fullOptions, id: \.self) { option in
+                subtitleOptionRow(option, in: group, forced: false)
+            }
+
+            // Image (bitmap) subtitles: listed but greyed and non-selectable — the
+            // server never renders them (contract: out of scope).
+            ForEach(imageSubtitles, id: \.self) { meta in
+                imageSubtitleRow(meta)
+            }
+        } else if !imageSubtitles.isEmpty {
+            // Direct/remux with only image subs: no legible group at all.
+            ForEach(imageSubtitles, id: \.self) { meta in
+                imageSubtitleRow(meta)
             }
         } else {
             Text("No subtitle tracks available")
@@ -2027,6 +2129,48 @@ private struct SubtitleAudioPickerView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var imageSubtitles: [Subtitle] {
+        subtitles.filter { $0.isImage }
+    }
+
+    @ViewBuilder
+    private func subtitleOptionRow(_ option: AVMediaSelectionOption,
+                                   in group: AVMediaSelectionGroup,
+                                   forced: Bool) -> some View {
+        let isSelected = currentSelection?.selectedMediaOption(in: group) == option
+        Button {
+            player.currentItem?.select(option, in: group)
+            currentSelection = player.currentItem?.currentMediaSelection
+        } label: {
+            trackRow(name: option.displayName,
+                     isSelected: isSelected,
+                     detail: forced ? "Translation" : nil)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func imageSubtitleRow(_ meta: Subtitle) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(meta.name)
+                Text("Image subtitles — not supported")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .foregroundStyle(.secondary)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(meta.name), image subtitles, not supported")
+        #if os(tvOS)
+        // Keep the row focusable so tvOS focus can traverse past it without a dead-end,
+        // but it performs no action.
+        .focusable(true)
+        #endif
     }
 
     @ViewBuilder
@@ -2126,10 +2270,17 @@ private struct SubtitleAudioPickerView: View {
         }
     }
 
-    private func trackRow(name: String, isSelected: Bool) -> some View {
+    private func trackRow(name: String, isSelected: Bool, detail: String? = nil) -> some View {
         HStack {
-            Text(name)
-                .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .foregroundStyle(.primary)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Spacer()
             Image(systemName: "checkmark")
                 .foregroundStyle(Color.dsAccent)
@@ -2138,6 +2289,7 @@ private struct SubtitleAudioPickerView: View {
                 .accessibilityLabel("Selected")
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 
     private func formatChapterTime(_ seconds: Double) -> String {

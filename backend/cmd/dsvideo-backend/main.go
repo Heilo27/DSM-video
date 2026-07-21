@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -3145,6 +3146,23 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// synchronous: it's pure filesystem, no ffmpeg.
 	subtitleTracks = append(subtitleTracks, s.collectEmbeddedSubtitles(itemID, path, subtitleOffset, probeResult)...)
 
+	// TASK-826: classify each track (full / forced / image) and mark the single best
+	// forced track for auto-enable. Runtime comes from the authoritative DB duration,
+	// falling back to the live probe; audio language from the probe (empty when the
+	// codec came from the DB and no live probe ran this request — then only forced
+	// flags/tokens drive classification, cue-density and audio-match are skipped).
+	runtimeSecs := 0.0
+	if itemDuration.Valid {
+		runtimeSecs = float64(itemDuration.Int64)
+	} else if probeResult != nil {
+		runtimeSecs = probeResult.DurationSecs
+	}
+	audioLang := ""
+	if probeResult != nil {
+		audioLang = probeResult.AudioLang
+	}
+	classifySubtitleTracks(subtitleTracks, runtimeSecs, audioLang)
+
 	ps := PlaySession{
 		ItemID:       itemID,
 		Path:         path,
@@ -3249,11 +3267,25 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build subtitle info for the response so the client knows tracks are available.
+	// TASK-826 contract: each entry carries classification + auto-enable metadata.
+	// See .claude/scratch/subtitle-api-contract.md for the frozen field list.
 	subtitleInfo := make([]map[string]any, 0, len(subtitleTracks))
-	for _, s := range subtitleTracks {
+	for i, t := range subtitleTracks {
+		typ := t.Type
+		if typ == "" {
+			typ = "full"
+		}
 		subtitleInfo = append(subtitleInfo, map[string]any{
-			"language": s.Language,
-			"name":     s.Name,
+			// url: the HLS subtitle rendition selector index for this track. Clients
+			// select the matching #EXT-X-MEDIA rendition (subtitle_<i>) in the master
+			// playlist; image subs produce no rendition and carry url "".
+			"url":        subtitleTrackURL(baseURL, sessionID, ps.Kind, t, i),
+			"language":   t.Language,
+			"name":       t.Name,
+			"type":       typ,
+			"forced":     t.Forced,
+			"default":    t.Default,
+			"autoEnable": t.AutoEnable,
 		})
 	}
 
@@ -3341,27 +3373,40 @@ func findSubtitleFiles(videoPath string, offset float64) []transcode.SubtitleTra
 		}
 		seen[fullPath] = true
 
-		// Infer language from suffix: "movie.en.srt" → "en"
+		// Infer language + forced/default flags from suffix tokens:
+		// "movie.en.forced.srt" → lang "en", forced. "movie.fr.default.srt" → default.
 		lang := "und"
 		displayName := "Subtitles"
+		forced := false
+		isDefault := false
 		suffix := strings.TrimPrefix(nameNoExt, base)
 		if suffix != "" {
 			parts := strings.Split(strings.TrimPrefix(suffix, "."), ".")
 			for _, p := range parts {
 				p = strings.ToLower(p)
-				if p == "forced" || p == "sdh" || p == "cc" || p == "default" {
+				switch p {
+				case "forced":
+					forced = true
+					continue
+				case "default":
+					isDefault = true
+					continue
+				case "sdh", "cc":
+					// full-dialogue variants — carry no forced/default semantics here
 					continue
 				}
-				if len(p) == 2 || len(p) == 3 {
+				if lang == "und" && (len(p) == 2 || len(p) == 3) {
 					lang = p
 					if n, ok := langNames[p]; ok {
 						displayName = n
 					} else {
 						displayName = strings.ToUpper(p)
 					}
-					break
 				}
 			}
+		}
+		if forced {
+			displayName += " (Forced)"
 		}
 
 		tracks = append(tracks, transcode.SubtitleTrack{
@@ -3369,10 +3414,148 @@ func findSubtitleFiles(videoPath string, offset float64) []transcode.SubtitleTra
 			Name:     displayName,
 			Path:     fullPath,
 			Offset:   offset,
+			Forced:   forced,
+			Default:  isDefault,
+			// Type is finalized by classifySubtitleTracks (cue-density may promote an
+			// untagged sidecar to "forced"); default here to the flag-derived value.
+			Type: subTypeFromForced(forced),
 		})
 	}
 
 	return tracks
+}
+
+// subtitleTrackURL returns the fetchable URL for a track's HLS subtitle rendition,
+// or "" when there is none. Text subtitles are delivered as in-manifest HLS
+// renditions (subtitle_<i>.m3u8, served by the {variant}.m3u8 route). Image subs
+// produce no rendition, and direct/remux playback has no HLS manifest at all — both
+// yield "". The index i matches the rendition ordinal addSubtitleRenditions assigns.
+func subtitleTrackURL(baseURL, sessionID, kind string, t transcode.SubtitleTrack, i int) string {
+	if kind != "hls" || t.Type == "image" || t.Path == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/api/v1/playback/%s/subtitle_%d.m3u8", baseURL, sessionID, i)
+}
+
+// forcedCueDensityThreshold is the fraction of runtime below which a text subtitle's
+// cue coverage is treated as "translation-only" (forced). A full-dialogue track cues
+// almost continuously; a forced track only covers the handful of foreign-language
+// scenes, so its cue count relative to a per-minute baseline is tiny. ~0.15 = 15%.
+const forcedCueDensityThreshold = 0.15
+
+// subTypeFromForced maps a forced flag to the default subtitle Type. Cue-density may
+// later promote a "full" sidecar to "forced" (see classifySubtitleTracks).
+func subTypeFromForced(forced bool) string {
+	if forced {
+		return "forced"
+	}
+	return "full"
+}
+
+// cueCountRe matches SRT/VTT cue timing lines ("00:01:23,456 --> 00:01:25,000").
+// Counting these is a cheap proxy for the number of subtitle events in a text file.
+var cueCountRe = regexp.MustCompile(`\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}\s*-->`)
+
+// subtitleCueDensity returns the fraction of the runtime "covered" by a text subtitle
+// file, normalized against a full-dialogue baseline of ~12 cues/minute. Values well
+// below 1.0 indicate sparse (forced/translation-only) coverage. It reads the file
+// directly (SRT/VTT/ASS text) — cheap, no ffmpeg — and returns (density, ok). ok is
+// false when the file can't be read or runtime is unknown, so callers fall back to
+// flags/tokens only. A modest read cap keeps a pathological file from blocking.
+func subtitleCueDensity(path string, runtimeSecs float64) (float64, bool) {
+	if path == "" || runtimeSecs <= 0 {
+		return 0, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	var cues float64
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ass", ".ssa":
+		// ASS/SSA: each dialogue event is a "Dialogue:" line.
+		cues = float64(bytes.Count(bytes.ToLower(data), []byte("dialogue:")))
+	default:
+		// SRT / VTT: count cue timing lines.
+		cues = float64(len(cueCountRe.FindAllIndex(data, -1)))
+	}
+	if cues == 0 {
+		return 0, true // parsed fine, genuinely no cues → maximally sparse
+	}
+	const baselineCuesPerMinute = 12.0
+	expected := (runtimeSecs / 60.0) * baselineCuesPerMinute
+	if expected <= 0 {
+		return 0, false
+	}
+	return cues / expected, true
+}
+
+// classifySubtitleTracks finalizes each track's Type and marks the single best forced
+// track for auto-enable. Rules (TASK-826, exact):
+//   - A text track is "forced" when its disposition/token already says so, OR its
+//     cue-density is below forcedCueDensityThreshold. Image subs stay "image". Full
+//     subs are never promoted by density if they carry no forced signal AND density
+//     is above threshold.
+//   - A forced track AUTO-ENABLES only when audioLang == trackLang. Full subs never
+//     auto-enable. At most ONE track gets AutoEnable — the first forced track whose
+//     language matches the audio, preferring one already flagged forced/default.
+//
+// runtimeSecs is the authoritative item runtime; audioLang is the primary audio
+// stream's language ("" if unknown). Mutates tracks in place.
+func classifySubtitleTracks(tracks []transcode.SubtitleTrack, runtimeSecs float64, audioLang string) {
+	audioLang = strings.ToLower(strings.TrimSpace(audioLang))
+	for i := range tracks {
+		t := &tracks[i]
+		if t.Type == "image" {
+			t.Forced = false
+			t.Default = false
+			t.AutoEnable = false
+			continue
+		}
+		if t.Forced {
+			t.Type = "forced"
+			continue
+		}
+		// Not flagged forced — try the cue-density heuristic on the actual file.
+		if density, ok := subtitleCueDensity(t.Path, runtimeSecs); ok && density < forcedCueDensityThreshold {
+			t.Forced = true
+			t.Type = "forced"
+		} else if t.Type == "" {
+			t.Type = "full"
+		}
+	}
+
+	// Pick at most one auto-enable track: a forced track whose language matches the
+	// audio. Prefer a track that was explicitly flagged forced/default over one
+	// promoted solely by cue-density (rank), and the earliest such track.
+	if audioLang == "" {
+		return
+	}
+	bestIdx := -1
+	bestRank := -1
+	for i := range tracks {
+		t := &tracks[i]
+		if t.Type != "forced" {
+			continue
+		}
+		tl := strings.ToLower(strings.TrimSpace(t.Language))
+		if tl == "" || tl == "und" || tl != audioLang {
+			continue
+		}
+		rank := 0
+		if t.Default {
+			rank = 2
+		} else if t.Forced {
+			rank = 1
+		}
+		if rank > bestRank {
+			bestRank = rank
+			bestIdx = i
+		}
+	}
+	if bestIdx >= 0 {
+		tracks[bestIdx].AutoEnable = true
+	}
 }
 
 // embeddedSubLangNames maps ISO language codes to display names for embedded
@@ -3454,6 +3637,20 @@ func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float
 	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", sanitizeID(itemID))
 	var tracks []transcode.SubtitleTrack
 	for _, sub := range probeResult.EmbeddedSubs {
+		// Image-based subs (PGS/VobSub) are out of scope: surface them so the client
+		// can list them, but NEVER extract/OCR. No Path, no cue-density.
+		if sub.IsImage {
+			tracks = append(tracks, transcode.SubtitleTrack{
+				Language:   sub.Language,
+				Name:       embeddedSubName(sub),
+				Offset:     offset,
+				Type:       "image",
+				Forced:     false,
+				Default:    false,
+				AutoEnable: false,
+			})
+			continue
+		}
 		destPath := filepath.Join(cacheDir, fmt.Sprintf("stream_%d.srt", sub.Index))
 		if _, statErr := os.Stat(destPath); statErr == nil {
 			// Already cached — include it now.
@@ -3462,6 +3659,9 @@ func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float
 				Name:     embeddedSubName(sub),
 				Path:     destPath,
 				Offset:   offset,
+				Forced:   sub.Forced,
+				Default:  sub.Default,
+				Type:     subTypeFromForced(sub.Forced),
 			})
 			continue
 		}

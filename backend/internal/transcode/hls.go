@@ -106,12 +106,25 @@ func (g *HLSGenerator) SetFFmpegLimiter(l *FFmpegLimiter) {
 	g.limiter = l
 }
 
-// SubtitleTrack describes an external subtitle file to include in HLS output.
+// SubtitleTrack describes a subtitle source (external sidecar or embedded text
+// stream) to include in HLS output and expose to the client.
 type SubtitleTrack struct {
 	Language string  // BCP-47 language tag, e.g. "en", "fr"
 	Name     string  // Display name, e.g. "English"
-	Path     string  // Absolute path to source SRT/ASS/VTT file
+	Path     string  // Absolute path to source SRT/ASS/VTT file ("" for un-extracted image subs)
 	Offset   float64 // Timing offset in seconds (positive = delay, negative = advance)
+
+	// Classification (TASK-826). Type is one of "full", "forced", or "image".
+	//   - "full":   complete dialogue. Manual toggle, DEFAULT OFF, never auto-enables.
+	//   - "forced": translation-only (foreign dialogue in an otherwise-native film).
+	//               May auto-enable when it matches the audio language.
+	//   - "image":  PGS/VobSub bitmap sub. Out of scope — surfaced but never extracted.
+	Type    string
+	Forced  bool // disposition.forced OR ".forced" filename token OR cue-density heuristic
+	Default bool // disposition.default OR ".default" filename token
+	// AutoEnable is set on AT MOST ONE forced track per item — the best forced track
+	// whose language matches the primary audio language. Full subs never auto-enable.
+	AutoEnable bool
 }
 
 // HLSSession represents an active transcoding session.
@@ -551,6 +564,12 @@ func (g *HLSGenerator) addSubtitleRenditions(ctx context.Context, session *HLSSe
 
 	var renditionLines []string
 	for i, sub := range session.SubtitleTracks {
+		// Image-based subs (PGS/VobSub) are out of scope: no text to convert to WebVTT
+		// and no source path to feed ffmpeg. They're surfaced in the /playback response
+		// as type:"image" but produce no HLS rendition. Skip them here.
+		if sub.Type == "image" || sub.Path == "" {
+			continue
+		}
 		vttName := fmt.Sprintf("subtitle_%d.m3u8", i)
 		vttPath := filepath.Join(session.OutputDir, vttName)
 		segPattern := filepath.Join(session.OutputDir, fmt.Sprintf("sub_%d_%%05d.vtt", i))
@@ -599,13 +618,22 @@ func (g *HLSGenerator) addSubtitleRenditions(ctx context.Context, session *HLSSe
 		if name == "" {
 			name = lang
 		}
+		// DEFAULT=YES marks the rendition a compliant player selects automatically.
+		// We map it to the auto-enable decision (the single best forced track matching
+		// the audio language) rather than "first track". FORCED=YES advertises the
+		// rendition as containing only forced/translation cues so players may show it
+		// even when the user has subtitles off.
 		isDefault := "NO"
-		if i == 0 {
+		if sub.AutoEnable {
 			isDefault = "YES"
 		}
+		isForced := "NO"
+		if sub.Forced {
+			isForced = "YES"
+		}
 		renditionLines = append(renditionLines,
-			fmt.Sprintf(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="%s",NAME="%s",DEFAULT=%s,FORCED=NO,URI="%s"`,
-				lang, name, isDefault, vttName),
+			fmt.Sprintf(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="%s",NAME="%s",DEFAULT=%s,FORCED=%s,URI="%s"`,
+				lang, name, isDefault, isForced, vttName),
 		)
 	}
 

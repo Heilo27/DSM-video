@@ -1160,6 +1160,10 @@ private struct PlayerSheet: View {
   @State private var playbackDuration: Double = 0
   @State private var isOffline: Bool = false
   @State private var chapters: [Chapter] = []
+  // TASK-828: semantic subtitle metadata (full/forced/image + autoEnable) from the
+  // playback response, handed to the player so it can auto-enable the forced
+  // translation track and label the picker correctly.
+  @State private var subtitles: [Subtitle] = []
   @State private var subtitleOffset: Double = 0
   @State private var subtitleOffsetRestartTask: Task<Void, Never>? = nil
 
@@ -1193,6 +1197,7 @@ private struct PlayerSheet: View {
           resumePosition: resumePosition,
           serverDuration: playbackDuration,
           chapters: chapters,
+          subtitles: subtitles,
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
@@ -1505,6 +1510,7 @@ private struct PlayerSheet: View {
       resumeOverrideSeconds = 0
       resumeOverrideDuration = 0
       chapters = info.chapters ?? []
+      subtitles = info.subtitles ?? []
       playbackDuration = Double(info.durationSeconds ?? 0)
       playbackURL = url
     } catch APIError.converting {
@@ -1528,6 +1534,7 @@ private struct PlayerSheet: View {
           resumeOverrideSeconds = 0
           resumeOverrideDuration = 0
           chapters = info.chapters ?? []
+          subtitles = info.subtitles ?? []
           playbackDuration = Double(info.durationSeconds ?? 0)
           playbackURL = url
           appState.clearNetworkError()

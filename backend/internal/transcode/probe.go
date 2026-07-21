@@ -27,6 +27,7 @@ type ProbeResult struct {
 	Container      string    // e.g., "mp4", "mkv", "webm", "mov"
 	VideoCodec     string    // e.g., "h264", "hevc", "vp9", "av1"
 	AudioCodec     string    // e.g., "aac", "ac3", "dts", "eac3", "flac", "opus"
+	AudioLang      string    // BCP-47-ish tag of the PRIMARY audio stream (e.g. "en"), or "" if untagged
 	DurationSecs   float64   // Duration in seconds
 	Width          int       // Video width
 	Height         int       // Video height
@@ -37,16 +38,19 @@ type ProbeResult struct {
 	EmbeddedSubs   []EmbeddedSubtitle // Text-based embedded subtitle streams (may be empty)
 }
 
-// EmbeddedSubtitle describes a text subtitle stream muxed inside the container
-// (e.g. an MKV with internal SRT/ASS). Image-based subs (PGS/VobSub) are excluded
-// since they can't be converted to WebVTT without OCR.
+// EmbeddedSubtitle describes a subtitle stream muxed inside the container
+// (e.g. an MKV with internal SRT/ASS). Text streams (SRT/ASS/mov_text) can be
+// converted to WebVTT and played. Image-based streams (PGS/VobSub) are recorded
+// with IsImage=true so clients can surface them, but they are NEVER extracted or
+// OCR'd — the pipeline must not attempt ffmpeg conversion on an image sub.
 type EmbeddedSubtitle struct {
 	Index    int    // ffmpeg stream index
 	Language string // BCP-47-ish tag from stream tags (e.g. "en"), or "und"
 	Title    string // Optional human title from stream tags
-	Codec    string // e.g. "subrip", "ass", "mov_text"
+	Codec    string // e.g. "subrip", "ass", "mov_text", "hdmv_pgs_subtitle", "dvd_subtitle"
 	Forced   bool
 	Default  bool
+	IsImage  bool // true for PGS/VobSub — out of scope for extraction, surfaced as type:"image"
 }
 
 // ffprobeOutput represents the JSON output from ffprobe.
@@ -166,17 +170,32 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 			if result.AudioCodec == "" { // Take first audio stream
 				result.AudioCodec = normalizeAudioCodec(stream.CodecName)
 				result.AudioChannels = stream.Channels
+				// Language of the PRIMARY audio stream — drives the forced-subtitle
+				// auto-enable rule (a forced track auto-enables only when its language
+				// matches the audio the viewer is hearing). "" when untagged.
+				result.AudioLang = strings.ToLower(stream.Tags["language"])
 			}
 		case "subtitle":
-			// Only text-based subtitle codecs can be converted to WebVTT. Image-based
-			// (hdmv_pgs_subtitle, dvd_subtitle/VobSub) require OCR — skip them.
-			switch strings.ToLower(stream.CodecName) {
+			// Text-based codecs (SRT/ASS/mov_text) convert to WebVTT and play. Image-based
+			// codecs (hdmv_pgs_subtitle, dvd_subtitle/VobSub) require OCR and are OUT OF
+			// SCOPE — we record them so clients can list them, but tag IsImage so nothing
+			// downstream tries to extract/convert them.
+			codec := strings.ToLower(stream.CodecName)
+			isText := false
+			isImage := false
+			switch codec {
 			case "subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text":
+				isText = true
+			case "hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub", "vobsub", "dvb_subtitle", "xsub":
+				isImage = true
+			}
+			if isText || isImage {
 				sub := EmbeddedSubtitle{
 					Index:   stream.Index,
-					Codec:   strings.ToLower(stream.CodecName),
+					Codec:   codec,
 					Forced:  stream.Disposition.Forced == 1,
 					Default: stream.Disposition.Default == 1,
+					IsImage: isImage,
 				}
 				sub.Language = "und"
 				if l := strings.ToLower(stream.Tags["language"]); l != "" {
