@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"dsvideo/backend/internal/metadata"
@@ -74,6 +76,15 @@ type Config struct {
 	TMDbAPIKey    string
 	ImageCacheDir string
 
+	// AdminUser is the DSM username permitted to mutate server-global state
+	// (tmdb_api_key + other global settings) and to hit /admin/*. TASK-791/811:
+	// the backend otherwise has no role model — every authed DSM user is equal, so a
+	// low-priv user could swap the global TMDb key or trigger rescans (DoS). When set
+	// (env DSVIDEO_ADMIN_USER) only this user is admin. When empty, the first user to
+	// authenticate is recorded as owner (settings key owner_username) and becomes admin
+	// — a fresh-NAS default so the installing user is the admin without extra config.
+	AdminUser string
+
 	// Security: when true, a DS Video User-Agent presenting an unknown SID is
 	// granted a local session WITHOUT validating the SID against DSM. This was the
 	// historical default to work around fragile DS Video builds, but it lets anyone
@@ -122,6 +133,10 @@ type Server struct {
 	// Serializes progress writes to avoid SQLite busy-timeout under concurrent playback.
 	progressMu sync.Mutex
 
+	// Serializes the first-user-wins owner claim (TASK-791/811) so two simultaneous
+	// first logins can't both win the owner_username row.
+	ownerMu sync.Mutex
+
 	// Trick-play generation guards (TASK-740). Lazy sprite generation runs ffmpeg,
 	// so concurrent requests for the same item must collapse to one job. The
 	// total-concurrency cap is no longer a separate trickplay semaphore — TASK-752
@@ -147,10 +162,13 @@ type Server struct {
 	ffmpegLimiter *transcode.FFmpegLimiter
 
 	// Token revocation list: jti → expiry unix timestamp.
-	// KNOWN LIMITATION: this list is in-memory only and is cleared on server restart.
-	// Any tokens revoked before a restart (e.g. via logout) will be re-accepted by a
-	// freshly started server until their natural JWT expiry. A persistent fix requires
-	// a SQLite revocation table — deferred to the TASK-309 database rebuild.
+	// This map is a fast in-memory lookup backed by the persistent `revoked_tokens`
+	// SQLite table (schema in the migrations block). On revoke (e.g. logout) the jti
+	// is written to both the map and the table; on startup the table is warmed back
+	// into this map (see warmRevokedTokens), so a revoked token stays revoked across
+	// restarts until its natural JWT expiry. Expired entries are purged from both the
+	// map and the table by the background purge loop and at startup. (Persistence was
+	// TASK-309, now shipped — this is no longer in-memory-only.)
 	revokedTokens sync.Map
 
 	// Pairing codes: code → pairingEntry (tvOS ↔ iOS device pairing)
@@ -582,6 +600,7 @@ func main() {
 	r.Use(redactSensitiveParams) // must run before Logger to prevent token leakage in logs
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(bodyLimitMiddleware) // TASK-810: cap request bodies to avoid NAS OOM DoS
 
 	// Serve web player
 	webFS, err := fs.Sub(webContent, "web")
@@ -894,6 +913,9 @@ func loadConfig() Config {
 		TMDbAPIKey:    get("DSVIDEO_TMDB_API_KEY", ""),
 		ImageCacheDir: get("DSVIDEO_IMAGE_CACHE_DIR", filepath.Join(os.TempDir(), "dsvideo_images")),
 
+		// TASK-791/811: admin/owner for server-global mutations. Empty = first-user-wins.
+		AdminUser: get("DSVIDEO_ADMIN_USER", ""),
+
 		// Security — default false. Opt in only with an explicit "1"/"true".
 		AllowUnvalidatedDSVideo: strings.EqualFold(get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", ""), "true") ||
 			get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", "") == "1",
@@ -1184,6 +1206,23 @@ func (s *Server) getTMDbClient(r *http.Request) *metadata.TMDbClient {
 // appearing verbatim in Synology package log files.
 // NOTE: only r.URL is modified — the actual query string seen by handlers is
 // unaffected because this runs before routing resolves to a handler.
+// maxRequestBodyBytes caps any inbound request body. TASK-810: the JSON endpoints decode
+// r.Body with no limit; on an internet-exposed NAS a single multi-GB POST would stream
+// into the decoder and OOM-kill the process. Every legitimate request here (JSON control
+// endpoints, WebAPI form login) is well under 1 MB; media streaming routes are all GET
+// with no body, so a global cap is safe. MaxBytesReader also makes the server close the
+// connection once the limit is exceeded rather than draining the oversized body.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
+func bodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func redactSensitiveParams(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if q := r.URL.Query(); q.Has("_sid") || q.Has("token") {
@@ -1416,7 +1455,10 @@ func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, d
 
 	log.Printf("[Auth] auth.cgi returned HTTP %d", resp.StatusCode)
 
-	body, err := io.ReadAll(resp.Body)
+	// TASK-823: bound the DSM auth response read. auth.cgi returns a small JSON
+	// blob; 1 MiB is far more than any legitimate response and caps memory if the
+	// (trusted but possibly misbehaving) DSM endpoint streams an unbounded body.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("dsm auth unavailable: read error")
 	}
@@ -1470,37 +1512,52 @@ func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, d
 	}, nil
 }
 
+// revokeJWT parses a signed JWT and, if valid, adds its jti to the revocation list
+// (in-memory for in-flight requests + persisted so it survives restarts). Safe to call
+// with an empty/invalid token — it's a no-op then. TASK-806: shared by REST logout and
+// WebAPI logout so a credential logged out in either session plane is revoked in BOTH,
+// closing the divergence where a WebAPI logout deleted only the local SID while the
+// embedded REST JWT stayed valid.
+func (s *Server) revokeJWT(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	tok, err := jwt.Parse(raw, func(token *jwt.Token) (any, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, errors.New("unexpected signing method")
+		}
+		return []byte(s.cfg.JWTSecret), nil
+	})
+	if err != nil || !tok.Valid {
+		return
+	}
+	claims, ok := tok.Claims.(jwt.MapClaims)
+	if !ok {
+		return
+	}
+	jti, _ := claims["jti"].(string)
+	exp, _ := claims["exp"].(float64)
+	if jti == "" {
+		return
+	}
+	expUnix := int64(exp)
+	// Fast in-memory revocation (for requests already in-flight)
+	s.revokedTokens.Store(jti, expUnix)
+	// Persistent revocation (survives server restarts)
+	if _, dbErr := s.db.Exec(
+		`INSERT OR REPLACE INTO revoked_tokens(jti, revoked_at, expires_at) VALUES (?, ?, ?)`,
+		jti, time.Now().Unix(), expUnix,
+	); dbErr != nil {
+		log.Printf("[logout] failed to persist revoked token: %v", dbErr)
+	}
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if strings.HasPrefix(h, prefix) {
-		raw := strings.TrimSpace(strings.TrimPrefix(h, prefix))
-		if raw != "" {
-			tok, err := jwt.Parse(raw, func(token *jwt.Token) (any, error) {
-				if token.Method != jwt.SigningMethodHS256 {
-					return nil, errors.New("unexpected signing method")
-				}
-				return []byte(s.cfg.JWTSecret), nil
-			})
-			if err == nil && tok.Valid {
-				if claims, ok := tok.Claims.(jwt.MapClaims); ok {
-					jti, _ := claims["jti"].(string)
-					exp, _ := claims["exp"].(float64)
-					if jti != "" {
-						expUnix := int64(exp)
-						// Fast in-memory revocation (for requests already in-flight)
-						s.revokedTokens.Store(jti, expUnix)
-						// Persistent revocation (survives server restarts)
-						if _, dbErr := s.db.Exec(
-							`INSERT OR REPLACE INTO revoked_tokens(jti, revoked_at, expires_at) VALUES (?, ?, ?)`,
-							jti, time.Now().Unix(), expUnix,
-						); dbErr != nil {
-							log.Printf("[logout] failed to persist revoked token: %v", dbErr)
-						}
-					}
-				}
-			}
-		}
+		s.revokeJWT(strings.TrimPrefix(h, prefix))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -1588,6 +1645,64 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func userFromCtx(ctx context.Context) authedUser {
 	u, _ := ctx.Value(userKey).(authedUser)
 	return u
+}
+
+// ownerUsername returns the persisted owner (settings key owner_username, global row),
+// or "" if none has been claimed yet.
+func (s *Server) ownerUsername() string {
+	var v string
+	_ = s.db.QueryRow("SELECT value FROM settings WHERE key = 'owner_username' AND user_id = ''").Scan(&v)
+	return v
+}
+
+// isAdmin reports whether the authenticated user may mutate server-global state and hit
+// /admin/*. TASK-791/811. Precedence:
+//  1. If DSVIDEO_ADMIN_USER is configured, ONLY that username (case-insensitive) is admin.
+//  2. Otherwise the persisted owner_username (first-user-wins) is admin.
+//
+// It also lazily claims ownership: when no admin is configured AND no owner is recorded
+// yet, the first authenticated caller is written as owner and is treated as admin. This
+// makes the installing user the admin on a fresh NAS with zero configuration, while never
+// silently promoting a second user once an owner exists.
+func (s *Server) isAdmin(u authedUser) bool {
+	if u.Username == "" {
+		return false
+	}
+	if configured := strings.TrimSpace(s.cfg.AdminUser); configured != "" {
+		return strings.EqualFold(u.Username, configured)
+	}
+
+	if owner := s.ownerUsername(); owner != "" {
+		return strings.EqualFold(u.Username, owner)
+	}
+
+	// No admin configured and no owner yet — claim it for this user under a lock so a
+	// race between two first logins resolves to a single winner.
+	s.ownerMu.Lock()
+	defer s.ownerMu.Unlock()
+	if owner := s.ownerUsername(); owner != "" {
+		return strings.EqualFold(u.Username, owner)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(
+		`INSERT INTO settings(key, user_id, value, updated_at) VALUES('owner_username','',?,?)
+		 ON CONFLICT(key, user_id) DO NOTHING`,
+		u.Username, now,
+	); err != nil {
+		log.Printf("[admin] failed to record owner_username=%q: %v", u.Username, err)
+		return false
+	}
+	log.Printf("[admin] no admin configured — recorded first user %q as owner", u.Username)
+	return strings.EqualFold(u.Username, s.ownerUsername())
+}
+
+// requireAdmin writes a 403 and returns false when the caller is not admin.
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if s.isAdmin(userFromCtx(r.Context())) {
+		return true
+	}
+	writeErr(w, http.StatusForbidden, "admin_required")
+	return false
 }
 
 // -------------------------
@@ -1757,7 +1872,9 @@ func resolveQuickConnect(ctx context.Context, quickConnectID string) ([]qcCandid
 		return nil, fmt.Errorf("quickconnect http %d", resp.StatusCode)
 	}
 	var out map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// TASK-823: bound the QuickConnect resolver response. quickconnect.to returns a
+	// small candidate list; 1 MiB caps memory against a misbehaving relay.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
 		return nil, err
 	}
 
@@ -2884,22 +3001,11 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Security: verify the DB-stored path is within a configured media root.
-	// Prevents path traversal if the database is tampered with.
-	cleanedPath := filepath.Clean(path)
-	mediaRoots := []string{s.cfg.MoviesPath, s.cfg.TVPath, s.cfg.HomePath}
-	withinRoot := false
-	for _, root := range mediaRoots {
-		if root == "" {
-			continue
-		}
-		cleanedRoot := filepath.Clean(root)
-		if strings.HasPrefix(cleanedPath, cleanedRoot+string(filepath.Separator)) || cleanedPath == cleanedRoot {
-			withinRoot = true
-			break
-		}
-	}
-	if !withinRoot {
-		log.Printf("[Playback] SECURITY: path %q not within any configured media root — rejecting", cleanedPath)
+	// Prevents path traversal if the database is tampered with. TASK-800: shared with
+	// trickplay + subtitle extraction via pathWithinMediaRoot so every path→ffmpeg site
+	// enforces the same guard, not just playback.
+	if !s.pathWithinMediaRoot(path) {
+		log.Printf("[Playback] SECURITY: path %q not within any configured media root — rejecting", filepath.Clean(path))
 		writeErr(w, http.StatusForbidden, "path_not_allowed")
 		return
 	}
@@ -3077,17 +3183,16 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 				ps.Kind = "direct"
 				ps.Transcoding = false
 			} else {
-				dir := filepath.Join(os.TempDir(), "dsvideo_hls_"+sessionID)
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					writeErr(w, http.StatusInternalServerError, "hls_prepare_failed")
-					return
-				}
-				ps.HLSDir = dir
-				go func() {
-					if err := s.legacyGenerateHLS(path, dir); err != nil {
-						log.Printf("legacy HLS generation failed for %s: %v", path, err)
-					}
-				}()
+				// TASK-818: hlsGenerator is constructed unconditionally in NewServer
+				// (NewHLSGenerator never returns nil, even when ffmpeg is absent), so
+				// this branch is unreachable in practice. The former legacyGenerateHLS
+				// fallback spawned a bare, uncancellable ffmpeg that bypassed the shared
+				// TASK-752 budget and leaked on session teardown; it has been removed.
+				// If we ever do land here, fail cleanly rather than start an untracked
+				// transcode.
+				log.Printf("[Playback] No HLS generator available for non-web client — cannot transcode")
+				writeErr(w, http.StatusServiceUnavailable, "transcode_unavailable")
+				return
 			}
 		}
 	}
@@ -3318,6 +3423,14 @@ func embeddedSubName(sub transcode.EmbeddedSubtitle) string {
 //     from this response (it appears on the next play — the agreed UX).
 func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float64, probeResult *transcode.ProbeResult) []transcode.SubtitleTrack {
 	if s.cfg.FFmpegPath == "" {
+		return nil
+	}
+	// TASK-800: never hand a path outside a media root to ffmpeg (probe or extraction).
+	// Playback's own guard already covers the /playback path, but this method is the
+	// funnel for every embedded-subtitle ffmpeg invocation — enforce it here too so the
+	// asymmetry can't be reintroduced by a future caller.
+	if !s.pathWithinMediaRoot(videoPath) {
+		log.Printf("[subtitles] SECURITY: path %q for item %s not within any media root — skipping ffmpeg", filepath.Clean(videoPath), itemID)
 		return nil
 	}
 
@@ -3568,39 +3681,6 @@ func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.
 	}
 }
 
-// legacyGenerateHLS is the original simple HLS generation fallback.
-// Used when the new transcode system is not available.
-func (s *Server) legacyGenerateHLS(inputPath, outDir string) error {
-	// Find ffmpeg
-	ffmpegPath := s.cfg.FFmpegPath
-	if ffmpegPath == "" {
-		var err error
-		ffmpegPath, err = findFFmpeg()
-		if err != nil {
-			return err
-		}
-	}
-
-	// Single-variant HLS. Legacy mode is intentionally simple.
-	cmd := exec.Command(
-		ffmpegPath,
-		"-y",
-		"-i", inputPath,
-		"-c:v", "libx264",
-		"-c:a", "aac",
-		"-preset", "veryfast",
-		"-crf", "22",
-		"-f", "hls",
-		"-hls_time", "6",
-		"-hls_playlist_type", "vod",
-		"-hls_segment_filename", filepath.Join(outDir, "seg_%05d.ts"),
-		filepath.Join(outDir, "master.m3u8"),
-	)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run()
-}
-
 // findFFmpeg searches for ffmpeg in common locations.
 func findFFmpeg() (string, error) {
 	// Try PATH first
@@ -3654,6 +3734,30 @@ func (s *Server) handlePlaybackStream(w http.ResponseWriter, r *http.Request) {
 	}
 	http.ServeContent(w, r, filepath.Base(ps.Path), st.ModTime(), f)
 }
+
+// tailBuffer is a bounded io.Writer that retains only the last `max` bytes
+// written to it. It is used to capture the tail of an ffmpeg process's stderr
+// for diagnostics without buffering an unbounded amount of progress output.
+type tailBuffer struct {
+	max int
+	buf bytes.Buffer
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if _, err := t.buf.Write(p); err != nil {
+		return 0, err
+	}
+	if excess := t.buf.Len() - t.max; excess > 0 {
+		// Drop the oldest bytes, keeping only the trailing window.
+		t.buf.Next(excess)
+	}
+	return n, nil
+}
+
+func (t *tailBuffer) String() string { return strings.TrimSpace(t.buf.String()) }
 
 // handleRemuxStream serves video by remuxing through ffmpeg to fragmented MP4.
 // This is used for web clients when the video codec is compatible (H.264)
@@ -3711,7 +3815,15 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 	}
 
 	cmd := exec.Command(ffmpegPath, args...)
-	cmd.Stderr = nil // Suppress ffmpeg progress output
+	// TASK-822: previously cmd.Stderr = nil discarded all diagnostics, so a failed
+	// remux gave the client a broken stream with zero server-side explanation.
+	// Capture the tail of stderr (bounded — ffmpeg is chatty with progress lines)
+	// and log it on a non-zero exit.
+	stderrTail := newTailBuffer(8 << 10) // 8 KiB tail
+	cmd.Stderr = stderrTail
+	// Run ffmpeg in its own process group so we can signal the whole group on
+	// client disconnect — matching the HLS/normalize transcode paths.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -3729,12 +3841,17 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Transfer-Encoding", "chunked")
 
-	// Use CloseNotifier to stop ffmpeg if client disconnects
+	// Stop ffmpeg if the client disconnects. Kill the whole process group
+	// (negative pid) so no child is orphaned; fall back to killing the process.
 	done := r.Context().Done()
 	go func() {
 		<-done
 		if cmd.Process != nil {
-			cmd.Process.Kill()
+			if pgid, gerr := syscall.Getpgid(cmd.Process.Pid); gerr == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = cmd.Process.Kill()
+			}
 		}
 	}()
 
@@ -3743,7 +3860,17 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 		log.Printf("[Remux] Stream ended: %v", err)
 	}
 
-	cmd.Wait()
+	if werr := cmd.Wait(); werr != nil {
+		// Distinguish a real ffmpeg failure from a client-disconnect kill: if the
+		// request context is done, the non-zero exit is our own SIGKILL, not a fault.
+		if r.Context().Err() == nil {
+			if tail := stderrTail.String(); tail != "" {
+				log.Printf("[Remux] ffmpeg exited with error for %s: %v\nffmpeg stderr (tail):\n%s", ps.Path, werr, tail)
+			} else {
+				log.Printf("[Remux] ffmpeg exited with error for %s: %v (no stderr captured)", ps.Path, werr)
+			}
+		}
+	}
 }
 
 // trickplayDir returns the cache directory for an item's scrubbing-preview assets.
@@ -3821,6 +3948,12 @@ func (s *Server) handleTrickplayVTT(w http.ResponseWriter, r *http.Request) {
 	var duration sql.NullInt64
 	if err := s.db.QueryRow("SELECT path, duration_seconds FROM items WHERE id = ?", itemID).Scan(&path, &duration); err != nil {
 		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// TASK-800: same within-media-root guard playback enforces, before ffmpeg touches the path.
+	if !s.pathWithinMediaRoot(path) {
+		log.Printf("[trickplay] SECURITY: path %q for item %s not within any media root — rejecting", filepath.Clean(path), itemID)
+		writeErr(w, http.StatusForbidden, "path_not_allowed")
 		return
 	}
 	if s.prober == nil || s.cfg.FFmpegPath == "" {
@@ -3995,6 +4128,39 @@ type progressRequest struct {
 	State           string `json:"state,omitempty"`
 }
 
+// itemExists reports whether an items row with this id is present. TASK-797: guards
+// progress / watchlist / downloads INSERTs so a scripted client cannot write unbounded
+// rows for arbitrary (non-existent) item IDs — which bloats the tables and, for progress,
+// bumps progress_seq on every fake write forcing every device into a full re-sync.
+func (s *Server) itemExists(itemID string) bool {
+	if itemID == "" {
+		return false
+	}
+	var one int
+	err := s.db.QueryRow("SELECT 1 FROM items WHERE id = ?", itemID).Scan(&one)
+	return err == nil
+}
+
+// pathWithinMediaRoot reports whether a DB-stored media path resolves inside one of the
+// configured media roots. TASK-800: the same guard handlePlayback applies must run at
+// every path→ffmpeg site (trickplay sprite generation, embedded-subtitle extraction) so a
+// tampered/mis-scanned items.path can never become an ffmpeg-driven arbitrary-file
+// read/probe primitive. Empty roots are ignored; if no root is configured this returns
+// false (fail closed).
+func (s *Server) pathWithinMediaRoot(path string) bool {
+	cleanedPath := filepath.Clean(path)
+	for _, root := range []string{s.cfg.MoviesPath, s.cfg.TVPath, s.cfg.HomePath} {
+		if root == "" {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		if cleanedPath == cleanedRoot || strings.HasPrefix(cleanedPath, cleanedRoot+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "id")
 	var req progressRequest
@@ -4019,6 +4185,11 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DurationSeconds <= 0 || req.PositionSeconds < 0 {
 		writeErr(w, http.StatusBadRequest, "invalid_progress")
+		return
+	}
+	// TASK-797: reject progress for a non-existent item BEFORE writing / bumping seq.
+	if !s.itemExists(itemID) {
+		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
 	u := userFromCtx(r.Context())
@@ -4580,10 +4751,22 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	// TASK-791: writing a server-global setting (currently tmdb_api_key — reinitializes
+	// the shared TMDb client and kicks a full library rescan) is admin-only. Per-user
+	// settings remain writable by their owner. Gate before touching the DB so a low-priv
+	// user can neither swap the global key nor trigger the rescan-DoS.
+	globalSettingKeys := map[string]bool{"tmdb_api_key": true}
+	for key := range req.Settings {
+		if globalSettingKeys[key] && !s.isAdmin(u) {
+			writeErr(w, http.StatusForbidden, "admin_required")
+			return
+		}
+	}
+
 	for key, value := range req.Settings {
 		// tmdb_api_key is a global setting
 		userID := u.ID
-		if key == "tmdb_api_key" {
+		if globalSettingKeys[key] {
 			userID = ""
 		}
 
@@ -4927,6 +5110,12 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	itemID := chi.URLParam(r, "itemId")
 
+	// TASK-797: only mark real items for download.
+	if !s.itemExists(itemID) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
 		"INSERT OR IGNORE INTO downloads(item_id, user_id, marked_at) VALUES(?,?,?)",
@@ -5042,6 +5231,12 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	itemID := chi.URLParam(r, "itemId")
 
+	// TASK-797: only watchlist real items.
+	if !s.itemExists(itemID) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO watchlist(item_id, user_id) VALUES (?, ?)`,
 		itemID, u.ID,
@@ -5096,25 +5291,40 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		ffmpegAvailable = true
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	// TASK-811: dbPath, baseUrl, transcode tempDir and absolute library paths are
+	// filesystem-layout disclosure that aids other attacks. Only an admin sees them; a
+	// non-admin gets the operational status with paths redacted.
+	admin := s.isAdmin(userFromCtx(r.Context()))
+
+	transcode := map[string]any{
+		"enabled":         s.hlsGenerator != nil,
+		"ffmpegAvailable": ffmpegAvailable,
+		"activeSessions":  activeTranscodes,
+		"diskUsageKB":     transcodeDiskUsage / 1024,
+	}
+	resp := map[string]any{
 		"ok":               true,
 		"version":          "0.2.0-dev",
-		"baseUrl":          s.cfg.BaseURL,
-		"dbPath":           s.cfg.DBPath,
-		"libraries":        configuredLibraries(s.cfg),
+		"libraries":        configuredLibrariesRedacted(s.cfg, admin),
 		"lastScanAt":       last.UTC().Format(time.RFC3339),
 		"playbackSessions": activeSessions,
-		"transcode": map[string]any{
-			"enabled":         s.hlsGenerator != nil,
-			"ffmpegAvailable": ffmpegAvailable,
-			"activeSessions":  activeTranscodes,
-			"diskUsageKB":     transcodeDiskUsage / 1024,
-			"tempDir":         s.cfg.TranscodeDir,
-		},
-	})
+		"isAdmin":          admin,
+	}
+	if admin {
+		resp["baseUrl"] = s.cfg.BaseURL
+		resp["dbPath"] = s.cfg.DBPath
+		transcode["tempDir"] = s.cfg.TranscodeDir
+	}
+	resp["transcode"] = transcode
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleAdminScan(w http.ResponseWriter, r *http.Request) {
+	// TASK-811/791: a full rescan is CPU/IO heavy on the NAS — admin-only so a low-priv
+	// user cannot trigger a rescan-DoS.
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	// Get TMDb client from request header (allows per-user API keys)
 	tmdbClient := s.getTMDbClient(r)
 	go func() {
@@ -5135,6 +5345,19 @@ func configuredLibraries(cfg Config) []map[string]any {
 	}
 	if cfg.HomePath != "" {
 		libs = append(libs, map[string]any{"id": "lib_home", "title": "Home Videos", "kind": "home", "path": cfg.HomePath})
+	}
+	return libs
+}
+
+// configuredLibrariesRedacted returns the library list with absolute filesystem paths
+// included only for admins. TASK-811: non-admins must not learn the NAS directory layout.
+func configuredLibrariesRedacted(cfg Config, admin bool) []map[string]any {
+	libs := configuredLibraries(cfg)
+	if admin {
+		return libs
+	}
+	for _, lib := range libs {
+		delete(lib, "path")
 	}
 	return libs
 }

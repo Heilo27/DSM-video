@@ -674,7 +674,9 @@ private struct TVLandscapeCard: View {
         Text(item.title)
           .font(.system(size: 17, weight: .medium))
           .foregroundStyle(.white)
-          .lineLimit(1)
+          // TASK-802: allow a second line + slight scale so long titles don't silently truncate.
+          .lineLimit(2)
+          .minimumScaleFactor(0.85)
           .frame(width: cardWidth, alignment: .leading)
 
         if let year = item.year {
@@ -952,12 +954,23 @@ private struct TVSearchView: View {
                 .foregroundStyle(Color.dsError)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             } else if hasSearched && results.isEmpty {
-              ContentUnavailableView(
-                "No Results",
-                systemImage: "magnifyingglass",
-                description: Text("No videos match \"\(searchText)\"")
-              )
-              .foregroundStyle(.white)
+              // TASK-801: give the empty-results region a focusable action so focus
+              // has a home here (not only the search field / toolbar).
+              VStack(spacing: 24) {
+                ContentUnavailableView(
+                  "No Results",
+                  systemImage: "magnifyingglass",
+                  description: Text("No videos match \"\(searchText)\"")
+                )
+                .foregroundStyle(.white)
+
+                Button("Clear Search") {
+                  searchText = ""
+                  searchFieldFocused = true
+                }
+                .buttonStyle(.bordered)
+              }
+              .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             } else if !results.isEmpty {
               ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {

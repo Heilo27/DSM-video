@@ -28,7 +28,32 @@ find_go_binary() {
 
 pid_alive() {
   # Use /proc instead of kill -0 to avoid EPERM when caller != process owner.
-  [ -d "/proc/${1}" ]
+  # TASK-814: existence of /proc/$1 is NOT enough — after a crash the OS can
+  # recycle that PID onto an unrelated process, which would report the package
+  # as healthy while the server is dead (and block restart with "already
+  # running"). Verify the PID actually belongs to our binary.
+  [ -d "/proc/${1}" ] || return 1
+  # Preferred: readlink /proc/$1/exe basename == dsvideo-backend. This is exact
+  # (not truncated) but can EPERM when caller != process owner.
+  _exe="$(readlink "/proc/${1}/exe" 2>/dev/null || true)"
+  if [ -n "${_exe}" ]; then
+    # basename is normally "dsvideo-backend"; after an in-place upgrade the
+    # kernel appends " (deleted)" to the exe link, so match that too.
+    case "${_exe##*/}" in
+      dsvideo-backend|"dsvideo-backend (deleted)") return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  # Fallback (readlink denied): /proc/$1/comm. Kernel truncates comm to 15
+  # chars; "dsvideo-backend" is exactly 15 so it survives intact.
+  if [ -r "/proc/${1}/comm" ]; then
+    _comm="$(cat "/proc/${1}/comm" 2>/dev/null || true)"
+    [ "${_comm}" = "dsvideo-backend" ] && return 0
+    return 1
+  fi
+  # Neither exe nor comm readable: fall back to bare existence rather than
+  # reporting a live server dead on a permission quirk.
+  return 0
 }
 
 start() {
@@ -160,9 +185,10 @@ start() {
   sleep 2
   PID="$(cat "${PIDFILE}")"
   if ! pid_alive "${PID}"; then
-    echo "[${PACKAGE}] ERROR: Process died immediately after start. Check log above for errors." >> "${LOG}"
-    echo "[${PACKAGE}] Last 20 lines of log:" >> "${LOG}"
-    tail -20 "${LOG}" >> "${LOG}" 2>/dev/null || true
+    # TASK-825: do not `tail "${LOG}" >> "${LOG}"` — reading the log while
+    # appending to it can duplicate/garble the captured tail, and the lines are
+    # already present above. The diagnostics are in this same file just above.
+    echo "[${PACKAGE}] ERROR: Process died immediately after start. See the log lines above for the cause." >> "${LOG}"
     rm -f "${PIDFILE}"
     exit 1
   fi

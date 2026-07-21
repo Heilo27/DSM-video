@@ -198,6 +198,38 @@ final class DownloadManager: NSObject {
     removePersistedResumeData(for: itemId)
   }
 
+  /// TASK-807: bulk-purge every downloaded file and all download state. Called on
+  /// logout() so a shared device leaves no cross-user video residue on disk.
+  func clearAll() {
+    // Cancel any in-flight tasks first so no completion handler re-creates state
+    // or writes a file after we've wiped the directory.
+    for (_, download) in activeDownloads {
+      download.task.cancel()
+      downloadTasks.removeValue(forKey: download.task)
+    }
+    activeDownloads.removeAll()
+    downloadProgress.removeAll()
+    pausedDownloads.removeAll()
+    failedDownloads.removeAll()
+    pendingDownloadInfo.removeAll()
+
+    let fm = FileManager.default
+
+    // Remove individual poster files recorded in metadata (posters may live outside
+    // the Downloads directory), then remove the whole Downloads directory.
+    for item in getDownloadedItems() {
+      try? fm.removeItem(atPath: item.videoPath)
+      if let posterPath = item.posterPath {
+        try? fm.removeItem(atPath: posterPath)
+      }
+    }
+    try? fm.removeItem(at: downloadsDirectory())
+
+    // Wipe persisted metadata and any lingering resume-data blobs.
+    try? fm.removeItem(at: downloadsMetadataFileURL)
+    cachedDownloadedItems = nil
+  }
+
   func isDownloaded(itemId: String) -> Bool {
     getDownloadedItems().contains { $0.id == itemId }
   }

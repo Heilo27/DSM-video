@@ -20,6 +20,10 @@ final class SetupFlowState {
   var resolvedAddress: String = ""
   var isHTTPS: Bool = false
   var rememberMe: Bool = true
+  // TASK-805: once a discovered server has been chosen and navigation is under way,
+  // ignore a second rapid tap on another row so resolvedAddress can't be overwritten
+  // out from under the credentials screen. Reset when leaving the credentials step.
+  var isSelectingServer: Bool = false
 }
 
 // MARK: - Root
@@ -374,9 +378,15 @@ private struct SetupWANDirectScreen: View {
           // Auto-discovered servers on the local network
           if !discovery.servers.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-              Text("FOUND ON YOUR NETWORK")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.dsTextMuted)
+              HStack(spacing: 8) {
+                Text("FOUND ON YOUR NETWORK")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(Color.dsTextMuted)
+                // TASK-798: keep the spinner visible while more servers may still resolve.
+                if discovery.isScanning {
+                  ProgressView().controlSize(.mini)
+                }
+              }
 
               VStack(spacing: 10) {
                 ForEach(discovery.servers) { server in
@@ -411,12 +421,35 @@ private struct SetupWANDirectScreen: View {
                   }
                   .buttonStyle(.plain)
                   .simultaneousGesture(TapGesture().onEnded {
+                    // TASK-805: first tap wins; a rapid second tap on another row is ignored
+                    // until the credentials screen resets the flag on appear.
+                    guard !flow.isSelectingServer else { return }
+                    flow.isSelectingServer = true
                     flow.resolvedAddress = server.baseURL
                     flow.isHTTPS = false
                   })
                 }
               }
             }
+          } else {
+            // TASK-798: no servers found yet — give explicit feedback instead of a blank gap.
+            HStack(spacing: 10) {
+              if discovery.isScanning {
+                ProgressView().controlSize(.small)
+                Text("Scanning your network…")
+                  .font(.subheadline)
+                  .foregroundStyle(Color.dsTextSecondary)
+              } else {
+                Image(systemName: "wifi.exclamationmark")
+                  .foregroundStyle(Color.dsTextMuted)
+                Text("No servers found on your network. Enter an address below.")
+                  .font(.subheadline)
+                  .foregroundStyle(Color.dsTextSecondary)
+                  .fixedSize(horizontal: false, vertical: true)
+              }
+              Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
           }
 
           VStack(alignment: .leading, spacing: 8) {
@@ -778,6 +811,9 @@ struct SetupCredentialsScreen: View {
     .navigationTitle(isReturningUser ? "Welcome Back" : "Sign In")
     .inlineNavTitle()
     .onAppear {
+      // TASK-805: navigation completed — clear the discovered-server selection guard so
+      // backing out and choosing a different server works again.
+      flow.isSelectingServer = false
       // Pre-fill from AppState for returning users
       if !appState.username.isEmpty {
         username = appState.username

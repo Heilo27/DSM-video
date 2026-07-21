@@ -154,11 +154,19 @@ struct TVShowsView: View {
         .padding(.top, 24)
         #endif
       } else if shows.isEmpty {
-        ContentUnavailableView(
-          "No TV Shows",
-          systemImage: "tv",
-          description: Text("No TV shows found in this library.")
-        )
+        VStack(spacing: 24) {
+          ContentUnavailableView(
+            "No TV Shows",
+            systemImage: "tv",
+            description: Text("No TV shows found in this library.")
+          )
+          // TASK-799: give the empty state a focusable action so tvOS focus has a home.
+          Button("Refresh") {
+            Task { await load() }
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(Color.dsAccent)
+        }
         #if os(tvOS)
         .padding(.top, 80)
         #else

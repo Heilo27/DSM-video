@@ -74,7 +74,27 @@ final class BonjourDiscovery {
       to: .service(name: name, type: type, domain: domain, interface: nil),
       using: .tcp
     )
+    // TASK-808: an endpoint stuck in .preparing/.waiting was never cancelled until
+    // stopScan(), leaking the NWConnection for the scan's lifetime. Arm a hard timeout
+    // that cancels the connection regardless of the state it's stuck in.
+    let timeoutTask = Task { @MainActor in
+      try? await Task.sleep(for: .seconds(5))
+      guard !Task.isCancelled else { return }
+      connection.cancel()
+    }
+
     connection.stateUpdateHandler = { [weak self] state in
+      // Any terminal-ish state means we're done with this connection — stop the timer.
+      switch state {
+      case .ready, .failed, .cancelled:
+        timeoutTask.cancel()
+      case .waiting:
+        // Won't resolve on this path — release it now rather than waiting for timeout.
+        timeoutTask.cancel()
+        connection.cancel()
+      default:
+        break
+      }
       Task { @MainActor [weak self] in
         guard let self else { return }
         if case .ready = state, let inner = connection.currentPath?.remoteEndpoint,

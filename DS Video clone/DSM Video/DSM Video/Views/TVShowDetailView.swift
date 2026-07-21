@@ -188,12 +188,35 @@ private struct TVShowDetailSplitView: View {
           // folder can't be resolved — e.g. a stale Continue Watching / Just Added entry
           // whose folder was renamed or removed. Show an explicit empty state instead of
           // a blank page (TASK-732).
-          ContentUnavailableView(
-            "No Episodes Found",
-            systemImage: "tv.slash",
-            description: Text("This show's episodes couldn't be found on the server. They may have been moved or removed.")
-          )
-          .foregroundStyle(.white)
+          // TASK-792: the empty branch must expose a focusable action, otherwise the
+          // tvOS focus engine lands nowhere and the user can only escape via Menu.
+          VStack(spacing: 24) {
+            ContentUnavailableView(
+              "No Episodes Found",
+              systemImage: "tv.slash",
+              description: Text("This show's episodes couldn't be found on the server. They may have been moved or removed.")
+            )
+            .foregroundStyle(.white)
+
+            HStack(spacing: 20) {
+              Button {
+                Task { await load() }
+              } label: {
+                Label("Retry", systemImage: "arrow.clockwise")
+                  .font(.system(size: 20, weight: .medium))
+              }
+              .buttonStyle(.bordered)
+
+              Button {
+                showMetadataFixer = true
+              } label: {
+                Label("Fix Metadata", systemImage: "magnifyingglass")
+                  .font(.system(size: 20, weight: .medium))
+              }
+              .buttonStyle(.bordered)
+              .accessibilityHint("Search and correct this show's metadata")
+            }
+          }
           .padding(.top, 60)
         } else {
           ForEach(seasons, id: \.seasonNumber) { season in

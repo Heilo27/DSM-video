@@ -130,6 +130,8 @@ private struct SidebarView: View {
   /// so the parent can share the same list without a duplicate API call.
   @Binding var libraries: [Library]
   @State private var isLoading = false
+  // TASK-793: distinguish a genuinely-empty server from a load failure.
+  @State private var loadError: String?
 
   private var movieLibraries: [Library] {
     libraries.filter { ["movie", "movies", "home", "homevideo"].contains($0.kind) }
@@ -165,8 +167,24 @@ private struct SidebarView: View {
               .tag(SidebarSelection.library(lib))
           }
           if !isLoading && movieLibraries.isEmpty && tvLibraries.isEmpty {
-            Label("No libraries", systemImage: "exclamationmark.triangle")
-              .foregroundStyle(.secondary)
+            if let loadError {
+              // TASK-793: a load failure is not an empty library — show the error + retry.
+              VStack(alignment: .leading, spacing: 6) {
+                Label("Couldn't load libraries", systemImage: "exclamationmark.triangle")
+                  .foregroundStyle(Color.dsError)
+                Text(loadError)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                Button("Retry") {
+                  Task { await loadLibraries(force: true) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+              }
+            } else {
+              Label("No libraries", systemImage: "tray")
+                .foregroundStyle(.secondary)
+            }
           }
         }
       } header: {
@@ -184,21 +202,28 @@ private struct SidebarView: View {
     .task { await loadLibraries() }
   }
 
-  private func loadLibraries() async {
-    guard libraries.isEmpty && !isLoading else { return }
+  private func loadLibraries(force: Bool = false) async {
+    guard (force || libraries.isEmpty) && !isLoading else { return }
     if appState.isDemoMode {
       libraries = DemoData.libraries
       return
     }
     // Use AppState's already-populated homeLibraries to avoid a duplicate API call (TASK-256).
-    if !appState.homeLibraries.isEmpty {
+    if !force && !appState.homeLibraries.isEmpty {
       libraries = appState.homeLibraries
       return
     }
     isLoading = true
+    loadError = nil
     defer { isLoading = false }
-    if let response = try? await appState.api.libraries() {
+    // TASK-793: capture the failure so the sidebar can show an error+retry instead of
+    // masquerading a network failure as an empty library.
+    do {
+      let response = try await appState.api.libraries()
       libraries = response.libraries
+      loadError = nil
+    } catch {
+      loadError = error.localizedDescription
     }
   }
 }
@@ -366,6 +391,9 @@ private struct SearchView: View {
   private func search(commit: Bool) async {
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard query.count >= 2 else { return }
+    // TASK-795: re-entrancy guard — rapid recent-search taps were spawning concurrent
+    // search() calls racing the same result state. Bail if one is already in flight.
+    guard !isSearching else { return }
 
     isSearching = true
     hasSearched = true
@@ -686,6 +714,9 @@ struct DownloadsView: View {
               LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(downloads) { item in
                   Button {
+                    // TASK-796: guard against a double-tap setting playerItem twice
+                    // before the cover presents.
+                    guard !showPlayer else { return }
                     playerItem = item
                     showPlayer = true
                   } label: {
@@ -1209,7 +1240,12 @@ struct SettingsView: View {
     let form = Form {
       Section {
         // A14: read-only connected-server display + Change Server (mirrors tvOS).
-        LabeledContent("Connected To", value: appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
+        // TASK-809: long QuickConnect/DDNS URLs must truncate rather than overflow the row.
+        LabeledContent("Connected To") {
+          Text(appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        }
         if !appState.username.isEmpty {
           LabeledContent("Signed in as", value: appState.username)
         }

@@ -225,6 +225,9 @@ struct ItemDetailView: View {
   private var tvPlayButton: some View {
     let focused = focusedAction == .play
     return Button {
+      // TASK-796: guard so a Play/Start Over double-tap can't flip playFromBeginning
+      // after the player is already presenting.
+      guard !showPlayer else { return }
       playFromBeginning = false
       showPlayer = true
     } label: {
@@ -256,6 +259,7 @@ struct ItemDetailView: View {
   private var tvStartOverButton: some View {
     let focused = focusedAction == .fromBeginning
     return Button {
+      guard !showPlayer else { return }  // TASK-796
       playFromBeginning = true
       showPlayer = true
     } label: {
@@ -356,6 +360,7 @@ struct ItemDetailView: View {
           // buttons stay fixed-size.
           HStack(spacing: 12) {
             Button {
+              guard !showPlayer else { return }  // TASK-796
               playFromBeginning = false
               showPlayer = true
             } label: {
@@ -381,6 +386,7 @@ struct ItemDetailView: View {
 
             if savedPositionSeconds > 0 {
               Button {
+                guard !showPlayer else { return }  // TASK-796
                 playFromBeginning = true
                 showPlayer = true
               } label: {

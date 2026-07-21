@@ -131,7 +131,11 @@ final class AppState {
     // If baseURL is a bare QuickConnect ID, we can't build a usable URL without
     // resolving it first — leave api as-is. login() will resolve and set api correctly.
     if QuickConnectResolver.extractBareID(from: baseURL) != nil { return }
-    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
+    // TASK-817: useHTTPS is really "the last winning network's scheme," not a per-address
+    // preference. Apply the same LAN guard as buildCandidates() (TASK-779) so a bare
+    // private IP is never forced to https:// — bare-IP TLS has no valid cert and fails.
+    let effectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
+    guard let url = normalizedBaseURL(baseURL, forceHTTPS: effectiveHTTPS, defaultPort: defaultPort) else {
       return
     }
     api = APIClient(
@@ -171,8 +175,10 @@ final class AppState {
     // normalizedBaseURL returns nil for invalid URLs (empty, malformed). In that case we
     // use a non-routable placeholder; login() validates the URL before any request fires.
     let isQCID = QuickConnectResolver.extractBareID(from: storedBaseURL) != nil
+    // TASK-817: guard a bare private IP against a stale https flag (see updateAPI()).
+    let initEffectiveHTTPS = Self.isPrivateLANAddress(storedBaseURL) ? false : storedUseHTTPS
     let resolvedInitURL = isQCID ? Self.fallbackURL
-      : (normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS, defaultPort: storedDefaultPort) ?? Self.fallbackURL)
+      : (normalizedBaseURL(storedBaseURL, forceHTTPS: initEffectiveHTTPS, defaultPort: storedDefaultPort) ?? Self.fallbackURL)
     api = APIClient(
       baseURL: resolvedInitURL,
       token: storedToken
@@ -513,6 +519,10 @@ final class AppState {
     reconnectRetryTask = nil
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
+    // TASK-807: purge on-device content so a shared device leaves no cross-user residue.
+    // Downloads are @MainActor (sync); the SQLite cache is an actor (async).
+    DownloadManager.shared.clearAll()
+    Task { await LocalStore.shared.clearAll() }
   }
 
   /// Clears the session token (shows login screen) but keeps username and password
@@ -822,7 +832,9 @@ final class AppState {
       return
     }
 
-    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
+    // TASK-817: same LAN guard as updateAPI()/buildCandidates — never force https on a bare private IP.
+    let pairingEffectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
+    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: pairingEffectiveHTTPS, defaultPort: defaultPort) else {
       loginError = "Invalid server address. Please check the URL."
       return
     }
@@ -1359,13 +1371,26 @@ final class AppState {
 
   func toggleWatchlist(item: ItemSummary) async {
     guard !isDemoMode else { return }
+    // TASK-820: optimistic update, but revert on server failure so the UI can't
+    // diverge silently from the server until the next full sync.
     let alreadyIn = watchlistItems.contains(where: { $0.id == item.id })
     if alreadyIn {
+      let removedIndex = watchlistItems.firstIndex(where: { $0.id == item.id })
       watchlistItems.removeAll(where: { $0.id == item.id })
-      try? await api.removeFromWatchlist(id: item.id)
+      do {
+        try await api.removeFromWatchlist(id: item.id)
+      } catch {
+        // Restore at the original position (clamped) so ordering is preserved.
+        let insertAt = min(removedIndex ?? 0, watchlistItems.count)
+        watchlistItems.insert(item, at: insertAt)
+      }
     } else {
       watchlistItems.insert(item, at: 0)
-      try? await api.addToWatchlist(id: item.id)
+      do {
+        try await api.addToWatchlist(id: item.id)
+      } catch {
+        watchlistItems.removeAll(where: { $0.id == item.id })
+      }
     }
   }
 

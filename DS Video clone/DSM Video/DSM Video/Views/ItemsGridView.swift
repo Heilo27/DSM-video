@@ -93,9 +93,9 @@ struct ItemsGridView: View {
         let gridSpacing: CGFloat = 12
         let gridPadding: CGFloat = horizontalSizeClass == .regular ? 20 : 12
         #endif
-        if items.isEmpty && !isLoading && error == nil {
-          DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
-        }
+        // TASK-803: pick ONE empty state — an active search shows "No Results",
+        // otherwise a genuinely empty library shows "No Videos". Previously both
+        // could render stacked above an empty grid.
         if displayedItems.isEmpty && !searchText.isEmpty {
           ContentUnavailableView(
             "No Results",
@@ -104,6 +104,8 @@ struct ItemsGridView: View {
           )
           .foregroundStyle(.white)
           .padding(.top, 60)
+        } else if items.isEmpty && !isLoading && error == nil {
+          DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
         }
         LazyVGrid(columns: columns, spacing: gridSpacing) {
           #if os(tvOS)
