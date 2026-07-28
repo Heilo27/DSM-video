@@ -307,9 +307,21 @@ struct ItemsGridView: View {
       // Deduplicate: prefer items with a poster; break ties by keeping earliest addedAt.
       // The NAS can index the same movie from multiple paths (e.g. extras folder + main),
       // producing entries with different IDs but identical title+year.
-      var deduped: [String: ItemSummary] = [:]  // key: "title|year"
+      //
+      // Duration is part of the key so this only collapses what is really the same
+      // film. Keying on title+year alone silently hid distinct entries — a remake
+      // released the same year, a theatrical vs extended cut, or a director's cut —
+      // and the user would never learn the item existed. Runtime is bucketed to the
+      // nearest minute so a one-second probe difference between two encodes of the
+      // SAME file still dedups (the case this logic exists for), while genuinely
+      // different cuts stay visible. Items with no duration fall back to title+year.
+      func dedupKey(_ item: ItemSummary) -> String {
+        let minutes = item.durationSeconds.map { String(Int(($0 + 30) / 60)) } ?? "?"
+        return "\(item.title)|\(item.year ?? -1)|\(minutes)"
+      }
+      var deduped: [String: ItemSummary] = [:]
       for item in allItems {
-        let key = "\(item.title)|\(item.year ?? -1)"
+        let key = dedupKey(item)
         if let existing = deduped[key] {
           // Prefer the entry that has a poster image
           let keepNew = item.posterImageId != nil && existing.posterImageId == nil
@@ -318,10 +330,7 @@ struct ItemsGridView: View {
           deduped[key] = item
         }
       }
-      items = allItems.filter {
-        let key = "\($0.title)|\($0.year ?? -1)"
-        return deduped[key]?.id == $0.id
-      }
+      items = allItems.filter { deduped[dedupKey($0)]?.id == $0.id }
       sortedItems = sorted(items, by: sortOption)
       error = nil
     } catch {

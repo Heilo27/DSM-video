@@ -841,6 +841,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Delete("/watchlist/{itemId}", s.handleWatchlistRemove)
 
 		r.Get("/admin/status", s.handleAdminStatus)
+		r.Get("/admin/normalize/status", s.handleAdminNormalizeStatus)
 		r.Post("/admin/scan", s.handleAdminScan)
 		r.Get("/search", s.handleSearch)
 	})
@@ -930,7 +931,7 @@ func loadConfig() Config {
 		// user's library, not a playback-time choice. Capping at 720 would silently destroy
 		// every 1080p/4K source. 1080 preserves the common case; a 4K source still gets
 		// downscaled, which is the intended trade on a CPU-only NAS.
-		NormalizeMaxHeight:     getInt("DSVIDEO_NORMALIZE_MAX_HEIGHT", 1080),
+		NormalizeMaxHeight: getInt("DSVIDEO_NORMALIZE_MAX_HEIGHT", 1080),
 	}
 }
 
@@ -5522,6 +5523,54 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["transcode"] = transcode
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAdminNormalizeStatus reports the auto-normalize worker's state: whether it is
+// enabled, how deep the queue is, what it is doing now, and which items it has retired.
+//
+// This exists because diagnosing "is conversion working?" previously meant SSH-ing into
+// the NAS and grepping a log file — the retired-items list in particular was invisible,
+// so a file looping on every scan looked identical to one making progress. Admin-only:
+// the retired map is keyed by item ID, which decodes to an absolute filesystem path.
+func (s *Server) handleAdminNormalizeStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	if s.normalizeWorker == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled": false,
+			"reason":  "auto-normalize is off (DSVIDEO_AUTO_NORMALIZE) or ffmpeg/ffprobe were not found at startup",
+		})
+		return
+	}
+
+	st := s.normalizeWorker.Stats()
+
+	// Decode item IDs (hex of the path) back to paths so the response is readable
+	// without a second lookup — the whole point is answering the question in one call.
+	retired := make([]map[string]string, 0, len(st.Retired))
+	for id, reason := range st.Retired {
+		entry := map[string]string{"itemId": id, "reason": reason}
+		if p, err := hex.DecodeString(strings.TrimPrefix(id, "it_")); err == nil {
+			entry["path"] = string(p)
+		}
+		retired = append(retired, entry)
+	}
+	sort.Slice(retired, func(i, j int) bool { return retired[i]["path"] < retired[j]["path"] })
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":       true,
+		"queued":        st.Queued,
+		"queueCapacity": st.Capacity,
+		"converting":    st.Converting,
+		"maxHeight":     st.MaxHeight,
+		"retentionDays": s.cfg.NormalizeRetentionDays,
+		"originalsDir":  s.cfg.OriginalsDir,
+		"retiredCount":  len(retired),
+		"retired":       retired,
+		"idle":          s.normalizeWorker.IsIdleNow(),
+	})
 }
 
 func (s *Server) handleAdminScan(w http.ResponseWriter, r *http.Request) {

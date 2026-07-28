@@ -24,6 +24,13 @@ private enum ImageSession {
   }()
 }
 
+/// Backoff before image-fetch retry N (0-based): ~0.3s, then ~0.9s. Short on purpose —
+/// a poster the user is looking at right now is worthless if it arrives ten seconds
+/// late. Platform-neutral: both the UIKit and AppKit fetch paths use it.
+private func backoffNanos(_ attempt: Int) -> UInt64 {
+  UInt64(300_000_000.0 * pow(3.0, Double(attempt)))
+}
+
 // MARK: - Image Cache (UIKit platforms only)
 
 #if canImport(UIKit)
@@ -74,6 +81,54 @@ private actor ImageCache {
   /// Registers a newly created fetch task so subsequent callers can join it.
   func registerTask(_ task: Task<UIImage?, Never>, for url: URL) {
     inFlightTasks[url] = task
+  }
+
+  /// True when this URL is already cached or being fetched — i.e. prefetching it
+  /// would be wasted work.
+  func isWarm(_ url: URL) -> Bool {
+    cache.object(forKey: url as NSURL) != nil || inFlightTasks[url] != nil
+  }
+}
+
+// MARK: - Prefetch
+
+/// Warms the image cache for posters about to scroll into view, so a rail's first
+/// cards don't start from the grey placeholder on every cold scroll.
+///
+/// Deliberately fire-and-forget and best-effort: prefetch must never delay or
+/// out-prioritise a visible cell's own fetch. It shares ImageCache's in-flight
+/// registry, so a prefetch already running for a URL is simply joined by the real
+/// load when the cell appears — never duplicated.
+enum ImagePrefetcher {
+  /// Bounded so a fast fling can't queue hundreds of concurrent requests at a NAS
+  /// that is also transcoding. One screenful of lookahead is the useful window.
+  private static let maxPerBatch = 12
+
+  static func prefetch(urls: [URL?], token: String?, usesTunnelCookie: Bool) {
+    #if canImport(UIKit)
+    let targets = urls.compactMap { $0 }.prefix(maxPerBatch)
+    guard !targets.isEmpty else { return }
+    Task.detached(priority: .utility) {
+      for url in targets {
+        if await ImageCache.shared.isWarm(url) { continue }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        if url.absoluteString.contains("_sid=") {
+          // Video Station: session ID already in the URL.
+        } else if let token {
+          req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if usesTunnelCookie {
+          req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
+        }
+        // No retry here on purpose: a prefetch that misses costs nothing, and the
+        // visible-cell load will retry properly when the card actually appears.
+        guard let (data, response) = try? await ImageSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let image = UIImage(data: data) else { continue }
+        await ImageCache.shared.setImage(image, for: url)
+      }
+    }
+    #endif
   }
 }
 #endif
@@ -285,22 +340,49 @@ struct AuthenticatedImage: View {
         req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
 
-      do {
-        let (data, response) = try await ImageSession.shared.data(for: req)
+      // Retry transient failures. Previously a single dropped packet or a NAS busy
+      // for one second greyed the card permanently — nothing retried until the token
+      // or baseURL changed. Only network errors and 5xx/429 are retried; a 404 poster
+      // or a 401 fails immediately (retrying those is pure latency, and the token
+      // refresh path already re-fires the load via loadKey).
+      for attempt in 0..<3 {
+        if Task.isCancelled { return nil }
+        do {
+          let (data, response) = try await ImageSession.shared.data(for: req)
 
-        if let httpResponse = response as? HTTPURLResponse,
-           httpResponse.statusCode != 200 {
+          if let httpResponse = response as? HTTPURLResponse,
+             httpResponse.statusCode != 200 {
+            let code = httpResponse.statusCode
+            let transient = code == 429 || (500...599).contains(code)
+            if transient, attempt < 2 {
+              try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+              continue
+            }
+            return nil
+          }
+
+          if let uiImage = UIImage(data: data) {
+            await ImageCache.shared.setImage(uiImage, for: url)
+            return uiImage
+          }
+          // 200 with undecodable bytes — a truncated response is worth one more try.
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
+          return nil
+        } catch is CancellationError {
+          return nil
+        } catch {
+          // URLError (timeout, connection lost, DNS) — the transient case worth retrying.
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
           return nil
         }
-
-        if let uiImage = UIImage(data: data) {
-          await ImageCache.shared.setImage(uiImage, for: url)
-          return uiImage
-        }
-        return nil
-      } catch {
-        return nil
       }
+      return nil
     }
 
     // Register before awaiting so any concurrent caller sees the task immediately
@@ -420,16 +502,38 @@ struct AuthenticatedImage: View {
       if usesTunnel {
         req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
-      do {
-        let (data, response) = try await ImageSession.shared.data(for: req)
-        if let httpResponse = response as? HTTPURLResponse,
-           httpResponse.statusCode != 200 {
+      // See the UIKit body: retry transient failures only (network error, 5xx, 429).
+      for attempt in 0..<3 {
+        if Task.isCancelled { return nil }
+        do {
+          let (data, response) = try await ImageSession.shared.data(for: req)
+          if let httpResponse = response as? HTTPURLResponse,
+             httpResponse.statusCode != 200 {
+            let code = httpResponse.statusCode
+            let transient = code == 429 || (500...599).contains(code)
+            if transient, attempt < 2 {
+              try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+              continue
+            }
+            return nil
+          }
+          if let img = NSImage(data: data) { return img }
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
+          return nil
+        } catch is CancellationError {
+          return nil
+        } catch {
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
           return nil
         }
-        return NSImage(data: data)
-      } catch {
-        return nil
       }
+      return nil
     }
 
     await MacImageCache.shared.registerTask(fetchTask, for: url)

@@ -1203,6 +1203,12 @@ final class AppState {
         var since = cursors.itemSeq
         var afterRowid: Int? = nil
         var pageCount = 0
+        // Safety valves, mirroring the TASK-790 valve on the library grid. This loop
+        // is driven entirely by server-supplied `hasMore` + cursor, so a server that
+        // reports hasMore:true without advancing the cursor would spin it forever,
+        // hammering the NAS. 200 pages x 500 = 100k items, far past any real library.
+        let maxSyncPages = 200
+        var lastCursor: (Int, Int?)? = nil
         repeat {
           let page = try await apiSnapshot.syncItems(since: since, limit: 500, afterRowid: afterRowid)
           if !page.items.isEmpty {
@@ -1210,6 +1216,21 @@ final class AppState {
             since = page.nextSeq
             afterRowid = page.hasMore ? page.nextAfterRowid : nil
             pageCount += 1
+
+            // Non-advancing cursor: the next request would be byte-identical to the
+            // one we just made, so we'd refetch the same page indefinitely. Stop and
+            // let the next sync cycle retry from the last committed cursor.
+            let cursor = (since, afterRowid)
+            if let last = lastCursor, last.0 == cursor.0, last.1 == cursor.1 {
+              homeLog.error("runDeltaSync: cursor stalled at seq=\(since) after \(pageCount) pages — aborting to avoid an infinite sync loop")
+              break
+            }
+            lastCursor = cursor
+
+            if pageCount >= maxSyncPages {
+              homeLog.error("runDeltaSync: hit \(maxSyncPages)-page cap — stopping; remaining items sync on the next cycle")
+              break
+            }
             // After first page on cold start, show rails immediately
             if !background && pageCount == 1 {
               let rails = await LocalStore.shared.queryRails()

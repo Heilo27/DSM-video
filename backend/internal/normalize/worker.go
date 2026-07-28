@@ -333,6 +333,53 @@ func (w *NormalizeWorker) markPermaFailed(itemID, reason string) {
 	w.permaFailed[itemID] = reason
 }
 
+// Stats is a point-in-time view of the worker for the admin status endpoint.
+type Stats struct {
+	// Queued is the number of items waiting or in progress.
+	Queued int `json:"queued"`
+	// Capacity is the channel bound; Queued at Capacity means scans are dropping
+	// items (they get re-enqueued next scan, but throughput is the limit).
+	Capacity int `json:"capacity"`
+	// Converting is the count in the mid-swap window (normally 0 or 1).
+	Converting int `json:"converting"`
+	// Retired are items that failed deterministically and won't be retried until
+	// the server restarts, mapped to the reason.
+	Retired map[string]string `json:"retired"`
+	// MaxHeight is the normalization height cap — surfaced because it silently
+	// determines whether conversions downscale the user's originals.
+	MaxHeight int `json:"maxHeight"`
+}
+
+// IsIdleNow reports whether the server currently looks idle enough to convert. The
+// worker blocks on this before every job, so a status endpoint showing queued>0 with
+// idle=false explains "why is nothing converting?" without reading the log.
+func (w *NormalizeWorker) IsIdleNow() bool {
+	if w == nil || w.isIdle == nil {
+		return false
+	}
+	return w.isIdle()
+}
+
+// Stats returns a snapshot for diagnostics. Safe on a nil worker (auto-normalize off).
+func (w *NormalizeWorker) Stats() Stats {
+	if w == nil {
+		return Stats{}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	retired := make(map[string]string, len(w.permaFailed))
+	for k, v := range w.permaFailed {
+		retired[k] = v
+	}
+	return Stats{
+		Queued:     len(w.queued),
+		Capacity:   queueCapacity,
+		Converting: len(w.converting),
+		Retired:    retired,
+		MaxHeight:  w.maxHeight,
+	}
+}
+
 // PermaFailed returns a snapshot of retired items → reason, for logging/diagnostics.
 func (w *NormalizeWorker) PermaFailed() map[string]string {
 	if w == nil {

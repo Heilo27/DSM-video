@@ -711,5 +711,27 @@ private struct HomeRail: View {
         .padding(.horizontal, 16)
       }
     }
+    // Warm the cache for this rail's posters as soon as the rail exists, so the cards
+    // beyond the initial visible two or three are already decoded by the time they
+    // scroll in. Keyed on item IDs: re-fires when the rail's contents change (sync
+    // landing new items), not on every re-render.
+    .task(id: items.map(\.id).joined(separator: ",")) {
+      ImagePrefetcher.prefetch(
+        urls: items.map { item in
+          if useLandscapeCards {
+            let backdropId = item.backdropImageId ?? item.posterImageId
+            return backdropId.flatMap { appState.api.imageURL(id: $0, width: 500) }
+          }
+          // Must match ItemPosterCell's request exactly (342 = 110pt @3x on the
+          // server's ladder) or the prefetched bytes land under a different cache
+          // key and the cell still starts grey.
+          return item.posterImageId.flatMap {
+            appState.api.imageURL(id: $0, width: 342, version: item.changeSeq)
+          }
+        },
+        token: appState.sessionToken,
+        usesTunnelCookie: appState.api.usesTunnelCookie
+      )
+    }
   }
 }
