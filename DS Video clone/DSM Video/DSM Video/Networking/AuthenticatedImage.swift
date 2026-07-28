@@ -144,6 +144,14 @@ struct AuthenticatedImage: View {
   // "poster vanishes a few seconds after launch" flash and stops a transient
   // refetch failure from leaving a permanently-blank cell.
   @State private var loadedKey: String?
+  // The loadKey of the fetch currently in flight, or nil when idle. Replaces a bare
+  // `isLoading` bool as the re-entry guard: a bool latches true forever if the .task
+  // is cancelled mid-fetch (cell recycled / row re-rendered), and every subsequent
+  // .task then bails on `!isLoading` — the cell stays grey until it is scrolled off
+  // and back, which destroys the @State and clears the flag. Keying the guard on the
+  // in-flight key means a re-fired task for the SAME key still no-ops, but a task for
+  // a different key (or after a reset) always proceeds.
+  @State private var inFlightKey: String?
   #endif
 
   // Composite identity for the load task: a token refresh keeps the same URL, so a
@@ -196,6 +204,16 @@ struct AuthenticatedImage: View {
       // refresh), so a recycled cell always loads its own poster and a cell that hit
       // a 401 retries once the new token is available.
       await loadIfNeeded()
+
+      // Cancellation unwinds through here without running the completion path in
+      // loadIfNeeded(), so clear the in-flight marker explicitly. Without this the
+      // guard stays latched and every later .task for this cell no-ops — the
+      // "card goes grey a few seconds in and only comes back after scrolling
+      // off and back" bug.
+      if Task.isCancelled, inFlightKey == loadKey {
+        inFlightKey = nil
+        isLoading = false
+      }
     }
     .onChange(of: loadKey) { _, _ in
       // URL or token changed. Do NOT blank `image` — during a LAN→WAN reconnect the
@@ -213,8 +231,15 @@ struct AuthenticatedImage: View {
     // Refetch when there's no image yet OR the current image belongs to a stale key
     // (recycled cell / reconnect). `loadedKey == loadKey` with a non-nil image means
     // we're already showing the right poster — nothing to do.
-    guard let url, !isLoading, (image == nil || loadedKey != loadKey) else { return }
+    // Re-entry guard keyed on the in-flight load, not a bare bool: a fetch already
+    // running for THIS key is left alone, but anything else proceeds. A cancelled
+    // task can no longer strand the cell (see inFlightKey).
+    guard let url, inFlightKey != loadKey, (image == nil || loadedKey != loadKey) else { return }
     let keyAtStart = loadKey
+    inFlightKey = keyAtStart
+    // Clears on every exit path — success, failure, stale-generation bail, or a
+    // cancellation that unwinds mid-await — so the guard can never latch.
+    defer { if inFlightKey == keyAtStart { inFlightKey = nil } }
 
     // Capture this load's generation. Every @State write below is gated on it still
     // being current, so a completion that lands after the cell was recycled to a
@@ -284,11 +309,16 @@ struct AuthenticatedImage: View {
     let result = await fetchTask.value
     await ImageCache.shared.clearInFlightTask(for: url)
 
+    // Clear the spinner before the staleness check, not after. Gating this on
+    // isCurrent() left a superseded fetch spinning forever on a cell that had moved
+    // on — the spinner is this cell's own UI state and is always wrong once the
+    // fetch it belongs to has finished.
+    isLoading = false
+
     // Drop the result if this cell was recycled to a different URL/token while the
     // fetch was in flight — the image is cached for whoever needs it, but we must not
     // write it into a cell that has since moved on.
     guard isCurrent() else { return }
-    isLoading = false
 
     if let uiImage = result {
       image = Image(uiImage: uiImage)
@@ -331,6 +361,13 @@ struct AuthenticatedImage: View {
     }
     .task(id: loadKey) {
       await loadIfNeeded()
+
+      // See the UIKit body: a cancelled task must clear the in-flight marker itself,
+      // or the guard latches and the cell stays grey until it's recycled.
+      if Task.isCancelled, inFlightKey == loadKey {
+        inFlightKey = nil
+        isLoading = false
+      }
     }
     .onChange(of: loadKey) { _, _ in
       // See the UIKit body: don't blank `image` on a key change (LAN→WAN reconnect
@@ -341,8 +378,11 @@ struct AuthenticatedImage: View {
   }
 
   private func loadIfNeeded() async {
-    guard let url, !isLoading, (image == nil || loadedKey != loadKey) else { return }
+    // See the UIKit body: guard on the in-flight key, not a latching bool.
+    guard let url, inFlightKey != loadKey, (image == nil || loadedKey != loadKey) else { return }
     let keyAtStart = loadKey
+    inFlightKey = keyAtStart
+    defer { if inFlightKey == keyAtStart { inFlightKey = nil } }
 
     // See the UIKit body: gate every @State write on this generation so a stale
     // completion (cell recycled mid-fetch) is dropped instead of writing a wrong image.
@@ -400,8 +440,10 @@ struct AuthenticatedImage: View {
     }
     await MacImageCache.shared.clearInFlightTask(for: url)
 
-    guard isCurrent() else { return }
+    // See the UIKit body: clear the spinner before the staleness check, never after.
     isLoading = false
+
+    guard isCurrent() else { return }
 
     if let nsImage = result {
       image = Image(nsImage: nsImage)

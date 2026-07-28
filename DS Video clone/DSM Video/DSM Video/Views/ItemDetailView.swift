@@ -865,8 +865,9 @@ struct ItemDetailView: View {
     let avatarSize: CGFloat = 64
     VStack(spacing: 6) {
       Group {
+        // 64pt avatar → 192px at 3x, which lands on the server's 342 rung.
         if let imageId = person.imageId,
-           let url = appState.api.imageURL(id: imageId, width: 200, version: detail?.changeSeq) {
+           let url = appState.api.imageURL(id: imageId, width: 342, version: detail?.changeSeq) {
           AuthenticatedImage(
             url: url,
             token: appState.sessionToken,

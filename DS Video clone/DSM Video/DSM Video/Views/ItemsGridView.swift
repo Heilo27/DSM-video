@@ -413,7 +413,15 @@ private struct SortDimensionChip: View {
 
 struct ItemPosterCell: View {
   @Environment(AppState.self) private var appState
+  // Native scale of the screen this cell is on, so the requested width covers the
+  // pixels actually drawn. Stable for the life of the view on a given display, so it
+  // does not churn the image URL (which is also the cache key and the load identity).
+  @Environment(\.displayScale) private var displayScale
   let item: ItemSummary
+
+  // Clamped: displayScale is 1 in some previews/offscreen renders, which would
+  // request a 92px poster for a full-size cell. Never go below 2.
+  private var posterScale: CGFloat { max(displayScale, 2) }
 
   var body: some View {
     GeometryReader { geo in
@@ -489,8 +497,17 @@ struct ItemPosterCell: View {
         .frame(width: width, height: height, alignment: .top)
         .clipped()
     } else if item.posterImageId != nil {
+      // Size the request to the cell that draws it. This view is used from 46pt
+      // (search results) up to full grid cells, so a fixed literal either starves the
+      // big ones or — as `width: 400` did — pulls a 500px poster for a 110pt rail
+      // card. Over-fetching lengthens each request, which is what widens the window
+      // where a mid-flight cancellation can strand the cell grey.
       AuthenticatedImage(
-        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400, version: item.changeSeq),
+        url: appState.api.imageURL(
+          id: item.posterImageId ?? item.id,
+          width: APIClient.ladderWidth(forPointWidth: width, scale: posterScale),
+          version: item.changeSeq
+        ),
         token: appState.sessionToken,
         usesTunnelCookie: appState.api.usesTunnelCookie
       )

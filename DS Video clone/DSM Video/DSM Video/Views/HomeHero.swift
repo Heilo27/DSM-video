@@ -105,6 +105,10 @@ struct HomeHero: View {
       if appState.isDemoMode, let assetName = DemoData.posterAssetNames[item.id] {
         Image(assetName).resizable().scaledToFill()
       } else if let imageId = item.backdropImageId ?? item.posterImageId {
+        // Full-bleed 380pt hero: at native scale this genuinely exceeds the server's
+        // 500px top rung, so it resolves to `original`. Left deliberately — but note
+        // `width: 800` never meant 800px; the backend snaps anything over 500 to the
+        // full-resolution source. Kept explicit so it reads as intentional.
         AuthenticatedImage(
           url: appState.api.imageURL(id: imageId, width: 800),
           token: appState.sessionToken,

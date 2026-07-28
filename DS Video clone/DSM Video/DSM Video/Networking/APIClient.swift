@@ -200,6 +200,29 @@ struct APIClient {
     _ = try await request(url: url, method: "POST", body: Body(tmdbId: tmdbId), response: EmptyDecodable.self)
   }
 
+  /// Widths the backend actually serves. `metadata.ParseImageSize` snaps any `w` to
+  /// the TMDB ladder — 92 / 185 / 342 / 500 — and treats **anything above 500 as
+  /// `original`**, i.e. the full-resolution source image. Asking for `w=800` or
+  /// `w=1400` is therefore not "a big thumbnail", it's the uncompressed original.
+  ///
+  /// Passing a value off-ladder is silently rounded server-side, so the client would
+  /// mint a distinct URL (= distinct URLCache + NSCache key) for bytes identical to a
+  /// neighbouring request. Snapping here keeps one cache entry per real size.
+  static let imageWidthLadder = [92, 185, 342, 500]
+
+  /// Snap a point size to the smallest ladder width that covers it at native scale,
+  /// **capped at 500**. Pass the size the image is actually *drawn* at, in points.
+  ///
+  /// The cap matters: a 180pt grid cell at 3x wants 540px, which is past the top rung
+  /// — and falling through to `original` would fetch the full-resolution source, far
+  /// worse than the slight upscale from 500. For thumbnail-sized art a few percent of
+  /// softness is invisible; multiple megabytes per cell is not. Callers that genuinely
+  /// want `original` (full-bleed heroes) should pass a width explicitly instead.
+  static func ladderWidth(forPointWidth points: CGFloat, scale: CGFloat) -> Int {
+    let needed = points * scale
+    return imageWidthLadder.first { CGFloat($0) >= needed } ?? imageWidthLadder[imageWidthLadder.count - 1]
+  }
+
   func imageURL(id: String, width: Int? = nil, version: Int? = nil) -> URL? {
     guard baseURL != AppState.fallbackURL else { return nil }
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/images/\(id)"), resolvingAgainstBaseURL: false) else {

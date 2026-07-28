@@ -1070,6 +1070,8 @@ private struct TVShowDetailScrollView: View {
           .clipped()
           .accessibilityHidden(true)
       } else if let posterId = show.posterImageId {
+        // Full-width header — resolves to `original` server-side (anything over 500
+        // does). Intentional here; see APIClient.imageWidthLadder.
         AuthenticatedImage(
           url: appState.api.imageURL(id: posterId, width: 1200, version: show.metadataVersion),
           token: appState.sessionToken,

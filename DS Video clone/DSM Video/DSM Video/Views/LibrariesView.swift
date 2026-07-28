@@ -527,8 +527,11 @@ private struct ContinueWatchingCard: View {
             .resizable()
             .scaledToFill()
         } else if let backdropId = item.backdropImageId ?? item.posterImageId {
+          // 200x120 card. 500 is the top of the server's ladder before it falls back
+          // to serving the full-resolution original — the right cap for a thumbnail
+          // this size, and what `width: 400` was already being rounded up to.
           AuthenticatedImage(
-            url: appState.api.imageURL(id: backdropId, width: 400),
+            url: appState.api.imageURL(id: backdropId, width: 500),
             token: appState.sessionToken,
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
