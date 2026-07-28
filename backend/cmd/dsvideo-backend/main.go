@@ -925,7 +925,12 @@ func loadConfig() Config {
 		AutoNormalize:          getBool("DSVIDEO_AUTO_NORMALIZE", true),
 		OriginalsDir:           get("DSVIDEO_ORIGINALS_DIR", originalsDefault),
 		NormalizeRetentionDays: getInt("DSVIDEO_NORMALIZE_RETENTION_DAYS", 7),
-		NormalizeMaxHeight:     getInt("DSVIDEO_NORMALIZE_MAX_HEIGHT", 720),
+		// 1080 (not 720): normalization REPLACES the original, which is then reaped after
+		// the retention window — so this cap is a permanent, irreversible downscale of the
+		// user's library, not a playback-time choice. Capping at 720 would silently destroy
+		// every 1080p/4K source. 1080 preserves the common case; a 4K source still gets
+		// downscaled, which is the intended trade on a CPU-only NAS.
+		NormalizeMaxHeight:     getInt("DSVIDEO_NORMALIZE_MAX_HEIGHT", 1080),
 	}
 }
 

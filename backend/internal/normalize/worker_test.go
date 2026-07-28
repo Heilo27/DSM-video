@@ -98,6 +98,52 @@ func TestEnqueueDedupAndConvertingSet(t *testing.T) {
 	}
 }
 
+// TestPermaFailedStopsRequeue — a deterministic failure (unreadable file, or a target
+// name already taken by an unrelated file) must retire the item instead of being
+// re-enqueued by every library scan. Production regression: three unreadable DS9
+// episodes and one .AVI whose .mp4 twin already existed were retried on every scan for
+// hours, one of them burning a full re-encode each time before the post-convert guard
+// caught it.
+func TestPermaFailedStopsRequeue(t *testing.T) {
+	w := NewNormalizeWorker("ffmpeg", "ffprobe", t.TempDir(), 1080, nil, func() bool { return true }, nil)
+
+	// First enqueue is accepted.
+	w.Enqueue("bad1", "/v/corrupt.mkv", "/v")
+	if len(w.queue) != 1 {
+		t.Fatalf("queue len = %d, want 1", len(w.queue))
+	}
+	// Drain it, then retire it the way process() would on a probe failure.
+	<-w.queue
+	w.mu.Lock()
+	delete(w.queued, "bad1")
+	w.mu.Unlock()
+	w.markPermaFailed("bad1", "ffprobe could not read the file")
+
+	// A later scan re-enqueues — must be ignored now.
+	w.Enqueue("bad1", "/v/corrupt.mkv", "/v")
+	if len(w.queue) != 0 {
+		t.Errorf("queue len = %d, want 0 — retired item was re-enqueued", len(w.queue))
+	}
+
+	// An unrelated item is unaffected.
+	w.Enqueue("good1", "/v/fine.mkv", "/v")
+	if len(w.queue) != 1 {
+		t.Errorf("queue len = %d, want 1 — retirement leaked to an unrelated item", len(w.queue))
+	}
+
+	if got := w.PermaFailed(); got["bad1"] == "" {
+		t.Error("PermaFailed() should report a reason for bad1")
+	} else if _, leaked := got["good1"]; leaked {
+		t.Error("PermaFailed() must not contain healthy items")
+	}
+
+	// Snapshot must be a copy — mutating it can't corrupt worker state.
+	w.PermaFailed()["bad1"] = "tampered"
+	if w.PermaFailed()["bad1"] == "tampered" {
+		t.Error("PermaFailed() returned a live map, not a snapshot")
+	}
+}
+
 // TestWouldClobber — Worf P1-4: a same-path target (.mp4 remux of an .mp4) is never a
 // clobber; a different-path target (.mkv→.mp4) is a clobber ONLY when that .mp4 already
 // exists on disk as a separate file.
