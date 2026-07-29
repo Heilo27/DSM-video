@@ -662,7 +662,16 @@ struct GestureVideoPlayer: View {
                     #endif
                 }
             }
-            .padding(.horizontal, 20)
+            // Same title-safe fix as the bottom transport row: tvOS needs 60pt
+            // horizontally. The trailing controls in this bar were sitting in the
+            // overscan region on a real TV for the same reason.
+            .padding(.horizontal, {
+                #if os(tvOS)
+                return 60.0
+                #else
+                return 20.0
+                #endif
+            }())
             .padding(.top, {
                 #if os(tvOS)
                 return 40.0
@@ -807,9 +816,14 @@ struct GestureVideoPlayer: View {
                     Text(formatTime(isScrubbing ? scrubTime : currentTime))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
-                        .frame(minWidth: 50, alignment: .leading)
-                        .fixedSize()
                         .lineLimit(1)
+                        // .fixedSize() BEFORE .frame() so the label takes its ideal
+                        // width (never truncating a timestamp) and the bar yields the
+                        // space. Ordered the other way round — .frame then .fixedSize —
+                        // the fixedSize overrode the frame entirely and minWidth/maxWidth
+                        // were dead modifiers.
+                        .fixedSize()
+                        .frame(minWidth: 50, alignment: .leading)
                         .accessibilityHidden(true)
 
                     #if os(iOS)
@@ -894,14 +908,29 @@ struct GestureVideoPlayer: View {
                     Text("-\(formatTime(max(0, duration - (isScrubbing ? scrubTime : currentTime))))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
-                        .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
-                        .fixedSize()
                         .lineLimit(1)
+                        // See the elapsed label: .fixedSize() before .frame(). The old
+                        // maxWidth: 70 was never enforced anyway, and on a 3-hour film
+                        // ("-2:59:59" at tvOS caption size) it would have clipped the
+                        // timestamp if it ever had been.
+                        .fixedSize()
+                        .frame(minWidth: 50, alignment: .trailing)
                         .accessibilityHidden(true)
                 }
 
             }
-            .padding(.horizontal, 20)
+            // tvOS needs the 60pt title-safe inset horizontally, not just vertically.
+            // At 20pt this row sat 40pt inside the overscan region on each side, and a
+            // real TV clipped the trailing "-remaining" label off the right edge. The
+            // .padding(.bottom) below already branched for tvOS; the horizontal one was
+            // missed, so the bug only showed on a TV and never in the simulator.
+            .padding(.horizontal, {
+                #if os(tvOS)
+                return 60.0
+                #else
+                return 20.0
+                #endif
+            }())
             .padding(.bottom, {
                 #if os(tvOS)
                 return 60.0
