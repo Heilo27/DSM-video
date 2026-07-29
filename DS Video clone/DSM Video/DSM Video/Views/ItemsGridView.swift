@@ -93,9 +93,9 @@ struct ItemsGridView: View {
         let gridSpacing: CGFloat = 12
         let gridPadding: CGFloat = horizontalSizeClass == .regular ? 20 : 12
         #endif
-        if items.isEmpty && !isLoading && error == nil {
-          DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
-        }
+        // TASK-803: pick ONE empty state — an active search shows "No Results",
+        // otherwise a genuinely empty library shows "No Videos". Previously both
+        // could render stacked above an empty grid.
         if displayedItems.isEmpty && !searchText.isEmpty {
           ContentUnavailableView(
             "No Results",
@@ -104,6 +104,8 @@ struct ItemsGridView: View {
           )
           .foregroundStyle(.white)
           .padding(.top, 60)
+        } else if items.isEmpty && !isLoading && error == nil {
+          DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
         }
         LazyVGrid(columns: columns, spacing: gridSpacing) {
           #if os(tvOS)
@@ -146,7 +148,15 @@ struct ItemsGridView: View {
         }
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(alignment: .top) {
+      // Themed ground + cinematic atmosphere streaks (no-op on flat themes, where
+      // dsBackground is pure black and AtmosphereBackground renders nothing).
+      ZStack(alignment: .top) {
+        Color.dsBackground
+        AtmosphereBackground().frame(height: 400)
+      }
+      .ignoresSafeArea()
+    }
     .navigationTitle(library.title)
     #if !os(tvOS)
     // Force white nav-bar content (the large title was rendering dim grey on black).
@@ -273,10 +283,20 @@ struct ItemsGridView: View {
       var allItems: [ItemSummary] = []
       var offset = 0
       let pageSize = 200
+      // TASK-790: app-side safety valves so a misbehaving/regressed server (total that
+      // never converges, or overlapping pages that never satisfy the total break) can't
+      // paginate forever. 50 pages × 200 = 10k items is well past any real library.
+      let maxPages = 50
+      var seenIDs = Set<String>()
 
-      while true {
+      for _ in 0..<maxPages {
         let response = try await appState.api.items(libraryId: library.id, limit: pageSize, offset: offset)
         allItems.append(contentsOf: response.items)
+
+        // Break if the page returned no NEW ids — guards against a server that keeps
+        // returning full but overlapping pages (which would never trip the total check).
+        let newIDs = response.items.filter { seenIDs.insert($0.id).inserted }
+        if newIDs.isEmpty { break }
 
         if response.items.count < pageSize || allItems.count >= response.total {
           break
@@ -287,9 +307,21 @@ struct ItemsGridView: View {
       // Deduplicate: prefer items with a poster; break ties by keeping earliest addedAt.
       // The NAS can index the same movie from multiple paths (e.g. extras folder + main),
       // producing entries with different IDs but identical title+year.
-      var deduped: [String: ItemSummary] = [:]  // key: "title|year"
+      //
+      // Duration is part of the key so this only collapses what is really the same
+      // film. Keying on title+year alone silently hid distinct entries — a remake
+      // released the same year, a theatrical vs extended cut, or a director's cut —
+      // and the user would never learn the item existed. Runtime is bucketed to the
+      // nearest minute so a one-second probe difference between two encodes of the
+      // SAME file still dedups (the case this logic exists for), while genuinely
+      // different cuts stay visible. Items with no duration fall back to title+year.
+      func dedupKey(_ item: ItemSummary) -> String {
+        let minutes = item.durationSeconds.map { String(Int(($0 + 30) / 60)) } ?? "?"
+        return "\(item.title)|\(item.year ?? -1)|\(minutes)"
+      }
+      var deduped: [String: ItemSummary] = [:]
       for item in allItems {
-        let key = "\(item.title)|\(item.year ?? -1)"
+        let key = dedupKey(item)
         if let existing = deduped[key] {
           // Prefer the entry that has a poster image
           let keepNew = item.posterImageId != nil && existing.posterImageId == nil
@@ -298,10 +330,7 @@ struct ItemsGridView: View {
           deduped[key] = item
         }
       }
-      items = allItems.filter {
-        let key = "\($0.title)|\($0.year ?? -1)"
-        return deduped[key]?.id == $0.id
-      }
+      items = allItems.filter { deduped[dedupKey($0)]?.id == $0.id }
       sortedItems = sorted(items, by: sortOption)
       error = nil
     } catch {
@@ -393,7 +422,15 @@ private struct SortDimensionChip: View {
 
 struct ItemPosterCell: View {
   @Environment(AppState.self) private var appState
+  // Native scale of the screen this cell is on, so the requested width covers the
+  // pixels actually drawn. Stable for the life of the view on a given display, so it
+  // does not churn the image URL (which is also the cache key and the load identity).
+  @Environment(\.displayScale) private var displayScale
   let item: ItemSummary
+
+  // Clamped: displayScale is 1 in some previews/offscreen renders, which would
+  // request a 92px poster for a full-size cell. Never go below 2.
+  private var posterScale: CGFloat { max(displayScale, 2) }
 
   var body: some View {
     GeometryReader { geo in
@@ -447,6 +484,8 @@ struct ItemPosterCell: View {
           }
         }
       }
+      // Ambient elevation on the Cinematic theme; no-op on flat themes.
+      .dsCardDepth(cornerRadius: 10)
     }
     .aspectRatio(2.0 / 3.0, contentMode: .fit)
     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -467,8 +506,17 @@ struct ItemPosterCell: View {
         .frame(width: width, height: height, alignment: .top)
         .clipped()
     } else if item.posterImageId != nil {
+      // Size the request to the cell that draws it. This view is used from 46pt
+      // (search results) up to full grid cells, so a fixed literal either starves the
+      // big ones or — as `width: 400` did — pulls a 500px poster for a 110pt rail
+      // card. Over-fetching lengthens each request, which is what widens the window
+      // where a mid-flight cancellation can strand the cell grey.
       AuthenticatedImage(
-        url: appState.api.imageURL(id: item.posterImageId ?? item.id, width: 400, version: item.changeSeq),
+        url: appState.api.imageURL(
+          id: item.posterImageId ?? item.id,
+          width: APIClient.ladderWidth(forPointWidth: width, scale: posterScale),
+          version: item.changeSeq
+        ),
         token: appState.sessionToken,
         usesTunnelCookie: appState.api.usesTunnelCookie
       )

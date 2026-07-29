@@ -131,7 +131,11 @@ final class AppState {
     // If baseURL is a bare QuickConnect ID, we can't build a usable URL without
     // resolving it first — leave api as-is. login() will resolve and set api correctly.
     if QuickConnectResolver.extractBareID(from: baseURL) != nil { return }
-    guard let url = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
+    // TASK-817: useHTTPS is really "the last winning network's scheme," not a per-address
+    // preference. Apply the same LAN guard as buildCandidates() (TASK-779) so a bare
+    // private IP is never forced to https:// — bare-IP TLS has no valid cert and fails.
+    let effectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
+    guard let url = normalizedBaseURL(baseURL, forceHTTPS: effectiveHTTPS, defaultPort: defaultPort) else {
       return
     }
     api = APIClient(
@@ -171,8 +175,10 @@ final class AppState {
     // normalizedBaseURL returns nil for invalid URLs (empty, malformed). In that case we
     // use a non-routable placeholder; login() validates the URL before any request fires.
     let isQCID = QuickConnectResolver.extractBareID(from: storedBaseURL) != nil
+    // TASK-817: guard a bare private IP against a stale https flag (see updateAPI()).
+    let initEffectiveHTTPS = Self.isPrivateLANAddress(storedBaseURL) ? false : storedUseHTTPS
     let resolvedInitURL = isQCID ? Self.fallbackURL
-      : (normalizedBaseURL(storedBaseURL, forceHTTPS: storedUseHTTPS, defaultPort: storedDefaultPort) ?? Self.fallbackURL)
+      : (normalizedBaseURL(storedBaseURL, forceHTTPS: initEffectiveHTTPS, defaultPort: storedDefaultPort) ?? Self.fallbackURL)
     api = APIClient(
       baseURL: resolvedInitURL,
       token: storedToken
@@ -252,12 +258,32 @@ final class AppState {
     if expiry.timeIntervalSince(now) < twentyFourHours {
       // Expiring soon — schedule a silent refresh after the home screen has loaded
       // to avoid racing with homeLoad()'s own QC resolution and api mutation.
+      Task { @MainActor [weak self] in
+        // Brief yield so init's Task and homeLoad() settle first.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        await self?.refreshSession()
+      }
+    }
+  }
+
+  /// TASK-781: proactive near-expiry token refresh. Exchanges the current token for a fresh
+  /// one via `/api/v1/auth/refresh` (no password re-transmission), then rebuilds `api` and
+  /// persists the new token. Falls back to a full `login()` if the refresh endpoint is
+  /// unavailable/unsupported or fails — so this never regresses the previous behaviour, and
+  /// still works when only a token (no saved password) is stored. Wired in place of the old
+  /// login()-only path, which re-sent the plaintext password on every near-expiry launch.
+  func refreshSession() async {
+    guard sessionToken != nil, !isDemoMode else { return }
+    do {
+      let resp = try await api.refreshToken()
+      sessionToken = resp.token
+      api = APIClient(baseURL: api.baseURL, token: resp.token, usesTunnelCookie: api.usesTunnelCookie)
+      homeLog.info("refreshSession: token refreshed without password")
+    } catch {
+      // Refresh unavailable or rejected — fall back to a full login only if we can.
+      homeLog.warning("refreshSession: refresh failed (\(error.localizedDescription)) — falling back to login")
       if !savedPassword.isEmpty {
-        Task { @MainActor [weak self] in
-          // Brief yield so init's Task and homeLoad() settle first.
-          try? await Task.sleep(nanoseconds: 2_000_000_000)
-          await self?.login()
-        }
+        await login()
       }
     }
   }
@@ -321,6 +347,26 @@ final class AppState {
   ///
   /// Returns `QuickConnectResolver.Candidate` so callers get the tunnel-cookie
   /// flag for free — LAN/WAN direct candidates always have requiresTunnelCookie=false.
+  /// True if `address` is (or resolves textually to) a private / link-local / loopback host
+  /// for which HTTPS-to-bare-IP would fail cert validation. Strips scheme/port/path first.
+  /// Covers RFC1918 (10/8, 192.168/16, 172.16–31/12), link-local (169.254/16), loopback,
+  /// and .local mDNS names. (TASK-779)
+  static func isPrivateLANAddress(_ address: String) -> Bool {
+    var host = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let r = host.range(of: "://") { host = String(host[r.upperBound...]) }
+    if let slash = host.firstIndex(of: "/") { host = String(host[..<slash]) }
+    if let colon = host.firstIndex(of: ":") { host = String(host[..<colon]) }
+    guard !host.isEmpty else { return false }
+    if host == "localhost" || host == "127.0.0.1" || host.hasSuffix(".local") { return true }
+    if host.hasPrefix("192.168.") || host.hasPrefix("10.") || host.hasPrefix("169.254.") { return true }
+    // 172.16.0.0 – 172.31.255.255
+    if host.hasPrefix("172.") {
+      let parts = host.split(separator: ".")
+      if parts.count >= 2, let second = Int(parts[1]), (16...31).contains(second) { return true }
+    }
+    return false
+  }
+
   func buildCandidates() async throws -> [QuickConnectResolver.Candidate] {
     let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     let wan = wanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -335,7 +381,13 @@ final class AppState {
         _ = qcID
         return
       }
-      guard let url = normalizedBaseURL(address, forceHTTPS: useHTTPS, defaultPort: defaultPort) else { return }
+      // TASK-779: a persisted useHTTPS (set to the last winning WAN candidate's scheme)
+      // must NOT force https:// onto a raw LAN/private IP — the DDNS TLS cert doesn't cover
+      // bare IPs, so HTTPS to a LAN IP fails cert validation every time and the fast LAN
+      // path is wasted. Mirror QuickConnectResolver's LAN handling: force http for private
+      // IPs regardless of the persisted flag.
+      let forceHTTPS = Self.isPrivateLANAddress(address) ? false : useHTTPS
+      guard let url = normalizedBaseURL(address, forceHTTPS: forceHTTPS, defaultPort: defaultPort) else { return }
       candidates.append(.init(url: url, requiresTunnelCookie: false))
     }
 
@@ -361,6 +413,16 @@ final class AppState {
   }
 
   func login() async {
+    // TASK-780: re-entrancy guard. login() writes shared @Observable auth state
+    // (sessionToken, api, baseURL, useHTTPS, defaultPort). Two concurrent logins — e.g. the
+    // proactive near-expiry refresh scheduled in checkTokenExpiryOnLaunch() racing a user tap
+    // on Connect, or exchangePairingCode() — can finish on different candidates and interleave
+    // these writes, leaving api pointed at one URL while baseURL/useHTTPS reflect another.
+    // reconnect() already guards itself the same way (isReconnecting). Bail if one is in flight.
+    guard !isLoggingIn else {
+      homeLog.info("login: already in progress — ignoring re-entrant call")
+      return
+    }
     loginError = nil
     isLoggingIn = true
     defer { isLoggingIn = false }
@@ -457,6 +519,10 @@ final class AppState {
     reconnectRetryTask = nil
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
+    // TASK-807: purge on-device content so a shared device leaves no cross-user residue.
+    // Downloads are @MainActor (sync); the SQLite cache is an actor (async).
+    DownloadManager.shared.clearAll()
+    Task { await LocalStore.shared.clearAll() }
   }
 
   /// Clears the session token (shows login screen) but keeps username and password
@@ -574,6 +640,48 @@ final class AppState {
     return false
   }
 
+  /// Fast liveness check on the CURRENT address; runs the full LAN→WAN→relay
+  /// cascade only if the address we're on has gone dead. This is the piece that
+  /// makes "leave the house" work without a sign-out: on foreground, NWPathMonitor
+  /// often never fires for a backgrounded app, and homeLoad()'s in-memory path only
+  /// runs a silent heartbeat — neither re-runs the cascade. This does.
+  ///
+  enum RevalidateResult {
+    case stillGood       // current address is live — caller should proceed as normal
+    case switched        // moved to a new address; networkDidReconnect already posted
+    case failed          // no reachable address found
+  }
+
+  /// Returns how the revalidation resolved so the caller knows whether it still needs
+  /// to trigger a load itself. On `.switched` this method already posts
+  /// networkDidReconnect (which drives homeLoad), so the caller must NOT load again.
+  func revalidateConnection() async -> RevalidateResult {
+    guard sessionToken != nil, !isDemoMode else { return .failed }
+    guard api.baseURL != AppState.fallbackURL else {
+      // Never resolved (QC ID) — go straight to the full cascade.
+      return await reconnect() ? .switched : .failed
+    }
+    // Only worth re-probing when we actually have a second address to fall back to.
+    let hasLAN = !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let hasWAN = !wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    guard hasLAN || hasWAN else { return .stillGood }
+
+    // Quick 2s probe of the address we think we're on.
+    if (try? await api.serverVersion(timeout: 2)) != nil {
+      return .stillGood  // current address still live — nothing to do
+    }
+    homeLog.info("revalidateConnection: current address \(self.api.baseURL) is unreachable — running cascade")
+    let before = api.baseURL.absoluteString
+    guard await reconnect() else { return .failed }
+    if api.baseURL.absoluteString != before {
+      homeLog.info("revalidateConnection: switched \(before) → \(self.api.baseURL) — posting networkDidReconnect")
+      NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
+      return .switched
+    }
+    // reconnect() re-verified the same address (transient blip recovered) — treat as good.
+    return .stillGood
+  }
+
   /// Retries QC resolution in the background every ~8s for up to 5 minutes.
   /// On success: clears serverUnreachable and triggers a fresh homeLoad.
   /// Called when homeLoad() can't reach the server on cold start.
@@ -641,10 +749,22 @@ final class AppState {
         let hasLAN = !self.lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasWAN = !self.wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if hasLAN && hasWAN && self.sessionToken != nil && path.status == .satisfied {
-          Task { @MainActor [weak self] in
-            guard let self, !self.isReconnecting else { return }
-            homeLog.info("networkMonitor: path changed with dual addresses — re-probing")
-            _ = await self.reconnect()
+          // Run the re-probe inline on this @MainActor task and AWAIT it so the
+          // refresh post happens only after reconnect() resolves. The previous
+          // nested fire-and-forget Task let the handler return before reconnect
+          // finished, so the LAN↔WAN switch landed but nothing refreshed.
+          guard !self.isReconnecting else { return }
+          homeLog.info("networkMonitor: path changed with dual addresses — re-probing")
+          // A LAN→WAN switch stays online→online, so the offline→online post above
+          // never fires. Detect the address change via reconnect()'s effect on
+          // baseURL/api and post .networkDidReconnect ourselves so the listening
+          // views (LibrariesView/MainView) reload libraries and streams.
+          let addressBefore = self.api.baseURL.absoluteString
+          let switched = await self.reconnect()
+          let addressAfter = self.api.baseURL.absoluteString
+          if switched && addressBefore != addressAfter {
+            homeLog.info("networkMonitor: effective address changed \(addressBefore) → \(addressAfter) — posting networkDidReconnect")
+            NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
           }
         }
       }
@@ -673,6 +793,14 @@ final class AppState {
   }
 
   func exchangePairingCode(_ code: String) async {
+    // TASK-780: share login()'s re-entrancy guard. This path also mutates the shared auth
+    // state (sessionToken, api, baseURL) and uses the same isLoggingIn flag, so a concurrent
+    // login() and pairing exchange would otherwise interleave their writes. Whichever
+    // acquires the flag first proceeds; the other bails.
+    guard !isLoggingIn else {
+      homeLog.info("exchangePairingCode: auth already in progress — ignoring")
+      return
+    }
     loginError = nil
     isLoggingIn = true
     defer { isLoggingIn = false }
@@ -704,7 +832,9 @@ final class AppState {
       return
     }
 
-    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: useHTTPS, defaultPort: defaultPort) else {
+    // TASK-817: same LAN guard as updateAPI()/buildCandidates — never force https on a bare private IP.
+    let pairingEffectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
+    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: pairingEffectiveHTTPS, defaultPort: defaultPort) else {
       loginError = "Invalid server address. Please check the URL."
       return
     }
@@ -753,6 +883,22 @@ final class AppState {
     homeIsCacheDecoding = false
     homeIsBackgroundRefreshing = false
     homeError = nil
+    // SECURITY (TASK-775): explicitly delete the Top Shelf snapshot on logout/clear.
+    // Setting homeJustAdded = [] above triggers writeTopShelfSnapshot()'s didSet, but that
+    // function early-returns on empty state and never overwrites/removes the file — so a
+    // stale topshelf.json from the previous session would otherwise persist on disk. Delete
+    // it directly, independent of the empty-write guard.
+    deleteTopShelfSnapshot()
+  }
+
+  /// Removes the persisted Top Shelf snapshot from the shared App Group container.
+  /// Called on logout/clearHomeState so no cached content survives sign-out (TASK-775).
+  func deleteTopShelfSnapshot() {
+    guard let container = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
+    ) else { return }
+    let fileURL = container.appendingPathComponent("topshelf.json")
+    try? FileManager.default.removeItem(at: fileURL)
   }
 
   var homeAllRailsEmpty: Bool {
@@ -823,27 +969,31 @@ final class AppState {
       allItems
         .filter { item in
           guard let p = item.progress, p.durationSeconds > 0, p.positionSeconds > 0 else { return false }
-          let frac = Double(p.positionSeconds) / Double(p.durationSeconds)
-          return frac >= 0.05 && frac < 0.95
+          // Finished items belong in Recently Watched, not Continue Watching — use the
+          // shared rule so the rails agree with what playback will actually resume.
+          guard !PlaybackProgress.isFinished(
+            positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds) else { return false }
+          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.05
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(10))
 
-    let recentlyWatched = deduplicated(
+    let recentlyWatched = Array(deduplicated(
       allItems
         .filter { item in
           guard let p = item.progress, p.durationSeconds > 0 else { return false }
-          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.95
+          return PlaybackProgress.isFinished(
+            positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds)
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
-    )
+    ).prefix(8))
 
     let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
     let justAdded = Array(deduplicatedByShow(
       allItems
         .filter { !watchedIDs.contains($0.id) }
         .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    ).prefix(10))
+    ).prefix(8))
 
     return (continueWatching, justAdded, recentlyWatched)
   }
@@ -970,6 +1120,28 @@ final class AppState {
     await runDeltaSyncWithBackgroundTask()
   }
 
+  /// TASK-787: single foreground-coordination owner. Previously TWO scenePhase==.active
+  /// handlers (app-level → foregroundRefresh, LibrariesView → revalidateConnection+homeLoad)
+  /// fired on the same event with no ordering, racing the shared home-* flags. This is now
+  /// the ONLY foreground entry point: revalidate the connection first (running the LAN→WAN
+  /// cascade if the address went stale while backgrounded), then refresh exactly once.
+  /// On `.switched`, revalidateConnection already posts networkDidReconnect (which drives
+  /// homeLoad), so we must not refresh again here.
+  private var isForegroundCoordinating = false
+  func foregroundReconnectAndRefresh() async {
+    guard sessionToken != nil else { return }
+    // Re-entrancy guard: a second .active event (or a slow revalidate overlapping the
+    // next foreground) must not launch a parallel revalidate/refresh pass.
+    guard !isForegroundCoordinating else { return }
+    isForegroundCoordinating = true
+    defer { isForegroundCoordinating = false }
+
+    let result = await revalidateConnection()
+    // .switched → networkDidReconnect already triggered homeLoad; don't double-refresh.
+    guard result != .switched else { return }
+    await foregroundRefresh()
+  }
+
   // MARK: - Delta Sync
 
   /// FIX-10: Wraps a background delta sync in a UIApplication background task so iOS
@@ -1031,6 +1203,12 @@ final class AppState {
         var since = cursors.itemSeq
         var afterRowid: Int? = nil
         var pageCount = 0
+        // Safety valves, mirroring the TASK-790 valve on the library grid. This loop
+        // is driven entirely by server-supplied `hasMore` + cursor, so a server that
+        // reports hasMore:true without advancing the cursor would spin it forever,
+        // hammering the NAS. 200 pages x 500 = 100k items, far past any real library.
+        let maxSyncPages = 200
+        var lastCursor: (Int, Int?)? = nil
         repeat {
           let page = try await apiSnapshot.syncItems(since: since, limit: 500, afterRowid: afterRowid)
           if !page.items.isEmpty {
@@ -1038,6 +1216,21 @@ final class AppState {
             since = page.nextSeq
             afterRowid = page.hasMore ? page.nextAfterRowid : nil
             pageCount += 1
+
+            // Non-advancing cursor: the next request would be byte-identical to the
+            // one we just made, so we'd refetch the same page indefinitely. Stop and
+            // let the next sync cycle retry from the last committed cursor.
+            let cursor = (since, afterRowid)
+            if let last = lastCursor, last.0 == cursor.0, last.1 == cursor.1 {
+              homeLog.error("runDeltaSync: cursor stalled at seq=\(since) after \(pageCount) pages — aborting to avoid an infinite sync loop")
+              break
+            }
+            lastCursor = cursor
+
+            if pageCount >= maxSyncPages {
+              homeLog.error("runDeltaSync: hit \(maxSyncPages)-page cap — stopping; remaining items sync on the next cycle")
+              break
+            }
             // After first page on cold start, show rails immediately
             if !background && pageCount == 1 {
               let rails = await LocalStore.shared.queryRails()
@@ -1135,8 +1328,16 @@ final class AppState {
         homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
       }
     } catch {
-      // Heartbeat failures are silent — server may be temporarily unreachable
-      homeLog.debug("heartbeat: failed — \(error.localizedDescription)")
+      // Heartbeat failures are usually transient. But a persistent failure here is the
+      // signal that we've moved off the network the current address lives on (e.g. left
+      // the LAN mid-session and NWPathMonitor didn't deliver a path update). Re-probe:
+      // if the current address is dead, revalidateConnection() runs the LAN→WAN cascade
+      // and switches us over so the next heartbeat lands. Guard against piling up behind
+      // an in-flight reconnect.
+      homeLog.debug("heartbeat: failed — \(error.localizedDescription); revalidating")
+      if !isReconnecting {
+        _ = await revalidateConnection()
+      }
     }
   }
 
@@ -1191,13 +1392,26 @@ final class AppState {
 
   func toggleWatchlist(item: ItemSummary) async {
     guard !isDemoMode else { return }
+    // TASK-820: optimistic update, but revert on server failure so the UI can't
+    // diverge silently from the server until the next full sync.
     let alreadyIn = watchlistItems.contains(where: { $0.id == item.id })
     if alreadyIn {
+      let removedIndex = watchlistItems.firstIndex(where: { $0.id == item.id })
       watchlistItems.removeAll(where: { $0.id == item.id })
-      try? await api.removeFromWatchlist(id: item.id)
+      do {
+        try await api.removeFromWatchlist(id: item.id)
+      } catch {
+        // Restore at the original position (clamped) so ordering is preserved.
+        let insertAt = min(removedIndex ?? 0, watchlistItems.count)
+        watchlistItems.insert(item, at: insertAt)
+      }
     } else {
       watchlistItems.insert(item, at: 0)
-      try? await api.addToWatchlist(id: item.id)
+      do {
+        try await api.addToWatchlist(id: item.id)
+      } catch {
+        watchlistItems.removeAll(where: { $0.id == item.id })
+      }
     }
   }
 
@@ -1219,14 +1433,15 @@ final class AppState {
     let items: [TopShelfItem] = homeJustAdded.prefix(10).compactMap { item in
       // Prefer backdrop for landscape Top Shelf cards, fall back to poster
       let imageID = item.backdropImageId ?? item.posterImageId
-      var imageURLString: String? = nil
-      if let imageID {
-        var urlString = api.imageURL(id: imageID, width: 760)?.absoluteString
-        if let token = sessionToken, let base = urlString {
-          urlString = base + (base.contains("?") ? "&" : "?") + "token=\(token)"
-        }
-        imageURLString = urlString
-      }
+      // SECURITY (TASK-774): do NOT bake the live bearer session token into the persisted
+      // image URL. This file is unencrypted JSON in a shared App Group container — a token
+      // written here is a working, long-lived credential readable via device backup or any
+      // process with the group entitlement. The Top Shelf extension uses setImageURL(), which
+      // is fetched by the tvOS system and cannot inject an Authorization header, and there is
+      // no shared Keychain access group between the app and the extension. So we fail closed:
+      // persist the tokenless URL only. Artwork that requires auth simply won't render in Top
+      // Shelf; titles + deep links still work. Never persist the credential.
+      let imageURLString: String? = imageID.flatMap { api.imageURL(id: $0, width: 760)?.absoluteString }
       return TopShelfItem(
         id: item.id,
         title: item.title,

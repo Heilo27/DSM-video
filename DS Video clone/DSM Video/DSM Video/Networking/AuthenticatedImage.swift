@@ -24,6 +24,13 @@ private enum ImageSession {
   }()
 }
 
+/// Backoff before image-fetch retry N (0-based): ~0.3s, then ~0.9s. Short on purpose —
+/// a poster the user is looking at right now is worthless if it arrives ten seconds
+/// late. Platform-neutral: both the UIKit and AppKit fetch paths use it.
+private func backoffNanos(_ attempt: Int) -> UInt64 {
+  UInt64(300_000_000.0 * pow(3.0, Double(attempt)))
+}
+
 // MARK: - Image Cache (UIKit platforms only)
 
 #if canImport(UIKit)
@@ -74,6 +81,54 @@ private actor ImageCache {
   /// Registers a newly created fetch task so subsequent callers can join it.
   func registerTask(_ task: Task<UIImage?, Never>, for url: URL) {
     inFlightTasks[url] = task
+  }
+
+  /// True when this URL is already cached or being fetched — i.e. prefetching it
+  /// would be wasted work.
+  func isWarm(_ url: URL) -> Bool {
+    cache.object(forKey: url as NSURL) != nil || inFlightTasks[url] != nil
+  }
+}
+
+// MARK: - Prefetch
+
+/// Warms the image cache for posters about to scroll into view, so a rail's first
+/// cards don't start from the grey placeholder on every cold scroll.
+///
+/// Deliberately fire-and-forget and best-effort: prefetch must never delay or
+/// out-prioritise a visible cell's own fetch. It shares ImageCache's in-flight
+/// registry, so a prefetch already running for a URL is simply joined by the real
+/// load when the cell appears — never duplicated.
+enum ImagePrefetcher {
+  /// Bounded so a fast fling can't queue hundreds of concurrent requests at a NAS
+  /// that is also transcoding. One screenful of lookahead is the useful window.
+  private static let maxPerBatch = 12
+
+  static func prefetch(urls: [URL?], token: String?, usesTunnelCookie: Bool) {
+    #if canImport(UIKit)
+    let targets = urls.compactMap { $0 }.prefix(maxPerBatch)
+    guard !targets.isEmpty else { return }
+    Task.detached(priority: .utility) {
+      for url in targets {
+        if await ImageCache.shared.isWarm(url) { continue }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        if url.absoluteString.contains("_sid=") {
+          // Video Station: session ID already in the URL.
+        } else if let token {
+          req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if usesTunnelCookie {
+          req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
+        }
+        // No retry here on purpose: a prefetch that misses costs nothing, and the
+        // visible-cell load will retry properly when the card actually appears.
+        guard let (data, response) = try? await ImageSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let image = UIImage(data: data) else { continue }
+        await ImageCache.shared.setImage(image, for: url)
+      }
+    }
+    #endif
   }
 }
 #endif
@@ -137,6 +192,21 @@ struct AuthenticatedImage: View {
   // was recycled to a different URL (fast flinging) is discarded instead of writing
   // a stale poster into the reused cell.
   @State private var loadGeneration: Int = 0
+  // The loadKey the currently-displayed `image` was fetched for. When loadKey changes
+  // (e.g. baseURL flips LAN→WAN on reconnect, or the token refreshes — neither of which
+  // changes the actual poster), we keep showing this image and refetch in the
+  // background, swapping only when the new fetch succeeds. This prevents the
+  // "poster vanishes a few seconds after launch" flash and stops a transient
+  // refetch failure from leaving a permanently-blank cell.
+  @State private var loadedKey: String?
+  // The loadKey of the fetch currently in flight, or nil when idle. Replaces a bare
+  // `isLoading` bool as the re-entry guard: a bool latches true forever if the .task
+  // is cancelled mid-fetch (cell recycled / row re-rendered), and every subsequent
+  // .task then bails on `!isLoading` — the cell stays grey until it is scrolled off
+  // and back, which destroys the @State and clears the flag. Keying the guard on the
+  // in-flight key means a re-fired task for the SAME key still no-ops, but a task for
+  // a different key (or after a reset) always proceeds.
+  @State private var inFlightKey: String?
   #endif
 
   // Composite identity for the load task: a token refresh keeps the same URL, so a
@@ -189,18 +259,42 @@ struct AuthenticatedImage: View {
       // refresh), so a recycled cell always loads its own poster and a cell that hit
       // a 401 retries once the new token is available.
       await loadIfNeeded()
+
+      // Cancellation unwinds through here without running the completion path in
+      // loadIfNeeded(), so clear the in-flight marker explicitly. Without this the
+      // guard stays latched and every later .task for this cell no-ops — the
+      // "card goes grey a few seconds in and only comes back after scrolling
+      // off and back" bug.
+      if Task.isCancelled, inFlightKey == loadKey {
+        inFlightKey = nil
+        isLoading = false
+      }
     }
     .onChange(of: loadKey) { _, _ in
-      // URL or token changed — reset state so loadIfNeeded()'s `image == nil` guard
-      // passes and we fetch fresh instead of showing the stale poster / stuck glyph.
-      image = nil
+      // URL or token changed. Do NOT blank `image` — during a LAN→WAN reconnect the
+      // baseURL (and token) change but the poster is identical, so clearing here just
+      // flashes the cell empty and, if the refetch transiently fails, strands it blank.
+      // Instead clear only the failure/loading flags and let loadIfNeeded() refetch;
+      // it swaps `image` in place once the new key resolves. `loadedKey != loadKey`
+      // is what lets it run despite a non-nil `image`.
       didFail = false
       isLoading = false
     }
   }
 
   private func loadIfNeeded() async {
-    guard let url, !isLoading, image == nil else { return }
+    // Refetch when there's no image yet OR the current image belongs to a stale key
+    // (recycled cell / reconnect). `loadedKey == loadKey` with a non-nil image means
+    // we're already showing the right poster — nothing to do.
+    // Re-entry guard keyed on the in-flight load, not a bare bool: a fetch already
+    // running for THIS key is left alone, but anything else proceeds. A cancelled
+    // task can no longer strand the cell (see inFlightKey).
+    guard let url, inFlightKey != loadKey, (image == nil || loadedKey != loadKey) else { return }
+    let keyAtStart = loadKey
+    inFlightKey = keyAtStart
+    // Clears on every exit path — success, failure, stale-generation bail, or a
+    // cancellation that unwinds mid-await — so the guard can never latch.
+    defer { if inFlightKey == keyAtStart { inFlightKey = nil } }
 
     // Capture this load's generation. Every @State write below is gated on it still
     // being current, so a completion that lands after the cell was recycled to a
@@ -214,7 +308,7 @@ struct AuthenticatedImage: View {
     let outcome = await ImageCache.shared.fetchOrJoin(for: url)
 
     if let cached = outcome.cached {
-      if isCurrent() { image = Image(uiImage: cached) }
+      if isCurrent() { image = Image(uiImage: cached); loadedKey = keyAtStart }
       return
     }
 
@@ -222,7 +316,8 @@ struct AuthenticatedImage: View {
       // Join in-flight — someone else is already fetching this URL
       let result = await existingTask.value
       guard isCurrent() else { return }
-      if let result { image = Image(uiImage: result) } else { didFail = true }
+      if let result { image = Image(uiImage: result); loadedKey = keyAtStart }
+      else if image == nil { didFail = true }  // don't hide a good poster on a reconnect refetch miss
       return
     }
 
@@ -245,22 +340,49 @@ struct AuthenticatedImage: View {
         req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
 
-      do {
-        let (data, response) = try await ImageSession.shared.data(for: req)
+      // Retry transient failures. Previously a single dropped packet or a NAS busy
+      // for one second greyed the card permanently — nothing retried until the token
+      // or baseURL changed. Only network errors and 5xx/429 are retried; a 404 poster
+      // or a 401 fails immediately (retrying those is pure latency, and the token
+      // refresh path already re-fires the load via loadKey).
+      for attempt in 0..<3 {
+        if Task.isCancelled { return nil }
+        do {
+          let (data, response) = try await ImageSession.shared.data(for: req)
 
-        if let httpResponse = response as? HTTPURLResponse,
-           httpResponse.statusCode != 200 {
+          if let httpResponse = response as? HTTPURLResponse,
+             httpResponse.statusCode != 200 {
+            let code = httpResponse.statusCode
+            let transient = code == 429 || (500...599).contains(code)
+            if transient, attempt < 2 {
+              try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+              continue
+            }
+            return nil
+          }
+
+          if let uiImage = UIImage(data: data) {
+            await ImageCache.shared.setImage(uiImage, for: url)
+            return uiImage
+          }
+          // 200 with undecodable bytes — a truncated response is worth one more try.
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
+          return nil
+        } catch is CancellationError {
+          return nil
+        } catch {
+          // URLError (timeout, connection lost, DNS) — the transient case worth retrying.
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
           return nil
         }
-
-        if let uiImage = UIImage(data: data) {
-          await ImageCache.shared.setImage(uiImage, for: url)
-          return uiImage
-        }
-        return nil
-      } catch {
-        return nil
       }
+      return nil
     }
 
     // Register before awaiting so any concurrent caller sees the task immediately
@@ -269,15 +391,23 @@ struct AuthenticatedImage: View {
     let result = await fetchTask.value
     await ImageCache.shared.clearInFlightTask(for: url)
 
+    // Clear the spinner before the staleness check, not after. Gating this on
+    // isCurrent() left a superseded fetch spinning forever on a cell that had moved
+    // on — the spinner is this cell's own UI state and is always wrong once the
+    // fetch it belongs to has finished.
+    isLoading = false
+
     // Drop the result if this cell was recycled to a different URL/token while the
     // fetch was in flight — the image is cached for whoever needs it, but we must not
     // write it into a cell that has since moved on.
     guard isCurrent() else { return }
-    isLoading = false
 
     if let uiImage = result {
       image = Image(uiImage: uiImage)
-    } else {
+      loadedKey = keyAtStart
+    } else if image == nil {
+      // Only surface failure if we have nothing to show. A reconnect refetch that
+      // misses must leave the existing poster in place, not blank the cell.
       didFail = true
     }
   }
@@ -313,16 +443,28 @@ struct AuthenticatedImage: View {
     }
     .task(id: loadKey) {
       await loadIfNeeded()
+
+      // See the UIKit body: a cancelled task must clear the in-flight marker itself,
+      // or the guard latches and the cell stays grey until it's recycled.
+      if Task.isCancelled, inFlightKey == loadKey {
+        inFlightKey = nil
+        isLoading = false
+      }
     }
     .onChange(of: loadKey) { _, _ in
-      image = nil
+      // See the UIKit body: don't blank `image` on a key change (LAN→WAN reconnect
+      // keeps the same poster) — just clear the flags and let loadIfNeeded() swap in place.
       didFail = false
       isLoading = false
     }
   }
 
   private func loadIfNeeded() async {
-    guard let url, !isLoading, image == nil else { return }
+    // See the UIKit body: guard on the in-flight key, not a latching bool.
+    guard let url, inFlightKey != loadKey, (image == nil || loadedKey != loadKey) else { return }
+    let keyAtStart = loadKey
+    inFlightKey = keyAtStart
+    defer { if inFlightKey == keyAtStart { inFlightKey = nil } }
 
     // See the UIKit body: gate every @State write on this generation so a stale
     // completion (cell recycled mid-fetch) is dropped instead of writing a wrong image.
@@ -333,14 +475,15 @@ struct AuthenticatedImage: View {
     let outcome = await MacImageCache.shared.fetchOrJoin(for: url)
 
     if let cached = outcome.cached {
-      if isCurrent() { image = Image(nsImage: cached) }
+      if isCurrent() { image = Image(nsImage: cached); loadedKey = keyAtStart }
       return
     }
 
     if let existingTask = outcome.task {
       let result = await existingTask.value
       guard isCurrent() else { return }
-      if let result { image = Image(nsImage: result) } else { didFail = true }
+      if let result { image = Image(nsImage: result); loadedKey = keyAtStart }
+      else if image == nil { didFail = true }
       return
     }
 
@@ -359,16 +502,38 @@ struct AuthenticatedImage: View {
       if usesTunnel {
         req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
-      do {
-        let (data, response) = try await ImageSession.shared.data(for: req)
-        if let httpResponse = response as? HTTPURLResponse,
-           httpResponse.statusCode != 200 {
+      // See the UIKit body: retry transient failures only (network error, 5xx, 429).
+      for attempt in 0..<3 {
+        if Task.isCancelled { return nil }
+        do {
+          let (data, response) = try await ImageSession.shared.data(for: req)
+          if let httpResponse = response as? HTTPURLResponse,
+             httpResponse.statusCode != 200 {
+            let code = httpResponse.statusCode
+            let transient = code == 429 || (500...599).contains(code)
+            if transient, attempt < 2 {
+              try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+              continue
+            }
+            return nil
+          }
+          if let img = NSImage(data: data) { return img }
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
+          return nil
+        } catch is CancellationError {
+          return nil
+        } catch {
+          if attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
           return nil
         }
-        return NSImage(data: data)
-      } catch {
-        return nil
       }
+      return nil
     }
 
     await MacImageCache.shared.registerTask(fetchTask, for: url)
@@ -379,12 +544,15 @@ struct AuthenticatedImage: View {
     }
     await MacImageCache.shared.clearInFlightTask(for: url)
 
-    guard isCurrent() else { return }
+    // See the UIKit body: clear the spinner before the staleness check, never after.
     isLoading = false
+
+    guard isCurrent() else { return }
 
     if let nsImage = result {
       image = Image(nsImage: nsImage)
-    } else {
+      loadedKey = keyAtStart
+    } else if image == nil {
       didFail = true
     }
   }

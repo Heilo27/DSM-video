@@ -14,13 +14,28 @@ import (
 	"time"
 )
 
+// maxImageBytes caps the size of a single downloaded image written to the cache.
+// TASK-823: the image io.Copy was unbounded — a misbehaving or compromised upstream
+// (even the trusted TMDb CDN) could fill the NAS image-cache disk. TMDb "original"
+// posters/backdrops are a few MB at most; 32 MiB is a generous ceiling that never
+// clips a legitimate image but stops a runaway body.
+const maxImageBytes = 32 << 20 // 32 MiB
+
+// download represents an in-flight image download so that waiters can observe its
+// actual outcome (path + error), not merely that it finished.
+type download struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
 // ImageCache handles caching of images from external sources.
 type ImageCache struct {
 	cacheDir   string
 	httpClient *http.Client
 
-	mu    sync.RWMutex
-	inFlight map[string]chan struct{} // Prevent duplicate downloads
+	mu       sync.RWMutex
+	inFlight map[string]*download // Prevent duplicate downloads
 }
 
 // NewImageCache creates a new image cache.
@@ -35,7 +50,7 @@ func NewImageCache(cacheDir string) *ImageCache {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		inFlight: make(map[string]chan struct{}),
+		inFlight: make(map[string]*download),
 	}
 }
 
@@ -88,33 +103,40 @@ func (c *ImageCache) CacheImage(ctx context.Context, imageID, sourceURL string) 
 
 	// Check if download is already in progress
 	c.mu.Lock()
-	if ch, ok := c.inFlight[imageID]; ok {
+	if dl, ok := c.inFlight[imageID]; ok {
 		c.mu.Unlock()
-		// Wait for the other download to complete
+		// Wait for the other download to complete, then adopt its outcome.
 		select {
-		case <-ch:
-			if path, ok := c.GetCachedImage(imageID); ok {
-				return path, nil
+		case <-dl.done:
+			if dl.err != nil {
+				// TASK-824: surface the real failure instead of the misleading
+				// "download completed but image not found" — the download did not
+				// complete, it failed.
+				return "", fmt.Errorf("shared image download failed: %w", dl.err)
 			}
-			return "", fmt.Errorf("download completed but image not found")
+			return dl.path, nil
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
 	}
 
 	// Mark download as in progress
-	ch := make(chan struct{})
-	c.inFlight[imageID] = ch
+	dl := &download{done: make(chan struct{})}
+	c.inFlight[imageID] = dl
 	c.mu.Unlock()
 
-	defer func() {
-		c.mu.Lock()
-		delete(c.inFlight, imageID)
-		close(ch)
-		c.mu.Unlock()
-	}()
+	// Record the outcome on dl so waiters observe the real path/error, then release.
+	cachePath, err := c.downloadImage(ctx, imageID, sourceURL)
+	c.mu.Lock()
+	dl.path, dl.err = cachePath, err
+	delete(c.inFlight, imageID)
+	close(dl.done)
+	c.mu.Unlock()
+	return cachePath, err
+}
 
-	// Download the image
+// downloadImage performs the actual HTTP fetch and cache write for CacheImage.
+func (c *ImageCache) downloadImage(ctx context.Context, imageID, sourceURL string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
@@ -145,10 +167,19 @@ func (c *ImageCache) CacheImage(ctx context.Context, imageID, sourceURL string) 
 	if err != nil {
 		return "", fmt.Errorf("create cache file: %w", err)
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// TASK-823: bound the copy. LimitReader caps at maxImageBytes+1 so we can
+	// detect (and reject) an oversized body rather than silently truncating it.
+	limited := io.LimitReader(resp.Body, maxImageBytes+1)
+	n, err := io.Copy(f, limited)
+	if err != nil {
 		f.Close()
 		os.Remove(cachePath) // Clean up on error
 		return "", fmt.Errorf("write cache file: %w", err)
+	}
+	if n > maxImageBytes {
+		f.Close()
+		os.Remove(cachePath)
+		return "", fmt.Errorf("image exceeds %d byte cap", maxImageBytes)
 	}
 	if closeErr := f.Close(); closeErr != nil {
 		os.Remove(cachePath) // Clean up partial file on flush/close failure

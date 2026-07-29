@@ -31,6 +31,10 @@ struct GestureVideoPlayer: View {
     /// and larger than playerItem.duration, the player uses it instead. 0 = unknown.
     var serverDuration: Double = 0
     var chapters: [Chapter] = []
+    // TASK-828: server-supplied subtitle semantics (full/forced/image + autoEnable).
+    // Empty for offline downloads and older servers; the player then falls back to
+    // plain AVFoundation behaviour (all subs off, manual selection only).
+    var subtitles: [Subtitle] = []
     var itemID: String = ""
     var itemTitle: String = ""
     var itemYear: Int? = nil
@@ -86,6 +90,15 @@ struct GestureVideoPlayer: View {
     @State private var lastScrubPressAt: Date = .distantPast
     @State private var scrubStepRepeat: Int = 0
 
+    // TASK: coalesced seeking. AVPlayer cancels an in-flight seek when a new one
+    // arrives; with ±2s tolerance on transcoded HLS, rapid skip-button taps each
+    // land back near the same segment boundary and playback thrashes instead of
+    // advancing. Serialise seeks: while one is running, only remember the LATEST
+    // requested target and fire it once the current seek completes.
+    @State private var isSeekInProgress: Bool = false
+    @State private var pendingSeekTarget: Double? = nil
+    @State private var pendingSeekTight: Bool = false
+
     @State private var isAdjustingVolume: Bool = false
     @State private var volumeLevel: Float = 0.5
     @State private var volumeStartLevel: Float = 0.5
@@ -111,6 +124,10 @@ struct GestureVideoPlayer: View {
     // and is deferred — the current lifecycle (onAppear/onDisappear) is correct.
     @State private var cancellables = Set<AnyCancellable>()
     @State private var hasResumedPosition: Bool = false
+    // TASK-828: guard so the forced/translation track is auto-enabled exactly once per
+    // item load. readyToPlay can fire more than once (e.g. after a stall), and we must
+    // not re-assert the selection after the user has changed it themselves.
+    @State private var didApplyForcedSubtitle: Bool = false
     @State private var showCaptionsPicker: Bool = false
     @State private var didSetupPlayer: Bool = false
     @State private var subtitleOffsetSeconds: Double = 0
@@ -252,6 +269,7 @@ struct GestureVideoPlayer: View {
                     SubtitleAudioPickerView(
                         player: player,
                         chapters: chapters,
+                        subtitles: subtitles,
                         itemTitle: itemTitle,
                         itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
@@ -266,6 +284,7 @@ struct GestureVideoPlayer: View {
                     SubtitleAudioPickerView(
                         player: player,
                         chapters: chapters,
+                        subtitles: subtitles,
                         itemTitle: itemTitle,
                         itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
@@ -280,6 +299,7 @@ struct GestureVideoPlayer: View {
                     SubtitleAudioPickerView(
                         player: player,
                         chapters: chapters,
+                        subtitles: subtitles,
                         itemTitle: itemTitle,
                         itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
@@ -642,7 +662,16 @@ struct GestureVideoPlayer: View {
                     #endif
                 }
             }
-            .padding(.horizontal, 20)
+            // Same title-safe fix as the bottom transport row: tvOS needs 60pt
+            // horizontally. The trailing controls in this bar were sitting in the
+            // overscan region on a real TV for the same reason.
+            .padding(.horizontal, {
+                #if os(tvOS)
+                return 60.0
+                #else
+                return 20.0
+                #endif
+            }())
             .padding(.top, {
                 #if os(tvOS)
                 return 40.0
@@ -787,9 +816,14 @@ struct GestureVideoPlayer: View {
                     Text(formatTime(isScrubbing ? scrubTime : currentTime))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
-                        .frame(minWidth: 50, alignment: .leading)
-                        .fixedSize()
                         .lineLimit(1)
+                        // .fixedSize() BEFORE .frame() so the label takes its ideal
+                        // width (never truncating a timestamp) and the bar yields the
+                        // space. Ordered the other way round — .frame then .fixedSize —
+                        // the fixedSize overrode the frame entirely and minWidth/maxWidth
+                        // were dead modifiers.
+                        .fixedSize()
+                        .frame(minWidth: 50, alignment: .leading)
                         .accessibilityHidden(true)
 
                     #if os(iOS)
@@ -874,14 +908,29 @@ struct GestureVideoPlayer: View {
                     Text("-\(formatTime(max(0, duration - (isScrubbing ? scrubTime : currentTime))))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
-                        .frame(minWidth: 50, maxWidth: 70, alignment: .trailing)
-                        .fixedSize()
                         .lineLimit(1)
+                        // See the elapsed label: .fixedSize() before .frame(). The old
+                        // maxWidth: 70 was never enforced anyway, and on a 3-hour film
+                        // ("-2:59:59" at tvOS caption size) it would have clipped the
+                        // timestamp if it ever had been.
+                        .fixedSize()
+                        .frame(minWidth: 50, alignment: .trailing)
                         .accessibilityHidden(true)
                 }
 
             }
-            .padding(.horizontal, 20)
+            // tvOS needs the 60pt title-safe inset horizontally, not just vertically.
+            // At 20pt this row sat 40pt inside the overscan region on each side, and a
+            // real TV clipped the trailing "-remaining" label off the right edge. The
+            // .padding(.bottom) below already branched for tvOS; the horizontal one was
+            // missed, so the bug only showed on a TV and never in the simulator.
+            .padding(.horizontal, {
+                #if os(tvOS)
+                return 60.0
+                #else
+                return 20.0
+                #endif
+            }())
             .padding(.bottom, {
                 #if os(tvOS)
                 return 60.0
@@ -1188,6 +1237,7 @@ struct GestureVideoPlayer: View {
                     // asset default if no preference is stored or no track matches.
                     Task { @MainActor in
                         applyPreferredAudioLanguage(to: item)
+                        applyAutoEnabledForcedSubtitle(to: item)
                     }
                 }
             }
@@ -1437,7 +1487,8 @@ struct GestureVideoPlayer: View {
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
-                // best-effort deactivation; nothing actionable on failure
+                // Best-effort deactivation; nothing actionable on failure (TASK-767: log for diagnosis).
+                orientLog.debug("AVAudioSession.setActive(false) failed on teardown — \(error.localizedDescription)")
             }
         }
         #endif
@@ -1469,12 +1520,48 @@ struct GestureVideoPlayer: View {
     ///   With 2s HLS segments keyframes are at most 2s away, so this lands accurately
     ///   without the multi-segment overshoot that .positiveInfinity caused.
     private func seek(to time: Double, tight: Bool = false) {
+        // Coalesce rapid seeks. If a seek is already running, just record the
+        // latest target (overwriting any earlier pending one) and bail — the
+        // completion handler will drain to it. This prevents AVPlayer from
+        // cancelling/restarting seeks on every tap, which thrashed the HLS
+        // position instead of accumulating the skips.
+        guard !isSeekInProgress else {
+            pendingSeekTarget = time
+            pendingSeekTight = tight
+            return
+        }
+
+        isSeekInProgress = true
         let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        let toleranceBefore: CMTime
+        let toleranceAfter: CMTime
         if tight {
-            player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            toleranceBefore = .zero
+            toleranceAfter = .zero
         } else {
             let tol = CMTime(seconds: 2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-            player?.seek(to: cmTime, toleranceBefore: tol, toleranceAfter: tol)
+            toleranceBefore = tol
+            toleranceAfter = tol
+        }
+
+        guard let player else {
+            // No player yet — clear state so a later seek isn't permanently blocked.
+            isSeekInProgress = false
+            return
+        }
+
+        player.seek(to: cmTime, toleranceBefore: toleranceBefore, toleranceAfter: toleranceAfter) { _ in
+            // Completion fires on an arbitrary queue; hop to the main actor to
+            // touch @State and to drain any pending target safely.
+            Task { @MainActor in
+                isSeekInProgress = false
+                if let next = pendingSeekTarget {
+                    let nextTight = pendingSeekTight
+                    pendingSeekTarget = nil
+                    pendingSeekTight = false
+                    seek(to: next, tight: nextTight)
+                }
+            }
         }
     }
 
@@ -1532,6 +1619,55 @@ struct GestureVideoPlayer: View {
             if let match {
                 await MainActor.run { item.select(match, in: group) }
             }
+        }
+    }
+
+    /// TASK-828: auto-enable the single forced/translation subtitle track the server
+    /// flagged with `autoEnable:true`, at playback start, WITHOUT any user action.
+    ///
+    /// This is the "A Bridge Too Far" case — the German/French scenes in an otherwise
+    /// English film. It is deliberately NOT surfaced to the user as "subtitles were
+    /// turned on": there is no toast, no persisted preference, no menu state change the
+    /// user initiated. It simply selects the correct forced AVMediaSelectionOption so
+    /// foreign dialogue is translated. Full subtitles are never touched here — they stay
+    /// off until the user picks them.
+    ///
+    /// Uses BOTH signals per the contract: the server's `autoEnable`/`language`/`type`
+    /// fields decide *whether* to enable and *which language*, and AVFoundation's native
+    /// `.containsOnlyForcedSubtitles` characteristic on the legible group locates the
+    /// matching forced rendition (delivered with FORCED=YES in the HLS manifest).
+    private func applyAutoEnabledForcedSubtitle(to item: AVPlayerItem) {
+        guard !didApplyForcedSubtitle else { return }
+        // Only one forced track ever carries autoEnable (contract guarantee).
+        guard let forcedMeta = subtitles.first(where: { $0.autoEnable && $0.forced && !$0.isImage }) else {
+            didApplyForcedSubtitle = true
+            return
+        }
+        didApplyForcedSubtitle = true
+        let wantLang = forcedMeta.language.lowercased()
+        Task {
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
+
+            // Prefer options AVFoundation itself marks as forced-only, then match language.
+            let forcedOptions = group.options.filter {
+                $0.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
+            }
+            func langMatches(_ opt: AVMediaSelectionOption) -> Bool {
+                guard wantLang != "und", !wantLang.isEmpty else { return true }
+                let tag = (opt.extendedLanguageTag ?? opt.locale?.identifier ?? "").lowercased()
+                return tag == wantLang || tag.hasPrefix(wantLang + "-") || wantLang.hasPrefix(tag)
+            }
+
+            let match = forcedOptions.first(where: langMatches)
+                ?? forcedOptions.first
+                // Fallback if the manifest didn't tag FORCED but the server told us the
+                // display name (already suffixed "(Forced)") — match by name/language.
+                ?? group.options.first(where: { opt in
+                    opt.displayName == forcedMeta.name && langMatches(opt)
+                })
+
+            guard let match else { return }
+            await MainActor.run { item.select(match, in: group) }
         }
     }
 
@@ -1869,6 +2005,9 @@ struct AirPlayButton: UIViewRepresentable {
 private struct SubtitleAudioPickerView: View {
     let player: AVPlayer
     var chapters: [Chapter] = []
+    // TASK-828: server subtitle semantics, used to split the list into Forced /
+    // Full / (greyed) Image and to label the auto-enabled forced track.
+    var subtitles: [Subtitle] = []
     var itemTitle: String = ""
     var itemYear: Int? = nil
     var onOffsetChange: ((Double) -> Void)? = nil
@@ -1950,27 +2089,65 @@ private struct SubtitleAudioPickerView: View {
         }
     }
 
+    // TASK-828: match a server metadata entry to a live AVMediaSelectionOption.
+    // Forced tracks: prefer the AVFoundation forced characteristic, then language.
+    // Full tracks: language + NOT forced-characteristic. Language uses loose prefix
+    // matching because tags vary ("de" vs "de-DE").
+    private func metadata(for option: AVMediaSelectionOption) -> Subtitle? {
+        let optForced = option.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
+        let optLang = (option.extendedLanguageTag ?? option.locale?.identifier ?? "").lowercased()
+        func langMatches(_ meta: Subtitle) -> Bool {
+            let m = meta.language.lowercased()
+            guard m != "und", !m.isEmpty, !optLang.isEmpty else { return true }
+            return optLang == m || optLang.hasPrefix(m + "-") || m.hasPrefix(optLang)
+        }
+        // Exact display-name match wins when the server label matches AVFoundation's.
+        if let byName = subtitles.first(where: { !$0.isImage && $0.name == option.displayName }) {
+            return byName
+        }
+        return subtitles.first {
+            !$0.isImage && $0.forced == optForced && langMatches($0)
+        }
+    }
+
     @ViewBuilder
     private var subtitleSection: some View {
         if let group = subtitleGroup {
             let noneSelected = currentSelection?.selectedMediaOption(in: group) == nil
+            // "None" applies to full subtitles; forced/translation is handled separately
+            // and auto-managed, so keep the off control at the top of the list.
             Button {
                 player.currentItem?.select(nil, in: group)
                 currentSelection = player.currentItem?.currentMediaSelection
             } label: {
-                trackRow(name: "None", isSelected: noneSelected)
+                trackRow(name: "Off", isSelected: noneSelected)
             }
             .buttonStyle(.plain)
 
-            ForEach(group.options, id: \.self) { option in
-                let isSelected = currentSelection?.selectedMediaOption(in: group) == option
-                Button {
-                    player.currentItem?.select(option, in: group)
-                    currentSelection = player.currentItem?.currentMediaSelection
-                } label: {
-                    trackRow(name: option.displayName, isSelected: isSelected)
-                }
-                .buttonStyle(.plain)
+            // Partition the live options by the server's semantics. Options with no
+            // metadata (offline/older server) fall into `full` so nothing disappears.
+            let forcedOptions = group.options.filter { metadata(for: $0)?.forced == true }
+            let fullOptions = group.options.filter { metadata(for: $0)?.forced != true }
+
+            // Forced / translation tracks — labelled as translation, not "subtitles",
+            // because these carry only the foreign-scene dialogue.
+            ForEach(forcedOptions, id: \.self) { option in
+                subtitleOptionRow(option, in: group, forced: true)
+            }
+
+            ForEach(fullOptions, id: \.self) { option in
+                subtitleOptionRow(option, in: group, forced: false)
+            }
+
+            // Image (bitmap) subtitles: listed but greyed and non-selectable — the
+            // server never renders them (contract: out of scope).
+            ForEach(imageSubtitles, id: \.self) { meta in
+                imageSubtitleRow(meta)
+            }
+        } else if !imageSubtitles.isEmpty {
+            // Direct/remux with only image subs: no legible group at all.
+            ForEach(imageSubtitles, id: \.self) { meta in
+                imageSubtitleRow(meta)
             }
         } else {
             Text("No subtitle tracks available")
@@ -1981,6 +2158,48 @@ private struct SubtitleAudioPickerView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var imageSubtitles: [Subtitle] {
+        subtitles.filter { $0.isImage }
+    }
+
+    @ViewBuilder
+    private func subtitleOptionRow(_ option: AVMediaSelectionOption,
+                                   in group: AVMediaSelectionGroup,
+                                   forced: Bool) -> some View {
+        let isSelected = currentSelection?.selectedMediaOption(in: group) == option
+        Button {
+            player.currentItem?.select(option, in: group)
+            currentSelection = player.currentItem?.currentMediaSelection
+        } label: {
+            trackRow(name: option.displayName,
+                     isSelected: isSelected,
+                     detail: forced ? "Translation" : nil)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func imageSubtitleRow(_ meta: Subtitle) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(meta.name)
+                Text("Image subtitles — not supported")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .foregroundStyle(.secondary)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(meta.name), image subtitles, not supported")
+        #if os(tvOS)
+        // Keep the row focusable so tvOS focus can traverse past it without a dead-end,
+        // but it performs no action.
+        .focusable(true)
+        #endif
     }
 
     @ViewBuilder
@@ -2080,10 +2299,17 @@ private struct SubtitleAudioPickerView: View {
         }
     }
 
-    private func trackRow(name: String, isSelected: Bool) -> some View {
+    private func trackRow(name: String, isSelected: Bool, detail: String? = nil) -> some View {
         HStack {
-            Text(name)
-                .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .foregroundStyle(.primary)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Spacer()
             Image(systemName: "checkmark")
                 .foregroundStyle(Color.dsAccent)
@@ -2092,6 +2318,7 @@ private struct SubtitleAudioPickerView: View {
                 .accessibilityLabel("Selected")
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 
     private func formatChapterTime(_ seconds: Double) -> String {

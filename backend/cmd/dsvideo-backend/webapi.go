@@ -1241,6 +1241,10 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 	case "logout":
 		session := s.getWebAPISession(r)
 		if session != nil {
+			// TASK-806: revoke the JWT embedded in this WebAPI session too, not just the
+			// local SID. Without this the REST plane would keep honoring the same token
+			// after a WebAPI logout — divergent revocation across the two session planes.
+			s.revokeJWT(session.Token)
 			webAPISessions.Delete(session.SID)
 			deletePersistedSession(s.db, session.SID)
 		}
@@ -2088,7 +2092,8 @@ func (s *Server) webAPIStreamingOpen(w http.ResponseWriter, r *http.Request, ses
 		Path:         path,
 		Kind:         "direct",
 		CreatedAt:    time.Now(),
-		PlaybackMode: 0, // DirectPlay
+		LastAccess:   time.Now(), // TASK-794: seed so the idle reaper doesn't evict before first GET
+		PlaybackMode: 0,          // DirectPlay
 	}
 
 	s.mu.Lock()
@@ -2134,10 +2139,11 @@ func (s *Server) handleWebAPIVTEStreaming(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.mu.RLock()
-	ps, ok := s.playSessions[streamID]
-	s.mu.RUnlock()
-
+	// TASK-794: read through getSession() (NOT a direct map read) so LastAccess is
+	// bumped on every Range re-request. The 30-min idle playSessions reaper keys off
+	// LastAccess; a direct RLock read left it pinned at CreatedAt, so a title longer
+	// than 30 min was evicted mid-play and a post-30-min seek returned error 1101.
+	ps, ok := s.getSession(streamID)
 	if !ok {
 		writeWebAPIError(w, 1101)
 		return
@@ -2192,23 +2198,33 @@ func (s *Server) handleWebAPIPoster(w http.ResponseWriter, r *http.Request, meth
 
 	session := s.getWebAPISession(r)
 
+	// TASK-804: poster.cgi was registered unauthenticated and, with no session, fell
+	// through to a raw `SELECT 1 FROM items WHERE id = ?` that served the poster on a hit
+	// and 404'd on a miss. Since item IDs are deterministic (hex-of-path), that let an
+	// unauthenticated caller enumerate/guess IDs and distinguish existing items (200) from
+	// non-existing (404) — a library-content-existence oracle. Require a valid session so
+	// both the session-scoped mapper lookups AND the direct-ID fallback are auth-gated;
+	// an unauthenticated request now always returns the same 105 regardless of ID.
+	if session == nil {
+		writeWebAPIError(w, 105)
+		return
+	}
+
 	// Resolve the ID to internal ID
 	var internalID string
-	if session != nil {
-		switch itemType {
-		case "tvshow", "tvshow_episode":
-			internalID = s.resolveMapperID(session.SID, idStr, "lib_tv")
-			if internalID == "" {
-				// Try poster ID from TV show mapping
-				internalID = s.resolvePosterID(session.SID, idStr)
-			}
-		default:
-			internalID = s.resolveMapperID(session.SID, idStr, "lib_movies")
+	switch itemType {
+	case "tvshow", "tvshow_episode":
+		internalID = s.resolveMapperID(session.SID, idStr, "lib_tv")
+		if internalID == "" {
+			// Try poster ID from TV show mapping
+			internalID = s.resolvePosterID(session.SID, idStr)
 		}
+	default:
+		internalID = s.resolveMapperID(session.SID, idStr, "lib_movies")
 	}
 
 	if internalID == "" {
-		// Fallback: try treating the ID as a direct item ID
+		// Fallback: try treating the ID as a direct item ID (now behind the session gate).
 		var exists int
 		err := s.db.QueryRow("SELECT 1 FROM items WHERE id = ?", idStr).Scan(&exists)
 		if err == nil {

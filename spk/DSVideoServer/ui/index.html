@@ -4,17 +4,14 @@
 <meta charset="utf-8">
 <title>DSVideoServer</title>
 <script>
-// Redirect to the DSVideoServer web player on port 8090
-// Uses the same hostname as the current page
-var host = window.location.hostname;
-window.location.replace('http://' + host + ':8090/');
+// Redirect to the web player via a RELATIVE path on DSM's own port.
+// Never jump to :8090 directly — QuickConnect only relays DSM's port, and a
+// port jump fails with "this package cannot be accessed when using QuickConnect".
+window.location.replace('/dsvideo/');
 </script>
 </head>
 <body>
 <p>Redirecting to DSVideoServer...</p>
-<p>If not redirected, <a id="link">click here</a>.</p>
-<script>
-document.getElementById('link').href = 'http://' + window.location.hostname + ':8090/';
-</script>
+<p>If not redirected, <a href="/dsvideo/">click here</a>.</p>
 </body>
 </html>

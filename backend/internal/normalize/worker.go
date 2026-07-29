@@ -68,6 +68,17 @@ type NormalizeWorker struct {
 	// this tiny window — NOT during the whole encode, so on-demand playback of a
 	// still-queued/encoding item keeps working (slowly, via the normal transcode path).
 	converting map[string]struct{}
+	// permaFailed: items whose failure is deterministic — a corrupt/unreadable file
+	// (ffprobe exit 1) or a conversion target blocked by an unrelated existing file.
+	// Without this, every library scan re-enqueues them and the worker re-probes and
+	// re-fails forever, spamming the log and burning an idle slot that a convertible
+	// file should have had. Observed in production: three unreadable DS9 episodes and
+	// one .AVI whose .mp4 twin already exists, retried on every scan for hours.
+	//
+	// Deliberately in-memory only: a restart clears it, so a genuinely fixed file
+	// (user replaced the corrupt download, removed the duplicate) gets another chance
+	// without any manual reset. The value records why, for the status endpoint/log.
+	permaFailed map[string]string
 }
 
 // Tunables. queueCapacity bounds memory if a huge first scan enqueues thousands of
@@ -105,6 +116,7 @@ func NewNormalizeWorker(
 		queue:       make(chan queueItem, queueCapacity),
 		queued:      make(map[string]struct{}),
 		converting:  make(map[string]struct{}),
+		permaFailed: make(map[string]string),
 	}
 }
 
@@ -119,6 +131,11 @@ func (w *NormalizeWorker) Enqueue(itemID, path, mediaRoot string) {
 	}
 	w.mu.Lock()
 	if _, dup := w.queued[itemID]; dup {
+		w.mu.Unlock()
+		return
+	}
+	// Deterministic prior failure — don't re-queue it every scan. Cleared on restart.
+	if _, dead := w.permaFailed[itemID]; dead {
 		w.mu.Unlock()
 		return
 	}
@@ -191,11 +208,25 @@ func (w *NormalizeWorker) process(ctx context.Context, item queueItem) {
 	probe, probeErr := prober.Probe(probeCtx, item.path)
 	cancel()
 	if probeErr != nil {
-		log.Printf("[normalize] probe failed for %s (%s) — skipping: %v", item.itemID, item.path, probeErr)
+		// ffprobe can't read the file — corrupt, truncated, or not really video. This
+		// will fail identically on every future scan, so retire it instead of looping.
+		log.Printf("[normalize] probe failed for %s (%s) — giving up (will retry after a server restart): %v", item.itemID, item.path, probeErr)
+		w.markPermaFailed(item.itemID, "ffprobe could not read the file")
 		return
 	}
 	action := Decide(probe, filepath.Ext(item.path))
 	if action == ActionSkip {
+		return
+	}
+
+	// Check the clobber condition BEFORE spending the encode, not just after. The
+	// post-convert guard below is the authoritative one (the target could appear while
+	// we encode), but without this pre-check a blocked item pays for a full re-encode
+	// on every single scan before being thrown away — observed in production as the
+	// same .AVI burning four encodes in two hours. Cheap stat, saves hours of NAS CPU.
+	if wouldClobber(item.path, TargetOutputPath(item.path)) {
+		log.Printf("[normalize] target for %s already exists as a different file — skipping before encode (delete whichever copy you don't want)", item.path)
+		w.markPermaFailed(item.itemID, "conversion target already exists as a different file")
 		return
 	}
 
@@ -249,8 +280,13 @@ func (w *NormalizeWorker) process(ctx context.Context, item queueItem) {
 	// the original is about to be moved into the backup tree below, so a same-name swap is
 	// safe and is NOT blocked here.)
 	if wouldClobber(item.path, target) {
-		log.Printf("[normalize] target %s already exists as a different file — aborting conversion of %s to avoid clobber", target, item.path)
+		// The destination name is taken by an unrelated file (typically the SAME title
+		// already converted, e.g. "Movie.AVI" beside an existing "Movie.mp4"). Nothing
+		// about a later scan changes this, and we've already burned a full encode to get
+		// here — retire it so we don't pay that cost again on every scan.
+		log.Printf("[normalize] target %s already exists as a different file — aborting conversion of %s to avoid clobber (giving up; delete whichever copy you don't want)", target, item.path)
 		_ = os.Remove(outTmp)
+		w.markPermaFailed(item.itemID, "conversion target already exists as a different file")
 		return
 	}
 
@@ -290,6 +326,74 @@ func (w *NormalizeWorker) process(ctx context.Context, item queueItem) {
 // clobber risk — when target == src the original is moved to the backup tree first, so a
 // same-name swap is always safe. A different-path target that already exists on disk is a
 // separate file (its own library item) and must not be overwritten.
+// markPermaFailed retires itemID from future scans, recording why. See permaFailed.
+func (w *NormalizeWorker) markPermaFailed(itemID, reason string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.permaFailed[itemID] = reason
+}
+
+// Stats is a point-in-time view of the worker for the admin status endpoint.
+type Stats struct {
+	// Queued is the number of items waiting or in progress.
+	Queued int `json:"queued"`
+	// Capacity is the channel bound; Queued at Capacity means scans are dropping
+	// items (they get re-enqueued next scan, but throughput is the limit).
+	Capacity int `json:"capacity"`
+	// Converting is the count in the mid-swap window (normally 0 or 1).
+	Converting int `json:"converting"`
+	// Retired are items that failed deterministically and won't be retried until
+	// the server restarts, mapped to the reason.
+	Retired map[string]string `json:"retired"`
+	// MaxHeight is the normalization height cap — surfaced because it silently
+	// determines whether conversions downscale the user's originals.
+	MaxHeight int `json:"maxHeight"`
+}
+
+// IsIdleNow reports whether the server currently looks idle enough to convert. The
+// worker blocks on this before every job, so a status endpoint showing queued>0 with
+// idle=false explains "why is nothing converting?" without reading the log.
+func (w *NormalizeWorker) IsIdleNow() bool {
+	if w == nil || w.isIdle == nil {
+		return false
+	}
+	return w.isIdle()
+}
+
+// Stats returns a snapshot for diagnostics. Safe on a nil worker (auto-normalize off).
+func (w *NormalizeWorker) Stats() Stats {
+	if w == nil {
+		return Stats{}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	retired := make(map[string]string, len(w.permaFailed))
+	for k, v := range w.permaFailed {
+		retired[k] = v
+	}
+	return Stats{
+		Queued:     len(w.queued),
+		Capacity:   queueCapacity,
+		Converting: len(w.converting),
+		Retired:    retired,
+		MaxHeight:  w.maxHeight,
+	}
+}
+
+// PermaFailed returns a snapshot of retired items → reason, for logging/diagnostics.
+func (w *NormalizeWorker) PermaFailed() map[string]string {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]string, len(w.permaFailed))
+	for k, v := range w.permaFailed {
+		out[k] = v
+	}
+	return out
+}
+
 func wouldClobber(src, target string) bool {
 	if target == src {
 		return false

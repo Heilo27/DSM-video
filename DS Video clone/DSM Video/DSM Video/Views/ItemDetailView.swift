@@ -225,6 +225,9 @@ struct ItemDetailView: View {
   private var tvPlayButton: some View {
     let focused = focusedAction == .play
     return Button {
+      // TASK-796: guard so a Play/Start Over double-tap can't flip playFromBeginning
+      // after the player is already presenting.
+      guard !showPlayer else { return }
       playFromBeginning = false
       showPlayer = true
     } label: {
@@ -256,6 +259,7 @@ struct ItemDetailView: View {
   private var tvStartOverButton: some View {
     let focused = focusedAction == .fromBeginning
     return Button {
+      guard !showPlayer else { return }  // TASK-796
       playFromBeginning = true
       showPlayer = true
     } label: {
@@ -282,7 +286,7 @@ struct ItemDetailView: View {
       let summary = ItemSummary(
         id: d.id, type: d.type, title: d.title, year: d.year,
         durationSeconds: d.durationSeconds, addedAt: "",
-        rating: d.rating, posterImageId: d.images.poster.id
+        rating: d.rating, posterImageId: d.images?.poster.id
       )
       Task { await appState.toggleWatchlist(item: summary) }
     } label: {
@@ -356,6 +360,7 @@ struct ItemDetailView: View {
           // buttons stay fixed-size.
           HStack(spacing: 12) {
             Button {
+              guard !showPlayer else { return }  // TASK-796
               playFromBeginning = false
               showPlayer = true
             } label: {
@@ -381,6 +386,7 @@ struct ItemDetailView: View {
 
             if savedPositionSeconds > 0 {
               Button {
+                guard !showPlayer else { return }  // TASK-796
                 playFromBeginning = true
                 showPlayer = true
               } label: {
@@ -576,7 +582,7 @@ struct ItemDetailView: View {
         .overlay(alignment: .topTrailing) {
           if !appState.isDemoMode,
              (detail?.summary == nil || detail?.summary?.isEmpty == true),
-             detail?.images.backdrop.id == nil {
+             detail?.images?.backdrop.id == nil {
             Button {
               showMetadataFixer = true
             } label: {
@@ -594,13 +600,53 @@ struct ItemDetailView: View {
             .padding(10)
           }
         }
+        // Cinematic-only: a scrim + display-font title over the backdrop so the Detail
+        // hero speaks the same language as the Home hero. No-op on flat themes, which
+        // keep the plain backdrop + nav title.
+        .overlay {
+          if ThemeHolder.shared.current.usesCinematicChrome {
+            // Position the title/eyebrow in the visible band just above where the frosted
+            // content panel starts (the panel covers the bottom ~42% of the header). A
+            // GeometryReader keeps it above the panel's top edge on any screen size.
+            GeometryReader { geo in
+              let panelTop = geo.size.height - max(260, geo.size.height * 0.42)
+              ZStack(alignment: .bottomLeading) {
+                LinearGradient(
+                  stops: [.init(color: .clear, location: 0.4),
+                          .init(color: Color.dsBackground.opacity(0.85), location: 1.0)],
+                  startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: panelTop + 30)
+                .frame(maxHeight: .infinity, alignment: .top)
+
+                VStack(alignment: .leading, spacing: 6) {
+                  Text((detail?.type ?? "") == "tvshow" ? "SERIES" : "FEATURE")
+                    .font(.dsEyebrow)
+                    .tracking(2)
+                    .foregroundStyle(Color.dsAccent)
+                  Text(detail?.title ?? fallbackTitle)
+                    .font(.dsDisplay)
+                    .foregroundStyle(Color.dsTextPrimary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.6)
+                    .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
+                }
+                .padding(.horizontal, 20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(.bottom, geo.size.height - panelTop + 16)
+              }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+          }
+        }
         #endif
     }
   }
 
   @ViewBuilder
   private var backdropImage: some View {
-    if let backdropId = detail?.images.backdrop.id ?? detail?.images.backdrop.mapperId {
+    if let backdropId = detail?.images?.backdrop.id ?? detail?.images?.backdrop.mapperId {
       AuthenticatedImage(
         url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq),
         token: appState.sessionToken,
@@ -768,7 +814,7 @@ struct ItemDetailView: View {
         durationSeconds: d.durationSeconds,
         addedAt: "",
         rating: d.rating,
-        posterImageId: d.images.poster.id
+        posterImageId: d.images?.poster.id
       )
       Haptics.play(.selection)
       Task { await appState.toggleWatchlist(item: summary) }
@@ -819,8 +865,9 @@ struct ItemDetailView: View {
     let avatarSize: CGFloat = 64
     VStack(spacing: 6) {
       Group {
+        // 64pt avatar → 192px at 3x, which lands on the server's 342 rung.
         if let imageId = person.imageId,
-           let url = appState.api.imageURL(id: imageId, width: 200, version: detail?.changeSeq) {
+           let url = appState.api.imageURL(id: imageId, width: 342, version: detail?.changeSeq) {
           AuthenticatedImage(
             url: url,
             token: appState.sessionToken,
@@ -897,7 +944,7 @@ struct ItemDetailView: View {
 
       // Get poster URL if available
       var posterURL: URL? = nil
-      if let posterId = detail?.images.poster.id {
+      if let posterId = detail?.images?.poster.id {
         posterURL = appState.api.imageURL(id: posterId, width: 400)
       }
 
@@ -1114,6 +1161,10 @@ private struct PlayerSheet: View {
   @State private var playbackDuration: Double = 0
   @State private var isOffline: Bool = false
   @State private var chapters: [Chapter] = []
+  // TASK-828: semantic subtitle metadata (full/forced/image + autoEnable) from the
+  // playback response, handed to the player so it can auto-enable the forced
+  // translation track and label the picker correctly.
+  @State private var subtitles: [Subtitle] = []
   @State private var subtitleOffset: Double = 0
   @State private var subtitleOffsetRestartTask: Task<Void, Never>? = nil
 
@@ -1147,6 +1198,7 @@ private struct PlayerSheet: View {
           resumePosition: resumePosition,
           serverDuration: playbackDuration,
           chapters: chapters,
+          subtitles: subtitles,
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
@@ -1436,7 +1488,9 @@ private struct PlayerSheet: View {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)
       if FileManager.default.fileExists(atPath: downloaded.videoPath) {
         isOffline = true
-        resumePosition = forceFromBeginning ? 0 : Double(downloaded.resumePositionSeconds)
+        resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+          positionSeconds: downloaded.resumePositionSeconds,
+          durationSeconds: downloaded.durationSeconds))
         playbackDuration = Double(downloaded.durationSeconds)
         playbackURL = localURL
         return
@@ -1451,10 +1505,13 @@ private struct PlayerSheet: View {
         error = "No playable URL."
         return
       }
-      resumePosition = forceFromBeginning ? 0 : Double(max(info.resumePositionSeconds, resumeOverrideSeconds))
+      resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+        positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
+        durationSeconds: info.durationSeconds ?? 0))
       resumeOverrideSeconds = 0
       resumeOverrideDuration = 0
       chapters = info.chapters ?? []
+      subtitles = info.subtitles ?? []
       playbackDuration = Double(info.durationSeconds ?? 0)
       playbackURL = url
     } catch APIError.converting {
@@ -1472,10 +1529,13 @@ private struct PlayerSheet: View {
           let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
           let url = info.streamUrl ?? info.hlsMasterUrl
           guard let url else { self.error = "No playable URL."; return }
-          resumePosition = forceFromBeginning ? 0 : Double(max(info.resumePositionSeconds, resumeOverrideSeconds))
+          resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+            positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
+            durationSeconds: info.durationSeconds ?? 0))
           resumeOverrideSeconds = 0
           resumeOverrideDuration = 0
           chapters = info.chapters ?? []
+          subtitles = info.subtitles ?? []
           playbackDuration = Double(info.durationSeconds ?? 0)
           playbackURL = url
           appState.clearNetworkError()

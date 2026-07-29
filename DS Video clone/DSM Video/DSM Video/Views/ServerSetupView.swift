@@ -20,6 +20,10 @@ final class SetupFlowState {
   var resolvedAddress: String = ""
   var isHTTPS: Bool = false
   var rememberMe: Bool = true
+  // TASK-805: once a discovered server has been chosen and navigation is under way,
+  // ignore a second rapid tap on another row so resolvedAddress can't be overwritten
+  // out from under the credentials screen. Reset when leaving the credentials step.
+  var isSelectingServer: Bool = false
 }
 
 // MARK: - Root
@@ -30,15 +34,9 @@ struct ServerSetupView: View {
 
   var body: some View {
     NavigationStack {
-      SetupWelcomeScreen()
+      SetupWANMethodsScreen()
         .navigationDestination(for: SetupRoute.self) { route in
           switch route {
-          case .lanScan:
-            SetupLANScanScreen()
-          case .lanManual:
-            SetupLANManualScreen()
-          case .wanMethods:
-            SetupWANMethodsScreen()
           case .wanTailscale:
             SetupWANTailscaleScreen()
           case .wanDirect:
@@ -57,391 +55,11 @@ struct ServerSetupView: View {
 }
 
 enum SetupRoute: Hashable {
-  case lanScan, lanManual
-  case wanMethods, wanTailscale, wanDirect, wanQuickConnect
+  case wanTailscale, wanDirect, wanQuickConnect
   case credentials
 }
 
-// MARK: - Welcome
-
-private struct SetupWelcomeScreen: View {
-  @Environment(AppState.self) private var appState
-
-  var body: some View {
-    ZStack {
-      Color.dsBackground.ignoresSafeArea()
-
-      // ScrollView so the centered hero + cards can't clip vertically at the
-      // largest Dynamic Type sizes. GeometryReader gives the inner VStack a
-      // minHeight equal to the viewport so the Spacers still center content at
-      // normal sizes; when content grows past the viewport it scrolls instead.
-      GeometryReader { geo in
-        ScrollView {
-          VStack(spacing: 0) {
-            Spacer(minLength: 0)
-
-            VStack(spacing: 8) {
-              ZStack {
-                Circle()
-                  .fill(Color.dsAccent)
-                  .frame(width: 72, height: 72)
-                Image(systemName: "play.fill")
-                  .font(.system(size: 28))
-                  .foregroundStyle(Color.dsAccentOn)
-                  .offset(x: 3)
-              }
-              .accessibilityHidden(true)
-              .padding(.bottom, 8)
-
-              Text(AppInfo.displayName)
-                .font(.largeTitle.weight(.semibold))
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-
-              Text("Your NAS, beautifully.")
-                .font(.subheadline)
-                .foregroundStyle(Color.dsTextSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-
-              Text("Let's get you connected.")
-                .font(.footnote)
-                .foregroundStyle(Color.dsTextMuted)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
-            }
-
-            Spacer().frame(height: 40)
-
-            VStack(spacing: 12) {
-              NavigationLink(value: SetupRoute.lanScan) {
-                SetupModeCard(
-                  icon: "wifi",
-                  title: "On your home network",
-                  subtitle: "I'm on the same WiFi as my NAS"
-                )
-              }
-
-              NavigationLink(value: SetupRoute.wanMethods) {
-                SetupModeCard(
-                  icon: "globe",
-                  title: "Away from home",
-                  subtitle: "I'm on mobile data or a different network"
-                )
-              }
-            }
-            .padding(.horizontal, 24)
-
-            Spacer(minLength: 0)
-
-            #if !os(tvOS)
-            Button {
-              // Skip wizard — go straight to manual credentials for power users
-            } label: {
-              Text("Already have a server address?")
-                .font(.footnote)
-                .foregroundStyle(Color.dsTextMuted)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(minHeight: 44)
-            }
-            .buttonStyle(.plain)
-
-            NavigationLink(value: SetupRoute.credentials) {
-              Text("Enter it manually")
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(Color.dsAccent)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(minHeight: 44)
-            }
-            .padding(.bottom, 24)
-            #endif
-          }
-          .frame(minHeight: geo.size.height)
-        }
-      }
-    }
-    .navigationBarHidden(true)
-  }
-}
-
-private struct SetupModeCard: View {
-  let icon: String
-  let title: String
-  let subtitle: String
-
-  var body: some View {
-    HStack(spacing: 16) {
-      Image(systemName: icon)
-        .font(.system(size: 28, weight: .medium))
-        .foregroundStyle(Color.dsAccent)
-        .frame(width: 44)
-
-      VStack(alignment: .leading, spacing: 3) {
-        Text(title)
-          .font(.headline)
-          .foregroundStyle(.white)
-          .fixedSize(horizontal: false, vertical: true)
-        Text(subtitle)
-          .font(.subheadline)
-          .foregroundStyle(Color.dsTextSecondary)
-          .fixedSize(horizontal: false, vertical: true)
-      }
-
-      Spacer(minLength: 8)
-
-      Image(systemName: "chevron.right")
-        .font(.system(size: 14, weight: .semibold))
-        .foregroundStyle(Color.dsTextMuted)
-    }
-    .padding(.horizontal, 20)
-    .padding(.vertical, 18)
-    .background(Color.dsSurface)
-    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-  }
-}
-
-// MARK: - LAN Scan
-
-private struct SetupLANScanScreen: View {
-  @Environment(SetupFlowState.self) private var flow
-  @State private var discovery = BonjourDiscovery()
-  @State private var timedOut = false
-  @State private var path: [SetupRoute] = []
-
-  var body: some View {
-    ZStack {
-      Color.dsBackground.ignoresSafeArea()
-
-      if timedOut && discovery.servers.isEmpty {
-        SetupLANManualScreen()
-      } else if !discovery.servers.isEmpty {
-        SetupLANFoundScreen(servers: discovery.servers, onNotFound: {
-          timedOut = true
-        })
-      } else {
-        VStack(spacing: 20) {
-          Spacer()
-          ProgressView()
-            .scaleEffect(1.4)
-            .tint(.white)
-          Text("Looking for servers on your network…")
-            .font(.headline)
-            .foregroundStyle(.white)
-          Text("This usually takes just a moment.")
-            .font(.subheadline)
-            .foregroundStyle(Color.dsTextSecondary)
-          Spacer()
-        }
-        .padding()
-      }
-    }
-    .navigationTitle("Find Server")
-    .inlineNavTitle()
-    .onAppear { discovery.startScan() }
-    .onDisappear { discovery.stopScan() }
-    .task {
-      try? await Task.sleep(for: .seconds(8))
-      if discovery.servers.isEmpty { timedOut = true }
-    }
-  }
-}
-
-private struct SetupLANFoundScreen: View {
-  @Environment(SetupFlowState.self) private var flow
-  let servers: [BonjourDiscovery.DiscoveredServer]
-  let onNotFound: () -> Void
-
-  var body: some View {
-    ZStack {
-      Color.dsBackground.ignoresSafeArea()
-
-      VStack(alignment: .leading, spacing: 0) {
-        Text("FOUND ON YOUR NETWORK")
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(Color.dsTextMuted)
-          .padding(.horizontal, 24)
-          .padding(.top, 24)
-          .padding(.bottom, 12)
-
-        ScrollView {
-          VStack(spacing: 10) {
-            ForEach(servers) { server in
-              NavigationLink(value: SetupRoute.credentials) {
-                HStack(spacing: 16) {
-                  Image(systemName: "server.rack")
-                    .font(.system(size: 24))
-                    .foregroundStyle(Color.dsAccent)
-                    .frame(width: 36)
-
-                  VStack(alignment: .leading, spacing: 3) {
-                    Text(server.name)
-                      .font(.headline)
-                      .foregroundStyle(.white)
-                      .fixedSize(horizontal: false, vertical: true)
-                    Text(server.baseURL)
-                      .font(.caption)
-                      .foregroundStyle(Color.dsTextMuted)
-                      .fixedSize(horizontal: false, vertical: true)
-                  }
-
-                  Spacer(minLength: 8)
-
-                  Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.dsTextMuted)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
-                .background(Color.dsSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-              }
-              .buttonStyle(.plain)
-              .simultaneousGesture(TapGesture().onEnded {
-                flow.resolvedAddress = server.baseURL
-                flow.isHTTPS = false
-              })
-            }
-          }
-          .padding(.horizontal, 24)
-        }
-
-        Divider()
-          .background(Color.dsBorderSubtle)
-          .padding(.top, 8)
-
-        Button(action: onNotFound) {
-          Text("Don't see your server?")
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(Color.dsAccent)
-            .frame(maxWidth: .infinity, minHeight: 52)
-        }
-        .buttonStyle(.plain)
-      }
-    }
-    .navigationTitle("Select Server")
-    .inlineNavTitle()
-  }
-}
-
-// MARK: - LAN Manual
-
-private struct SetupLANManualScreen: View {
-  @Environment(SetupFlowState.self) private var flow
-  @State private var address: String = "192.168."
-  @State private var isProbing = false
-  @State private var probeError: String?
-
-  private var canContinue: Bool {
-    let trimmed = address.trimmingCharacters(in: .whitespaces)
-    return !trimmed.isEmpty && trimmed != "192.168." && trimmed.count > 9
-  }
-
-  var body: some View {
-    ZStack {
-      Color.dsBackground.ignoresSafeArea()
-
-      ScrollView {
-        VStack(alignment: .leading, spacing: 24) {
-          // Status block
-          HStack(alignment: .top, spacing: 16) {
-            Image(systemName: "exclamationmark.wifi")
-              .font(.system(size: 28))
-              .foregroundStyle(Color.dsTextMuted)
-            VStack(alignment: .leading, spacing: 6) {
-              Text("Couldn't find a server automatically")
-                .font(.headline)
-                .foregroundStyle(.white)
-                .fixedSize(horizontal: false, vertical: true)
-              Text("Make sure your NAS is powered on and connected to the same WiFi network as this device.")
-                .font(.subheadline)
-                .foregroundStyle(Color.dsTextSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-          }
-          .padding(16)
-          .background(Color.dsSurface)
-          .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-          // Address field
-          VStack(alignment: .leading, spacing: 8) {
-            Text("SERVER ADDRESS")
-              .font(.caption.weight(.semibold))
-              .foregroundStyle(Color.dsTextMuted)
-
-            VStack(spacing: 0) {
-              TextField("192.168.1.100 or hostname", text: $address)
-                .keyboardType(.URL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(.horizontal, 16)
-                .frame(minHeight: 48)
-
-              if let probeError {
-                Divider().background(Color.dsBorderSubtle)
-                Text(probeError)
-                  .font(.footnote)
-                  .foregroundStyle(Color.dsError)
-                  .padding(.horizontal, 16)
-                  .padding(.vertical, 10)
-              }
-            }
-            .background(Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-            Text("Include a port if needed — e.g., 192.168.1.100:5001")
-              .font(.caption)
-              .foregroundStyle(Color.dsTextMuted)
-          }
-
-          // Actions
-          VStack(spacing: 10) {
-            NavigationLink(value: SetupRoute.credentials) {
-              ZStack {
-                if isProbing {
-                  ProgressView().tint(Color.dsAccentOn)
-                } else {
-                  Text("Connect")
-                    .font(.headline)
-                    .foregroundStyle(canContinue ? Color.dsAccentOn : Color.dsTextMuted)
-                }
-              }
-              .frame(maxWidth: .infinity, minHeight: 52)
-              .background(canContinue ? Color.dsAccent : Color.dsSurface)
-              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-            .disabled(!canContinue || isProbing)
-            .buttonStyle(.plain)
-            .simultaneousGesture(TapGesture().onEnded {
-              guard canContinue else { return }
-              flow.resolvedAddress = address.trimmingCharacters(in: .whitespaces)
-              probeError = nil
-            })
-
-            NavigationLink(value: SetupRoute.lanScan) {
-              Text("Scan Again")
-                .font(.headline)
-                .foregroundStyle(Color.dsTextSecondary)
-                .frame(maxWidth: .infinity, minHeight: 52)
-                .background(Color.dsSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-            .buttonStyle(.plain)
-          }
-        }
-        .padding(24)
-      }
-    }
-    .navigationTitle("Enter Address")
-    .inlineNavTitle()
-    .onChange(of: address) { _, _ in probeError = nil }
-  }
-}
-
-// MARK: - WAN Methods
+// MARK: - Connection Methods (root)
 
 private struct SetupWANMethodsScreen: View {
   var body: some View {
@@ -450,10 +68,39 @@ private struct SetupWANMethodsScreen: View {
 
       ScrollView {
         VStack(alignment: .leading, spacing: 16) {
-          Text("Choose how you connect to your NAS from outside your home network.")
+          // Hero / branding — this is the landing page now.
+          VStack(spacing: 8) {
+            ZStack {
+              Circle()
+                .fill(Color.dsAccent)
+                .frame(width: 72, height: 72)
+              Image(systemName: "play.fill")
+                .font(.system(size: 28))
+                .foregroundStyle(Color.dsAccentOn)
+                .offset(x: 3)
+            }
+            .accessibilityHidden(true)
+            .padding(.bottom, 8)
+
+            Text(AppInfo.displayName)
+              .font(.largeTitle.weight(.semibold))
+              .foregroundStyle(.white)
+              .multilineTextAlignment(.center)
+              .fixedSize(horizontal: false, vertical: true)
+
+            Text("Your NAS, beautifully.")
+              .font(.subheadline)
+              .foregroundStyle(Color.dsTextSecondary)
+              .multilineTextAlignment(.center)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          .frame(maxWidth: .infinity)
+          .padding(.top, 16)
+          .padding(.bottom, 8)
+
+          Text("Choose how you'd like to connect to your NAS.")
             .font(.subheadline)
             .foregroundStyle(Color.dsTextSecondary)
-            .padding(.top, 8)
 
           NavigationLink(value: SetupRoute.wanTailscale) {
             WANMethodCard(
@@ -487,12 +134,33 @@ private struct SetupWANMethodsScreen: View {
             )
           }
           .buttonStyle(.plain)
+
+          #if !os(tvOS)
+          VStack(spacing: 0) {
+            Text("Already have a server address?")
+              .font(.footnote)
+              .foregroundStyle(Color.dsTextMuted)
+              .multilineTextAlignment(.center)
+              .fixedSize(horizontal: false, vertical: true)
+              .frame(maxWidth: .infinity, minHeight: 44)
+
+            NavigationLink(value: SetupRoute.credentials) {
+              Text("Enter it manually")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.dsAccent)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+          }
+          .padding(.top, 8)
+          #endif
         }
         .padding(24)
       }
     }
-    .navigationTitle("Remote Connection")
-    .inlineNavTitle()
+    .navigationBarHidden(true)
   }
 }
 
@@ -685,6 +353,7 @@ private struct TailscaleStep: View {
 
 private struct SetupWANDirectScreen: View {
   @Environment(SetupFlowState.self) private var flow
+  @State private var discovery = BonjourDiscovery()
   @State private var address: String = ""
 
   private var canContinue: Bool {
@@ -701,9 +370,86 @@ private struct SetupWANDirectScreen: View {
             Text("Enter your server address")
               .font(.title3.weight(.semibold))
               .foregroundStyle(.white)
-            Text("Use this if you've already set up DDNS, a static IP, or port forwarding on your router.")
+            Text("Use this if you've already set up DDNS, a static IP, or port forwarding on your router. We'll also auto-find any servers on your local network.")
               .font(.subheadline)
               .foregroundStyle(Color.dsTextSecondary)
+          }
+
+          // Auto-discovered servers on the local network
+          if !discovery.servers.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+              HStack(spacing: 8) {
+                Text("FOUND ON YOUR NETWORK")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(Color.dsTextMuted)
+                // TASK-798: keep the spinner visible while more servers may still resolve.
+                if discovery.isScanning {
+                  ProgressView().controlSize(.mini)
+                }
+              }
+
+              VStack(spacing: 10) {
+                ForEach(discovery.servers) { server in
+                  NavigationLink(value: SetupRoute.credentials) {
+                    HStack(spacing: 16) {
+                      Image(systemName: "server.rack")
+                        .font(.system(size: 24))
+                        .foregroundStyle(Color.dsAccent)
+                        .frame(width: 36)
+
+                      VStack(alignment: .leading, spacing: 3) {
+                        Text(server.name)
+                          .font(.headline)
+                          .foregroundStyle(.white)
+                          .fixedSize(horizontal: false, vertical: true)
+                        Text(server.baseURL)
+                          .font(.caption)
+                          .foregroundStyle(Color.dsTextMuted)
+                          .fixedSize(horizontal: false, vertical: true)
+                      }
+
+                      Spacer(minLength: 8)
+
+                      Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.dsTextMuted)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background(Color.dsSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                  }
+                  .buttonStyle(.plain)
+                  .simultaneousGesture(TapGesture().onEnded {
+                    // TASK-805: first tap wins; a rapid second tap on another row is ignored
+                    // until the credentials screen resets the flag on appear.
+                    guard !flow.isSelectingServer else { return }
+                    flow.isSelectingServer = true
+                    flow.resolvedAddress = server.baseURL
+                    flow.isHTTPS = false
+                  })
+                }
+              }
+            }
+          } else {
+            // TASK-798: no servers found yet — give explicit feedback instead of a blank gap.
+            HStack(spacing: 10) {
+              if discovery.isScanning {
+                ProgressView().controlSize(.small)
+                Text("Scanning your network…")
+                  .font(.subheadline)
+                  .foregroundStyle(Color.dsTextSecondary)
+              } else {
+                Image(systemName: "wifi.exclamationmark")
+                  .foregroundStyle(Color.dsTextMuted)
+                Text("No servers found on your network. Enter an address below.")
+                  .font(.subheadline)
+                  .foregroundStyle(Color.dsTextSecondary)
+                  .fixedSize(horizontal: false, vertical: true)
+              }
+              Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
           }
 
           VStack(alignment: .leading, spacing: 8) {
@@ -750,6 +496,8 @@ private struct SetupWANDirectScreen: View {
     }
     .navigationTitle("Direct Address")
     .inlineNavTitle()
+    .onAppear { discovery.startScan() }
+    .onDisappear { discovery.stopScan() }
   }
 }
 
@@ -1063,6 +811,9 @@ struct SetupCredentialsScreen: View {
     .navigationTitle(isReturningUser ? "Welcome Back" : "Sign In")
     .inlineNavTitle()
     .onAppear {
+      // TASK-805: navigation completed — clear the discovered-server selection guard so
+      // backing out and choosing a different server works again.
+      flow.isSelectingServer = false
       // Pre-fill from AppState for returning users
       if !appState.username.isEmpty {
         username = appState.username

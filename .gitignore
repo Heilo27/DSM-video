@@ -48,3 +48,4 @@ backend/dsvideo-backend
 # Xcode build output (subdir of DS Video clone, regenerated)
 DS Video clone/build/
 DS Video clone/build-device/
+DS Video clone/build-iphone/

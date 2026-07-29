@@ -28,20 +28,16 @@
 	<array>
 		<string>_dsvideo._tcp</string>
 	</array>
+	<!-- ATS (TASK-777): cleartext is scoped to the local network ONLY. NSAllowsLocalNetworking
+	     permits http:// to LAN / .local / RFC1918 hosts (the LAN login candidates) and nothing
+	     public. There is deliberately NO NSAllowsArbitraryLoads and NO cleartext exception for
+	     quickconnect.to: the QuickConnect relay now connects over HTTPS (TASK-776), so public
+	     relay/WAN traffic stays TLS-encrypted. The prior quickconnect.to insecure-HTTP exception
+	     was what permitted the plaintext-credential relay path and has been removed. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
-		<key>NSExceptionDomains</key>
-		<dict>
-			<key>quickconnect.to</key>
-			<dict>
-				<key>NSIncludesSubdomains</key>
-				<true/>
-				<key>NSExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-			</dict>
-		</dict>
 	</dict>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

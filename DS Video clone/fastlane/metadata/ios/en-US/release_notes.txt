@@ -1,8 +1,15 @@
-This update focuses on a smoother, more reliable library and playback experience.
+This update makes getting connected simpler and keeps your library ready to play.
 
-• Fixed TV show posters that could appear blank or shift position while scrolling, and posters that occasionally overflowed onto neighboring shows.
-• Shows that share a folder (such as a series and its spin-off) now appear as separate, correctly-rendered entries.
-• Improved playback reliability for MKV and AVI titles when paired with the latest server update — fewer "playback failed" interruptions.
-• More dependable artwork loading throughout the app, including after reconnecting.
+SIMPLER SETUP
+Connecting to your NAS is now a single, clear screen — choose Tailscale, a direct address, or QuickConnect. When you enter an address directly, the app also scans your local network and offers any servers it finds, so you can tap instead of type.
+
+ALWAYS READY TO PLAY
+Newly added videos are now converted automatically in the background to the format that plays back fastest, with no setup required. While a title is being prepared, the app lets you know.
+
+PLAYBACK FIXES
+• Fixed the scrubber and seeking on transcoded video so the timeline and skip controls are accurate.
+• Improved reliability for MKV and AVI titles with the latest server update.
+
+Plus general interface polish and refinements throughout.
 
 Thanks for using DSM Video. Keep the feedback coming.

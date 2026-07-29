@@ -77,7 +77,24 @@ enum QuickConnectResolver {
     }
     // WAN: HTTPS only — cert is valid for the DDNS hostname assigned by Synology.
     // HTTP to a public IP is blocked by ATS (-1022) and would send credentials in plaintext.
-    if let p = httpsPort { addDirect("https://\(wanIP):\(p)") }
+    //
+    // TASK-778: HTTPS to the *raw WAN IP* always fails cert validation (SAN mismatch,
+    // -1200) because the Synology cert is issued for the DDNS hostname, not the IP — so the
+    // WAN-direct candidate never succeeds and every remote login burns its 8s timeout before
+    // falling through to the relay. Prefer the DDNS/FQDN hostname (which the cert matches)
+    // for the HTTPS candidate; fall back to the raw IP only if no hostname is advertised.
+    let ddnsHost = firstNonEmptyString(from: [
+      server["ddns"], server["fqdn"], server["host"], ext["ddns"], ext["fqdn"],
+    ])
+    if let p = httpsPort {
+      if let ddnsHost, ddnsHost.lowercased() != "null" {
+        addDirect("https://\(ddnsHost):\(p)")
+      } else {
+        // No DDNS hostname advertised — raw-IP HTTPS will likely fail cert, but it's the
+        // only WAN-direct option; keep it so a valid-for-IP cert (rare) can still work.
+        addDirect("https://\(wanIP):\(p)")
+      }
+    }
 
     // Relay candidates — Synology's tunnel infrastructure, no port forwarding needed.
     // Appended last; only tried when all direct connections fail.
@@ -115,16 +132,23 @@ enum QuickConnectResolver {
     let json = try await queryCommand("request_tunnel", id: id)
     guard let service = json["service"] as? [String: Any] else { return nil }
 
-    // Prefer the relay domain name (relay_dn) over raw IP — required for TLS cert validation.
+    // SECURITY (TASK-776): the relay carries the login password and every subsequent
+    // Bearer token. It MUST be HTTPS. Synology's relay DNS endpoints (relay_dualstack /
+    // relay_dn, e.g. *.direct.quickconnect.to) terminate TLS with a valid cert for that
+    // hostname, so HTTPS against the *domain name* is correct. A raw relay_ip has no
+    // matching cert AND would only accept plaintext — using it would leak credentials on
+    // an untrusted network, so we FAIL CLOSED and emit no relay candidate rather than
+    // send the password in the clear.
     let relayHost = (service["relay_dualstack"] as? String)
                  ?? (service["relay_dn"] as? String)
-                 ?? (service["relay_ip"] as? String)
-    guard let relayHost, !relayHost.isEmpty else { return nil }
+    guard let relayHost, !relayHost.isEmpty else {
+      qcLog.error("resolveRelay: no TLS-capable relay hostname (relay_dn/relay_dualstack) — refusing plaintext relay, no candidate emitted")
+      return nil
+    }
 
+    // Prefer the relay's own HTTPS port; fall back to the server's HTTPS port, then 443.
     let relayPort = intValue(service["relay_port"]) ?? intValue(service["https_port"]) ?? 443
-    // Synology relay tunnels speak plain HTTP — the relay handles TLS at its outer edge.
-    // Sending HTTPS produces WRONG_VERSION_NUMBER. Always use http for relay candidates.
-    guard let url = URL(string: "http://\(relayHost):\(relayPort)") else { return nil }
+    guard let url = URL(string: "https://\(relayHost):\(relayPort)") else { return nil }
     return Candidate(url: url, requiresTunnelCookie: true)
   }
 
@@ -147,6 +171,17 @@ enum QuickConnectResolver {
     ])
     let (data, _) = try await URLSession.shared.data(for: request)
     return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+  }
+
+  /// Returns the first non-empty, non-null String from a list of heterogeneous JSON values.
+  private static func firstNonEmptyString(from values: [Any?]) -> String? {
+    for v in values {
+      if let s = v as? String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty && t.lowercased() != "null" { return t }
+      }
+    }
+    return nil
   }
 
   private static func intValue(_ val: Any?) -> Int? {

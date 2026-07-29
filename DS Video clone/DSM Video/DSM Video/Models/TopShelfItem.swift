@@ -6,6 +6,6 @@ struct TopShelfItem: Codable, Sendable {
     let id: String
     let title: String
     let year: Int?
-    let imageURL: String?   // full URL string including auth token as query param
+    let imageURL: String?   // tokenless image URL (TASK-774: never persist the session token here)
     let deepLinkURL: String // dsvideo://item/{id}
 }

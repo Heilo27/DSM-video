@@ -183,7 +183,10 @@ struct ItemDetail: Decodable, Identifiable {
   let summary: String?
   let genres: [String]?
   let cast: [Person]?
-  let images: Images
+  // TASK-783: optional so an item whose server response omits the `images`
+  // envelope (freshly-scanned / not-yet-TMDb-matched item, or an older server)
+  // still decodes and opens — the detail view falls back to placeholder art.
+  let images: Images?
   let changeSeq: Int?
 
   // TASK-728: media specs (nil until the server has fully probed the file).
@@ -197,7 +200,7 @@ struct ItemDetail: Decodable, Identifiable {
   init(id: String, type: String, title: String, originalTitle: String? = nil,
        year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
        rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
-       cast: [Person]? = nil, images: Images, changeSeq: Int? = nil,
+       cast: [Person]? = nil, images: Images? = nil, changeSeq: Int? = nil,
        videoCodec: String? = nil, audioCodec: String? = nil, container: String? = nil,
        width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil) {
     self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
@@ -268,6 +271,38 @@ struct PlaybackInfo: Decodable {
   let durationSeconds: Int?
   let chapters: [Chapter]?
   let quality: String?
+  // TASK-828: semantic subtitle metadata from the server's /playback response.
+  // Additive — older servers omit it, so it's optional. The player still discovers
+  // the actual text renditions from the HLS manifest; this array supplies the
+  // "full vs forced vs image" semantics AVFoundation can't infer, plus which single
+  // forced track should auto-enable (translation of foreign scenes).
+  let subtitles: [Subtitle]?
+}
+
+/// A single subtitle track as described by the frozen `/playback subtitles[]` contract
+/// (TASK-826). Matched to the player's AVMediaSelectionOptions by `language` (and `forced`
+/// characteristic), not by array index — image subs occupy a slot but produce no rendition.
+struct Subtitle: Decodable, Hashable {
+  /// HLS subtitle rendition playlist URL. `""` for image subs and direct/remux responses.
+  let url: String
+  /// BCP-47-ish lowercased tag (`"en"`, `"de"`); `"und"` when unknown.
+  let language: String
+  /// Human display label; already carries a `(Forced)` suffix for forced tracks.
+  let name: String
+  /// `"full"` | `"forced"` | `"image"`.
+  let type: String
+  /// True for translation-only/forced tracks.
+  let forced: Bool
+  /// Source-flagged default. Advisory.
+  let `default`: Bool
+  /// At most one track per item. When true, the client turns this track ON at
+  /// playback start with no user action (foreign-scene translation case).
+  let autoEnable: Bool
+
+  enum Kind: String { case full, forced, image, unknown }
+  var kind: Kind { Kind(rawValue: type) ?? .unknown }
+  /// Image subs are surfaced but never fetched/selectable.
+  var isImage: Bool { kind == .image }
 }
 
 // MARK: - Progress

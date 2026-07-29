@@ -382,7 +382,7 @@ private struct LibraryCard: View {
 
 struct LibraryHomeView: View {
   @Environment(AppState.self) private var appState
-  @Environment(\.scenePhase) private var scenePhase
+  // TASK-787: scenePhase handling moved to the app-level owner; no longer needed here.
 
   /// Pass `true` when this view is embedded inside an existing NavigationStack
   /// (e.g. the iPad split-view detail column) to avoid nesting stacks.
@@ -420,6 +420,11 @@ struct LibraryHomeView: View {
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
+            // Cinematic hero (full-bleed). Renders only on the Cinematic theme — on
+            // Classic / Nitrate HomeHero is an EmptyView, so the layout below is
+            // exactly the prior top-rail arrangement. Featured from Just Added.
+            HomeHero(items: appState.homeJustAdded)
+
             // TASK-742: these are curated, finite, mixed-library lists — a "See All"
             // that dumps the user into a single library grid is misleading, so they
             // carry no See-All. Full browsing lives in the Libraries tab.
@@ -446,12 +451,33 @@ struct LibraryHomeView: View {
               )
             }
           }
-          .padding(.vertical, 16)
+          .padding(.top, ThemeHolder.shared.current.usesCinematicChrome ? 0 : 16)
+          .padding(.bottom, 16)
+        }
+        .background(alignment: .top) {
+          // Atmospheric light streaks sit behind all content (no-op on flat themes).
+          ZStack(alignment: .top) {
+            Color.dsBackground
+            AtmosphereBackground().frame(height: 560)
+          }
+          .ignoresSafeArea()
+        }
+        // TASK-789: on Cinematic the floating glass tab bar overlaps the scroll content,
+        // occluding the last rail's card title/year labels. Add a bottom inset equal to
+        // the floating tab bar height so the final row clears the glass. Classic keeps the
+        // standard opaque tab bar (content already sits above it) — leave it untouched.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+          if ThemeHolder.shared.current.usesCinematicChrome {
+            Color.clear.frame(height: 64)
+          }
         }
       }
     }
     .preferredColorScheme(.dark)
     .navigationTitle("Home")
+    // On Cinematic the hero owns the top edge — hide the nav bar so the backdrop runs
+    // full-bleed under the status bar. Flat themes keep the standard "Home" title.
+    .toolbar(ThemeHolder.shared.current.usesCinematicChrome ? .hidden : .automatic, for: .navigationBar)
     .task { await appState.homeLoad() }
     .refreshable { await appState.homeForceRefresh() }
     // TASK-302: announce to VoiceOver once when content rails first appear
@@ -472,13 +498,11 @@ struct LibraryHomeView: View {
       loadLog.info("LibraryHomeView: networkDidReconnect — triggering homeLoad")
       Task { await appState.homeLoad() }
     }
-    .onChange(of: scenePhase) { _, newPhase in
-      // Retry homeLoad when app returns to foreground — catches cases where the
-      // background retry exhausted or the relay URL expired while backgrounded.
-      guard newPhase == .active, appState.sessionToken != nil else { return }
-      loadLog.info("LibraryHomeView: scenePhase became active — triggering homeLoad")
-      Task { await appState.homeLoad() }
-    }
+    // TASK-787: foreground revalidate+refresh is now owned solely by the app-level
+    // scenePhase handler (DS_Video_cloneApp → appState.foregroundReconnectAndRefresh()).
+    // The duplicate handler that lived here raced the same home-* flags on the same
+    // .active event; it has been removed. networkDidReconnect (above) still drives a
+    // homeLoad when the coordinator switches address.
     .background(Color.black.ignoresSafeArea())
 
     if isEmbedded {
@@ -503,8 +527,11 @@ private struct ContinueWatchingCard: View {
             .resizable()
             .scaledToFill()
         } else if let backdropId = item.backdropImageId ?? item.posterImageId {
+          // 200x120 card. 500 is the top of the server's ladder before it falls back
+          // to serving the full-resolution original — the right cap for a thumbnail
+          // this size, and what `width: 400` was already being rounded up to.
           AuthenticatedImage(
-            url: appState.api.imageURL(id: backdropId, width: 400),
+            url: appState.api.imageURL(id: backdropId, width: 500),
             token: appState.sessionToken,
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
@@ -555,6 +582,8 @@ private struct ContinueWatchingCard: View {
     }
     .frame(width: 200, height: 120)
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    // Ambient elevation on the Cinematic theme; no-op on flat themes.
+    .dsCardDepth(cornerRadius: 10)
     // TASK-693/698: redact in app switcher / screen recordings.
     .privacySensitive()
     #if os(iOS)
@@ -681,6 +710,28 @@ private struct HomeRail: View {
         }
         .padding(.horizontal, 16)
       }
+    }
+    // Warm the cache for this rail's posters as soon as the rail exists, so the cards
+    // beyond the initial visible two or three are already decoded by the time they
+    // scroll in. Keyed on item IDs: re-fires when the rail's contents change (sync
+    // landing new items), not on every re-render.
+    .task(id: items.map(\.id).joined(separator: ",")) {
+      ImagePrefetcher.prefetch(
+        urls: items.map { item in
+          if useLandscapeCards {
+            let backdropId = item.backdropImageId ?? item.posterImageId
+            return backdropId.flatMap { appState.api.imageURL(id: $0, width: 500) }
+          }
+          // Must match ItemPosterCell's request exactly (342 = 110pt @3x on the
+          // server's ladder) or the prefetched bytes land under a different cache
+          // key and the cell still starts grey.
+          return item.posterImageId.flatMap {
+            appState.api.imageURL(id: $0, width: 342, version: item.changeSeq)
+          }
+        },
+        token: appState.sessionToken,
+        usesTunnelCookie: appState.api.usesTunnelCookie
+      )
     }
   }
 }

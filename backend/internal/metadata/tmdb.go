@@ -297,11 +297,15 @@ func (c *TMDbClient) doRequest(ctx context.Context, reqURL string, result interf
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		// TASK-823: cap the error-body read — a misbehaving upstream must not be able
+		// to make us buffer an unbounded error string. 64 KiB is ample for any API error.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("tmdb api error: %d - %s", resp.StatusCode, string(body))
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+	// TASK-823: bound the JSON body too. TMDb detail/search responses are well under
+	// this; 8 MiB is a generous ceiling that caps memory on a misbehaving upstream.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(result); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
 

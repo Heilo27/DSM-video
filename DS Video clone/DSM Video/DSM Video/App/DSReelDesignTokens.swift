@@ -34,6 +34,9 @@ extension Color {
     // Borders / separators
     static var dsBorderSubtle:  Color { ThemeHolder.shared.current.borderSubtle }
     static var dsBorderStrong:  Color { ThemeHolder.shared.current.borderStrong }
+
+    // Extended cinematic tokens (flat themes resolve these to no-op values)
+    static var dsAccentGlow:    Color { ThemeHolder.shared.current.accentGlow }
 }
 
 // MARK: - Hex Color Initializer
@@ -74,4 +77,8 @@ extension Font {
 
     // Screen titles (used across all main views)
     static var dsScreenTitle:   Font { ThemeHolder.shared.current.fontScreenTitle }
+
+    // Cinematic display / eyebrow (flat themes fall back to large-title / caption)
+    static var dsDisplay:       Font { ThemeHolder.shared.current.fontDisplay }
+    static var dsEyebrow:       Font { ThemeHolder.shared.current.fontEyebrow }
 }

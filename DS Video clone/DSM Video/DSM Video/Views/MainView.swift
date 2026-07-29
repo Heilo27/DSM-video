@@ -130,6 +130,8 @@ private struct SidebarView: View {
   /// so the parent can share the same list without a duplicate API call.
   @Binding var libraries: [Library]
   @State private var isLoading = false
+  // TASK-793: distinguish a genuinely-empty server from a load failure.
+  @State private var loadError: String?
 
   private var movieLibraries: [Library] {
     libraries.filter { ["movie", "movies", "home", "homevideo"].contains($0.kind) }
@@ -165,8 +167,24 @@ private struct SidebarView: View {
               .tag(SidebarSelection.library(lib))
           }
           if !isLoading && movieLibraries.isEmpty && tvLibraries.isEmpty {
-            Label("No libraries", systemImage: "exclamationmark.triangle")
-              .foregroundStyle(.secondary)
+            if let loadError {
+              // TASK-793: a load failure is not an empty library — show the error + retry.
+              VStack(alignment: .leading, spacing: 6) {
+                Label("Couldn't load libraries", systemImage: "exclamationmark.triangle")
+                  .foregroundStyle(Color.dsError)
+                Text(loadError)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                Button("Retry") {
+                  Task { await loadLibraries(force: true) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+              }
+            } else {
+              Label("No libraries", systemImage: "tray")
+                .foregroundStyle(.secondary)
+            }
           }
         }
       } header: {
@@ -184,21 +202,28 @@ private struct SidebarView: View {
     .task { await loadLibraries() }
   }
 
-  private func loadLibraries() async {
-    guard libraries.isEmpty && !isLoading else { return }
+  private func loadLibraries(force: Bool = false) async {
+    guard (force || libraries.isEmpty) && !isLoading else { return }
     if appState.isDemoMode {
       libraries = DemoData.libraries
       return
     }
     // Use AppState's already-populated homeLibraries to avoid a duplicate API call (TASK-256).
-    if !appState.homeLibraries.isEmpty {
+    if !force && !appState.homeLibraries.isEmpty {
       libraries = appState.homeLibraries
       return
     }
     isLoading = true
+    loadError = nil
     defer { isLoading = false }
-    if let response = try? await appState.api.libraries() {
+    // TASK-793: capture the failure so the sidebar can show an error+retry instead of
+    // masquerading a network failure as an empty library.
+    do {
+      let response = try await appState.api.libraries()
       libraries = response.libraries
+      loadError = nil
+    } catch {
+      loadError = error.localizedDescription
     }
   }
 }
@@ -366,6 +391,9 @@ private struct SearchView: View {
   private func search(commit: Bool) async {
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard query.count >= 2 else { return }
+    // TASK-795: re-entrancy guard — rapid recent-search taps were spawning concurrent
+    // search() calls racing the same result state. Bail if one is already in flight.
+    guard !isSearching else { return }
 
     isSearching = true
     hasSearched = true
@@ -656,15 +684,25 @@ struct DownloadsView: View {
     return all.sorted()
   }
 
+  // TASK-782: genuinely-failed downloads, shown in their own "Failed" section with retry.
+  private var failedDownloadIDs: [String] {
+    Array(downloadManager.failedDownloads.keys).sorted()
+  }
+
   var body: some View {
     let content = Group {
-      if downloads.isEmpty && inProgressIDs.isEmpty {
+      if downloads.isEmpty && inProgressIDs.isEmpty && failedDownloadIDs.isEmpty {
         DSContentUnavailable(title: "No Downloads", systemImage: "arrow.down.circle", description: "Downloaded videos will appear here for offline viewing")
       } else {
         ScrollView {
           VStack(spacing: 16) {
             // Storage indicator
             storageSection
+
+            // Failed downloads (TASK-782) — surfaced so a failure isn't silent.
+            if !failedDownloadIDs.isEmpty {
+              failedDownloadsSection
+            }
 
             // Active and paused downloads
             if !inProgressIDs.isEmpty {
@@ -676,6 +714,9 @@ struct DownloadsView: View {
               LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(downloads) { item in
                   Button {
+                    // TASK-796: guard against a double-tap setting playerItem twice
+                    // before the cover presents.
+                    guard !showPlayer else { return }
                     playerItem = item
                     showPlayer = true
                   } label: {
@@ -712,6 +753,9 @@ struct DownloadsView: View {
     }
     .onChange(of: downloadManager.pausedDownloads.count) { _, _ in
       loadDownloads()
+      loadStorageInfo()
+    }
+    .onChange(of: downloadManager.failedDownloads.count) { _, _ in
       loadStorageInfo()
     }
     .fullScreenCover(isPresented: $showPlayer, onDismiss: { showPlayer = false }) {
@@ -796,6 +840,74 @@ struct DownloadsView: View {
   // MARK: - Active Downloads Section
 
   @ViewBuilder
+  // TASK-782: renders each failed download with its reason and a Retry (transient) or
+  // dismiss (permanent) affordance, so a failure is never silent.
+  private var failedDownloadsSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("Failed")
+        .font(.headline)
+        .foregroundStyle(Color.dsTextPrimary)
+        .padding(.horizontal)
+
+      VStack(spacing: 0) {
+        ForEach(failedDownloadIDs, id: \.self) { itemID in
+          if let failure = downloadManager.failedDownloads[itemID] {
+            HStack(spacing: 12) {
+              Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+              VStack(alignment: .leading, spacing: 2) {
+                Text(failure.title)
+                  .font(.subheadline.weight(.semibold))
+                  .foregroundStyle(Color.dsTextPrimary)
+                  .lineLimit(1)
+                Text(failure.message)
+                  .font(.caption)
+                  .foregroundStyle(Color.dsTextSecondary)
+                  .lineLimit(2)
+              }
+              Spacer()
+              if failure.isPermanent {
+                Button {
+                  downloadManager.dismissFailedDownload(itemId: itemID)
+                } label: {
+                  Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(Color.dsTextSecondary)
+                    .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss failed download \(failure.title)")
+              } else {
+                Button {
+                  downloadManager.retryFailedDownload(itemId: itemID)
+                } label: {
+                  Text("Retry")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.dsAccent)
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 8)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Retry download \(failure.title)")
+              }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            if itemID != failedDownloadIDs.last {
+              Divider()
+                .background(Color.dsSurface)
+                .padding(.horizontal)
+            }
+          }
+        }
+      }
+      .background(Color.dsSurface.opacity(0.5))
+      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .padding(.horizontal)
+    }
+  }
+
   private var activeDownloadsSection: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Downloading")
@@ -1128,7 +1240,12 @@ struct SettingsView: View {
     let form = Form {
       Section {
         // A14: read-only connected-server display + Change Server (mirrors tvOS).
-        LabeledContent("Connected To", value: appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
+        // TASK-809: long QuickConnect/DDNS URLs must truncate rather than overflow the row.
+        LabeledContent("Connected To") {
+          Text(appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        }
         if !appState.username.isEmpty {
           LabeledContent("Signed in as", value: appState.username)
         }
