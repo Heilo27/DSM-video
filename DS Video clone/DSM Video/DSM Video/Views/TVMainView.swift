@@ -223,8 +223,21 @@ private struct TVHomeView: View {
                 TVLandscapeRail(title: "Recently Watched", items: appState.homeRecentlyWatched)
               }
 
-              // Empty state
-              if appState.homeLibraries.isEmpty && !appState.homeIsLoading {
+              // Empty state.
+              //
+              // Gated on "nothing at all is on screen", NOT just on homeLibraries being empty.
+              // Libraries can be present while every home rail AND every library rail is empty
+              // (a configured but unscanned library, or a library whose items all failed to
+              // sync). In that case the previous condition was false, so no empty state
+              // rendered — and every rail above is wrapped in `if !isEmpty`, so they rendered
+              // nothing either. The result on tvOS was a blank screen with NO focusable
+              // element, which the focus engine cannot escape: force-quit was the only exit.
+              // The Refresh button matters as much as the message — it gives focus a home.
+              if !appState.homeIsLoading
+                  && appState.homeContinueWatching.isEmpty
+                  && appState.homeJustAdded.isEmpty
+                  && appState.homeRecentlyWatched.isEmpty
+                  && appState.homeLibraries.isEmpty {
                 ContentUnavailableView(
                   "No Libraries",
                   systemImage: "film.stack",
@@ -232,7 +245,14 @@ private struct TVHomeView: View {
                 )
                 .foregroundStyle(.white)
                 .padding(.top, 40)
+                Button("Refresh") { Task { await appState.homeLoad() } }
+                  .buttonStyle(.borderedProminent)
+                  .tint(Color.dsAccent)
               }
+              // NOTE: no separate "libraries exist but are empty" branch is needed —
+              // TVLibraryRail always renders a focusable NavigationLink header even when the
+              // library has zero items, so focus always has a home in that case. The only
+              // truly blank+unfocusable state is the one handled above.
 
               // Per-library rails
               ForEach(Array(appState.homeLibraries.enumerated()), id: \.element.id) { idx, lib in
@@ -240,7 +260,9 @@ private struct TVHomeView: View {
               }
             }
           }
-          .padding(.top, 100)
+          // Reduced from 100: the header actions now sit in a .safeAreaInset above this
+          // content rather than floating over it, so the old clearance is no longer needed.
+          .padding(.top, 24)
           .padding(.bottom, 80)
         }
       }
@@ -248,30 +270,35 @@ private struct TVHomeView: View {
         ItemDetailView(itemID: itemID, fallbackTitle: "")
           .environment(appState)
       }
-      .toolbar {
-        ToolbarItem(placement: .topBarLeading) {
-          Button {
-            showSettings = true
-          } label: {
-            Image(systemName: "gear")
-              .foregroundStyle(.white)
+      // Header actions live IN the content, not in a .toolbar.
+      //
+      // tvOS does not lay out topBarLeading/topBarTrailing items the way iOS does — it
+      // renders them as free-floating pills near the top-left of the window, OUTSIDE the
+      // scroll content and outside the 60pt title-safe inset. Measured on an Apple TV 4K
+      // sim at 1920x1080, the Settings and Search buttons drew at x 46–283, y 60–135,
+      // printing directly on top of the "Just Added" rail header (it read "ust A d" on
+      // screen) and extending 14px into the left overscan band.
+      //
+      // This is the same defect class as the sort controls in ItemsGridView/TVShowsView and
+      // the player's transport row: iOS toolbar API compiled for tvOS, laid out somewhere
+      // the author never saw. A plain focusable HStack inside the scroll content is
+      // positioned by us, respects title-safe, and joins the normal focus order.
+      .safeAreaInset(edge: .top, spacing: 0) {
+        HStack(spacing: 24) {
+          Button { showSettings = true } label: {
+            Image(systemName: "gear").foregroundStyle(.white)
           }
           .accessibilityLabel("Settings")
-        }
-        ToolbarItem(placement: .topBarLeading) {
-          Button {
-            showSearch = true
-          } label: {
-            Image(systemName: "magnifyingglass")
-              .foregroundStyle(.white)
+
+          Button { showSearch = true } label: {
+            Image(systemName: "magnifyingglass").foregroundStyle(.white)
           }
           .accessibilityLabel("Search")
-        }
-        if !appState.isDemoMode {
-          ToolbarItem(placement: .topBarTrailing) {
-            Button {
-              showPairing = true
-            } label: {
+
+          Spacer()
+
+          if !appState.isDemoMode {
+            Button { showPairing = true } label: {
               if #available(tvOS 17, *) {
                 Label("Pair iOS Device", systemImage: "iphone.and.arrow.right.inward")
                   .foregroundStyle(.white)
@@ -280,8 +307,12 @@ private struct TVHomeView: View {
                   .foregroundStyle(.white)
               }
             }
+            .accessibilityLabel("Pair iOS Device")
           }
         }
+        .padding(.horizontal, 60)   // title-safe
+        .padding(.vertical, 24)
+        .background(Color.black.opacity(0.95))
       }
     }
     .sheet(isPresented: $showSettings) {
@@ -409,9 +440,13 @@ private struct TVLibraryRail: View {
             .foregroundStyle(Color.dsTextSecondary)
             .accessibilityHidden(true)
         }
-        .padding(.horizontal, 60)
       }
       .buttonStyle(.plain)
+      // Title-safe padding goes OUTSIDE the Button, not inside its label. With it inside,
+      // the button's own frame started at x=0 and tvOS drew the focus highlight around
+      // that frame — 14px into the left overscan band, where a real TV clips it. Padding
+      // the button itself keeps the highlight inside title-safe too.
+      .padding(.horizontal, 60)
       .accessibilityLabel(library.title)
       .accessibilityHint("Opens full library")
 

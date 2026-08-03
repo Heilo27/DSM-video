@@ -4389,7 +4389,15 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 			))
 		}
 	}
-	if req.DurationSeconds <= 0 || req.PositionSeconds < 0 {
+	// Upper bound as well as lower. Without it any client (or a scripted POST) can store a
+	// duration larger than a 32-bit int; that row is then handed to every syncing client, and
+	// one that narrows to Int32 traps on it at launch — an unrecoverable crash-loop seeded by
+	// a single bad write. The clients were fixed to bind 64-bit, but the server must not
+	// persist impossible values in the first place. 32 days is far beyond any real title and
+	// still leaves 32-bit clients safe.
+	const maxProgressSeconds = 32 * 24 * 60 * 60 // 2_764_800
+	if req.DurationSeconds <= 0 || req.PositionSeconds < 0 ||
+		req.DurationSeconds > maxProgressSeconds || req.PositionSeconds > maxProgressSeconds {
 		writeErr(w, http.StatusBadRequest, "invalid_progress")
 		return
 	}

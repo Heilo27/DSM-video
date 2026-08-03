@@ -424,8 +424,15 @@ struct APIClient {
          conv.status == "converting" {
         throw APIError.converting
       }
+      // Carry the HTTP status alongside the decoded error code. The backend's writeErr
+      // ALWAYS emits a JSON body ({"error": code}) — including on 401 — so this decode
+      // always succeeded and every auth rejection became .server("invalid_token"),
+      // never .http(401). The two `case .http(401)` handlers in AppState were therefore
+      // unreachable: an expired or revoked token left the user on an authenticated-looking
+      // UI with empty rails, no route back to login, and the dead token still in the
+      // Keychain. Preserving the status here is what makes those handlers fire.
       if let apiErr = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
-        throw APIError.server(apiErr.error)
+        throw APIError.server(apiErr.error, status: httpResp.statusCode)
       }
       throw APIError.http(httpResp.statusCode)
     }
@@ -436,7 +443,11 @@ struct APIClient {
 enum APIError: Error {
   case network
   case http(Int)
-  case server(String)
+  /// A structured error from the server. `status` is the HTTP status that carried it —
+  /// needed because the backend returns a JSON body on EVERY error including 401, so
+  /// matching on the message alone cannot distinguish an auth failure from any other
+  /// server-side rejection. Defaulted so existing construction sites keep compiling.
+  case server(String, status: Int = 0)
   case invalidURL
   // The server is currently converting this title to a smooth-playback format
   // (auto-normalize). Not a failure — an informational, transient state.
@@ -448,7 +459,7 @@ enum APIError: Error {
     case .converting:
       return "This video is being prepared for smooth playback. Check back in a few minutes."
     case .http(let code): return "Server error (\(code))."
-    case .server(let msg):
+    case .server(let msg, _):
       // Map known server error codes to friendly, actionable text.
       switch msg {
       case "permission_denied":
@@ -461,6 +472,26 @@ enum APIError: Error {
         return msg.replacingOccurrences(of: "_", with: " ")
       }
     case .invalidURL: return "Invalid server URL."
+    }
+  }
+
+  /// True when this is an authentication/authorization rejection — the token is missing,
+  /// expired, invalid, or revoked, or the account lacks permission.
+  ///
+  /// Use this instead of matching `.http(401)`: the backend attaches a JSON body to every
+  /// error response, so a 401 arrives as `.server("invalid_token", status: 401)` and a bare
+  /// `case .http(401)` never matches. Checking the status covers both shapes, and the
+  /// message check covers any path that loses the status.
+  var isAuthFailure: Bool {
+    switch self {
+    case .http(let code):
+      return code == 401 || code == 403
+    case .server(let msg, let status):
+      if status == 401 || status == 403 { return true }
+      return ["missing_token", "invalid_token", "token_revoked",
+              "permission_denied", "account_disabled"].contains(msg)
+    default:
+      return false
     }
   }
 

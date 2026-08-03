@@ -300,64 +300,12 @@ struct TVShowsView: View {
       }
     }
     #else
-    .searchable(text: $searchText, prompt: "Search TV shows")
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        HStack(spacing: 12) {
-          // Recently Watched
-          Button {
-            sortOption = .recentlyWatched
-            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.tvSortOption")
-            sortedShows = computeSortedShows()
-          } label: {
-            Label("Watched", systemImage: "play.circle")
-          }
-          .tint(sortOption == .recentlyWatched ? Color.dsAccent : .white)
-          .accessibilityLabel("Sort by recently watched")
-
-          // A→Z toggle
-          Button {
-            sortOption = (sortOption == .nameAsc) ? .nameDesc : .nameAsc
-            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.tvSortOption")
-            sortedShows = computeSortedShows()
-          } label: {
-            Label(
-              sortOption == .nameAsc ? "Z→A" : "A→Z",
-              systemImage: sortOption == .nameAsc ? "textformat.abc.dottedunderline" : "textformat.abc"
-            )
-          }
-          .tint(sortOption == .nameAsc || sortOption == .nameDesc ? Color.dsAccent : .white)
-          .accessibilityLabel(sortOption == .nameAsc ? "Sort Z to A" : "Sort A to Z")
-
-          // Recently Added toggle
-          Button {
-            sortOption = (sortOption == .addedNewest) ? .addedOldest : .addedNewest
-            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.tvSortOption")
-            sortedShows = computeSortedShows()
-          } label: {
-            Label(
-              sortOption == .addedOldest ? "Oldest First" : "Recently Added",
-              systemImage: sortOption == .addedOldest ? "clock" : "clock.badge.checkmark"
-            )
-          }
-          .tint(sortOption == .addedNewest || sortOption == .addedOldest ? Color.dsAccent : .white)
-          .accessibilityLabel(sortOption == .addedOldest ? "Sort oldest first" : "Sort recently added first")
-
-          // Release Year toggle
-          Button {
-            sortOption = (sortOption == .releaseNewest) ? .releaseOldest : .releaseNewest
-            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.tvSortOption")
-            sortedShows = computeSortedShows()
-          } label: {
-            Label(
-              sortOption == .releaseOldest ? "Year ↑" : "Year ↓",
-              systemImage: "calendar"
-            )
-          }
-          .tint(sortOption == .releaseNewest || sortOption == .releaseOldest ? Color.dsAccent : .white)
-          .accessibilityLabel(sortOption == .releaseOldest ? "Sort by oldest release year" : "Sort by newest release year")
-        }
-      }
+    // tvOS: same fix as the Movies grid — render the real TVShowSortChipBar as a focusable
+    // row instead of four Buttons inside ToolbarItem(placement: .topBarTrailing), a
+    // placement tvOS does not render. Those buttons compiled fine and were never visible,
+    // leaving the TV Shows grid permanently stuck on its default sort with no way to change it.
+    .safeAreaInset(edge: .top, spacing: 0) {
+      TVShowSortChipBar(selection: $sortOption)
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
@@ -408,7 +356,8 @@ struct TVShowsView: View {
 
 // MARK: - Sort Chip Bar (iOS/macOS only)
 
-#if !os(tvOS)
+// Available on tvOS too: this was #if !os(tvOS), which is why the TV Shows grid had no
+// sort control at all — the tvOS branch above referenced a type that did not exist for it.
 private struct TVShowSortChipBar: View {
   @Binding var selection: TVShowSortOption
 
@@ -432,7 +381,6 @@ private struct TVShowSortChipBar: View {
     }
   }
 }
-#endif
 
 // MARK: - Poster Cell
 

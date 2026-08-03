@@ -551,7 +551,12 @@ final class AppState {
   func handleConnectionFailure(_ error: Error) {
     if let apiErr = error as? APIError {
       switch apiErr {
-      case .http(401), .http(403):
+      // isAuthFailure, not `.http(401)`: the backend sends a JSON body with every error,
+      // so an expired token arrives as .server("invalid_token", status: 401) and the old
+      // `.http(401)` pattern never matched. This branch was dead code — a rejected token
+      // left the user on an authenticated-looking UI with empty rails and no way back to
+      // the login screen.
+      case _ where apiErr.isAuthFailure:
         // Token expired or rejected — must re-authenticate
         Self.deleteFromKeychain(account: Keys.keychainAccountToken)
         sessionToken = nil
@@ -622,7 +627,14 @@ final class AppState {
         clearNetworkError()
         return true
       } catch let err as APIError {
-        if case .http(401) = err {
+        // isAuthFailure covers 401 AND 403 in both .http and .server shapes. The old
+        // `case .http(401)` could never match (the server always sends a JSON body), so
+        // this fell through and ADOPTED the candidate on any auth rejection — calling
+        // clearNetworkError() and reporting success. A revoked or permission-denied
+        // account therefore "reconnected" to a server that would refuse every subsequent
+        // request: /api/v1/version is unauthenticated, so probe one passed and probe two's
+        // failure was swallowed here. Fail closed on auth, not open.
+        if err.isAuthFailure {
           homeLog.warning("reconnect: token rejected by \(candidate.url) — triggering session expiry")
           handleConnectionFailure(err)
           return false

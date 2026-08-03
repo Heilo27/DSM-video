@@ -243,16 +243,24 @@ actor LocalStore {
       sqlite3_bind_text(stmt, 2, libId, -1, SQLITE_TRANSIENT)
       sqlite3_bind_text(stmt, 3, item.type, -1, SQLITE_TRANSIENT)
       sqlite3_bind_text(stmt, 4, item.title, -1, SQLITE_TRANSIENT)
-      if let year = item.year { sqlite3_bind_int(stmt, 5, Int32(year)) } else { sqlite3_bind_null(stmt, 5) }
-      if let dur = item.durationSeconds { sqlite3_bind_int(stmt, 6, Int32(dur)) } else { sqlite3_bind_null(stmt, 6) }
+      // bind_int64/Int64 — never Int32(). The models are Int (64-bit) and these values come
+      // straight from server JSON, so `Int32(x)` is a TRAPPING narrowing conversion: any value
+      // above Int32.max crashes the app rather than truncating. The backend validates progress
+      // only as `duration <= 0 || position < 0` (main.go:4392) with no upper bound, so an
+      // out-of-range duration is accepted server-side, returned by sync, and then traps here —
+      // on every launch, because runDeltaSync runs at startup. That is an unrecoverable
+      // crash-loop with no in-app escape. SQLite stores 64-bit integers natively; there was
+      // never a reason to narrow.
+      if let year = item.year { sqlite3_bind_int64(stmt, 5, Int64(year)) } else { sqlite3_bind_null(stmt, 5) }
+      if let dur = item.durationSeconds { sqlite3_bind_int64(stmt, 6, Int64(dur)) } else { sqlite3_bind_null(stmt, 6) }
       sqlite3_bind_text(stmt, 7, item.addedAt, -1, SQLITE_TRANSIENT)
       if let r = item.rating { sqlite3_bind_double(stmt, 8, r) } else { sqlite3_bind_null(stmt, 8) }
       if let p = item.posterImageId { sqlite3_bind_text(stmt, 9, p, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 9) }
       if let b = item.backdropImageId { sqlite3_bind_text(stmt, 10, b, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 10) }
       if let s = item.showName { sqlite3_bind_text(stmt, 11, s, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 11) }
       if let f = item.showFolderId { sqlite3_bind_text(stmt, 12, f, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 12) }
-      if let sn = item.seasonNumber { sqlite3_bind_int(stmt, 13, Int32(sn)) } else { sqlite3_bind_null(stmt, 13) }
-      if let en = item.episodeNumber { sqlite3_bind_int(stmt, 14, Int32(en)) } else { sqlite3_bind_null(stmt, 14) }
+      if let sn = item.seasonNumber { sqlite3_bind_int64(stmt, 13, Int64(sn)) } else { sqlite3_bind_null(stmt, 13) }
+      if let en = item.episodeNumber { sqlite3_bind_int64(stmt, 14, Int64(en)) } else { sqlite3_bind_null(stmt, 14) }
       sqlite3_bind_int64(stmt, 15, Int64(item.changeSeq ?? 0))
       let rc = sqlite3_step(stmt)
       if rc != SQLITE_DONE {
@@ -314,8 +322,9 @@ actor LocalStore {
     for (itemId, p) in progress {
       sqlite3_reset(stmt)
       sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
-      sqlite3_bind_int(stmt, 2, Int32(p.positionSeconds))
-      sqlite3_bind_int(stmt, 3, Int32(p.durationSeconds))
+      // See upsertItems: server-supplied, unbounded above — bind 64-bit, never Int32().
+      sqlite3_bind_int64(stmt, 2, Int64(p.positionSeconds))
+      sqlite3_bind_int64(stmt, 3, Int64(p.durationSeconds))
       sqlite3_bind_text(stmt, 4, p.updatedAt, -1, SQLITE_TRANSIENT)
       // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
       let rc = sqlite3_step(stmt)
@@ -345,8 +354,8 @@ actor LocalStore {
     defer { sqlite3_finalize(stmt) }
     let now = iso8601Formatter.string(from: Date())
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
-    sqlite3_bind_int(stmt, 2, Int32(positionSeconds))
-    sqlite3_bind_int(stmt, 3, Int32(durationSeconds))
+    sqlite3_bind_int64(stmt, 2, Int64(positionSeconds))
+    sqlite3_bind_int64(stmt, 3, Int64(durationSeconds))
     sqlite3_bind_text(stmt, 4, now, -1, SQLITE_TRANSIENT)
     // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
     let rc = sqlite3_step(stmt)

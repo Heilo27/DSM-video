@@ -216,37 +216,14 @@ struct ItemsGridView: View {
       sortedItems = sorted(items, by: new)
     }
     #else
-    .searchable(text: $searchText, prompt: "Search \(library.title)")
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        HStack(spacing: 12) {
-          // A→Z toggle
-          Button {
-            sortOption = (sortOption == .nameAsc) ? .nameDesc : .nameAsc
-            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.sortOption")
-            sortedItems = sorted(items, by: sortOption)
-          } label: {
-            Label(
-              sortOption == .nameAsc ? "Z→A" : "A→Z",
-              systemImage: sortOption == .nameAsc ? "textformat.abc.dottedunderline" : "textformat.abc"
-            )
-          }
-          .accessibilityLabel(sortOption == .nameAsc ? "Sort Z to A" : "Sort A to Z")
-
-          // Recently Added toggle
-          Button {
-            sortOption = (sortOption == .addedNewest) ? .addedOldest : .addedNewest
-            UserDefaults.standard.set(sortOption.rawValue, forKey: "dsReel.sortOption")
-            sortedItems = sorted(items, by: sortOption)
-          } label: {
-            Label(
-              sortOption == .addedOldest ? "Oldest First" : "Recently Added",
-              systemImage: sortOption == .addedOldest ? "clock" : "clock.badge.checkmark"
-            )
-          }
-          .accessibilityLabel(sortOption == .addedOldest ? "Sort oldest first" : "Sort recently added first")
-        }
-      }
+    // tvOS: render the SAME SortChipBar the iOS branch uses, as a focusable row above the
+    // grid. This branch previously put two sort buttons in
+    // ToolbarItem(placement: .topBarTrailing) and called .searchable() — neither of which
+    // tvOS renders. The controls existed in code and were invisible on screen, which is
+    // why the TV had no way to change sort order. Same defect class as the player's
+    // top-bar/transport overscan bug: written for iOS, compiled for tvOS, never displayed.
+    .safeAreaInset(edge: .top, spacing: 0) {
+      SortChipBar(selection: $sortOption)
     }
     .onChange(of: items) { _, new in sortedItems = sorted(new, by: sortOption) }
     .onChange(of: sortOption) { _, new in
