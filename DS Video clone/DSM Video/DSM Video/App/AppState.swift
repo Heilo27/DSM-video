@@ -586,8 +586,15 @@ final class AppState {
   /// logout() — not here. Cancelling from clearNetworkError() would self-cancel the retry task
   /// before homeLoad() runs on the success path (Issue 7).
   func clearNetworkError() {
+    let wasDown = serverUnreachable || isOffline
     serverUnreachable = false
     isOffline = false
+    // Connectivity just came back — push anything recorded while we were offline. This is
+    // the single choke point every reconnect path funnels through, so hooking it here
+    // covers foreground revalidation, QuickConnect re-resolution, and manual retry alike.
+    if wasDown {
+      Task { await self.flushPendingProgress() }
+    }
   }
 
   /// Re-resolves QC candidates and updates api to the first reachable one.
@@ -1206,6 +1213,12 @@ final class AppState {
     let apiSnapshot = api
     homeLog.info("runDeltaSync: background=\(background)")
 
+    // Step 0: push before pulling. Any progress recorded while the NAS was unreachable is
+    // still flagged pending; it MUST go up before we download the server's copy, otherwise
+    // the server's older value comes back down and upsertProgress's last-writer-wins
+    // comparison overwrites the newer local position — silently losing the user's place.
+    await flushPendingProgress()
+
     do {
       // Step 1: Get server seq numbers and our local cursors
       let status = try await apiSnapshot.syncStatus()
@@ -1372,23 +1385,61 @@ final class AppState {
     homeRecentlyWatched = rails.recentlyWatched
   }
 
-  /// Optimistic progress write: update local store immediately, then fire network write.
+  /// Optimistic progress write: update the local store immediately (durability), mark it
+  /// pending, then attempt the network write. On failure the row STAYS pending and is
+  /// retried by `flushPendingProgress()`.
+  ///
+  /// The previous version fired a detached, unretried Task and only logged failure. Its
+  /// comment claimed "the delta-sync cursor reconciles the server on the next sync pass" —
+  /// that mechanism never existed; sync is download-only. Every progress update made while
+  /// the NAS was unreachable was therefore lost permanently, which is why the server held
+  /// zero progress rows while the phone displayed a populated Continue Watching rail, and
+  /// why Continue Watching / Recently Watched were empty on every other device.
   func recordProgress(itemId: String, positionSeconds: Int, durationSeconds: Int) async {
     guard !isDemoMode else { return }
     await LocalStore.shared.upsertSingleProgress(
       itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
-    let apiSnapshot = api
-    let logSnapshot = homeLog
-    Task.detached(priority: .utility) {
-      // TASK-695: the LocalStore write above is the durability guarantee, so a network
-      // sync failure isn't data loss — but it shouldn't be invisible. Log it (the
-      // delta-sync cursor reconciles the server on the next sync pass).
+
+    do {
+      try await api.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      await LocalStore.shared.markProgressSynced(
+        itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+    } catch {
+      // Stays flagged pending — flushPendingProgress() will retry on the next foreground,
+      // reconnect, or sync pass. Not data loss: the local write above already landed.
+      homeLog.warning("recordProgress: server write failed for \(itemId) — \(error.localizedDescription); queued for retry")
+    }
+  }
+
+  /// Uploads progress the server has not confirmed. Idempotent and safe to call often —
+  /// returns immediately when the outbox is empty.
+  ///
+  /// Called on foreground, after a successful reconnect, and at the start of a delta sync,
+  /// so a device that recorded progress offline pushes it as soon as the NAS is reachable
+  /// again. Ordering is oldest-first so a replay reconstructs the real watch sequence; the
+  /// server's own last-writer-wins comparison discards anything staler than what it holds.
+  func flushPendingProgress() async {
+    guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
+    let pending = await LocalStore.shared.pendingProgress()
+    guard !pending.isEmpty else { return }
+
+    homeLog.info("flushPendingProgress: \(pending.count) queued progress row(s) to upload")
+    var uploaded = 0
+    for row in pending {
       do {
-        try await apiSnapshot.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+        try await api.setProgress(
+          id: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+        await LocalStore.shared.markProgressSynced(
+          itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+        uploaded += 1
       } catch {
-        logSnapshot.warning("recordProgress: server sync failed for \(itemId) — \(error.localizedDescription); local store holds it until next sync")
+        // Stop on the first failure rather than hammering an unreachable or rejecting
+        // server with the whole backlog. Everything not yet uploaded stays pending.
+        homeLog.warning("flushPendingProgress: stopped after \(uploaded) upload(s) — \(error.localizedDescription)")
+        return
       }
     }
+    homeLog.info("flushPendingProgress: uploaded \(uploaded) row(s)")
   }
 
   // homeRefreshProgress kept for backwards compat with any view that calls it

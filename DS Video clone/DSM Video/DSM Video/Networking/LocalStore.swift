@@ -167,6 +167,23 @@ actor LocalStore {
       execIgnoringErrors("ALTER TABLE items ADD COLUMN show_folder_id TEXT")
       setUserVersion(1)
     }
+    if version < 2 {
+      // v2: outbox flag for progress that has not yet been accepted by the server.
+      //
+      // Before this, recordProgress() wrote locally and fired a detached, unretried POST
+      // whose failure was only logged — the comment claimed "the delta-sync cursor
+      // reconciles the server on the next pass", but no upward push existed anywhere in
+      // the client. A failed POST was lost permanently, which is why the server held zero
+      // progress rows while the phone showed a populated Continue Watching rail.
+      //
+      // Defaulting existing rows to 1 (pending) is deliberate: every row already on a
+      // device predates the outbox and may never have reached the server, so the first
+      // flush after upgrade re-sends them. The server upsert is idempotent and its
+      // last-writer-wins comparison discards anything staler than what it holds.
+      execIgnoringErrors("ALTER TABLE progress ADD COLUMN pending_sync INTEGER NOT NULL DEFAULT 1")
+      execIgnoringErrors("CREATE INDEX IF NOT EXISTS idx_progress_pending ON progress(pending_sync) WHERE pending_sync = 1")
+      setUserVersion(2)
+    }
   }
 
   private func userVersion() -> Int {
@@ -336,16 +353,19 @@ actor LocalStore {
     exec("COMMIT")
   }
 
+  /// Writes progress locally and marks it pending upload. `pending_sync` is cleared only by
+  /// `markProgressSynced(_:)` after the server has actually accepted the value.
   func upsertSingleProgress(itemId: String, positionSeconds: Int, durationSeconds: Int) {
     guard let db else { return }
     var stmt: OpaquePointer?
     let sql = """
-      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at)
-      VALUES(?,?,?,?)
+      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync)
+      VALUES(?,?,?,?,1)
       ON CONFLICT(item_id) DO UPDATE SET
         position_seconds=excluded.position_seconds,
         duration_seconds=excluded.duration_seconds,
-        updated_at=excluded.updated_at
+        updated_at=excluded.updated_at,
+        pending_sync=1
     """
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
       log.error("upsertSingleProgress: sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
@@ -363,6 +383,81 @@ actor LocalStore {
       let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
       log.error("upsertSingleProgress: step failed [\(rc)] for item \(itemId): \(msg)")
     }
+  }
+
+  // MARK: - Progress Outbox
+  //
+  // Progress is written locally first and flagged pending; the flag clears only once the
+  // server confirms the write. This replaces a detached fire-and-forget POST whose failure
+  // was logged and then forgotten, which silently lost every progress update made while the
+  // NAS was unreachable — the reason the server held zero rows while phones showed
+  // populated Continue Watching rails.
+
+  /// One item of unsynced progress.
+  struct PendingProgress: Sendable {
+    let itemId: String
+    let positionSeconds: Int
+    let durationSeconds: Int
+  }
+
+  /// Progress rows the server has not yet confirmed, oldest first so the flush replays in
+  /// the order the user actually watched. Bounded: a device offline for a long stretch
+  /// should not fire an unbounded burst at the NAS on reconnect.
+  func pendingProgress(limit: Int = 200) -> [PendingProgress] {
+    guard let db else { return [] }
+    var stmt: OpaquePointer?
+    let sql = """
+      SELECT item_id, position_seconds, duration_seconds
+      FROM progress
+      WHERE pending_sync = 1
+      ORDER BY updated_at ASC
+      LIMIT ?
+    """
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_int64(stmt, 1, Int64(limit))
+    var out: [PendingProgress] = []
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      guard let idC = sqlite3_column_text(stmt, 0) else { continue }
+      out.append(PendingProgress(
+        itemId: String(cString: idC),
+        positionSeconds: Int(sqlite3_column_int64(stmt, 1)),
+        durationSeconds: Int(sqlite3_column_int64(stmt, 2))
+      ))
+    }
+    return out
+  }
+
+  /// Clears the pending flag after the server accepted this exact value.
+  ///
+  /// The position/duration guard matters: if the user kept watching while the flush was in
+  /// flight, the row now holds a NEWER position than the one just uploaded. Clearing
+  /// unconditionally would drop that newer value from the outbox and it would never be sent.
+  func markProgressSynced(itemId: String, positionSeconds: Int, durationSeconds: Int) {
+    guard let db else { return }
+    var stmt: OpaquePointer?
+    let sql = """
+      UPDATE progress SET pending_sync = 0
+      WHERE item_id = ? AND position_seconds = ? AND duration_seconds = ?
+    """
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int64(stmt, 2, Int64(positionSeconds))
+    sqlite3_bind_int64(stmt, 3, Int64(durationSeconds))
+    if sqlite3_step(stmt) != SQLITE_DONE {
+      let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+      log.error("markProgressSynced: step failed for \(itemId): \(msg)")
+    }
+  }
+
+  /// Count of unsynced rows — for diagnostics and to skip a no-op flush cheaply.
+  func pendingProgressCount() -> Int {
+    guard let db else { return 0 }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM progress WHERE pending_sync = 1", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+    defer { sqlite3_finalize(stmt) }
+    return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
   }
 
   /// Resumable position for an item, or 0 if there is nothing to resume.
