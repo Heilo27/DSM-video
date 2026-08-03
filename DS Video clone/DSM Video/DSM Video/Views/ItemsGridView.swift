@@ -351,9 +351,8 @@ struct ItemsGridView: View {
   }
 }
 
-// MARK: - Sort Chip Bar (iOS/macOS only)
+// MARK: - Sort Chip Bar
 
-#if !os(tvOS)
 /// A sort dimension that toggles direction when its chip is re-tapped. Some
 /// dimensions (All, Rating) have no direction — a single tap selects them.
 private struct SortDimension {
@@ -418,7 +417,6 @@ private struct SortDimensionChip: View {
     }
   }
 }
-#endif
 
 struct ItemPosterCell: View {
   @Environment(AppState.self) private var appState

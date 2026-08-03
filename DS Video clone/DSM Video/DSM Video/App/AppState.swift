@@ -1015,8 +1015,16 @@ final class AppState {
       return
     }
 
-    // Already have in-memory rail data — run heartbeat to check for changes
-    if !homeAllRailsEmpty || !homeLibraries.isEmpty {
+    // Already have in-memory rail data — run heartbeat to check for changes.
+    //
+    // This MUST gate on the rails themselves, not on libraries. The condition used to
+    // be `!homeAllRailsEmpty || !homeLibraries.isEmpty`, and that `||` meant a session
+    // which had loaded libraries but NOT yet loaded rails took this early return and
+    // never reached the cold-start path below that actually queries them from SQLite.
+    // On tvOS that was reliably the case — libraries populate first — so Continue
+    // Watching / Just Added / Recently Watched never appeared on the TV at all while
+    // the Movies and TV Shows rails showed fine.
+    if !homeAllRailsEmpty {
       homeLog.info("homeLoad[\(callID)]: PATH=in-memory — rails populated, running heartbeat")
       homeError = nil  // clear any stale error banner alongside populated content
       Task { await self.runHeartbeat() }
