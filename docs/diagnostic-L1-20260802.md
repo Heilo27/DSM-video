@@ -88,14 +88,28 @@ account passed probe one and had probe two's failure swallowed. Now fails closed
 
 ### Confirmed, not fixed (carried to cycle 2)
 
-**Progress sync is one-directional (TASK-830 + TASK-839).** Confirmed from both ends: the
-server returns zero progress rows for the account, and `AppState.swift:1364` fires the POST
-in a detached, unretried `Task` that only logs failure. The code comment claiming a
-"delta-sync cursor reconciles on the next pass" is false — there is no outbox, dirty flag,
-or upward push anywhere in the 47 files. A failed POST is lost permanently. This is why
-Continue Watching and Recently Watched are empty on every device but the one that watched.
-`toggleWatchlist` already implements the optimistic-with-rollback pattern progress lacks,
-which makes this an oversight rather than a design decision.
+**Progress sync had no retry (TASK-830 + TASK-839) — FIXED.** `recordProgress` fired the
+POST in a detached, unretried `Task` that only logged failure, and its comment claimed a
+"delta-sync cursor reconciles the server on the next pass" — a mechanism that does not exist
+anywhere in the client. Sync is download-only, so progress recorded while the NAS was
+unreachable was lost permanently. Fixed with a `pending_sync` outbox (schema v2), flushed
+before the download half of sync and on every reconnect.
+
+**CORRECTION — the server was never empty.** Earlier in this session I reported "the server
+has zero progress rows" and repeated it several times while reasoning about the tvOS rails.
+That measurement was wrong: I queried `/api/v1/progress`, a *batch* endpoint that returns an
+empty map unless given `ids=`. The correct endpoint is `/api/v1/progress/all`, which returns
+**193 rows — 35 eligible for Continue Watching, 118 for Recently Watched**. The client
+already calls `/progress/all` correctly (`APIClient.swift:141`).
+
+The empty tvOS rails were therefore NOT caused by missing server data. The actual cause is
+the `homeLoad()` early-return fixed in `0aff373`: once `homeLibraries` was populated the
+function returned before ever querying the rails from SQLite. Replaying the real server data
+through the rail SQL confirms Continue Watching will show 10 titles once that fix reaches the
+device.
+
+The outbox fix remains correct and worth keeping — a failed POST was genuinely being dropped
+— but it is a durability improvement, not the cause of the reported symptom.
 
 **iOS AX5 Dynamic Type is broken (TASK-857).** At maximum text size, card titles overflow
 onto the poster art and collide with text baked into the artwork. Unreadable.
