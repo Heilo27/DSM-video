@@ -410,7 +410,12 @@ struct GestureVideoPlayer: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             HStack(spacing: 12) {
-                if onPlaybackFailed != nil {
+                // TASK-848: hide Retry when the failure was an expired session. Retrying
+                // re-fetches with the same dead token and fails identically every time —
+                // offering the button just invites the user to loop. The session has
+                // already been torn down by handlePlaybackFailure, so Dismiss returns them
+                // to the login screen, which is the only action that can actually help.
+                if onPlaybackFailed != nil, !err.localizedCaseInsensitiveContains("session expired") {
                     Button("Retry") {
                         playerError = nil
                         onPlaybackFailed?()

@@ -545,8 +545,15 @@ struct ItemDetailView: View {
 
   // MARK: - Header
 
+  // TASK-846: horizontalSizeClass is ALWAYS .regular on tvOS — it carries no information
+  // there, so this silently took the iPad branch (420pt) on a 1080pt-tall 10-foot display.
+  // Give tvOS its own constant sized for the screen it actually runs on.
   private var backdropHeight: CGFloat {
-    horizontalSizeClass == .regular ? 420 : min(300, viewHeight * 0.35)
+    #if os(tvOS)
+    return 620
+    #else
+    return horizontalSizeClass == .regular ? 420 : min(300, viewHeight * 0.35)
+    #endif
   }
 
   @ViewBuilder
@@ -1171,6 +1178,10 @@ private struct PlayerSheet: View {
   // Progress sync debouncing
   @State private var lastSyncTime: Date = .distantPast
   @State private var lastSyncedPosition: Int = 0
+  /// The most recent position reported by the player (~every 0.5s), NOT gated by the sync
+  /// throttle. This is what the dismiss and background-flush paths must persist —
+  /// `lastSyncedPosition` is only the last value that survived throttling. See TASK-838.
+  @State private var livePosition: Int = 0
   @State private var lastKnownDuration: Int = 0
   private let syncInterval: TimeInterval = 10  // Sync at most every 10 seconds
   private let seekThreshold: Int = 15  // Or if position changes by 15+ seconds (seek)
@@ -1209,7 +1220,11 @@ private struct PlayerSheet: View {
             // Guard: if user dismissed before video started or position/duration are
             // unknown, skip setProgress entirely — must not overwrite real saved progress
             // with 0/0 on instant dismiss (P2-3).
-            guard lastSyncedPosition > 0 && lastKnownDuration > 0 else {
+            // TASK-838: persist the LIVE position, not the throttled one. Falls back to
+            // lastSyncedPosition if the player never reported a tick, so the "watched under
+            // ~5s → write nothing" behaviour below is preserved exactly.
+            let exitPosition = livePosition > 0 ? livePosition : lastSyncedPosition
+            guard exitPosition > 0 && lastKnownDuration > 0 else {
               dismiss()
               return
             }
@@ -1217,12 +1232,12 @@ private struct PlayerSheet: View {
               // Persist final position locally for resume-on-reopen
               DownloadManager.shared.updateResumePosition(
                 itemId: itemID,
-                positionSeconds: lastSyncedPosition
+                positionSeconds: exitPosition
               )
             }
             // Route through appState.recordProgress so LocalStore is updated (TASK-361).
             // Task is unavoidable here since onDismiss is a sync closure.
-            let positionAtDismiss = lastSyncedPosition
+            let positionAtDismiss = exitPosition
             let durationAtDismiss = lastKnownDuration
             Task {
               await appState.recordProgress(
@@ -1238,6 +1253,15 @@ private struct PlayerSheet: View {
             let durationInt = Int(duration)
             guard durationInt > 0 else { return }
             lastKnownDuration = durationInt
+
+            // Record the LIVE position on every tick (~0.5s), before the throttle below.
+            // `lastSyncedPosition` only advances when the throttle lets a sync through
+            // (10s elapsed, 15s seek delta, or first sync), so using it at dismiss threw
+            // away up to 10 seconds of watched content on every exit — and, near the end
+            // of a title, could flip the 90s-remaining finish rule on a stale value so a
+            // finished item was recorded as unfinished. The player has the true position
+            // the whole time; this just stops discarding it.
+            livePosition = positionInt
 
             let now = Date()
             let timeSinceLastSync = now.timeIntervalSince(lastSyncTime)
@@ -1361,8 +1385,11 @@ private struct PlayerSheet: View {
     .onChange(of: scenePhase) { _, newPhase in
       // TASK-270: flush pending progress when app goes to background so force-kill
       // doesn't lose the last known position.
-      if newPhase == .background, lastSyncedPosition > 0, lastKnownDuration > 0 {
-        let pos = lastSyncedPosition
+      // TASK-838: same live-position fix as onDismiss. Using the throttled value here
+      // undercut the very force-kill protection this flush was added for — it saved a
+      // position up to 10s stale at the moment the app was about to be killed.
+      if newPhase == .background, max(livePosition, lastSyncedPosition) > 0, lastKnownDuration > 0 {
+        let pos = max(livePosition, lastSyncedPosition)
         let dur = lastKnownDuration
         if isOffline {
           DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos)
@@ -1462,6 +1489,9 @@ private struct PlayerSheet: View {
     // can't suppress the final progress write on the next dismiss (TASK-401).
     lastKnownDuration = 0
     lastSyncedPosition = 0
+    // Same reason as the two above (TASK-401): a live position left over from a previous
+    // item or a previous attempt must not be written against this one.
+    livePosition = 0
     isOffline = false
 
     // TASK-719: if a failure-recovery snapshot exists, seed the trackers so an
@@ -1521,7 +1551,14 @@ private struct PlayerSheet: View {
       self.error = APIError.converting.userMessage
       return
     } catch {
-      appState.handleConnectionFailure(error)
+      // TASK-848: route through handlePlaybackFailure so an expired/revoked token is
+      // recognised as auth expiry rather than surfacing a generic "Playback Failed" whose
+      // Retry re-fetches with the same dead token forever. It tears the session down
+      // identically to handleConnectionFailure and reports whether auth was the cause.
+      if appState.handlePlaybackFailure(error) {
+        self.error = "Your session expired. Please sign in again."
+        return
+      }
       // If this was a network failure and the server is a QuickConnect ID,
       // try re-resolving candidates (network context may have changed since login).
       if appState.serverUnreachable, await appState.reconnect() {

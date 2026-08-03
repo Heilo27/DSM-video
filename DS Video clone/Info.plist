@@ -2,43 +2,50 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleDisplayName</key>
 	<string>DSM Video</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>HeiloProjects.DSReel.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>dsvideo</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.entertainment</string>
-	<key>NSCameraUsageDescription</key>
-	<string>Camera access is needed to scan QR codes for pairing with Apple TV.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>DSM Video connects to your Synology NAS on the local network to stream your video library.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_dsvideo._tcp</string>
-	</array>
-	<!-- ATS (TASK-777): cleartext is scoped to the local network ONLY. NSAllowsLocalNetworking
-	     permits http:// to LAN / .local / RFC1918 hosts (the LAN login candidates) and nothing
-	     public. There is deliberately NO NSAllowsArbitraryLoads and NO cleartext exception for
-	     quickconnect.to: the QuickConnect relay now connects over HTTPS (TASK-776), so public
-	     relay/WAN traffic stays TLS-encrypted. The prior quickconnect.to insecure-HTTP exception
-	     was what permitted the plaintext-credential relay path and has been removed. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dsvideo._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is needed to scan QR codes for pairing with Apple TV.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>DSM Video connects to your Synology NAS on the local network to stream your video library.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -48,15 +55,15 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
 		<string>LaunchBackground</string>
 	</dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

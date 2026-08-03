@@ -414,8 +414,22 @@ struct ItemPosterCell: View {
 
       ZStack(alignment: .bottom) {
         posterImage(width: width, height: height)
+        // TASK-857: the gradient's opaque region is a fixed fraction of card height, so at
+        // accessibility text sizes the footer grew up past it and drew unreadably over bare
+        // poster art (title text on top of the poster's own baked-in title). Backing the
+        // footer with a scrim sized to the footer's MEASURED height keeps text legible at
+        // every Dynamic Type size instead of only the ones that happen to fit under 45%.
         gradientOverlay
         cellFooter
+          .background(alignment: .bottom) {
+            LinearGradient(
+              colors: [.black.opacity(0), .black.opacity(0.85), .black.opacity(0.92)],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+            .padding(.top, -14)   // fade in above the text rather than starting hard at it
+            .allowsHitTesting(false)
+          }
 
         // Progress bar — pinned to bottom edge, INSIDE clip boundary.
         // Only render meaningful progress: below ~2% it's a glitchy sliver, and at
@@ -541,6 +555,12 @@ struct ItemPosterCell: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.horizontal, 8)
     .padding(.bottom, 8)
+    // TASK-857: cap scaling at .accessibility1. The card frame is a fixed 2:3 aspect ratio
+    // that does not grow with the text, so past this point the footer stops gaining
+    // legibility and only eats poster area — at AX5 it climbed over the artwork entirely
+    // ("Meri dia…" drawn across the NORTHERN PASSAGE poster). Capped + scrimmed, the title
+    // stays readable at every size; the accessibility label carries the untruncated string.
+    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
     .accessibilityHidden(true)
   }
 }

@@ -321,7 +321,7 @@ private struct TVShowDetailSplitView: View {
         let hasInProgress = resp.items.contains { ep in
           guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
           let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          return frac > 0.02 && frac < PlaybackProgress.watchedThreshold
+          return frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold
         }
         if hasInProgress { break }
       } catch is CancellationError {
@@ -346,7 +346,7 @@ private struct TVShowDetailSplitView: View {
       for ep in entry.episodes {
         if let prog = ep.progress, prog.durationSeconds > 0 {
           let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          if frac > 0.02 && frac < PlaybackProgress.watchedThreshold {
+          if frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold {
             // Track the *latest* in-progress episode (overwrite as we walk forward)
             inProgressEp = ep
             inProgressSeason = entry.season
@@ -1200,7 +1200,7 @@ private struct TVShowDetailScrollView: View {
           let hasInProgress = resp.items.contains { ep in
             guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
             let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-            return frac > 0.02 && frac < PlaybackProgress.watchedThreshold
+            return frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold
           }
           if hasInProgress { break }
         } catch is CancellationError {
@@ -1226,7 +1226,7 @@ private struct TVShowDetailScrollView: View {
       for (i, ep) in entry.episodes.enumerated() {
         if let prog = ep.progress, prog.durationSeconds > 0 {
           let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          if frac > 0.02 && frac < PlaybackProgress.watchedThreshold {
+          if frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold {
             inProgress = (entry.season, entry.episodes, i)
             firstUnwatched = nil
           } else if frac >= PlaybackProgress.watchedThreshold {

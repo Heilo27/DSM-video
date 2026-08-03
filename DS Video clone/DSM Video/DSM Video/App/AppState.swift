@@ -65,7 +65,19 @@ final class AppState {
     didSet { UserDefaults.standard.set(username, forKey: Keys.username) }
   }
   var rememberMe: Bool {
-    didSet { UserDefaults.standard.set(rememberMe, forKey: Keys.rememberMe) }
+    didSet {
+      UserDefaults.standard.set(rememberMe, forKey: Keys.rememberMe)
+      // TASK-842: turning Remember Me OFF must evict the token that was persisted while it
+      // was on. Previously this didSet only wrote the UserDefaults flag, so a user who
+      // signed in with Remember Me on (the default), then turned it off and closed the app
+      // without an explicit Sign Out, left a live bearer token for the NAS sitting in the
+      // Keychain indefinitely. It is not read back at launch — init gates the load on the
+      // stored flag — so the symptom is invisible, which is precisely the problem on a
+      // shared or handed-down device.
+      if !rememberMe {
+        Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+      }
+    }
   }
   var useHTTPS: Bool {
     didSet {
@@ -100,16 +112,19 @@ final class AppState {
 
   var sessionToken: String? {
     didSet {
-      if rememberMe {
-        guard !isDemoMode else {
-          updateAPI()
-          return
-        }
-        if let token = sessionToken {
+      guard !isDemoMode else {
+        updateAPI()
+        return
+      }
+      // TASK-842: the DELETE is unconditional — it used to sit inside `if rememberMe`, so
+      // clearing the token while Remember Me was off left whatever was previously persisted
+      // untouched in the Keychain. Only the WRITE is gated on rememberMe.
+      if let token = sessionToken {
+        if rememberMe {
           Self.saveToKeychain(token, account: Keys.keychainAccountToken)
-        } else {
-          Self.deleteFromKeychain(account: Keys.keychainAccountToken)
         }
+      } else {
+        Self.deleteFromKeychain(account: Keys.keychainAccountToken)
       }
       updateAPI()
     }
@@ -428,6 +443,21 @@ final class AppState {
     defer { isLoggingIn = false }
 
     // Demo mode — App Review credentials. No network required.
+    //
+    // DELIBERATELY ships in release builds (TASK-852). App Review needs to evaluate the app
+    // without a Synology NAS on their network, and this is the documented demo account. It is
+    // NOT #if DEBUG-gated for that reason — unlike bootstrapDemoMode() below, which is a
+    // developer convenience and correctly debug-only.
+    //
+    // Blast radius is bounded by design and must stay that way: this branch short-circuits
+    // BEFORE any network call, binds sessionToken to the literal "demo", and isDemoMode
+    // (AppState.swift:83) gates every server-touching path — recordProgress, loadWatchlist,
+    // runHeartbeat, refreshSession, revalidateConnection. It grants access to bundled
+    // DemoData only and can never reach a real NAS or a real credential.
+    //
+    // If the App Store listing ever stops requiring an in-binary demo account, wrap this in
+    // #if DEBUG. Until then the exposure is accepted: the credentials are effectively public
+    // (plaintext in the binary, identical for every install) but unlock nothing but sample data.
     if username.trimmingCharacters(in: .whitespaces).lowercased() == "appledemo" &&
        savedPassword.trimmingCharacters(in: .whitespaces).lowercased() == "dsvideo2024" {
       // Clear any real NAS data that may have loaded before demo login
@@ -539,6 +569,35 @@ final class AppState {
     stopHeartbeatTimer()
     clearHomeState()
     // Keep savedPassword and username intact so Connect works immediately.
+  }
+
+  /// TASK-848: classify a playback-fetch failure and, when it is an expired/rejected session,
+  /// clear session state through the normal path. Returns true if the cause was auth.
+  ///
+  /// The player had no 401 handling at all. When the token expires mid-stream the segment
+  /// requests start returning 401, AVPlayer reports a non-specific media-services error, and
+  /// the overlay says "Playback Failed" with text that never mentions the session. Retry then
+  /// re-runs the playback fetch with the SAME dead token, so it can never succeed — the user
+  /// can press it indefinitely. Worse, the rest of the app still believed it was authenticated
+  /// (sessionToken non-nil), so dismissing the player dumped them to the login screen on the
+  /// next unrelated API call with nothing connecting it to the failure they just saw.
+  ///
+  /// Routing through handleConnectionFailure keeps session teardown identical to every other
+  /// auth failure in the app; the Bool lets the player replace Retry with a sign-in affordance
+  /// instead of offering a retry that provably cannot work.
+  ///
+  /// VIEW HOOKUP (owned by another agent): Views/ItemDetailView.swift `start()` — its
+  /// `catch` around the `appState.api.playback(...)` call (~line 1517) should call this and,
+  /// when it returns true, set an auth-specific error message; Views/GestureVideoPlayer.swift
+  /// errorOverlay (~line 399) should then show "Sign in again" in place of "Retry".
+  @discardableResult
+  func handlePlaybackFailure(_ error: Error) -> Bool {
+    let isAuth = (error as? APIError)?.isAuthFailure ?? false
+    handleConnectionFailure(error)
+    if isAuth {
+      homeLog.warning("playback failed due to auth expiry — session cleared, re-authentication required")
+    }
+    return isAuth
   }
 
   /// Called when a network operation fails. Distinguishes:
@@ -1242,6 +1301,16 @@ final class AppState {
         // hammering the NAS. 200 pages x 500 = 100k items, far past any real library.
         let maxSyncPages = 200
         var lastCursor: (Int, Int?)? = nil
+        // TASK-847: did the loop actually reach the end of the server's changes?
+        // Only a natural termination (empty page, or hasMore == false) means "we have
+        // consumed everything up to status.itemSeq". Bailing out through either safety
+        // valve leaves an un-fetched gap, and jumping the cursor to status.itemSeq anyway
+        // would skip that gap PERMANENTLY: the next sync sees cursors.itemSeq ==
+        // status.itemSeq, the `status.itemSeq > cursors.itemSeq` gate is false, and step 3
+        // never runs again. The tail of the library would be missing from grids, search and
+        // every rail until a sign-out forced a full resync — while the log line at the
+        // page cap promised the opposite ("remaining items sync on the next cycle").
+        var reachedEndOfChanges = false
         repeat {
           let page = try await apiSnapshot.syncItems(since: since, limit: 500, afterRowid: afterRowid)
           if !page.items.isEmpty {
@@ -1271,8 +1340,13 @@ final class AppState {
               homeJustAdded = rails.justAdded
               homeRecentlyWatched = rails.recentlyWatched
             }
-            if !page.hasMore { break }
+            if !page.hasMore {
+              reachedEndOfChanges = true
+              break
+            }
           } else {
+            // Server returned no items for this cursor — nothing further to consume.
+            reachedEndOfChanges = true
             break
           }
         } while true
@@ -1293,8 +1367,17 @@ final class AppState {
         }
 
         if deletionSucceeded {
-          await LocalStore.shared.setItemSeq(status.itemSeq)
-          homeLog.info("runDeltaSync: item sync complete — \(pageCount) page(s)")
+          // TASK-847: advance only to what was actually consumed. On a clean run that is
+          // status.itemSeq; on an early exit it is `since`, the last cursor the loop
+          // committed, so the un-fetched remainder is re-requested next cycle instead of
+          // being skipped forever.
+          let committedSeq = reachedEndOfChanges ? status.itemSeq : min(since, status.itemSeq)
+          await LocalStore.shared.setItemSeq(committedSeq)
+          if reachedEndOfChanges {
+            homeLog.info("runDeltaSync: item sync complete — \(pageCount) page(s)")
+          } else {
+            homeLog.warning("runDeltaSync: item sync stopped early — cursor advanced only to \(committedSeq) of \(status.itemSeq); remainder syncs next cycle")
+          }
         } else {
           homeLog.info("runDeltaSync: item sync complete (cursor NOT advanced — deletion pending) — \(pageCount) page(s)")
         }
@@ -1451,13 +1534,38 @@ final class AppState {
 
   var watchlistItems: [ItemSummary] = []
 
+  /// TASK-851: non-nil when the last loadWatchlist() attempt failed.
+  ///
+  /// Without this, a failed load is indistinguishable from a genuinely empty watchlist:
+  /// watchlistItems stays at its previous value — [] on a cold launch, and [] again after
+  /// logout/softLogout/handleConnectionFailure force-clear it — so WatchlistView renders
+  /// its "nothing in your watchlist" empty state and tells the user their list is empty
+  /// when in fact the request threw.
+  ///
+  /// VIEW HOOKUP (owned by another agent): Views/MainView.swift — WatchlistView, whose
+  /// `.task { await appState.loadWatchlist() }` is around line 646. It should branch on
+  /// `appState.watchlistLoadFailed` BEFORE its empty-state branch and show an error +
+  /// Retry affordance (Retry = call loadWatchlist() again) instead of "nothing here".
+  var watchlistLoadFailed: Bool = false
+
   func loadWatchlist() async {
     guard !isDemoMode, sessionToken != nil else { return }
     do {
       let resp = try await api.watchlist()
       watchlistItems = resp.items
+      watchlistLoadFailed = false
     } catch {
-      // Non-fatal — watchlist is supplementary
+      // Still non-fatal — the watchlist is supplementary and must not block the home load.
+      // But it is no longer silent:
+      //  - TASK-850: every other failure path in this file logs; an empty catch left a
+      //    permanently stale/empty watchlist with zero signal in a sysdiagnose to explain it.
+      //  - TASK-851: record the failure so the view can distinguish it from a real empty list.
+      //  - TASK-851: route through handleConnectionFailure so a 401 here contributes to
+      //    session-expiry detection like every other network path in AppState. This was the
+      //    only one that did not.
+      watchlistLoadFailed = true
+      homeLog.warning("loadWatchlist failed: \(error.localizedDescription)")
+      handleConnectionFailure(error)
     }
   }
 

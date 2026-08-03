@@ -331,6 +331,23 @@ private struct TVHomeView: View {
         .environment(appState)
     }
     .task { await appState.homeLoad() }
+    // TASK-835: GestureVideoPlayer.cleanup() posts .playerDidDismiss on both platforms, but
+    // only LibraryHomeView (iOS) observed it. Without this, exiting the player on Apple TV
+    // left Continue Watching showing the pre-playback state until the 30s heartbeat happened
+    // to notice a server seq bump, or until a cold launch. Mirrors LibrariesView.swift:489.
+    .onReceive(NotificationCenter.default.publisher(for: .playerDidDismiss)) { _ in
+      guard !appState.homeAllRailsEmpty || !appState.homeLibraries.isEmpty else { return }
+      // refreshProgressFromLocal directly, not homeRefreshProgress() — the latter no-ops
+      // while homeIsBackgroundRefreshing is true (TASK-435).
+      Task { await appState.refreshProgressFromLocal() }
+    }
+    // TASK-836: revalidateConnection()/networkMonitor post .networkDidReconnect and rely on a
+    // listener to call homeLoad(). tvOS had none, so a LAN/WAN address switch left the home
+    // screen frozen on stale rails with a working connection underneath it — the only load
+    // trigger here is the .task above, which does not re-fire. Mirrors LibrariesView.swift:497.
+    .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
+      Task { await appState.homeLoad() }
+    }
     .onChange(of: appState.pendingDeepLinkItemID) { _, newID in
       guard let id = newID else { return }
       navPath = [id]
@@ -398,10 +415,14 @@ private struct TVLandscapeRail: View {
             }
           }
         }
-        .padding(.horizontal, 60)
         .padding(.vertical, 12)
         .focusSection()
       }
+      // TASK-856: title-safe insets the ScrollView frame, not the LazyHStack. Padding the
+      // stack only insets its content extremes, leaving the viewport at x[0,1920] — the
+      // "Just Added" rail's 5th card title rendered into the right overscan band and read
+      // "Northern Pas" on a real TV. Padding the ScrollView clips at x=1860 instead.
+      .padding(.horizontal, 60)
     }
   }
 }
@@ -420,6 +441,12 @@ private struct TVLibraryRail: View {
   @State private var error: String?
 
   private var isTVLibrary: Bool { library.kind == "tv" }
+
+  /// TASK-844: settled, error-free, and nothing to show — render a placeholder rather than
+  /// an empty carousel body under a live library header.
+  private var isEmptyState: Bool {
+    !isLoading && error == nil && shows.isEmpty && items.isEmpty
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
@@ -457,21 +484,39 @@ private struct TVLibraryRail: View {
           .padding(.horizontal, 60)
       }
 
-      ScrollView(.horizontal, showsIndicators: false) {
-        LazyHStack(alignment: .top, spacing: 28) {
-          if isTVLibrary {
-            ForEach(shows.prefix(20)) { show in
-              TVShowNavCard(show: show, library: library)
-            }
-          } else {
-            ForEach(items.prefix(20)) { item in
-              TVItemNavCard(item: item)
+      // TASK-844: when the library has no content and no error, the ForEach below produced
+      // nothing and the rail rendered as a title over an empty 28pt-spaced scroller — a
+      // library name leading to a grid the user can't tell is empty until they push into it.
+      // Render an explicit inline empty state instead.
+      if isEmptyState {
+        Text("No videos yet")
+          .font(.system(size: 22))
+          .foregroundStyle(Color.dsTextMuted)
+          .padding(.horizontal, 60)
+          .padding(.vertical, 12)
+      } else {
+        ScrollView(.horizontal, showsIndicators: false) {
+          LazyHStack(alignment: .top, spacing: 28) {
+            if isTVLibrary {
+              ForEach(shows.prefix(20)) { show in
+                TVShowNavCard(show: show, library: library)
+              }
+            } else {
+              ForEach(items.prefix(20)) { item in
+                TVItemNavCard(item: item)
+              }
             }
           }
+          .padding(.vertical, 12)
+          .focusSection()
         }
+        // TASK-856: title-safe must inset the ScrollView's own frame, not the LazyHStack.
+        // `.padding(.horizontal, 60)` on the stack only insets its content extremes — the
+        // viewport still spanned x[0,1920], so mid-scroll a card's TITLE TEXT rendered inside
+        // the right 60pt overscan band and lost its trailing characters on a real TV
+        // ("Northern Pas"). Padding the ScrollView moves the clip edge to x=1860, so text is
+        // cut at the title-safe boundary; a partially visible card is still a valid scroll cue.
         .padding(.horizontal, 60)
-        .padding(.vertical, 12)
-        .focusSection()
       }
     }
     // TASK-432: stagger per-rail fetches to avoid N concurrent requests on home load.
@@ -480,14 +525,18 @@ private struct TVLibraryRail: View {
   }
 
   private func load() async {
+    // TASK-844: the reentrancy guard has to come BEFORE the stagger sleep. Behind it, two
+    // loads started inside the same stagger window both cleared the guard (it was still
+    // false while the first was suspended in Task.sleep) and ran concurrently.
+    guard !isLoading else { return }
+    isLoading = true
+    defer { isLoading = false }
+
     // TASK-432: stagger fetches based on rail index to spread concurrent network load.
     if index > 0 {
       try? await Task.sleep(for: .milliseconds(index * 150))
       guard !Task.isCancelled else { return }
     }
-    guard !isLoading else { return }
-    isLoading = true
-    defer { isLoading = false }
 
     if appState.isDemoMode {
       if isTVLibrary {
@@ -504,18 +553,27 @@ private struct TVLibraryRail: View {
         var seen = Set<String>()
         shows = response.shows.filter { seen.insert($0.id).inserted }
       } else {
+        // TASK-845: cache-THEN-network. The early `return` that used to sit here meant that
+        // once LocalStore held any row for this library the network fetch was never reached
+        // again — the rail was pinned to whatever delta sync last wrote, so a stalled cursor
+        // (failed syncDeleted, auth error) froze the rail with no indication it was stale and
+        // no recovery short of Settings > Force Refresh. The TV branch above always hits the
+        // network; the two paths in this same function behaved oppositely.
         let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
         if !cached.isEmpty {
           items = cached
           error = nil
-          return
         }
-        items = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
+        let fresh = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
+        items = fresh
       }
       error = nil
     } catch is CancellationError {
       // View disappeared — discard, don't set error
     } catch {
+      // TASK-845: with cache-then-network, a failed revalidate must not paint an error over
+      // content we already served from LocalStore — the rail is usable, just not fresh.
+      guard items.isEmpty && shows.isEmpty else { return }
       self.error = (error as? APIError)?.userMessage ?? "Couldn't load"
     }
   }

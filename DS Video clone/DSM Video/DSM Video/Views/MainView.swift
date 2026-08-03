@@ -13,25 +13,34 @@ struct MainView: View {
     ZStack(alignment: .top) {
       switch layout {
       case .tabs:
+        // TASK-858: tab titles are Title Case, not ALL CAPS.
+        //
+        // The selection pill and tab slot widths are drawn by the system tab bar, not by
+        // this app — we cannot reposition the pill. What we control is label width, and
+        // all-caps labels are materially wider than the system lays out for: the HOME
+        // pill's trailing edge clipped the leading "L" of "LIBRARIES", which rendered as
+        // "IBRARIES". This reproduced at DEFAULT Dynamic Type, so it is a plain sizing
+        // overflow rather than an accessibility-scaling artifact. Title Case fits, and
+        // matches the platform convention for tab items besides.
         TabView {
           LibraryHomeView()
-            .tabItem { Label("HOME", systemImage: "play.rectangle") }
+            .tabItem { Label("Home", systemImage: "play.rectangle") }
 
           LibrariesView()
-            .tabItem { Label("LIBRARIES", systemImage: "square.grid.2x2") }
+            .tabItem { Label("Libraries", systemImage: "square.grid.2x2") }
 
           // Search is no longer a dedicated tab — it lives as a magnifying-glass
           // toolbar button inside each library view (Movies / TV Shows). Dropping
           // it to 5 tabs keeps Watchlist + Settings at surface level instead of
           // being collapsed into the system "More" tab.
           DownloadsView()
-            .tabItem { Label("DOWNLOADS", systemImage: "arrow.down.circle") }
+            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
 
           WatchlistView()
-            .tabItem { Label("WATCHLIST", systemImage: "bookmark") }
+            .tabItem { Label("Watchlist", systemImage: "bookmark") }
 
           SettingsView()
-            .tabItem { Label("SETTINGS", systemImage: "gearshape") }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .tint(Color.dsAccent)
       case .split:
@@ -617,7 +626,17 @@ struct WatchlistView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if appState.watchlistItems.isEmpty {
+        // TASK-851: a load FAILURE must not render as "you have nothing saved". Check the
+        // error flag BEFORE the empty state, or a network blip silently tells the user
+        // their watchlist is empty — indistinguishable from having actually lost it.
+        if appState.watchlistLoadFailed && appState.watchlistItems.isEmpty {
+          ErrorRetryView(
+            title: "Couldn't load your watchlist",
+            message: "Check your connection to the server and try again."
+          ) {
+            Task { await appState.loadWatchlist() }
+          }
+        } else if appState.watchlistItems.isEmpty {
           DSContentUnavailable(
             title: "No Watchlist Items",
             systemImage: "bookmark",

@@ -317,17 +317,35 @@ actor LocalStore {
   func upsertProgress(_ progress: [String: ItemProgress]) {
     guard !progress.isEmpty, let db else { return }
     exec("BEGIN TRANSACTION")
-    // FIX-8: Only overwrite position if the incoming server timestamp is newer than what's
-    // stored locally. This prevents a reconnect sync from reverting offline-recorded progress.
-    // Strategy: INSERT new rows unconditionally; for conflicts, only update position/duration
-    // when the incoming updated_at is strictly newer than the stored value.
+    // TASK-840: conflict resolution is now ownership-based, NOT a wall-clock comparison.
+    //
+    // The previous rule (FIX-8) was `excluded.updated_at > updated_at` — a lexical compare of
+    // an RFC3339 string stamped by the DEVICE clock (upsertSingleProgress) against one stamped
+    // by the NAS clock (backend main.go handleProgress). Format parity is fine; CLOCK parity is
+    // not. A NAS running slow (bad NTP, dead RTC after a power cut) makes every server row look
+    // older than the local row forever, so newer cross-device progress is discarded on EVERY
+    // sync with no recovery short of a sign-out. A NAS running fast inverts it and clobbers
+    // offline-recorded local progress — the exact loss FIX-8 existed to prevent.
+    //
+    // No per-row server sequence exists to compare on instead: progress_seq is a single global
+    // counter and /progress/all returns only position/duration/updatedAt (main.go
+    // handleProgressAll), so there is nothing monotonic and per-item to key off.
+    //
+    // The correct discriminator is already on the row: pending_sync. It means "this local value
+    // has not been accepted by the server yet," which is the ONLY case where the local row can
+    // legitimately be newer than what the server just sent us. So:
+    //   pending_sync = 1 → keep local (our unsent write wins; flushPendingProgress will push it)
+    //   pending_sync = 0 → take the server value (it is authoritative by definition — it either
+    //                      originated here and round-tripped, or came from another device)
+    // Both sides of that test are local facts. No clock is consulted, so no amount of skew can
+    // suppress an update permanently.
     let sql = """
-      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at)
-      VALUES(?,?,?,?)
+      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync)
+      VALUES(?,?,?,?,0)
       ON CONFLICT(item_id) DO UPDATE SET
-        position_seconds=CASE WHEN excluded.updated_at > updated_at THEN excluded.position_seconds ELSE position_seconds END,
-        duration_seconds=CASE WHEN excluded.updated_at > updated_at THEN excluded.duration_seconds ELSE duration_seconds END,
-        updated_at=CASE WHEN excluded.updated_at > updated_at THEN excluded.updated_at ELSE updated_at END
+        position_seconds=CASE WHEN pending_sync = 1 THEN position_seconds ELSE excluded.position_seconds END,
+        duration_seconds=CASE WHEN pending_sync = 1 THEN duration_seconds ELSE excluded.duration_seconds END,
+        updated_at=CASE WHEN pending_sync = 1 THEN updated_at ELSE excluded.updated_at END
     """
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -482,6 +500,34 @@ actor LocalStore {
 
   // MARK: - Rails Queries
 
+  // TASK-841/TASK-849: the rail SQL and PlaybackProgress must express the SAME rule.
+  //
+  // Previously the SQL knew only about the 0.95 ratio and had no equivalent of the
+  // 90-seconds-remaining clause in PlaybackProgress.isFinished, and its two bands both
+  // included 0.95. Two defects followed: an item at exactly ratio 0.95 satisfied
+  // queryContinueWatching (BETWEEN ... AND 0.95) *and* queryRecentlyWatched (>= 0.95) and
+  // rendered in both rails at once; and a ~25-min episode with 75s left sat in Continue
+  // Watching with a near-full ring while getProgressSeconds — which routes through
+  // PlaybackProgress.isFinished — returned 0, so tapping it restarted from 00:00.
+  //
+  // These fragments are interpolated from the Swift constants so the two definitions cannot
+  // drift apart again. They are mutually exclusive by construction: an item is finished, or
+  // it is in progress, never both.
+  private static let sqlRatio = "CAST(p.position_seconds AS REAL) / p.duration_seconds"
+  private static let sqlRemaining = "(p.duration_seconds - p.position_seconds)"
+
+  /// Mirrors PlaybackProgress.isFinished: past the watched ratio OR inside the final 90s.
+  private static let sqlIsFinished = """
+    (\(sqlRatio) > \(PlaybackProgress.watchedThreshold) \
+    OR \(sqlRemaining) < \(PlaybackProgress.finishedRemainingSeconds))
+    """
+
+  /// Started (>= 5%) but not finished — the exact complement of sqlIsFinished within
+  /// the started band, so no row can match both rails.
+  private static let sqlIsInProgress = """
+    (\(sqlRatio) >= \(PlaybackProgress.startedThreshold) AND NOT \(sqlIsFinished))
+    """
+
   // Shared 18-column projection used by all three rail queries.
   private static let itemSelectColumns = """
     i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
@@ -505,7 +551,9 @@ actor LocalStore {
       JOIN progress p ON p.item_id = i.id
       WHERE p.duration_seconds > 0
         -- FIX-11: unified 5% lower threshold matches iOS computeHomeRails (was 0.02, tvOS diverged)
-        AND CAST(p.position_seconds AS REAL) / p.duration_seconds BETWEEN 0.05 AND 0.95
+        -- TASK-841: upper bound now excludes the 90s-remaining case as well as the 95% ratio,
+        -- so this rail agrees with PlaybackProgress.isFinished / getProgressSeconds.
+        AND \(Self.sqlIsInProgress)
       ORDER BY p.updated_at DESC
       LIMIT 20
     """
@@ -522,7 +570,7 @@ actor LocalStore {
       LEFT JOIN progress p ON p.item_id = i.id
       WHERE p.item_id IS NULL
          OR p.duration_seconds = 0
-         OR CAST(p.position_seconds AS REAL) / p.duration_seconds < 0.05
+         OR \(Self.sqlRatio) < \(PlaybackProgress.startedThreshold)
       ORDER BY i.added_at DESC
       LIMIT 500
     """
@@ -558,7 +606,10 @@ actor LocalStore {
       FROM items i
       JOIN progress p ON p.item_id = i.id
       WHERE p.duration_seconds > 0
-        AND CAST(p.position_seconds AS REAL) / p.duration_seconds >= 0.95
+        -- TASK-841: strictly > 0.95 (was >=, which overlapped Continue Watching's inclusive
+        -- upper bound and put an item at exactly 0.95 in both rails), plus the 90s-remaining
+        -- clause so this matches PlaybackProgress.isFinished exactly.
+        AND \(Self.sqlIsFinished)
       ORDER BY p.updated_at DESC
       LIMIT 500
     """

@@ -7,6 +7,19 @@ enum PlaybackProgress {
     /// Fraction of duration at/above which an item is treated as fully watched.
     static let watchedThreshold: Double = 0.95
 
+    /// Fraction of duration above which an item counts as genuinely "started" and so belongs
+    /// in Continue Watching rather than Just Added.
+    ///
+    /// TASK-849: this was 0.05 in the rail SQL and AppState.computeHomeRails but still 0.02 in
+    /// TVShowDetailView's resume scan, so for a 45-minute episode watched between 54s and 135s
+    /// the show page offered to resume an episode the home rail said had never been started.
+    /// 5% is the canonical value — it filters out the accidental tap / trailer-length sample
+    /// that 2% lets through. Every threshold check should reference this, not a literal.
+    ///
+    /// NOTE: ItemsGridView's separate 0.02 is a deliberate *rendering* cutoff for the progress
+    /// bar sliver (documented at its site) and is intentionally not this constant.
+    static let startedThreshold: Double = 0.05
+
     /// Seconds remaining at/below which an item is treated as finished regardless of
     /// percentage. Percentage alone strands long films: 95% of a 3h feature is still
     /// 9 minutes out, so stopping during a long credit roll would resume at the credits
