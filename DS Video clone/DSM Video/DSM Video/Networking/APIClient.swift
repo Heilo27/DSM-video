@@ -495,6 +495,28 @@ enum APIError: Error {
     }
   }
 
+  /// True when the server rejected this request in a way that RETRYING CANNOT FIX — the
+  /// resource is gone, or the payload is invalid. Distinct from a transient failure
+  /// (offline, timeout, 5xx, auth expiry), all of which can succeed later.
+  ///
+  /// Used by the progress outbox: a queued row for a deleted item 404s forever
+  /// (main.go's TASK-797 guard), and retrying it at the head of the queue blocks every
+  /// row behind it permanently. Such rows are dropped rather than retried.
+  ///
+  /// Deliberately EXCLUDES 401/403 — an expired token is transient, and those are handled
+  /// by isAuthFailure / the re-authentication path instead.
+  var isPermanentRejection: Bool {
+    switch self {
+    case .http(let code):
+      return code == 400 || code == 404 || code == 410 || code == 422
+    case .server(let msg, let status):
+      if status == 400 || status == 404 || status == 410 || status == 422 { return true }
+      return ["not_found", "invalid_progress", "item_not_found"].contains(msg)
+    default:
+      return false
+    }
+  }
+
   /// True when the failure came back from the server itself (it was reached and
   /// answered), as opposed to a connectivity/DNS/resolution miss. Used so the
   /// login flow surfaces a real auth error instead of a generic "couldn't find".

@@ -1508,6 +1508,7 @@ final class AppState {
 
     homeLog.info("flushPendingProgress: \(pending.count) queued progress row(s) to upload")
     var uploaded = 0
+    var dropped = 0
     for row in pending {
       do {
         try await api.setProgress(
@@ -1516,13 +1517,30 @@ final class AppState {
           itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
         uploaded += 1
       } catch {
-        // Stop on the first failure rather than hammering an unreachable or rejecting
-        // server with the whole backlog. Everything not yet uploaded stays pending.
-        homeLog.warning("flushPendingProgress: stopped after \(uploaded) upload(s) — \(error.localizedDescription)")
+        // A PERMANENT rejection must not block the queue behind it.
+        //
+        // The server 404s progress for an item it no longer has (main.go TASK-797 guard) and
+        // 400s a value that fails validation. Neither will ever succeed on retry. The original
+        // version of this loop returned on ANY error, so one deleted movie with queued progress
+        // stalled the entire outbox forever — silently, and with no self-heal: every later
+        // update queued behind it and never uploaded. Drop the row (clear its flag so it stops
+        // being retried) and keep going.
+        //
+        // Transient failures — offline, timeout, 5xx, auth — still stop the loop, because those
+        // WILL succeed later and hammering an unreachable NAS with the whole backlog is exactly
+        // what the stop-on-first-failure rule was for.
+        if let apiErr = error as? APIError, apiErr.isPermanentRejection {
+          homeLog.warning("flushPendingProgress: dropping \(row.itemId) — server rejected permanently (\(apiErr.userMessage))")
+          await LocalStore.shared.markProgressSynced(
+            itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+          dropped += 1
+          continue
+        }
+        homeLog.warning("flushPendingProgress: stopped after \(uploaded) upload(s), \(dropped) dropped — \(error.localizedDescription)")
         return
       }
     }
-    homeLog.info("flushPendingProgress: uploaded \(uploaded) row(s)")
+    homeLog.info("flushPendingProgress: uploaded \(uploaded) row(s), dropped \(dropped) permanently-rejected row(s)")
   }
 
   // homeRefreshProgress kept for backwards compat with any view that calls it
