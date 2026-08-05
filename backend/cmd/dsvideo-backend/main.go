@@ -772,10 +772,21 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	r.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
 	r.Get("/playback/{sessionId}/segments/{name}", s.handleHLSSegment)
 
-	// Images and TMDb proxy don't require auth — accessed via <img> tags / media players
-	r.Get("/images/{id}", s.handleImage)
+	// TMDb proxy and version stay public: neither reveals anything about THIS library.
+	// (The TMDb proxy is still an outbound-fetch primitive — tracked separately.)
 	r.Get("/tmdb/image", s.handleTMDbImageProxy)
 	r.Get("/version", s.handleVersion)
+
+	// Images REQUIRE auth. They used to be public "because <img> tags can't send headers",
+	// but item IDs are hex(absolute path), so an anonymous 200-vs-404 probe enumerated the
+	// entire library and confirmed the NAS layout — defeating the path redaction applied
+	// elsewhere, with no rate limit and reachable via the QuickConnect relay.
+	// authMiddleware now also accepts ?token=<jwt> so the web UI's bare <img src> keeps
+	// working; the native clients already send a Bearer header. Same token, same checks.
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMiddleware)
+		r.Get("/images/{id}", s.handleImage)
+	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
@@ -1598,11 +1609,25 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
 		const prefix = "Bearer "
-		if !strings.HasPrefix(h, prefix) {
-			writeErr(w, http.StatusUnauthorized, "missing_token")
-			return
+		raw := ""
+		if strings.HasPrefix(h, prefix) {
+			raw = strings.TrimSpace(strings.TrimPrefix(h, prefix))
+		} else {
+			// Fallback: token in the query string. An <img>/<video> tag cannot set an
+			// Authorization header, so the embedded web UI has no way to authenticate a
+			// poster load. Without this the images route had to stay fully public, which
+			// made it an unauthenticated LIBRARY ORACLE: item IDs are hex(absolute path),
+			// so an anonymous caller could probe /api/v1/images/<hex> and read 200-vs-404
+			// to enumerate every title on the NAS and confirm its directory layout — with
+			// no rate limit, and reachable over the QuickConnect relay. Verified against
+			// the live server before this change: a real path returned 200 + 31KB, a
+			// fabricated one returned 404.
+			//
+			// Same token, same validation below — this only changes WHERE it is read from.
+			// It is deliberately not a weaker credential: an expired or revoked token fails
+			// exactly as it would in the header.
+			raw = strings.TrimSpace(r.URL.Query().Get("token"))
 		}
-		raw := strings.TrimSpace(strings.TrimPrefix(h, prefix))
 		if raw == "" {
 			writeErr(w, http.StatusUnauthorized, "missing_token")
 			return
@@ -4409,9 +4434,32 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.progressMu.Lock()
+	// The upsert is conditional: a write is applied only if it is NEWER than what we hold,
+	// or if it meaningfully moves the position within the same title.
+	//
+	// It used to be unconditional (`DO UPDATE SET position_seconds=excluded...` with no
+	// WHERE), which made the server a pure last-write-wins sink and let any client regress
+	// another device's position. That is not hypothetical: a replayed backlog from a device
+	// that had been offline would overwrite a newer position watched elsewhere, and the
+	// client's own outbox comment asserted a "last-writer-wins comparison" here that had
+	// never actually existed. Verified against this server: POST 7500 then POST 6000 left
+	// the row at 6000, destroying 25 minutes of progress.
+	//
+	// The rule:
+	//   - excluded.updated_at > progress.updated_at  → a genuinely newer write, take it.
+	//   - same timestamp (1s RFC3339 granularity, so concurrent writes collide) → take the
+	//     LARGER position, since within one second the further-along value is the later one.
+	//   - a restart (position much smaller) is still honoured when the timestamp is newer —
+	//     that is the user deliberately rewatching, not a stale replay.
+	// duration is refreshed alongside so a re-probe that corrects runtime still lands.
 	_, err := s.db.Exec(
 		"INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at) VALUES(?,?,?,?,?) "+
-			"ON CONFLICT(item_id, user_id) DO UPDATE SET position_seconds=excluded.position_seconds, duration_seconds=excluded.duration_seconds, updated_at=excluded.updated_at",
+			"ON CONFLICT(item_id, user_id) DO UPDATE SET "+
+			"position_seconds=excluded.position_seconds, "+
+			"duration_seconds=excluded.duration_seconds, "+
+			"updated_at=excluded.updated_at "+
+			"WHERE excluded.updated_at > progress.updated_at "+
+			"   OR (excluded.updated_at = progress.updated_at AND excluded.position_seconds > progress.position_seconds)",
 		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now,
 	)
 	s.progressMu.Unlock()

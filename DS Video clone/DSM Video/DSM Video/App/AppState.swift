@@ -105,6 +105,10 @@ final class AppState {
   var serverUnreachable: Bool = false
   // FIX-16: Guard flag so concurrent reconnect() calls don't race.
   var isReconnecting: Bool = false
+  /// Guards flushPendingProgress against concurrent entry (runDeltaSync awaits it while
+  /// clearNetworkError fires it detached). See flushPendingProgress for why @MainActor
+  /// alone is not enough.
+  var isFlushingProgress: Bool = false
 
   private var networkMonitor: NWPathMonitor?
   private var heartbeatTimer: Timer?
@@ -1503,6 +1507,22 @@ final class AppState {
   /// server's own last-writer-wins comparison discards anything staler than what it holds.
   func flushPendingProgress() async {
     guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
+
+    // Re-entrancy guard, same pattern as reconnect()'s isReconnecting.
+    //
+    // @MainActor gives memory safety, NOT mutual exclusion across an await. There are two
+    // callers — runDeltaSync awaits this, and clearNetworkError fires it detached — and a
+    // reconnect during a sync runs both. The second entrant reads pendingProgress() before
+    // the first has confirmed its rows, so the same progress is POSTed twice: duplicate
+    // writes, and a doubled progress_seq bump that forces every other device into a
+    // redundant re-sync.
+    guard !isFlushingProgress else {
+      homeLog.info("flushPendingProgress: already in flight — skipping re-entrant call")
+      return
+    }
+    isFlushingProgress = true
+    defer { isFlushingProgress = false }
+
     let pending = await LocalStore.shared.pendingProgress()
     guard !pending.isEmpty else { return }
 

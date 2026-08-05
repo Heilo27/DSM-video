@@ -483,16 +483,33 @@ enum APIError: Error {
   /// `case .http(401)` never matches. Checking the status covers both shapes, and the
   /// message check covers any path that loses the status.
   var isAuthFailure: Bool {
+    // An ACCOUNT-STATE problem is not a credential problem: re-authenticating cannot fix it,
+    // so it must not trigger the clear-session-and-return-to-login path. The backend emits
+    // permission_denied/403 from the LOGIN handler itself (main.go:1331) when DSM rejects the
+    // account for this app — a documented, real condition. Treating it as an auth failure
+    // produced an infinite loop: sign in successfully → 403 → token deleted → sign in again →
+    // 403 → forever, with no message explaining that the fix is in DSM's Application
+    // Privileges. Those cases surface their own actionable error via userMessage instead.
+    if isAccountStateFailure { return false }
     switch self {
     case .http(let code):
       return code == 401 || code == 403
     case .server(let msg, let status):
       if status == 401 || status == 403 { return true }
-      return ["missing_token", "invalid_token", "token_revoked",
-              "permission_denied", "account_disabled"].contains(msg)
+      return ["missing_token", "invalid_token", "token_revoked"].contains(msg)
     default:
       return false
     }
+  }
+
+  /// The account exists and the password is right, but it is not permitted to use this app
+  /// (DSM Application Privileges) or is disabled. Re-authentication cannot resolve either —
+  /// only a change on the server can — so these must NOT drive the session-expiry path.
+  var isAccountStateFailure: Bool {
+    if case .server(let msg, _) = self {
+      return msg == "permission_denied" || msg == "account_disabled"
+    }
+    return false
   }
 
   /// True when the server rejected this request in a way that RETRYING CANNOT FIX — the

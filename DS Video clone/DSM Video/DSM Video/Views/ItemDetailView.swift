@@ -1372,7 +1372,12 @@ private struct PlayerSheet: View {
         }
       }
     }
-    .task { await start() }
+    // Keyed on itemID, not bare .task. On autoplay-next-episode this view is reused with a
+    // NEW itemID; an unkeyed .task does not re-fire, so start() never ran again and the
+    // trackers it resets — livePosition in particular — still held the PREVIOUS episode's
+    // position. That value could then be written against the new episode. The two sibling
+    // .task modifiers in this file are already keyed this way.
+    .task(id: itemID) { await start() }
     .onDisappear {
       // FIX-12: Cancel countdown when player is dismissed via system back gesture or swipe-to-dismiss.
       // Without this, the Task continues running against a deallocated binding and fires

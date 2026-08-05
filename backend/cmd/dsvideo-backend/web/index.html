@@ -2090,7 +2090,7 @@
           </div>
           <div class="video-poster">
             ${item.posterImageId
-              ? `<img src="${state.baseURL}/api/v1/images/${item.posterImageId}?w=342" alt="${escapeAttr(item.title)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+              ? `<img src="${imageURL(item.posterImageId,'w=342')}" alt="${escapeAttr(item.title)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
               : ''}
             <div class="video-poster-placeholder" ${item.posterImageId ? 'style="display:none"' : ''}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2132,7 +2132,7 @@
         <div class="video-card" onclick="navigateTo('showDetail', {showName:'${escapeAttr(show.showName)}', folderName:'${escapeAttr(show.folderName || show.showName)}'})">
           <div class="video-poster">
             ${show.posterImageId
-              ? `<img src="${state.baseURL}/api/v1/images/${show.posterImageId}?w=342" alt="${escapeAttr(show.showName)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+              ? `<img src="${imageURL(show.posterImageId,'w=342')}" alt="${escapeAttr(show.showName)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
               : ''}
             <div class="video-poster-placeholder" ${show.posterImageId ? 'style="display:none"' : ''}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2580,13 +2580,13 @@
             </div>
             ${backdropId ? `
               <div class="detail-backdrop">
-                <img src="${state.baseURL}/api/v1/images/${backdropId}?w=500&type=backdrop" alt="" onerror="this.parentElement.style.display='none'">
+                <img src="${imageURL(backdropId,'w=500&type=backdrop')}" alt="" onerror="this.parentElement.style.display='none'">
               </div>
             ` : ''}
             <div class="detail-header">
               <div class="detail-poster">
                 ${posterId
-                  ? `<img src="${state.baseURL}/api/v1/images/${posterId}?w=342" alt="${escapeAttr(item.title)}" onerror="this.style.display='none'">`
+                  ? `<img src="${imageURL(posterId,'w=342')}" alt="${escapeAttr(item.title)}" onerror="this.style.display='none'">`
                   : `<div class="video-poster-placeholder" style="height:100%"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg></div>`}
               </div>
               <div class="detail-info">
@@ -2666,13 +2666,13 @@
             </div>
             ${backdropId ? `
               <div class="detail-backdrop">
-                <img src="${state.baseURL}/api/v1/images/${backdropId}?w=500&type=backdrop" alt="" onerror="this.parentElement.style.display='none'">
+                <img src="${imageURL(backdropId,'w=500&type=backdrop')}" alt="" onerror="this.parentElement.style.display='none'">
               </div>
             ` : ''}
             <div class="detail-header">
               <div class="detail-poster">
                 ${posterId
-                  ? `<img src="${state.baseURL}/api/v1/images/${posterId}?w=342" alt="${escapeAttr(data.showName)}" onerror="this.style.display='none'">`
+                  ? `<img src="${imageURL(posterId,'w=342')}" alt="${escapeAttr(data.showName)}" onerror="this.style.display='none'">`
                   : `<div class="video-poster-placeholder" style="height:100%"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg></div>`}
               </div>
               <div class="detail-info">
@@ -3261,6 +3261,16 @@
       const div = document.createElement('div');
       div.textContent = text || '';
       return div.innerHTML;
+    }
+
+    // Images now require auth (they were an unauthenticated library oracle: item IDs are
+    // hex(absolute path), so anonymous 200-vs-404 probing enumerated the whole NAS).
+    // An <img> tag cannot set an Authorization header, so the server also accepts the same
+    // JWT as ?token=. Every image URL must go through this helper.
+    function imageURL(id, query) {
+      var base = state.baseURL + '/api/v1/images/' + id;
+      var q = query ? (query + '&') : '';
+      return base + '?' + q + 'token=' + encodeURIComponent(state.token || '');
     }
 
     function escapeAttr(text) {

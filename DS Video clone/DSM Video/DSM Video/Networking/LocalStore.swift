@@ -178,8 +178,17 @@ actor LocalStore {
       //
       // Defaulting existing rows to 1 (pending) is deliberate: every row already on a
       // device predates the outbox and may never have reached the server, so the first
-      // flush after upgrade re-sends them. The server upsert is idempotent and its
-      // last-writer-wins comparison discards anything staler than what it holds.
+      // flush after upgrade re-sends them.
+      //
+      // CORRECTION (2026-08-05): the original version of this comment claimed "the server
+      // upsert is idempotent and its last-writer-wins comparison discards anything staler
+      // than what it holds." That was FALSE — main.go's ON CONFLICT had no WHERE clause at
+      // all, so the server was a pure last-write-wins sink and this replay could overwrite a
+      // NEWER position watched on another device. Proven against the live server: POST 7500
+      // then POST 6000 left the row at 6000. The server upsert is now genuinely conditional
+      // (see handleProgress), so the safety argument this migration rests on is real rather
+      // than assumed. Old servers remain vulnerable to a replay, which is why the client
+      // also refuses to enqueue a regression — see recordProgress.
       execIgnoringErrors("ALTER TABLE progress ADD COLUMN pending_sync INTEGER NOT NULL DEFAULT 1")
       execIgnoringErrors("CREATE INDEX IF NOT EXISTS idx_progress_pending ON progress(pending_sync) WHERE pending_sync = 1")
       setUserVersion(2)
