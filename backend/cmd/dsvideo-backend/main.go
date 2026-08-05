@@ -777,16 +777,26 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	r.Get("/tmdb/image", s.handleTMDbImageProxy)
 	r.Get("/version", s.handleVersion)
 
-	// Images REQUIRE auth. They used to be public "because <img> tags can't send headers",
-	// but item IDs are hex(absolute path), so an anonymous 200-vs-404 probe enumerated the
-	// entire library and confirmed the NAS layout — defeating the path redaction applied
-	// elsewhere, with no rate limit and reachable via the QuickConnect relay.
-	// authMiddleware now also accepts ?token=<jwt> so the web UI's bare <img src> keeps
-	// working; the native clients already send a Bearer header. Same token, same checks.
-	r.Group(func(r chi.Router) {
-		r.Use(s.authMiddleware)
-		r.Get("/images/{id}", s.handleImage)
-	})
+	// Images are PUBLIC — deliberately, for now. See the security note below.
+	//
+	// KNOWN ISSUE (accepted, tracked): item IDs are hex(absolute path), so an anonymous
+	// caller who can reach this port can probe /api/v1/images/<hex> and read 200-vs-404 to
+	// enumerate every title on the NAS and confirm its directory layout. There is no rate
+	// limit on this route. It leaks the catalog and the folder tree — NOT credentials,
+	// tokens, video content, or write access; every other route stays authenticated.
+	//
+	// This was briefly locked behind authMiddleware, which broke every poster in the
+	// embedded web UI: an <img> tag cannot send an Authorization header, so it has no way
+	// to authenticate an image load. (The native iOS/tvOS clients are unaffected — they
+	// fetch images in code and set the Bearer header themselves.) A ?token= query fallback
+	// was tried and rejected valid tokens on the deployed server for reasons not yet
+	// understood, so it was reverted rather than left half-working.
+	//
+	// The correct fix is client-side and needs no URL token: have the web UI fetch each
+	// image with fetch() + the Authorization header and hand the result to <img> as a blob
+	// URL. Credentials stay in headers — which also matters because URLs land in access
+	// logs and browser history. Re-gate this route at the same time as that lands.
+	r.Get("/images/{id}", s.handleImage)
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
