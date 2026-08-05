@@ -1649,6 +1649,9 @@
     function logout() {
       state.token = null;
       localStorage.removeItem('ds_video_token');
+      // Release cached artwork blobs — otherwise a signed-out session could still render
+      // the previous account's posters from memory.
+      _revokeImageCache();
       document.getElementById('app').classList.remove('visible');
       document.getElementById('login-screen').style.display = 'flex';
     }
@@ -3263,14 +3266,65 @@
       return div.innerHTML;
     }
 
-    // Images now require auth (they were an unauthenticated library oracle: item IDs are
-    // hex(absolute path), so anonymous 200-vs-404 probing enumerated the whole NAS).
-    // An <img> tag cannot set an Authorization header, so the server also accepts the same
-    // JWT as ?token=. Every image URL must go through this helper.
+    // ---- Authenticated image loading -------------------------------------------------
+    //
+    // Images are fetched with fetch() + an Authorization header and handed to <img> as a
+    // blob: URL, rather than pointed at the API with a bare src.
+    //
+    // Why: item IDs are hex(absolute path), so a PUBLIC image route lets anyone who can
+    // reach the port probe 200-vs-404 and enumerate the whole library plus the NAS folder
+    // tree. An <img> tag cannot send an Authorization header, which is the only reason the
+    // route was ever public. Putting the JWT in the query string would work but leaks the
+    // credential into access logs, browser history, and Referer headers — so: headers.
+    //
+    // imageURL() stays SYNCHRONOUS and returns a placeholder immediately, because it is
+    // called from inside template literals that build HTML strings. The real bytes are
+    // swapped in when they arrive, keyed by a data-img-token attribute.
+
+    var _imgCache = new Map();   // request key -> blob: URL
+    var _imgSeq = 0;
+    // 1x1 transparent GIF — the <img> has valid src from the first paint, so no broken-image
+    // icon flashes and existing onerror handlers do not fire spuriously.
+    var IMG_PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
     function imageURL(id, query) {
-      var base = state.baseURL + '/api/v1/images/' + id;
-      var q = query ? (query + '&') : '';
-      return base + '?' + q + 'token=' + encodeURIComponent(state.token || '');
+      if (!id) return IMG_PLACEHOLDER;
+      var q = query ? ('?' + query) : '';
+      var key = id + q;
+      var cached = _imgCache.get(key);
+      if (cached) return cached;              // already resolved — use the blob directly
+
+      var marker = 'img' + (++_imgSeq);
+      _loadAuthedImage(key, state.baseURL + '/api/v1/images/' + id + q, marker);
+      // Consumed by the [data-img-token] lookup once the fetch resolves.
+      return IMG_PLACEHOLDER + '" data-img-token="' + marker;
+    }
+
+    function _loadAuthedImage(key, url, marker) {
+      fetch(url, { headers: { 'Authorization': 'Bearer ' + (state.token || '') } })
+        .then(function (r) { return r.ok ? r.blob() : Promise.reject(r.status); })
+        .then(function (blob) {
+          var objURL = URL.createObjectURL(blob);
+          _imgCache.set(key, objURL);
+          document.querySelectorAll('img[data-img-token="' + marker + '"]').forEach(function (el) {
+            el.src = objURL;
+            el.removeAttribute('data-img-token');
+          });
+        })
+        .catch(function () {
+          // Mirror the old bare-src failure shape so existing onerror styling still applies.
+          document.querySelectorAll('img[data-img-token="' + marker + '"]').forEach(function (el) {
+            el.removeAttribute('data-img-token');
+            if (el.onerror) { el.onerror(); }
+          });
+        });
+    }
+
+    // Blob URLs live until revoked; drop them on logout so a signed-out session cannot
+    // still render another account's artwork from memory.
+    function _revokeImageCache() {
+      _imgCache.forEach(function (u) { URL.revokeObjectURL(u); });
+      _imgCache.clear();
     }
 
     function escapeAttr(text) {
