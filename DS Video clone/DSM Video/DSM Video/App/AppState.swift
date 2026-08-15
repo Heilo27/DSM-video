@@ -1212,8 +1212,18 @@ final class AppState {
       }
       homeIsLoading = true
       homeError = nil
+      // defer, NOT a straight-line reset after the await. `.task` cancellation is
+      // cooperative and unwinds through this await, so a plain `homeIsLoading = false` on
+      // the next line never runs when the task is cancelled — the flag LATCHES true and
+      // every later homeLoad() bails at the re-entrancy guard above.
+      //
+      // That is precisely the tvOS pairing case: homeLoad() starts on the pairing screen,
+      // the token arrives, .task(id: sessionToken) cancels the in-flight run and starts a
+      // new one — which then found homeIsLoading still true and returned immediately,
+      // leaving the rails empty. Same defect class as the AuthenticatedImage isLoading
+      // latch (fixed 2026-07-28): a bool guard that a cancelled task never clears.
+      defer { homeIsLoading = false }
       await runDeltaSync(background: false)
-      homeIsLoading = false
       // If sync completed but produced no items and no error, the library is either
       // genuinely empty or the server rejected our state silently. Surface a hint.
       if homeAllRailsEmpty && homeLibraries.isEmpty && homeError == nil {
@@ -1231,8 +1241,8 @@ final class AppState {
     await Task.detached(priority: .utility) { await LocalStore.shared.clearAll() }.value
     homeIsLoading = true
     homeError = nil
+    defer { homeIsLoading = false }   // see homeLoad(): cancellation must not latch the flag
     await runDeltaSync(background: false)
-    homeIsLoading = false
     // Bump version so TVLibraryRail views re-fetch their content via .task(id:).
     libraryRailsVersion = UUID()
   }
