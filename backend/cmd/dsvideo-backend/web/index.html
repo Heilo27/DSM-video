@@ -1685,7 +1685,28 @@
         logout();
         throw new Error('Session expired');
       }
-      return response.json();
+      // THROW on any non-2xx, not just 401.
+      //
+      // This used to return response.json() for every other status, so a 404 or a 500
+      // resolved like a success. Six catch blocks around progress writes (L2237, L2248,
+      // L2782, L2983, L2999) were therefore unreachable dead code, and the optimistic UI
+      // stood over writes that never landed — the card flipped to watched, the server had
+      // nothing. Confirmed live: POST to a bogus item returned 404 and the caller got a
+      // resolved promise.
+      if (!response.ok) {
+        let code = '';
+        try { code = (await response.clone().json()).error || ''; } catch (_) {}
+        throw new Error(code || `HTTP ${response.status}`);
+      }
+      const body = await response.json();
+      // The progress endpoint reports whether the row actually changed. A 200 with
+      // applied:false means the server DISCARDED the write as superseded — treat it as a
+      // failure so the caller's catch can roll the optimistic UI back rather than showing a
+      // state the server does not have.
+      if (body && body.ok === true && body.applied === false) {
+        throw new Error('not_applied');
+      }
+      return body;
     }
 
     // Navigation
@@ -3300,20 +3321,36 @@
       return IMG_PLACEHOLDER + '" data-img-token="' + marker;
     }
 
+    // Applies a resolved blob (or a failure) to every <img> carrying this marker.
+    //
+    // The element may not be in the DOM yet: imageURL() is called while BUILDING an HTML
+    // string, so the fetch can resolve — instantly, for anything the browser has cached,
+    // and the images route sends max-age=604800 — before that string is ever inserted. A
+    // single immediate querySelectorAll then matches nothing and the poster stays on the 1x1
+    // placeholder permanently. Retry across a few frames so the insert has a chance to land.
+    function _applyToMarked(marker, apply) {
+      var attempts = 0;
+      (function tick() {
+        var els = document.querySelectorAll('img[data-img-token="' + marker + '"]');
+        if (els.length) { els.forEach(apply); return; }
+        if (++attempts < 30) { requestAnimationFrame(tick); }
+      })();
+    }
+
     function _loadAuthedImage(key, url, marker) {
       fetch(url, { headers: { 'Authorization': 'Bearer ' + (state.token || '') } })
         .then(function (r) { return r.ok ? r.blob() : Promise.reject(r.status); })
         .then(function (blob) {
           var objURL = URL.createObjectURL(blob);
           _imgCache.set(key, objURL);
-          document.querySelectorAll('img[data-img-token="' + marker + '"]').forEach(function (el) {
+          _applyToMarked(marker, function (el) {
             el.src = objURL;
             el.removeAttribute('data-img-token');
           });
         })
         .catch(function () {
           // Mirror the old bare-src failure shape so existing onerror styling still applies.
-          document.querySelectorAll('img[data-img-token="' + marker + '"]').forEach(function (el) {
+          _applyToMarked(marker, function (el) {
             el.removeAttribute('data-img-token');
             if (el.onerror) { el.onerror(); }
           });
