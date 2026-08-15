@@ -1550,8 +1550,19 @@ final class AppState {
   ///
   /// Called on foreground, after a successful reconnect, and at the start of a delta sync,
   /// so a device that recorded progress offline pushes it as soon as the NAS is reachable
-  /// again. Ordering is oldest-first so a replay reconstructs the real watch sequence; the
-  /// server's own last-writer-wins comparison discards anything staler than what it holds.
+  /// again. Ordering is oldest-first so a replay reconstructs the real watch sequence.
+  ///
+  /// On the server side each write is stamped with a monotone progress.write_seq and the
+  /// upsert only applies when the incoming seq is higher, so a replayed backlog cannot
+  /// clobber a newer value written from another device.
+  ///
+  /// This comment previously claimed the server ran "a last-writer-wins comparison [that]
+  /// discards anything staler than what it holds." That was FALSE when written — the
+  /// ON CONFLICT had no WHERE clause at all, making the server a pure last-write-wins sink,
+  /// and a replay from an upgraded device destroyed newer progress (proven live 2026-08-05:
+  /// POST 7500 then POST 6000 left the row at 6000). The guarantee is real NOW because
+  /// aabc29a implemented it; it is described here as mechanism, not assumption. Verify
+  /// against handleProgress before trusting it again.
   func flushPendingProgress() async {
     guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
 
@@ -1598,8 +1609,12 @@ final class AppState {
         // what the stop-on-first-failure rule was for.
         if let apiErr = error as? APIError, apiErr.isPermanentRejection {
           homeLog.warning("flushPendingProgress: dropping \(row.itemId) — server rejected permanently (\(apiErr.userMessage))")
-          await LocalStore.shared.markProgressSynced(
-            itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+          // dropPendingProgress, NOT markProgressSynced: the latter is value-guarded on
+          // (position, duration) so a stale ack cannot clear a newer local write. If the
+          // user kept watching during the flush, the row now holds a different position and
+          // the guarded update matches nothing — the row stayed pending and was retried on
+          // every subsequent flush, exactly the stall this drop path exists to prevent.
+          await LocalStore.shared.dropPendingProgress(itemId: row.itemId)
           dropped += 1
           continue
         }

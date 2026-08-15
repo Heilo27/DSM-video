@@ -478,6 +478,29 @@ actor LocalStore {
     }
   }
 
+  /// Clears the pending flag for an item REGARDLESS of its current position/duration.
+  ///
+  /// Only for rows the server has PERMANENTLY rejected (404 for a deleted item, 400 for an
+  /// invalid payload). Those can never be uploaded, so they must leave the outbox or they
+  /// block every row behind them — which is the stall that 14e72cf existed to remove.
+  ///
+  /// Deliberately NOT markProgressSynced: that helper is value-guarded so a stale
+  /// confirmation cannot clear a newer local position. Reusing it here meant a rejected row
+  /// whose position advanced mid-flush never cleared, so the flush "dropped" it in the log
+  /// and then retried it forever on the next pass — reintroducing the same stall under
+  /// concurrent playback.
+  func dropPendingProgress(itemId: String) {
+    guard let db else { return }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "UPDATE progress SET pending_sync = 0 WHERE item_id = ?", -1, &stmt, nil) == SQLITE_OK else { return }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
+    if sqlite3_step(stmt) != SQLITE_DONE {
+      let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+      log.error("dropPendingProgress: step failed for \(itemId): \(msg)")
+    }
+  }
+
   /// Count of unsynced rows — for diagnostics and to skip a no-op flush cheaply.
   func pendingProgressCount() -> Int {
     guard let db else { return 0 }

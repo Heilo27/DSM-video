@@ -478,7 +478,14 @@ struct LibraryHomeView: View {
     // On Cinematic the hero owns the top edge — hide the nav bar so the backdrop runs
     // full-bleed under the status bar. Flat themes keep the standard "Home" title.
     .toolbar(ThemeHolder.shared.current.usesCinematicChrome ? .hidden : .automatic, for: .navigationBar)
-    .task { await appState.homeLoad() }
+    // Keyed on sessionToken — the iOS counterpart of the tvOS fix in 0d240c8.
+    //
+    // RootView swaps the login screen for this view when a token appears. A bare `.task` is
+    // not guaranteed to re-fire across that swap if SwiftUI reuses the container's identity,
+    // which on tvOS left the home rails permanently empty after pairing — a bug that shipped
+    // to a real device. Keying on the token also re-runs the load after a session expiry and
+    // re-login, instead of leaving the previous session's (or an empty) rail set on screen.
+    .task(id: appState.sessionToken) { await appState.homeLoad() }
     .refreshable { await appState.homeForceRefresh() }
     // TASK-302: announce to VoiceOver once when content rails first appear
     .onChange(of: appState.homeJustAdded) { _, new in
