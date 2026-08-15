@@ -1638,26 +1638,20 @@ const userKey ctxKey = 1
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bearer header ONLY. A ?token= query fallback was added alongside the images-route
+		// gating, then the route was reverted to public while the fallback was left behind —
+		// so every authenticated route accepted a full-privilege JWT in the query string with
+		// no caller that needed it. URLs land in access logs, browser history and Referer
+		// headers, so that is a credential-leak surface for zero benefit.
+		//
+		// If the images route is ever re-gated, the correct answer is the blob-URL fetch
+		// already implemented in web/index.html (fetch + Authorization header → object URL),
+		// NOT a token in a URL.
 		h := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		raw := ""
 		if strings.HasPrefix(h, prefix) {
 			raw = strings.TrimSpace(strings.TrimPrefix(h, prefix))
-		} else {
-			// Fallback: token in the query string. An <img>/<video> tag cannot set an
-			// Authorization header, so the embedded web UI has no way to authenticate a
-			// poster load. Without this the images route had to stay fully public, which
-			// made it an unauthenticated LIBRARY ORACLE: item IDs are hex(absolute path),
-			// so an anonymous caller could probe /api/v1/images/<hex> and read 200-vs-404
-			// to enumerate every title on the NAS and confirm its directory layout — with
-			// no rate limit, and reachable over the QuickConnect relay. Verified against
-			// the live server before this change: a real path returned 200 + 31KB, a
-			// fabricated one returned 404.
-			//
-			// Same token, same validation below — this only changes WHERE it is read from.
-			// It is deliberately not a weaker credential: an expired or revoked token fails
-			// exactly as it would in the header.
-			raw = strings.TrimSpace(r.URL.Query().Get("token"))
 		}
 		if raw == "" {
 			writeErr(w, http.StatusUnauthorized, "missing_token")
