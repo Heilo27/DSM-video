@@ -12,7 +12,13 @@ import MediaPlayer
 import UIKit
 #endif
 
-private let orientLog = Logger(subsystem: "com.dsm.orientation", category: "player")
+// nonisolated: os.Logger is Sendable and stateless, but a file-level `let` inherits the
+// project's default @MainActor isolation, so reading it from the Task.detached teardown block
+// (cleanup(), ~:1496) was an isolation violation — "main actor-isolated let 'orientLog' cannot
+// be accessed from outside of the actor; this is an error in the Swift 6 language mode."
+// Same class as the PlaybackProgress isolation errors that failed Xcode Cloud build 7 in
+// Release; currently only a warning here, and fixed before it becomes a build failure.
+private nonisolated let orientLog = Logger(subsystem: "com.dsm.orientation", category: "player")
 
 /// A custom video player with gesture-based controls:
 /// - Horizontal swipe/pan to scrub through video
