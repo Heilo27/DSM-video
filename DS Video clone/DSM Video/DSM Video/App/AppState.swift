@@ -218,6 +218,16 @@ final class AppState {
     if AppState.isUITestDemoLaunch {
       bootstrapDemoMode()
     }
+    // QA live-session hook — see qaLiveToken. Adopts a real token + server so homeLoad()
+    // runs its true path against a live NAS. No-op unless the launch args are present.
+    if let qaToken = AppState.qaLiveToken {
+      if let qaServer = AppState.qaLiveServer {
+        baseURL = qaServer
+      }
+      sessionToken = qaToken
+      updateAPI()
+      homeLog.info("QA live-session hook active — server=\(self.baseURL, privacy: .public)")
+    }
     #endif
   }
 
@@ -238,6 +248,33 @@ final class AppState {
     let demoItems = DemoData.movieItems + DemoData.tvItems
     recomputeHomeRails(from: demoItems)
     sessionToken = "demo"
+  }
+
+  /// QA hook: boot straight into a REAL signed-in session using a token supplied on the
+  /// command line, e.g.
+  ///   xcrun simctl launch <udid> <bundle> -QALiveToken <jwt> -QALiveServer http://host:port
+  ///
+  /// Why this exists: the tvOS simulator on a headless Xcode install has no way to type or
+  /// to press a button — no Simulator.app for key events, no idb, no HID facility in simctl
+  /// — so the pairing screen is an absolute wall. Demo mode gets past it but calls
+  /// recomputeHomeRails() directly, bypassing homeLoad() entirely, so it cannot exercise the
+  /// real data path at all. This hook is the only way to observe homeLoad() running against
+  /// a live server in the simulator.
+  ///
+  /// DEBUG-only and inert without the explicit launch argument, exactly like the demo hook
+  /// above. The token is supplied per-launch and never persisted here.
+  static var qaLiveToken: String? {
+    let args = ProcessInfo.processInfo.arguments
+    guard let i = args.firstIndex(of: "-QALiveToken"), i + 1 < args.count else { return nil }
+    let v = args[i + 1]
+    return v.isEmpty ? nil : v
+  }
+
+  static var qaLiveServer: String? {
+    let args = ProcessInfo.processInfo.arguments
+    guard let i = args.firstIndex(of: "-QALiveServer"), i + 1 < args.count else { return nil }
+    let v = args[i + 1]
+    return v.isEmpty ? nil : v
   }
   #endif
 

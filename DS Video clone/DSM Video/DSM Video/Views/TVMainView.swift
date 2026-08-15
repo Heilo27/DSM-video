@@ -330,7 +330,19 @@ private struct TVHomeView: View {
       TVSearchView()
         .environment(appState)
     }
-    .task { await appState.homeLoad() }
+    // Keyed on the session token, not a bare .task.
+    //
+    // TVMainView swaps TVPairingView → TVHomeView inside a Group when sessionToken goes
+    // from nil to a value. SwiftUI frequently reuses the Group's identity across that
+    // swap rather than constructing a fresh view, so a bare `.task` is not guaranteed to
+    // fire on the transition — the home screen then renders with empty rails and nothing
+    // ever loads them, because homeLoad() is only otherwise called from Retry/Refresh.
+    // This is the same unkeyed-.task defect fixed in PlayerSheet (TASK-838): the modifier
+    // must be keyed on the value whose change should re-run the work.
+    //
+    // Keying on sessionToken also covers re-login after a session expiry, which
+    // previously left the same stale-empty state behind.
+    .task(id: appState.sessionToken) { await appState.homeLoad() }
     // TASK-835: GestureVideoPlayer.cleanup() posts .playerDidDismiss on both platforms, but
     // only LibraryHomeView (iOS) observed it. Without this, exiting the player on Apple TV
     // left Continue Watching showing the pre-playback state until the 30s heartbeat happened
