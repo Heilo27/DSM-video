@@ -229,6 +229,20 @@ final class AppState {
       homeLog.info("QA live-session hook active — server=\(self.baseURL, privacy: .public)")
     }
     #endif
+
+    // Launch banner. A photographed log needs to be self-describing: which build, which
+    // server, whether a token survived. Without this, every report starts with three
+    // clarifying questions before diagnosis can begin.
+    let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+    #if os(tvOS)
+    let platform = "tvOS"
+    #else
+    let platform = "iOS"
+    #endif
+    dlog.info(.app, "── launch: \(platform) v\(v) (\(b)) \(ProcessInfo.processInfo.operatingSystemVersionString) ──")
+    dlog.info(.app, "server=\(baseURL) https=\(useHTTPS) port=\(defaultPort) user='\(username)'")
+    dlog.info(.app, "token=\(DiagnosticLog.redact(sessionToken)) lan='\(lanAddress)' wan='\(wanAddress)'")
   }
 
   #if DEBUG
@@ -522,6 +536,14 @@ final class AppState {
         return lan.isEmpty ? 0 : 1
       }()
 
+      // Diagnostic: the candidate list IS the explanation for most login failures. A stale
+      // saved address shows up here as an address Ryan does not recognise, and the per-
+      // candidate results below say exactly how each one failed.
+      dlog.info(.auth, "login: user '\(username)', \(candidates.count) candidate(s), \(lanCount) LAN")
+      for (i, c) in candidates.enumerated() {
+        dlog.info(.auth, "  candidate \(i + 1): \(c.url.host ?? "?"):\(c.url.port.map(String.init) ?? "-") \(c.url.scheme ?? "?")\(c.requiresTunnelCookie ? " (relay)" : "")")
+      }
+
       var lastError: Error?
       for (index, candidate) in candidates.enumerated() {
         do {
@@ -553,9 +575,22 @@ final class AppState {
             Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
           }
           startHeartbeatTimer()
+          dlog.info(.auth, "login OK via \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") token=\(DiagnosticLog.redact(resp.token))")
           return
         } catch {
           homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
+          // Per-candidate failure reason. This is what distinguishes "wrong password"
+          // (server answered 401) from "wrong address" (nothing answered at all) — the
+          // exact ambiguity that cost an evening when the app reported both identically.
+          let why: String
+          if let apiErr = error as? APIError {
+            why = apiErr.serverReached ? "server rejected: \(apiErr.userMessage)" : apiErr.userMessage
+          } else if let urlErr = error as? URLError {
+            why = urlErr.code.diagnosticName
+          } else {
+            why = error.localizedDescription
+          }
+          dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
           lastError = error
         }
       }
@@ -565,6 +600,7 @@ final class AppState {
       // real 401/403 (wrong password, or account lacks app permission) gets hidden
       // behind a misleading "check the QuickConnect ID" message.
       let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+      dlog.error(.auth, "login FAILED — all \(candidates.count) candidate(s) exhausted")
       if let apiErr = lastError as? APIError, apiErr.serverReached {
         loginError = apiErr.userMessage
       } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
@@ -963,11 +999,14 @@ final class AppState {
           sessionToken = resp.token
           api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
           startHeartbeatTimer()
+          dlog.info(.auth, "pairing OK via QuickConnect \(candidate.url.host ?? "?") token=\(DiagnosticLog.redact(resp.token))")
           return
         } catch {
+          dlog.warn(.auth, "pairing via \(candidate.url.host ?? "?") failed — \((error as? APIError)?.userMessage ?? error.localizedDescription)")
           lastError = error
         }
       }
+      dlog.error(.auth, "pairing FAILED — all QuickConnect candidates exhausted")
       loginError = (lastError as? APIError)?.userMessage ?? "Invalid pairing code."
       return
     }
@@ -1069,6 +1108,14 @@ final class AppState {
         self.homeJustAdded = added
         self.homeRecentlyWatched = watched
         self.homeLog.info("recomputeHomeRails: done in \(elapsed)s — cont=\(cont.count) added=\(added.count) watched=\(watched.count)")
+        // The single highest-value line in the log for the "rails are missing" report:
+        // it says whether the rails were computed empty (a data/filter problem) or
+        // computed full but not rendered (a view problem). Those need opposite fixes.
+        if cont.isEmpty && added.isEmpty && watched.isEmpty {
+          dlog.warn(.home, "rails computed EMPTY from \(items.count) items — check addedAt/progress fields")
+        } else {
+          dlog.info(.home, "rails: ContinueWatching=\(cont.count) JustAdded=\(added.count) RecentlyWatched=\(watched.count) (from \(items.count) items)")
+        }
       }
     }
   }
@@ -1145,6 +1192,10 @@ final class AppState {
     homeLog.info("homeLoad[\(callID)]: called — isLoading=\(self.homeIsLoading) isCacheDecoding=\(self.homeIsCacheDecoding) isBackgroundRefreshing=\(self.homeIsBackgroundRefreshing)")
     guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else {
       homeLog.warning("homeLoad[\(callID)]: already loading/syncing, bailing")
+      // A guard that never releases is how the rails stayed empty before: the flag latched
+      // and every later call bailed here. If this line repeats with no matching completion,
+      // that is the bug — not a slow network.
+      dlog.warn(.home, "homeLoad bailed — busy (load=\(homeIsLoading) decode=\(homeIsCacheDecoding) bg=\(homeIsBackgroundRefreshing))")
       return
     }
 
@@ -1166,6 +1217,7 @@ final class AppState {
     // the Movies and TV Shows rails showed fine.
     if !homeAllRailsEmpty {
       homeLog.info("homeLoad[\(callID)]: PATH=in-memory — rails populated, running heartbeat")
+      dlog.info(.home, "homeLoad: in-memory (CW=\(homeContinueWatching.count) JA=\(homeJustAdded.count) RW=\(homeRecentlyWatched.count))")
       homeError = nil  // clear any stale error banner alongside populated content
       Task { await self.runHeartbeat() }
       return
@@ -1182,6 +1234,7 @@ final class AppState {
 
     if hasLocal {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — local DB has data, loading rails")
+      dlog.info(.home, "homeLoad: cold start from local DB")
       let rails = await Task.detached(priority: .userInitiated) {
         await LocalStore.shared.queryRails()
       }.value
@@ -1359,6 +1412,14 @@ final class AppState {
       // Step 2: Fetch libraries (always fast, small payload)
       let libs = try await apiSnapshot.libraries().libraries
       homeLibraries = libs
+      // Library names and counts. If a library the user expects is absent here, the problem
+      // is server-side indexing, not the client — which saves a round of client debugging.
+      if libs.isEmpty {
+        dlog.warn(.library, "server returned ZERO libraries")
+      } else {
+        dlog.info(.library, "libraries: \(libs.map(\.title).joined(separator: ", "))")
+      }
+      dlog.info(.library, "sync: server itemSeq=\(status.itemSeq) local=\(cursors.itemSeq) progressSeq=\(status.progressSeq)/\(cursors.progressSeq)")
 
       // Step 3: Fetch item deltas if server has new items
       let localCount = await LocalStore.shared.totalItemCount()

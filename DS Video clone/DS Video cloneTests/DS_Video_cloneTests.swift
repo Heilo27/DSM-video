@@ -571,4 +571,80 @@ struct AppStateTests {
     #expect(msg.contains("https") || msg.contains("secure"))
     #expect(!msg.contains("password"))
   }
+
+  // MARK: - Diagnostic log
+  //
+  // This log is meant to be PHOTOGRAPHED and sent over chat, so the redaction guarantees
+  // are a privacy boundary, not a nicety. A leaked token in a screenshot is a real breach.
+
+  @Test func redactNeverRevealsTheSecret() {
+    let secret = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.supersecretpayload"
+    let out = DiagnosticLog.redact(secret)
+    #expect(!out.contains("supersecretpayload"))
+    #expect(out.contains("\(secret.count)"))       // length is diagnostic
+    #expect(out.hasPrefix("eyJh"))                  // 4-char prefix distinguishes tokens
+    #expect(out.count < secret.count)
+  }
+
+  @Test func redactHandlesEmptyAndNil() {
+    #expect(DiagnosticLog.redact(nil) == "<empty>")
+    #expect(DiagnosticLog.redact("") == "<empty>")
+  }
+
+  @Test func safeURLStripsCredentialsAndTokens() {
+    let url = URL(string: "https://user:hunter2@nas.local:5000/api/v1/items?token=abc123&libraryId=lib_movies")!
+    let out = DiagnosticLog.safeURL(url)
+    #expect(!out.contains("hunter2"))
+    #expect(!out.contains("abc123"))
+    #expect(out.contains("lib_movies"))             // non-sensitive params survive
+    #expect(out.contains("nas.local"))
+  }
+
+  @Test func urlErrorNamesAreHumanReadable() {
+    // A raw code in a photo is useless; every name must be words, not a number.
+    #expect(URLError.Code.cannotConnectToHost.diagnosticName == "cannot connect to host")
+    #expect(URLError.Code.timedOut.diagnosticName == "timed out")
+    #expect(!URLError.Code.cannotFindHost.diagnosticName.contains("-"))
+  }
+
+  @Test func logRecordsAndReturnsNewestFirst() {
+    let log = DiagnosticLog.shared
+    log.clear()
+    log.info(.auth, "first")
+    log.warn(.network, "second")
+    log.error(.home, "third")
+    // Writes are async on a serial queue; entries syncs on that same queue, which
+    // guarantees prior appends have drained.
+    let entries = log.entries
+    #expect(entries.count >= 3)
+    #expect(entries[0].message == "third")          // newest first — the photo requirement
+    #expect(entries[0].level == .error)
+    log.clear()
+  }
+
+  /// End-to-end proof that a dead server address produces a diagnosable log entry naming
+  /// the host — the exact failure that cost an evening, where the app said "incorrect
+  /// username or password" and the log said nothing at all.
+  @Test func deadAddressIsLoggedWithHostAndReason() async {
+    let log = DiagnosticLog.shared
+    log.clear()
+
+    // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — guaranteed unroutable, so this fails fast
+    // and deterministically without depending on the local network.
+    let dead = URL(string: "http://192.0.2.1:9/")!
+    let client = APIClient(baseURL: dead, token: nil)
+    _ = try? await client.login(username: "u", password: "p", timeoutInterval: 2)
+
+    let entries = log.entries
+    let netFailures = entries.filter { $0.category == .network && $0.level == .error }
+    #expect(!netFailures.isEmpty, "a transport failure must produce a NET error entry")
+
+    if let first = netFailures.first {
+      // The host must appear, so a stale saved address is obvious in a photograph.
+      #expect(first.message.contains("192.0.2.1"))
+      // And it must NOT imply a credentials problem.
+      #expect(!first.message.lowercased().contains("password"))
+    }
+    log.clear()
+  }
 }

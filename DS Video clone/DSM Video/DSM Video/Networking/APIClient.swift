@@ -431,16 +431,32 @@ struct APIClient {
     // upstream sees the word "password" nowhere, matches something else, and tells the user
     // their credentials are wrong when the server was simply unreachable. Wrap it here so the
     // real reason survives all the way to the UI.
+    // Diagnostic instrumentation: this is the single choke point every API call passes
+    // through, so logging here covers login, libraries, home rails, playback and progress
+    // without scattering log lines across the codebase. Kept to one line per request so a
+    // photographed screen stays readable.
+    let started = Date()
+    let endpoint = "\(method) \(url.path)"
+
     let data: Data
     let httpResp: HTTPURLResponse
     do {
       let (d, resp) = try await URLSession.shared.data(for: req)
-      guard let http = resp as? HTTPURLResponse else { throw APIError.network }
+      guard let http = resp as? HTTPURLResponse else {
+        dlog.error(.network, "\(endpoint) — response was not HTTP")
+        throw APIError.network
+      }
       data = d
       httpResp = http
     } catch let urlError as URLError {
+      // The failure Ryan hit on the TV: server unreachable, reported to the user as a
+      // credentials problem. Log the host so a stale saved address is obvious at a glance.
+      dlog.error(.network,
+                 "\(endpoint) — \(urlError.code.diagnosticName) (host: \(url.host ?? "?"):\(url.port.map(String.init) ?? "-"))")
       throw APIError.connection(urlError.code)
     }
+
+    let ms = Int(Date().timeIntervalSince(started) * 1000)
     if !(200...299).contains(httpResp.statusCode) {
       // 409 from /playback means the server is mid-converting this file to a
       // DirectPlay format (auto-normalize, TASK-755). Surface it as a distinct,
@@ -459,11 +475,48 @@ struct APIClient {
       // UI with empty rails, no route back to login, and the dead token still in the
       // Keychain. Preserving the status here is what makes those handlers fire.
       if let apiErr = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
+        dlog.error(.network, "\(endpoint) → HTTP \(httpResp.statusCode) \(apiErr.error) (\(ms)ms)")
         throw APIError.server(apiErr.error, status: httpResp.statusCode)
       }
+      dlog.error(.network, "\(endpoint) → HTTP \(httpResp.statusCode), no error body (\(ms)ms)")
       throw APIError.http(httpResp.statusCode)
     }
-    return try Self.decoder.decode(T.self, from: data)
+
+    do {
+      let decoded = try Self.decoder.decode(T.self, from: data)
+      // Only log slow successes. A healthy request is noise; a slow one explains a stall.
+      if ms > 3000 {
+        dlog.warn(.network, "\(endpoint) → OK but slow: \(ms)ms, \(data.count)B")
+      }
+      return decoded
+    } catch let decodeError as DecodingError {
+      // Decode failures are the quietest class of bug in this app: the request succeeded,
+      // the server was healthy, and the screen renders empty. ItemsResponse.total silently
+      // breaking Watchlist on every platform was exactly this. Name the field and the
+      // expected type so the mismatch is diagnosable from a photo alone.
+      dlog.error(.decode, "\(endpoint) → \(Self.describe(decodeError)) [\(T.self)]")
+      throw decodeError
+    }
+  }
+
+  /// Flatten a DecodingError into one short, photographable line naming the offending field.
+  private static func describe(_ error: DecodingError) -> String {
+    func path(_ ctx: DecodingError.Context) -> String {
+      let p = ctx.codingPath.map(\.stringValue).filter { !$0.isEmpty }.joined(separator: ".")
+      return p.isEmpty ? "<root>" : p
+    }
+    switch error {
+    case .keyNotFound(let key, let ctx):
+      return "missing field '\(key.stringValue)' at \(path(ctx))"
+    case .typeMismatch(let type, let ctx):
+      return "wrong type at \(path(ctx)) — expected \(type)"
+    case .valueNotFound(let type, let ctx):
+      return "null at \(path(ctx)) — expected \(type)"
+    case .dataCorrupted(let ctx):
+      return "corrupt JSON at \(path(ctx))"
+    @unknown default:
+      return "decode failed"
+    }
   }
 }
 

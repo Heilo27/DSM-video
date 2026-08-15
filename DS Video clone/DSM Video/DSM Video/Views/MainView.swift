@@ -1422,6 +1422,19 @@ struct SettingsView: View {
         } label: {
           Label("Contact Support", systemImage: "envelope")
         }
+
+        // Deliberately a NavigationLink inside the Form, NOT a toolbar item: tvOS does not
+        // render ToolbarItem(placement: .topBar*) at all, which is how the library search
+        // control shipped invisible on the TV. A Form row is focusable and visible on both
+        // platforms, and this screen exists precisely for the device that is hardest to
+        // debug — it has to actually be reachable there.
+        NavigationLink {
+          DiagnosticLogView()
+        } label: {
+          Label("Diagnostic Log", systemImage: "stethoscope")
+        }
+        .accessibilityLabel("Diagnostic Log")
+        .accessibilityHint("Recent activity, for troubleshooting sign-in and loading problems")
       }
 
       Section {
