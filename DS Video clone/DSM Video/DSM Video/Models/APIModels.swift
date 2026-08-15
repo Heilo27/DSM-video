@@ -34,8 +34,19 @@ struct Library: Codable, Identifiable, Hashable, Sendable {
 // MARK: - Items
 
 struct ItemsResponse: Decodable {
-  let total: Int
+  /// Optional because not every endpoint that returns this shape sends it.
+  ///
+  /// GET /api/v1/watchlist returns ONLY {"items": [...]} — no `total`. With this declared
+  /// non-optional the decode threw keyNotFound on every watchlist load, on every platform,
+  /// every 30 seconds, and the list rendered permanently empty even with items saved
+  /// server-side (verified live: 6 items returned, 0 shown). /items does send it and is
+  /// unaffected.
+  let total: Int?
   let items: [ItemSummary]
+
+  /// Total when the server supplied one, else the count actually returned. Callers paging or
+  /// displaying a count should use this rather than force-unwrapping `total`.
+  var effectiveTotal: Int { total ?? items.count }
 }
 
 struct ItemProgress: Codable, Hashable, Sendable {

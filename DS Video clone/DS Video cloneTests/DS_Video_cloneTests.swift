@@ -349,6 +349,30 @@ struct APIModelsCodingTests {
     #expect(detail.images?.backdrop.mapperId == "42")
   }
 
+  /// GET /api/v1/watchlist returns ONLY {"items": [...]} — no `total`. ItemsResponse.total
+  /// was non-optional, so this decode threw keyNotFound and the watchlist rendered empty on
+  /// every platform, every 30s, even with items saved server-side (verified live: 6 returned,
+  /// 0 shown). Regression test for that exact payload shape.
+  @Test func itemsResponseDecodesWithoutTotal() throws {
+    let json = """
+    {"items":[{"id":"m1","libraryId":"lib_movies","type":"movie","title":"Inception","addedAt":"2026-01-01T00:00:00Z"}]}
+    """.data(using: .utf8)!
+    let resp = try JSONDecoder().decode(ItemsResponse.self, from: json)
+    #expect(resp.total == nil)
+    #expect(resp.items.count == 1)
+    #expect(resp.effectiveTotal == 1)   // falls back to the returned count
+  }
+
+  /// /items DOES send total; it must still be honoured for pagination.
+  @Test func itemsResponseUsesServerTotalWhenPresent() throws {
+    let json = """
+    {"total":503,"items":[{"id":"m1","libraryId":"lib_movies","type":"movie","title":"Inception","addedAt":"2026-01-01T00:00:00Z"}]}
+    """.data(using: .utf8)!
+    let resp = try JSONDecoder().decode(ItemsResponse.self, from: json)
+    #expect(resp.total == 503)
+    #expect(resp.effectiveTotal == 503)
+  }
+
   // MARK: PlaybackInfo decoding
 
   @Test func playbackInfoDecodes() throws {

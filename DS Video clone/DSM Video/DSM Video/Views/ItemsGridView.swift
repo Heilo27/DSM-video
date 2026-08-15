@@ -284,7 +284,7 @@ struct ItemsGridView: View {
         let newIDs = response.items.filter { seenIDs.insert($0.id).inserted }
         if newIDs.isEmpty { break }
 
-        if response.items.count < pageSize || allItems.count >= response.total {
+        if response.items.count < pageSize || allItems.count >= response.effectiveTotal {
           break
         }
         offset += pageSize

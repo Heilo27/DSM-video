@@ -369,7 +369,7 @@ private struct LibraryCard: View {
           }
         }
         posterIDs = unique
-        itemCount = resp.total
+        itemCount = resp.effectiveTotal
       }
     } catch {
       loadLog.warning("LibraryCard: artwork load failed for \(library.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
