@@ -349,16 +349,57 @@ type ParsedFilename struct {
 }
 
 // ParseFilename extracts title, year, and episode info from a filename.
+var (
+	whitespaceRun     = regexp.MustCompile(`\s+`)
+	danglingOpenParen = regexp.MustCompile(`\s*\([^)]*$`)
+	trailingSeparator = regexp.MustCompile(`[\s\-–—:,.]+$`)
+	// Only a hyphen acting as a delimiter (whitespace on at least one side). An intra-word
+	// hyphen — "X-Men", "Spider-Man", "Marvel's Agents of S.H.I.E.L.D." — is part of the
+	// title and must survive to be searchable.
+	delimiterHyphen = regexp.MustCompile(`\s+-+\s*|\s*-+\s+`)
+)
+
+// NormalizeTitle cleans a parsed title into something a search engine can match.
+//
+// Filename parsing expands separators into spaces and slices titles at pattern
+// boundaries, which reliably produces two artefacts that make a title unsearchable:
+// runs of whitespace (from "A - B" becoming "A   B"), and a dangling "(" left behind
+// when a cut lands inside a parenthetical. Both were present in
+// "X Men   PRYDE of The X Men (Original", which matched nothing on TMDb and left every
+// episode under that folder without artwork.
+//
+// The transformation is deliberately conservative — it only removes noise that parsing
+// introduced. Balanced parentheses are meaningful (a disambiguating year, "Justified
+// (2010)") and are preserved. Apostrophes and internal punctuation are left alone.
+func NormalizeTitle(title string) string {
+	out := whitespaceRun.ReplaceAllString(title, " ")
+	out = strings.TrimSpace(out)
+	// An unclosed "(" is always parsing damage: a real title would have closed it.
+	out = danglingOpenParen.ReplaceAllString(out, "")
+	out = trailingSeparator.ReplaceAllString(out, "")
+	return strings.TrimSpace(out)
+}
+
 func ParseFilename(filename string) ParsedFilename {
 	result := ParsedFilename{}
 
 	// Remove extension
 	name := strings.TrimSuffix(filename, "."+getExtension(filename))
 
-	// Replace common separators with spaces
+	// Replace common separators with spaces.
+	//
+	// Hyphens are handled separately and deliberately. Blanket-replacing them destroyed
+	// hyphenated titles — "X-Men" became "X Men", which does not match on TMDb — while
+	// only ever being needed for the DELIMITER form " - " that separates a show name from
+	// its episode marker. Replacing only a hyphen surrounded by whitespace splits
+	// "Show - S01 E01" correctly and leaves "X-Men" and "Spider-Man" intact.
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "_", " ")
-	name = strings.ReplaceAll(name, "-", " ")
+	name = delimiterHyphen.ReplaceAllString(name, " ")
+	// Collapse immediately: every downstream index-based slice below assumes single
+	// spacing, and without this the runs survive into the stored title.
+	name = whitespaceRun.ReplaceAllString(name, " ")
+	name = strings.TrimSpace(name)
 
 	// Check for TV show patterns: S01E02, S01 E02, 1x02, Season 1 Episode 2
 	tvPatterns := []struct {
@@ -410,10 +451,24 @@ func ParseFilename(filename string) ParsedFilename {
 		if matches := yearPattern.FindStringSubmatch(name); matches != nil {
 			year, _ := strconv.Atoi(strings.Trim(matches[0], "()"))
 			result.Year = year
-			// Title is everything before the year
-			idx := yearPattern.FindStringIndex(name)
-			if idx != nil {
-				result.Title = strings.TrimSpace(name[:idx[0]])
+			// Title is everything before the year.
+			//
+			// If the year sits INSIDE a parenthetical, cut at the opening "(" instead,
+			// so the whole group goes rather than half of it. Slicing at the year index
+			// is what produced "X Men PRYDE of The X Men (Original" from
+			// "...(Original 1989 Pilot)" — an unbalanced fragment that matches nothing.
+			// A parenthetical containing a year is an edition/release note, never part
+			// of the searchable title, so removing it whole is also more correct.
+			if idx := yearPattern.FindStringIndex(name); idx != nil {
+				cut := idx[0]
+				if open := strings.LastIndex(name[:cut], "("); open != -1 {
+					// Only when the "(" is genuinely unclosed before the year — a
+					// balanced group that merely precedes the year must be preserved.
+					if !strings.Contains(name[open:cut], ")") {
+						cut = open
+					}
+				}
+				result.Title = strings.TrimSpace(name[:cut])
 			}
 		} else {
 			// No year found, use whole name as title
@@ -422,9 +477,14 @@ func ParseFilename(filename string) ParsedFilename {
 	}
 
 	// Clean up title - remove quality indicators
-	qualityPatterns := regexp.MustCompile(`(?i)(720p|1080p|2160p|4k|uhd|hdr|bluray|brrip|webrip|web dl|hdtv|dvdrip|x264|x265|hevc|aac|ac3|dts).*`)
+	// Strip quality/release tags and everything after them. 360p/480p/576p were absent
+	// from this list even though the library is full of SD rips, so those tags survived
+	// into stored titles.
+	qualityPatterns := regexp.MustCompile(`(?i)\b(360p|480p|576p|720p|1080p|2160p|4k|uhd|hdr|bluray|brrip|webrip|web dl|hdtv|dvdrip|x264|x265|hevc|aac|ac3|dts)\b.*`)
 	result.Title = qualityPatterns.ReplaceAllString(result.Title, "")
-	result.Title = strings.TrimSpace(result.Title)
+
+	// Final pass: repairs any dangling paren or trailing separator the slices above left.
+	result.Title = NormalizeTitle(result.Title)
 
 	return result
 }
@@ -510,9 +570,49 @@ func (c *TMDbClient) FetchMovieMetadata(ctx context.Context, title string, year 
 
 // FetchTVMetadata searches TMDb and returns metadata for a TV episode.
 func (c *TMDbClient) FetchTVMetadata(ctx context.Context, showName string, season, episode int) (*VideoMetadata, error) {
-	results, err := c.SearchTV(ctx, showName, 0)
-	if err != nil {
-		return nil, err
+	return c.FetchTVMetadataWithFallback(ctx, showName, "", season, episode)
+}
+
+// FetchTVMetadataWithFallback searches TMDb for a TV episode, trying progressively
+// looser queries before giving up.
+//
+// A single-shot search was too brittle for a real library. When the parsed title carried
+// parsing damage the search returned nothing, the caller stamped metadata_fetched_at, and
+// that episode was never looked up again — permanently artwork-less. 476 episodes in the
+// live library were in exactly that state.
+//
+// The ladder, cheapest and most-likely-correct first:
+//
+//  1. the title as parsed
+//  2. the normalized title, if normalization actually changed it
+//  3. the containing folder name, which for nested collections is the real show name and
+//     is otherwise discarded — the scanner only ever passes the file's basename
+//
+// Each rung is tried only if the previous returned zero results; a successful search
+// short-circuits. An error (network, auth) aborts immediately rather than falling through,
+// since retrying a broken connection with a different string is pointless.
+func (c *TMDbClient) FetchTVMetadataWithFallback(ctx context.Context, showName, folderName string, season, episode int) (*VideoMetadata, error) {
+	attempts := []string{showName}
+	if n := NormalizeTitle(showName); n != "" && n != showName {
+		attempts = append(attempts, n)
+	}
+	if f := NormalizeTitle(folderName); f != "" && !containsFold(attempts, f) {
+		attempts = append(attempts, f)
+	}
+
+	var results []TVResult
+	var err error
+	for _, q := range attempts {
+		if strings.TrimSpace(q) == "" {
+			continue
+		}
+		results, err = c.SearchTV(ctx, q, 0)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) > 0 {
+			break
+		}
 	}
 
 	if len(results) == 0 {
@@ -575,4 +675,14 @@ func (c *TMDbClient) FetchTVMetadata(ctx context.Context, showName string, seaso
 	}
 
 	return meta, nil
+}
+
+// containsFold reports whether s appears in list, case-insensitively.
+func containsFold(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
 }

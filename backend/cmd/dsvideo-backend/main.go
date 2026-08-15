@@ -2845,9 +2845,23 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		"poster":   map[string]any{"id": nil},
 		"backdrop": map[string]any{"id": nil},
 	}
+	// Pick the artwork-bearing episode DETERMINISTICALLY.
+	//
+	// These queries had no ORDER BY, so which episode's art represented the show was
+	// whatever SQLite happened to return first — and that could change between scans.
+	// It matters most for a folder whose subfolders are separate series rather than
+	// seasons (the library has one: "X-Men - ANIME Series and CARTOON Series", holding
+	// both an anime and a cartoon show). matchWhere scopes to the first path segment,
+	// so without an ordering the anime's poster could represent the cartoon.
+	//
+	// ORDER BY path makes the choice stable and picks the first episode in on-disk order,
+	// which is the closest thing to "the show's own artwork" available without changing
+	// how shows are grouped. Grouping is deliberately left alone: of 82 show folders, ~40
+	// nest season directories correctly and only one nests distinct series, so deepening
+	// the heuristic would break 40 shows to fix one.
 	if posterPath.Valid && posterPath.String != "" {
 		var firstEpID string
-		s.db.QueryRow("SELECT id FROM items WHERE "+matchWhere+" AND poster_path IS NOT NULL AND poster_path != '' AND library_id = 'lib_tv' LIMIT 1",
+		s.db.QueryRow("SELECT id FROM items WHERE "+matchWhere+" AND poster_path IS NOT NULL AND poster_path != '' AND library_id = 'lib_tv' ORDER BY path LIMIT 1",
 			matchArgs...).Scan(&firstEpID)
 		if firstEpID != "" {
 			images["poster"] = map[string]any{"id": firstEpID}
@@ -2855,7 +2869,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if backdropPath.Valid && backdropPath.String != "" {
 		var firstEpID string
-		s.db.QueryRow("SELECT id FROM items WHERE "+matchWhere+" AND backdrop_path IS NOT NULL AND backdrop_path != '' AND library_id = 'lib_tv' LIMIT 1",
+		s.db.QueryRow("SELECT id FROM items WHERE "+matchWhere+" AND backdrop_path IS NOT NULL AND backdrop_path != '' AND library_id = 'lib_tv' ORDER BY path LIMIT 1",
 			matchArgs...).Scan(&firstEpID)
 		if firstEpID != "" {
 			images["backdrop"] = map[string]any{"id": firstEpID}
@@ -2870,7 +2884,8 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	// Use TMDb show_name as display name if available
 	displayName := showName
 	var tmdbName sql.NullString
-	s.db.QueryRow("SELECT show_name FROM items WHERE "+matchWhere+" AND show_name IS NOT NULL AND show_name != '' AND library_id = 'lib_tv' LIMIT 1",
+	// Same determinism problem as the artwork queries above.
+	s.db.QueryRow("SELECT show_name FROM items WHERE "+matchWhere+" AND show_name IS NOT NULL AND show_name != '' AND library_id = 'lib_tv' ORDER BY path LIMIT 1",
 		matchArgs...).Scan(&tmdbName)
 	if tmdbName.Valid && tmdbName.String != "" {
 		displayName = tmdbName.String
@@ -6110,6 +6125,9 @@ func (s *Server) fetchAndStoreMetadata(ctx context.Context, itemID string, parse
 	s.fetchAndStoreMetadataWithClient(ctx, itemID, parsed, itemType, client)
 }
 
+// Leading on-disk ordering prefix on a folder name: "01. ", "03 - ", "2) ".
+var folderOrderPrefix = regexp.MustCompile(`^\s*\d{1,3}\s*[.)\-]\s*`)
+
 func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID string, parsed metadata.ParsedFilename, itemType string, tmdbClient *metadata.TMDbClient) {
 	if tmdbClient == nil {
 		return
@@ -6141,7 +6159,22 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	var err error
 
 	if itemType == "episode" || parsed.IsTV {
-		meta, err = tmdbClient.FetchTVMetadata(ctx, parsed.Title, parsed.Season, parsed.Episode)
+		// Pass the containing folder name as a fallback query. The scanner parses only the
+		// file's basename, so for a nested layout like
+		//   .../Cartoon Shows/01. X-Men - PRYDE of The X-Men (Original 1989 Pilot)/file.mp4
+		// the folder carries the real show name while the basename carries release noise.
+		// Looked up from the row we are about to update rather than threaded through three
+		// call sites; it is one indexed read on a path we already have.
+		var itemPath string
+		_ = s.db.QueryRow(`SELECT path FROM items WHERE id = ?`, itemID).Scan(&itemPath)
+		folderName := ""
+		if itemPath != "" {
+			folderName = filepath.Base(filepath.Dir(itemPath))
+			// Drop a leading ordering prefix ("01. ", "03 - ") that sorts folders on disk
+			// but is not part of the show's name.
+			folderName = folderOrderPrefix.ReplaceAllString(folderName, "")
+		}
+		meta, err = tmdbClient.FetchTVMetadataWithFallback(ctx, parsed.Title, folderName, parsed.Season, parsed.Episode)
 	} else {
 		meta, err = tmdbClient.FetchMovieMetadata(ctx, parsed.Title, parsed.Year)
 	}

@@ -330,6 +330,18 @@ private struct TVHomeView: View {
       TVSearchView()
         .environment(appState)
     }
+    #if DEBUG
+    // QA hook: open Search straight from launch. tvOS focus cannot be driven from
+    // simctl (no sendkey) and the beta Xcode ships no Simulator.app to drive with
+    // AppleScript, so screenshotting this screen otherwise requires a physical remote.
+    // DEBUG-only, matching the existing -QALiveToken/-QALiveServer hooks.
+    .task {
+      if ProcessInfo.processInfo.arguments.contains("-QAOpenSearch") {
+        try? await Task.sleep(for: .seconds(2))
+        showSearch = true
+      }
+    }
+    #endif
     // Keyed on the session token, not a bare .task.
     //
     // TVMainView swaps TVPairingView → TVHomeView inside a Group when sessionToken goes
