@@ -162,7 +162,16 @@ struct ItemsGridView: View {
     // Force white nav-bar content (the large title was rendering dim grey on black).
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
-    .task { await load() }
+    // Keyed on the library id, NOT a bare .task.
+    //
+    // On iPad/macOS the sidebar swaps libraries inside SplitView.detailContent
+    // (MainView.swift:110-132) without changing the view TYPE or its position, so SwiftUI
+    // reuses this view in place. A bare `.task` does not re-fire on that swap: selecting
+    // Movies after TV Shows left the previous library's items on screen.
+    //
+    // Same defect class as TVMainView's homeLoad (0d240c8), which shipped to a real Apple TV
+    // and left the home rails permanently empty, and PlayerSheet (TASK-838).
+    .task(id: library.id) { await load() }
     #if !os(tvOS)
     // Search is a magnifying-glass button in the nav bar that presents a search
     // sheet, now that the dedicated Search tab is gone.
