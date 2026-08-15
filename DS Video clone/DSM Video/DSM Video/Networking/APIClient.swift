@@ -425,9 +425,21 @@ struct APIClient {
       req.httpBody = try Self.encoder.encode(body)
     }
 
-    let (data, httpResp) = try await URLSession.shared.data(for: req)
-    guard let httpResp = httpResp as? HTTPURLResponse else {
-      throw APIError.network
+    // A transport failure (host down, connection refused, DNS miss, TLS mismatch) throws
+    // URLError, NOT APIError. Left unwrapped it escapes as an unrecognised error type and
+    // callers fall through to a generic "Login failed" — or worse, a string-matching ladder
+    // upstream sees the word "password" nowhere, matches something else, and tells the user
+    // their credentials are wrong when the server was simply unreachable. Wrap it here so the
+    // real reason survives all the way to the UI.
+    let data: Data
+    let httpResp: HTTPURLResponse
+    do {
+      let (d, resp) = try await URLSession.shared.data(for: req)
+      guard let http = resp as? HTTPURLResponse else { throw APIError.network }
+      data = d
+      httpResp = http
+    } catch let urlError as URLError {
+      throw APIError.connection(urlError.code)
     }
     if !(200...299).contains(httpResp.statusCode) {
       // 409 from /playback means the server is mid-converting this file to a
@@ -457,6 +469,11 @@ struct APIClient {
 
 enum APIError: Error {
   case network
+  /// A transport-level failure that never reached the server (host unreachable, connection
+  /// refused, DNS failure, timeout, TLS rejection). Distinct from `.server`/`.http`, which
+  /// mean the server DID answer and rejected us — the difference the user needs in order to
+  /// know whether to fix their address or their password.
+  case connection(URLError.Code)
   case http(Int)
   /// A structured error from the server. `status` is the HTTP status that carried it —
   /// needed because the backend returns a JSON body on EVERY error including 401, so
@@ -471,6 +488,23 @@ enum APIError: Error {
   var userMessage: String {
     switch self {
     case .network: return "Network error."
+    case .connection(let code):
+      switch code {
+      case .cannotConnectToHost:
+        return "Couldn't connect to the server. Check the address and port, and that DSVideoServer is running."
+      case .cannotFindHost, .dnsLookupFailed:
+        return "Couldn't find that server. Double-check the address."
+      case .timedOut:
+        return "The server didn't respond. Check the address and that DSVideoServer is running."
+      case .notConnectedToInternet, .networkConnectionLost:
+        return "No network connection."
+      case .secureConnectionFailed, .serverCertificateUntrusted,
+           .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+           .serverCertificateHasUnknownRoot:
+        return "Secure connection failed. If your server has no HTTPS certificate, turn HTTPS off."
+      default:
+        return "Couldn't reach the server. Check the address and port."
+      }
     case .converting:
       return "This video is being prepared for smooth playback. Check back in a few minutes."
     case .http(let code): return "Server error (\(code))."
@@ -564,7 +598,7 @@ enum APIError: Error {
   var serverReached: Bool {
     switch self {
     case .server, .http, .converting: return true
-    case .network, .invalidURL: return false
+    case .network, .invalidURL, .connection: return false
     }
   }
 }

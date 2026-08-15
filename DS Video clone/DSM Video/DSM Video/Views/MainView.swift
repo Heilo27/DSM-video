@@ -10,7 +10,18 @@ struct MainView: View {
   let layout: Layout
 
   var body: some View {
-    ZStack(alignment: .top) {
+    // TASK-884: the offline banner is an OVERLAY on the content, not a ZStack sibling.
+    //
+    // It used to be a second child of a ZStack — a VStack whose trailing Spacer() expanded to
+    // full height. That made the banner layer as tall as the screen, so the ZStack sized to it
+    // and SWALLOWED the tab bar's safe-area inset before the TabView's content could ever see
+    // it. Net effect: every safeAreaInset / padding / spacer added inside LibraryHomeView was
+    // discarded, which is why three separate attempts down there produced an IDENTICAL pixel
+    // signature and the "Recently Watched" header kept rendering behind the glass bar.
+    //
+    // As an .overlay the banner is measured against the content rather than participating in
+    // its layout, so the inset propagates normally and the child's own clearance takes effect.
+    Group {
       switch layout {
       case .tabs:
         // TASK-858: tab titles are Title Case, not ALL CAPS.
@@ -46,12 +57,10 @@ struct MainView: View {
       case .split:
         SplitView()
       }
-
-      VStack(spacing: 0) {
-        OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
-          .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
-        Spacer()
-      }
+    }
+    .overlay(alignment: .top) {
+      OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
+        .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
     }
   }
 }

@@ -901,22 +901,55 @@ struct SetupCredentialsScreen: View {
     return false
   }
 
+  /// Last-resort prettifier for an error string that reached us without its type.
+  ///
+  /// This used to test for credentials FIRST, which made it actively misleading: a server
+  /// that was simply unreachable produced "Incorrect username or password", sending the user
+  /// to re-type a password that was never wrong. That is exactly what happened with a stale
+  /// saved address — nothing was listening, and the app blamed the credentials.
+  ///
+  /// Two rules here, both load-bearing:
+  ///   1. Connectivity is checked BEFORE credentials. A message can only mean "bad password"
+  ///      if the server was actually reached and said so.
+  ///   2. Credential matching is narrow. Substrings like "host" or "password" appear inside
+  ///      transport errors too, so only explicit server rejections qualify.
+  ///
+  /// Prefer APIError.userMessage over this function — the typed error carries the real reason.
+  /// This exists only for paths that have already flattened the error to a String.
   private func friendlyError(_ raw: String) -> String {
     let lower = raw.lowercased()
-    if lower.contains("401") || lower.contains("unauthori") || lower.contains("password") || lower.contains("credentials") {
-      return "Incorrect username or password."
-    }
-    if lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls") {
-      return "Certificate error. Try disabling HTTPS if your server doesn't have a certificate."
+
+    // --- Transport failures first: the server was never reached. ---
+    if lower.contains("refused") {
+      return "Connection refused. Check the port number, and that DSVideoServer is running."
     }
     if lower.contains("timed out") || lower.contains("timeout") {
       return "The server didn't respond. Check the address and that DSVideoServer is running."
     }
-    if lower.contains("refused") {
-      return "Connection refused. Check the port number."
+    if lower.contains("cannot connect") || lower.contains("could not connect")
+        || lower.contains("connection lost") || lower.contains("unreachable")
+        || lower.contains("offline") || lower.contains("not connected to the internet") {
+      return "Couldn't connect to the server. Check the address and port, and that DSVideoServer is running."
     }
-    if lower.contains("dns") || lower.contains("host") || lower.contains("couldn't find") {
-      return "Couldn't resolve that address. Double-check the hostname."
+    if lower.contains("dns") || lower.contains("cannot find host")
+        || lower.contains("couldn't find") || lower.contains("hostname could not be found") {
+      return "Couldn't find that server. Double-check the address."
+    }
+    if lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls")
+        || lower.contains("secure connection") {
+      return "Secure connection failed. If your server has no HTTPS certificate, turn HTTPS off."
+    }
+
+    // --- Only now can this be a real credential rejection. ---
+    if lower.contains("invalid_credentials") || lower.contains("401")
+        || lower.contains("unauthori") || lower.contains("incorrect username") {
+      return "Incorrect username or password."
+    }
+    if lower.contains("permission_denied") {
+      return "Your account isn't allowed to use this app. Ask the server owner to grant access in DSM → Control Panel → Application Privileges."
+    }
+    if lower.contains("account_disabled") {
+      return "This account is disabled. Ask the server owner to enable it."
     }
     return raw
   }

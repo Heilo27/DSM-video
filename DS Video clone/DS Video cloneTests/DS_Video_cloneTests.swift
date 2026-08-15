@@ -172,6 +172,8 @@ struct APIErrorTests {
   /// this suite had ever executed.
   @Test func serverErrorMapsKnownCodeToFriendlyText() {
     #expect(APIError.server("invalid_credentials").userMessage == "Incorrect username or password.")
+
+
     #expect(APIError.server("account_disabled").userMessage.contains("disabled"))
     #expect(APIError.server("permission_denied").userMessage.contains("Application Privileges"))
   }
@@ -528,5 +530,45 @@ struct AppStateTests {
     #expect(state.pairingError == "Must be logged in to generate pairing code.")
     #expect(state.pairingCode == nil)
     #expect(state.isGeneratingPairingCode == false)
+  }
+
+  // MARK: - Transport failures must never be reported as bad credentials
+  //
+  // Regression guard. A stale saved server address meant nothing was listening; the app
+  // told the user their username or password was wrong, so they re-typed a password that
+  // had never been wrong. A connection failure and a credential rejection are different
+  // problems with different fixes, and the UI must not confuse them.
+
+  @Test func connectionErrorsNeverMentionCredentials() {
+    let transportCodes: [URLError.Code] = [
+      .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .timedOut,
+      .notConnectedToInternet, .networkConnectionLost, .secureConnectionFailed,
+      .serverCertificateUntrusted, .resourceUnavailable
+    ]
+    for code in transportCodes {
+      let msg = APIError.connection(code).userMessage.lowercased()
+      #expect(!msg.contains("password"), "\(code) leaked a password hint: \(msg)")
+      #expect(!msg.contains("username"), "\(code) leaked a username hint: \(msg)")
+      #expect(!msg.isEmpty)
+    }
+  }
+
+  @Test func connectionErrorsAreNotServerReached() {
+    // serverReached gates whether the UI may present an auth failure at all.
+    #expect(APIError.connection(.cannotConnectToHost).serverReached == false)
+    #expect(APIError.connection(.timedOut).serverReached == false)
+    #expect(APIError.server("invalid_credentials", status: 401).serverReached == true)
+  }
+
+  @Test func unreachableHostSuggestsCheckingTheAddress() {
+    // The actionable instruction for a dead address is to fix the address, not the password.
+    let msg = APIError.connection(.cannotConnectToHost).userMessage.lowercased()
+    #expect(msg.contains("address") || msg.contains("port"))
+  }
+
+  @Test func certificateFailureIsDistinctFromCredentials() {
+    let msg = APIError.connection(.secureConnectionFailed).userMessage.lowercased()
+    #expect(msg.contains("https") || msg.contains("secure"))
+    #expect(!msg.contains("password"))
   }
 }

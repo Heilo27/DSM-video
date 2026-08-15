@@ -570,10 +570,17 @@ final class AppState {
       } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
         loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
       } else {
-        loginError = (lastError as? APIError)?.userMessage ?? "Login failed. Check that DSVideoServer is running on your NAS."
+        loginError = (lastError as? APIError)?.userMessage
+          ?? (lastError as? URLError).map { APIError.connection($0.code).userMessage }
+          ?? "Login failed. Check that DSVideoServer is running on your NAS."
       }
     } catch {
-      loginError = (error as? APIError)?.userMessage ?? "Login failed."
+      // Do NOT collapse an unrecognised error into a generic string here: a transport
+      // failure is now APIError.connection and carries the actual reason, and the fallback
+      // must not imply the credentials were the problem.
+      loginError = (error as? APIError)?.userMessage
+        ?? (error as? URLError).map { APIError.connection($0.code).userMessage }
+        ?? "Login failed."
     }
   }
 

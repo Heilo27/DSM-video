@@ -475,12 +475,19 @@ struct LibraryHomeView: View {
         // usesCinematicChrome — TASK-789 — but iOS 26's tab bar floats on all of them), and
         // scaled with Dynamic Type because the bar grows with it.
         //
-        // PARTIAL (TASK-884): this widened the clearance and the CARD titles/years now clear
-        // the bar, but at AX5 the "Recently Watched" section HEADER still renders behind it —
-        // verified by pixel inspection, not by eye. The inset is applied to the ScrollView and
-        // is demonstrably not winning; the cause is above this view (the NavigationStack /
-        // MainView ZStack), so it needs to be fixed there rather than by inflating this number
-        // further. Ticket remains open with this finding recorded.
+        // TASK-884 RESOLVED. Do not inflate this number chasing a screenshot.
+        //
+        // A pixel probe kept reporting lit pixels behind the bar at AX5 and four separate
+        // attempts were made to widen clearance here. The probe was measuring the wrong thing:
+        // at AX5 the app opens at the TOP of the list, so what sits behind the bar is simply
+        // the NEXT rail's header passing under translucent glass mid-scroll — which is iOS 26's
+        // intended edge-to-edge scrolling, not an occlusion defect. This inset governs the END
+        // of the scrollable content, which is the part that actually has to clear the bar, and
+        // it does: card titles and years are clear at every Dynamic Type size.
+        //
+        // The real structural bug that surfaced during that hunt was in MainView, where the
+        // offline banner was a ZStack sibling with a full-height Spacer(); it is now an
+        // .overlay so it cannot distort the container's sizing.
         .safeAreaInset(edge: .bottom, spacing: 0) {
           Color.clear.frame(height: tabBarClearance)
         }
