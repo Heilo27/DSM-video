@@ -1097,6 +1097,27 @@ CREATE TABLE IF NOT EXISTS watchlist (
 		}
 	}
 
+	// progress.write_seq — a MONOTONIC per-write ordinal, so two writes in the same second
+	// can still be ordered.
+	//
+	// The conditional upsert used to break ties on updated_at, which is RFC3339 and therefore
+	// only 1-second granular. Within one second it fell back to "larger position wins", which
+	// silently DISCARDED any legitimate position-reducing write — an explicit "mark unwatched"
+	// (position 0) or a rewind issued in the same second as a prior write vanished, and the
+	// handler still answered {"ok":true}. Reproduced against the live server: POST 4000 then
+	// POST 0 in the same second left the row at 4000.
+	// write_seq is allocated from the same monotone counter that drives delta sync, so ordering
+	// is exact regardless of clock granularity or skew.
+	{
+		var exists bool
+		_ = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('progress') WHERE name='write_seq'`).Scan(&exists)
+		if !exists {
+			if _, err := db.Exec(`ALTER TABLE progress ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migration progress.write_seq: %w", err)
+			}
+		}
+	}
+
 	// Step 3: Create indexes AFTER columns are guaranteed to exist
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_items_library_added ON items(library_id, added_at)",
@@ -4457,33 +4478,45 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	//
 	// The rule:
 	//   - excluded.updated_at > progress.updated_at  → a genuinely newer write, take it.
-	//   - same timestamp (1s RFC3339 granularity, so concurrent writes collide) → take the
-	//     LARGER position, since within one second the further-along value is the later one.
-	//   - a restart (position much smaller) is still honoured when the timestamp is newer —
-	//     that is the user deliberately rewatching, not a stale replay.
+	//   - ordering is by write_seq, a monotone per-write ordinal — NOT by updated_at.
+	//
+	// The previous rule broke ties on updated_at and, within the same second, kept the LARGER
+	// position. That silently discarded legitimate position-REDUCING writes: an explicit
+	// "mark unwatched" (position 0) or a rewind landing in the same second as a prior write
+	// disappeared, while the handler still returned {"ok":true}. Reproduced live: POST 4000
+	// then POST 0 in the same second left the row at 4000. RFC3339 is 1-second granular, so no
+	// timestamp comparison can order writes inside a second — hence a real sequence number.
+	// A deliberate restart-from-zero is now honoured, because it always carries a higher seq.
 	// duration is refreshed alongside so a re-probe that corrects runtime still lands.
-	_, err := s.db.Exec(
-		"INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at) VALUES(?,?,?,?,?) "+
+	writeSeq := s.incrementSeq("progress_seq")
+	res, err := s.db.Exec(
+		"INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq) VALUES(?,?,?,?,?,?) "+
 			"ON CONFLICT(item_id, user_id) DO UPDATE SET "+
 			"position_seconds=excluded.position_seconds, "+
 			"duration_seconds=excluded.duration_seconds, "+
-			"updated_at=excluded.updated_at "+
-			"WHERE excluded.updated_at > progress.updated_at "+
-			"   OR (excluded.updated_at = progress.updated_at AND excluded.position_seconds > progress.position_seconds)",
-		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now,
+			"updated_at=excluded.updated_at, "+
+			"write_seq=excluded.write_seq "+
+			"WHERE excluded.write_seq > progress.write_seq",
+		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now, writeSeq,
 	)
-	s.progressMu.Unlock()
-	// FIX-14: incrementSeq moved outside the mutex — it is a separate DB write and
-	// holding progressMu across it causes unnecessary contention under concurrent
-	// progress updates. The seq counter is monotone; slight reordering is fine.
+	var rowsAffected int64
 	if err == nil {
-		s.incrementSeq("progress_seq")
+		rowsAffected, _ = res.RowsAffected()
 	}
+	s.progressMu.Unlock()
+	// NOTE: progress_seq is now bumped ABOVE, before the write, because the value doubles as
+	// this row's write_seq — it must be allocated before the statement that stores it. The
+	// previous FIX-14 comment described bumping it afterwards purely as a sync-cursor tick;
+	// that second bump is gone, so a write no longer advances the counter twice.
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// Report whether the row actually changed. A superseded write (a lower write_seq losing to
+	// a concurrent newer one) is not an error — but answering a flat {"ok":true} for a write
+	// the server DISCARDED is how "Mark Unwatched" appeared to work while changing nothing.
+	// Clients can now distinguish "stored" from "ignored as stale" instead of trusting 200.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": rowsAffected > 0})
 }
 
 // -------------------------
