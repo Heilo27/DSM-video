@@ -165,9 +165,21 @@ struct APIErrorTests {
     #expect(error.userMessage == "Server error (500).")
   }
 
-  @Test func serverErrorReplacesUnderscores() {
-    let error = APIError.server("invalid_credentials")
-    #expect(error.userMessage == "invalid credentials")
+  /// Known server codes map to friendly, actionable text — NOT the raw underscore fallback.
+  /// This test previously asserted "invalid credentials" (the generic fallback) and was stale:
+  /// APIError.userMessage has mapped invalid_credentials to a real sentence for some time. It
+  /// never failed because the scheme's TestAction had an empty <Testables> block, so no test in
+  /// this suite had ever executed.
+  @Test func serverErrorMapsKnownCodeToFriendlyText() {
+    #expect(APIError.server("invalid_credentials").userMessage == "Incorrect username or password.")
+    #expect(APIError.server("account_disabled").userMessage.contains("disabled"))
+    #expect(APIError.server("permission_denied").userMessage.contains("Application Privileges"))
+  }
+
+  /// An UNKNOWN code still falls back to underscore-stripping, which is what keeps a new
+  /// server-side error string readable without a client release.
+  @Test func serverErrorReplacesUnderscoresForUnknownCode() {
+    #expect(APIError.server("some_new_code").userMessage == "some new code")
   }
 
   @Test func serverErrorPlainMessage() {
@@ -329,8 +341,12 @@ struct APIModelsCodingTests {
     #expect(detail.genres?.count == 2)
     #expect(detail.cast?.count == 1)
     #expect(detail.cast?[0].name == "Leonardo DiCaprio")
-    #expect(detail.images.poster.id == "poster1")
-    #expect(detail.images.backdrop.mapperId == "42")
+    // `images` is optional on the model (made so 3f462ea / TASK-783: a server response
+    // omitting the key used to fail the ENTIRE detail decode). Assert through the optional
+    // rather than force-unwrapping, so a regression to nil fails this expectation instead
+    // of trapping the test run.
+    #expect(detail.images?.poster.id == "poster1")
+    #expect(detail.images?.backdrop.mapperId == "42")
   }
 
   // MARK: PlaybackInfo decoding
@@ -449,11 +465,27 @@ struct AppStateTests {
   }
 
   @Test func apiClientUsesHTTPSWhenForced() {
+    // A ROUTABLE host honours useHTTPS.
+    let state = AppState()
+    state.baseURL = "nas.example.com"
+    state.useHTTPS = true
+    #expect(state.api.baseURL.scheme == "https")
+  }
+
+  /// A bare PRIVATE LAN IP must stay on http even when useHTTPS is set.
+  ///
+  /// TASK-779/TASK-817: `useHTTPS` is really "the scheme the last winning network used", not a
+  /// per-address preference, and bare-IP TLS has no valid certificate — forcing https to a LAN
+  /// IP fails every request. updateAPI() applies isPrivateLANAddress() as a guard.
+  ///
+  /// This test previously asserted the OPPOSITE (expecting https for 192.168.1.100) and so
+  /// encoded the pre-TASK-817 bug. It never failed because the scheme's TestAction had an empty
+  /// <Testables> block, so the whole suite was unrunnable and silently rotted.
+  @Test func apiClientKeepsHTTPForPrivateLANAddress() {
     let state = AppState()
     state.baseURL = "192.168.1.100"
     state.useHTTPS = true
-    let client = state.api
-    #expect(client.baseURL.scheme == "https")
+    #expect(state.api.baseURL.scheme == "http")
   }
 
   @Test func apiClientPassesToken() {
