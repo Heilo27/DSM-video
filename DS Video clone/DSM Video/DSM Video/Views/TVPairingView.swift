@@ -11,6 +11,12 @@ struct TVPairingView: View {
   @State private var countdownTask: Task<Void, Never>?
   @State private var showManualLogin: Bool = false
   @State private var discovery = BonjourDiscovery()
+  /// Code typed on THIS device to redeem a pairing code generated on an already-signed-in
+  /// phone. This is the direction a first-time Apple TV must use — see the header comment.
+  @State private var enteredCode: String = ""
+  @State private var isRedeeming: Bool = false
+  @State private var redeemError: String?
+  @FocusState private var codeFieldFocused: Bool
 
   var body: some View {
     ZStack {
@@ -38,19 +44,36 @@ struct TVPairingView: View {
             )
             .accessibilityHidden(true)
 
-          Text("Pair iOS Device")
+          Text(appState.sessionToken == nil ? "Connect This Apple TV" : "Pair iOS Device")
             .font(.system(size: 42, weight: .bold))
             .foregroundStyle(.white)
 
-          Text("Enter this code in DSM Video on your iPhone or iPad.")
+          Text(appState.sessionToken == nil
+               ? "On your iPhone or iPad, open DSM Video → Settings → Pair Apple TV, then enter the 6-digit code it shows."
+               : "Enter this code in DSM Video on your iPhone or iPad.")
             .font(.system(size: 20))
             .foregroundStyle(Color.dsTextSecondary)
             .multilineTextAlignment(.center)
+            .frame(maxWidth: 900)
         }
         .padding(.bottom, 56)
 
         // Content
-        if isGenerating && pairingCode == nil {
+        //
+        // THE PAIRING DIRECTION MATTERS. /auth/pairing/generate REQUIRES a bearer token;
+        // /auth/pairing/exchange does NOT. A first-time Apple TV has no token, so it cannot
+        // generate anything — it must ENTER a code produced by an already-signed-in phone.
+        //
+        // This screen used to offer only "Generate Pairing Code", which tripped
+        // `guard sessionToken != nil` in generatePairingCode() and showed
+        // "Must be logged in to generate pairing code." on the sign-in screen. The only
+        // escape was the on-screen keyboard. Worse, the one call site of
+        // exchangePairingCode() lived in PairingCodeView.swift, which is wrapped in
+        // `#if !os(tvOS)` — so the redeem path was compiled out of the TV app entirely and a
+        // virgin Apple TV could not pair at all.
+        if appState.sessionToken == nil {
+          codeEntry
+        } else if isGenerating && pairingCode == nil {
           ProgressView("Generating pairing code")
             .tint(.white)
             .scaleEffect(2.0)
@@ -217,8 +240,12 @@ struct TVPairingView: View {
         .environment(appState)
     }
     .onAppear {
-      // Only auto-generate if we have a session — generatePairingCode requires auth
-      if pairingCode == nil && !isGenerating && appState.sessionToken != nil {
+      if appState.sessionToken == nil {
+        // Signed out: this device REDEEMS a code. Put focus on the field so the remote's
+        // first Select opens the keyboard instead of landing on a button that cannot work.
+        codeFieldFocused = true
+      } else if pairingCode == nil && !isGenerating {
+        // Signed in: this device can hand a code to another device.
         Task { await generate() }
       }
       // Always scan for servers on the local network
@@ -246,6 +273,77 @@ struct TVPairingView: View {
   }
 
   @MainActor
+  /// Code ENTRY — the path a first-time Apple TV must take.
+  ///
+  /// tvOS renders a TextField as a full-screen keyboard when focused and activated, so this
+  /// is drivable with the remote alone. `.oneTimeCode` gives the numeric keypad layout.
+  @ViewBuilder
+  private var codeEntry: some View {
+    VStack(spacing: 28) {
+      TextField("000000", text: $enteredCode)
+        .textContentType(.oneTimeCode)
+        .keyboardType(.numberPad)
+        .font(.system(size: 56, weight: .bold, design: .monospaced))
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 520)
+        .focused($codeFieldFocused)
+        .privacySensitive()
+        .accessibilityLabel("Pairing code")
+        .accessibilityHint("Enter the 6-digit code shown on your iPhone or iPad")
+        .onChange(of: enteredCode) { _, newValue in
+          // Keep it to 6 digits; auto-submit on the sixth so the user never has to hunt
+          // for a Connect button with the remote.
+          let digits = newValue.filter(\.isNumber)
+          if digits != newValue { enteredCode = String(digits.prefix(6)); return }
+          if digits.count > 6 { enteredCode = String(digits.prefix(6)); return }
+          if digits.count == 6 { Task { await redeem() } }
+        }
+
+      if isRedeeming {
+        HStack(spacing: 12) {
+          ProgressView().tint(.white)
+          Text("Connecting…")
+            .font(.system(size: 19))
+            .foregroundStyle(Color.dsTextSecondary)
+        }
+      } else if let redeemError {
+        Text(redeemError)
+          .font(.system(size: 19))
+          .foregroundStyle(Color.dsError)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 700)
+      }
+
+      Button {
+        Task { await redeem() }
+      } label: {
+        Text("Connect")
+          .font(.system(size: 22, weight: .semibold))
+          .padding(.horizontal, 64)
+          .padding(.vertical, 24)
+      }
+      .buttonStyle(.borderedProminent)
+      .tint(Color.dsAccent)
+      .disabled(enteredCode.count != 6 || isRedeeming)
+    }
+  }
+
+  /// Redeems a code generated on a signed-in phone. Never requires a token on this device —
+  /// that is the whole point of the exchange endpoint.
+  private func redeem() async {
+    let code = enteredCode.filter(\.isNumber)
+    guard code.count == 6, !isRedeeming else { return }
+    isRedeeming = true
+    defer { isRedeeming = false }   // defer, so a cancelled task cannot latch this flag
+    redeemError = nil
+    await appState.exchangePairingCode(code)
+    if appState.sessionToken == nil {
+      redeemError = appState.loginError ?? "That code didn't work. Check it and try again."
+      enteredCode = ""
+    }
+    // On success TVMainView swaps to TVHomeView, and its .task(id: sessionToken) loads the rails.
+  }
+
   private func generate() async {
     error = nil
     isGenerating = true

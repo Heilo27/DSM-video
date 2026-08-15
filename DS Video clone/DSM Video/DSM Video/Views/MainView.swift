@@ -1289,6 +1289,55 @@ struct SettingsView: View {
         Text("DSVideoServer listens on port 5000 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
       }
 
+      // Pair Apple TV — the GENERATE half of the pairing flow.
+      //
+      // /auth/pairing/generate requires a bearer token; /auth/pairing/exchange does not. So a
+      // signed-in phone mints the code and a signed-out Apple TV redeems it. Before this
+      // section existed there was no way to produce a code anywhere in the shipping app: the
+      // TV offered only "Generate Pairing Code" (which needs a session it does not have), and
+      // PairingCodeView — the sole caller of exchangePairingCode — is #if !os(tvOS). A
+      // first-time Apple TV therefore could not pair at all.
+      #if os(iOS)
+      if appState.sessionToken != nil {
+        Section {
+          if let code = appState.pairingCode {
+            VStack(alignment: .leading, spacing: 8) {
+              Text(code)
+                .font(.system(size: 40, weight: .bold, design: .monospaced))
+                .tracking(6)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .speechSpellsOutCharacters(true)
+                .privacySensitive()
+                .accessibilityLabel("Pairing code: \(code.map { String($0) }.joined(separator: " "))")
+              Text("Enter this code on your Apple TV.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .padding(.vertical, 4)
+          }
+          Button {
+            Task { await appState.generatePairingCode() }
+          } label: {
+            if appState.isGeneratingPairingCode {
+              HStack { ProgressView(); Text("Generating…") }
+            } else {
+              Label(appState.pairingCode == nil ? "Pair Apple TV" : "New Code",
+                    systemImage: "appletv")
+            }
+          }
+          .disabled(appState.isGeneratingPairingCode)
+          if let err = appState.pairingError {
+            Text(err).font(.footnote).foregroundStyle(.red)
+          }
+        } header: {
+          Text("Apple TV")
+        } footer: {
+          Text("Open DSM Video on your Apple TV, then enter this code to sign it in. The code expires after a few minutes.")
+        }
+      }
+      #endif
+
       Section {
         Picker("Video Quality", selection: $appState.qualityCap) {
           Text("Auto").tag("auto")
