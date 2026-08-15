@@ -491,11 +491,20 @@ enum APIError: Error {
     // 403 → forever, with no message explaining that the fix is in DSM's Application
     // Privileges. Those cases surface their own actionable error via userMessage instead.
     if isAccountStateFailure { return false }
+    // 403 is NOT blanket-auth. The backend emits exactly three 403 codes and only one of them
+    // concerns the session:
+    //   permission_denied  — account state, handled above (re-auth cannot fix it)
+    //   admin_required     — this USER lacks a privilege; the session is perfectly valid
+    //   path_not_allowed   — the requested FILE is outside the media roots; nothing to do
+    //                        with credentials at all
+    // Treating the last two as auth failures deleted the Keychain token and claimed the
+    // session had expired, so a moved or renamed file could silently sign the user out.
+    // 401 remains unconditional — every 401 the server emits is genuinely a token problem.
     switch self {
     case .http(let code):
-      return code == 401 || code == 403
+      return code == 401
     case .server(let msg, let status):
-      if status == 401 || status == 403 { return true }
+      if status == 401 { return true }
       return ["missing_token", "invalid_token", "token_revoked"].contains(msg)
     default:
       return false
