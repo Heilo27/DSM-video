@@ -382,7 +382,16 @@ private struct LibraryCard: View {
 
 struct LibraryHomeView: View {
   @Environment(AppState.self) private var appState
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   // TASK-787: scenePhase handling moved to the app-level owner; no longer needed here.
+
+  /// Bottom inset that keeps the last rail clear of the floating tab bar (TASK-884).
+  /// The bar grows with Dynamic Type, so a fixed height that clears it at medium does not
+  /// clear it at the accessibility sizes — where the defect was worst (the whole
+  /// "Recently Watched" header was hidden behind the bar).
+  private var tabBarClearance: CGFloat {
+    dynamicTypeSize.isAccessibilitySize ? 132 : 76
+  }
 
   /// Pass `true` when this view is embedded inside an existing NavigationStack
   /// (e.g. the iPad split-view detail column) to avoid nesting stacks.
@@ -462,14 +471,18 @@ struct LibraryHomeView: View {
           }
           .ignoresSafeArea()
         }
-        // TASK-789: on Cinematic the floating glass tab bar overlaps the scroll content,
-        // occluding the last rail's card title/year labels. Add a bottom inset equal to
-        // the floating tab bar height so the final row clears the glass. Classic keeps the
-        // standard opaque tab bar (content already sits above it) — leave it untouched.
+        // Bottom clearance for the floating tab bar, on EVERY theme (was gated on
+        // usesCinematicChrome — TASK-789 — but iOS 26's tab bar floats on all of them), and
+        // scaled with Dynamic Type because the bar grows with it.
+        //
+        // PARTIAL (TASK-884): this widened the clearance and the CARD titles/years now clear
+        // the bar, but at AX5 the "Recently Watched" section HEADER still renders behind it —
+        // verified by pixel inspection, not by eye. The inset is applied to the ScrollView and
+        // is demonstrably not winning; the cause is above this view (the NavigationStack /
+        // MainView ZStack), so it needs to be fixed there rather than by inflating this number
+        // further. Ticket remains open with this finding recorded.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-          if ThemeHolder.shared.current.usesCinematicChrome {
-            Color.clear.frame(height: 64)
-          }
+          Color.clear.frame(height: tabBarClearance)
         }
       }
     }
@@ -564,13 +577,26 @@ private struct ContinueWatchingCard: View {
       )
       .frame(width: 200, height: 120)
 
+      // TASK-883: the title must stay legible at accessibility text sizes.
+      //
+      // The card is a fixed 200x120 and this title is a ZStack overlay pinned to the bottom.
+      // At AX5 two lines of .caption grew far taller than the gradient behind them, so white
+      // text landed directly on bare poster art — on a light poster (The Thin Man Goes Home)
+      // it was unreadable. That is a contrast failure, not just overflow.
+      //
+      // Two guards: cap Dynamic Type growth for this label (the card cannot grow with it),
+      // and give the text its own opaque backing sized to the text itself, so whatever the
+      // final height, the title is always drawn on a dark surface rather than on artwork.
       Text(item.title)
         .font(.caption.weight(.semibold))
         .foregroundStyle(.white)
         .lineLimit(2)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .padding(.horizontal, 8)
-        .padding(.bottom, 6)
+        .padding(.vertical, 4)
         .frame(width: 200, alignment: .leading)
+        .background(Color.black.opacity(0.75))
+        .padding(.bottom, 2)
 
       // Progress bar
       if let progress = item.progress, progress.durationSeconds > 0 {
