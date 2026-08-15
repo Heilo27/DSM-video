@@ -578,6 +578,20 @@ final class AppState {
   }
 
   func logout() {
+    // Revoke server-side FIRST (fire-and-forget). POST /auth/logout had zero callers, so
+    // signing out cleared the device while the bearer token stayed valid on the server until
+    // it expired — on a shared or lost device that token kept working after the user believed
+    // they were signed out. Captured before the local state is torn down, because the request
+    // needs the token we are about to delete. Deliberately not awaited: local sign-out must
+    // never hang on the network, and the local clear below is the real guarantee.
+    if sessionToken != nil {
+      let apiSnapshot = api
+      let logSnapshot = homeLog
+      Task.detached(priority: .utility) {
+        do { try await apiSnapshot.logout() }
+        catch { logSnapshot.warning("logout: server-side revoke failed — \(error.localizedDescription)") }
+      }
+    }
     Self.deleteFromKeychain(account: Keys.keychainAccountToken)
     Self.deleteFromKeychain(account: Keys.keychainAccount)
     savedPassword = ""

@@ -4379,9 +4379,18 @@ func (s *Server) handlePlaybackStop(w http.ResponseWriter, r *http.Request) {
 // -------------------------
 
 type progressRequest struct {
-	PositionSeconds int    `json:"positionSeconds"`
-	DurationSeconds int    `json:"durationSeconds"`
-	State           string `json:"state,omitempty"`
+	PositionSeconds int `json:"positionSeconds"`
+	DurationSeconds int `json:"durationSeconds"`
+	// Accepted and IGNORED. Clients send "playing"/"finished"; nothing reads it
+	// (grep req.State == 0 hits). It is kept in the struct so an unknown-field decode does
+	// not reject the body, and because six client call sites still populate it.
+	//
+	// It looked like the mechanism behind "mark as finished", but that is derived from
+	// position vs duration (PlaybackProgress.isFinished on the client, the rail SQL on the
+	// server), and write ordering now comes from progress.write_seq — so there is no
+	// behaviour for this field to drive. Do not add logic keyed on it without deciding what
+	// happens when an older client omits it entirely.
+	State string `json:"state,omitempty"`
 }
 
 // itemExists reports whether an items row with this id is present. TASK-797: guards

@@ -18,6 +18,21 @@ struct APIClient {
     )
   }
 
+  /// Revokes this token server-side. Best-effort: the local sign-out must not depend on it.
+  ///
+  /// POST /auth/logout existed with ZERO callers, so signing out cleared the device but left
+  /// the bearer token valid on the server until it expired — a stolen or shared-device token
+  /// kept working after the user thought they had signed out.
+  func logout(timeoutInterval: TimeInterval = 8) async throws {
+    _ = try await request(
+      path: "/api/v1/auth/logout",
+      method: "POST",
+      body: Optional<Int>.none,
+      response: ProgressResponse.self,   // server returns {"ok":true}
+      timeoutInterval: timeoutInterval
+    )
+  }
+
   func libraries() async throws -> LibrariesResponse {
     try await request(path: "/api/v1/libraries", method: "GET", body: Optional<Int>.none, response: LibrariesResponse.self, timeoutInterval: 15)
   }
