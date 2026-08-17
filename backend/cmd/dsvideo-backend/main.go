@@ -898,6 +898,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Get("/admin/status", s.handleAdminStatus)
 		r.Get("/admin/normalize/status", s.handleAdminNormalizeStatus)
 		r.Post("/admin/scan", s.handleAdminScan)
+		r.Post("/admin/metadata/refresh", s.handleAdminMetadataRefresh)
 		r.Get("/search", s.handleSearch)
 	})
 }
@@ -5752,6 +5753,57 @@ func (s *Server) handleAdminScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+}
+
+// handleAdminMetadataRefresh clears metadata_fetched_at so items are re-queried against
+// TMDb on the next scan.
+//
+// WHY THIS EXISTS. On a TMDb failure the scanner stamps metadata_fetched_at so it does not
+// re-request the same failing title on every scan. That is correct for throughput, but it
+// makes a bad result PERMANENT: when the failure was caused by the client sending a mangled
+// title, fixing the parser changes nothing for content already on disk. A library scanned
+// before the fix keeps its broken titles and missing artwork forever.
+//
+// Scope defaults to "broken": only rows whose title shows parsing damage (a run of spaces,
+// or a dangling "(" from a title sliced mid-parenthetical) or that have no artwork at all.
+// Rows that look correct today are left alone so they cannot regress. Pass scope=all to
+// re-query everything, which is slower and risks changing entries that are currently right.
+//
+// Admin-only: a full re-query hits the TMDb API once per item and is rate-limited upstream.
+func (s *Server) handleAdminMetadataRefresh(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	scope := r.URL.Query().Get("scope")
+	var query string
+	switch scope {
+	case "all":
+		query = `UPDATE items SET metadata_fetched_at = NULL`
+	case "", "broken":
+		query = `UPDATE items SET metadata_fetched_at = NULL
+		         WHERE title LIKE '%  %'
+		            OR title LIKE '%(' 
+		            OR (poster_path IS NULL AND backdrop_path IS NULL)`
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid_scope")
+		return
+	}
+
+	res, err := s.db.Exec(query)
+	if err != nil {
+		log.Printf("[admin] metadata refresh failed: %v", err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	cleared, _ := res.RowsAffected()
+	log.Printf("[admin] metadata refresh: cleared %d row(s), scope=%q", cleared, scope)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cleared": cleared,
+		"scope":   scope,
+		"next":    "POST /api/v1/admin/scan to re-query TMDb for these items",
+	})
 }
 
 func configuredLibraries(cfg Config) []map[string]any {
