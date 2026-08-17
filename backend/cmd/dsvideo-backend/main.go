@@ -1449,8 +1449,22 @@ func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, d
 	dsmURL := "http://localhost:5000/webapi/auth.cgi"
 
 	// Version 6 is the minimum that supports otp_code for 2FA.
+	//
+	// NOTE ON `session`: this used to send session=DSVideo, which is NOT a real DSM
+	// application name. DSM validates `session` against installed applications and denies
+	// the login with error 402 when it does not match one — but ONLY for non-admin users,
+	// because admins bypass application privilege checks entirely. The bug was therefore
+	// invisible to the NAS owner (an admin) and blocked every ordinary user, no matter what
+	// was ticked in Control Panel → Application Privileges. Granting "DSVideoServer" could
+	// never help: the server was asking DSM about a different, non-existent app.
+	//
+	// The session parameter is optional. Omitting it authenticates the account without
+	// scoping the session to an application, which is what we want — this package manages
+	// its own authorization (JWT + per-user access) and does not rely on DSM to gate it.
+	// Verified against a live DSM 7 NAS: a non-admin account that returns 402 with
+	// session=DSVideo authenticates successfully with the parameter omitted.
 	formData := fmt.Sprintf(
-		"api=SYNO.API.Auth&version=6&method=login&account=%s&passwd=%s&session=DSVideo&format=sid",
+		"api=SYNO.API.Auth&version=6&method=login&account=%s&passwd=%s&format=sid",
 		url.QueryEscape(username),
 		url.QueryEscape(password),
 	)
