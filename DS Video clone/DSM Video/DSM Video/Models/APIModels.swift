@@ -293,6 +293,13 @@ struct PlaybackInfo: Decodable {
 /// A single subtitle track as described by the frozen `/playback subtitles[]` contract
 /// (TASK-826). Matched to the player's AVMediaSelectionOptions by `language` (and `forced`
 /// characteristic), not by array index — image subs occupy a slot but produce no rendition.
+/// A subtitle track.
+///
+/// Every field decodes defensively. `PlaybackInfo.subtitles` is deliberately `[Subtitle]?`
+/// so an older server that omits the key still plays — but that tolerance was defeated by
+/// declaring all seven fields non-optional here: a server sending `subtitles` with any
+/// subset of keys failed the whole PlaybackInfo decode, blanking the player screen rather
+/// than degrading to "no subtitles". Missing fields now fall back to their neutral value.
 struct Subtitle: Decodable, Hashable {
   /// HLS subtitle rendition playlist URL. `""` for image subs and direct/remux responses.
   let url: String
@@ -309,6 +316,22 @@ struct Subtitle: Decodable, Hashable {
   /// At most one track per item. When true, the client turns this track ON at
   /// playback start with no user action (foreign-scene translation case).
   let autoEnable: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case url, language, name, type, forced, `default`, autoEnable
+  }
+
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    url = (try? c.decode(String.self, forKey: .url)) ?? ""
+    language = (try? c.decode(String.self, forKey: .language)) ?? "und"
+    type = (try? c.decode(String.self, forKey: .type)) ?? "full"
+    forced = (try? c.decode(Bool.self, forKey: .forced)) ?? false
+    `default` = (try? c.decode(Bool.self, forKey: .default)) ?? false
+    autoEnable = (try? c.decode(Bool.self, forKey: .autoEnable)) ?? false
+    // Name last: falls back to the language tag so a track is never unlabelled in the picker.
+    name = (try? c.decode(String.self, forKey: .name)) ?? language.uppercased()
+  }
 
   enum Kind: String { case full, forced, image, unknown }
   var kind: Kind { Kind(rawValue: type) ?? .unknown }
@@ -393,7 +416,15 @@ struct ServerVersion: Decodable {
 struct SyncStatusResponse: Decodable {
   let itemSeq: Int
   let progressSeq: Int
-  let totalItems: Int
+  /// Optional because the server already calls this a placeholder it intends to remove
+  /// (`"totalItems": 0`, main.go — the COUNT(*) behind it was dropped as a full table scan).
+  ///
+  /// This is the worst possible field to leave non-optional: syncStatus() is the SECOND
+  /// reconnect probe, so the day the server stops emitting the placeholder, every reconnect
+  /// would throw a DecodingError and the app would go permanently unreachable — with a
+  /// connection error pointing at a server that was answering fine.
+  let totalItems: Int?
+  var effectiveTotalItems: Int { totalItems ?? 0 }
 }
 
 struct SyncHeartbeatResponse: Decodable {

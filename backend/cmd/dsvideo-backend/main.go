@@ -841,6 +841,18 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Get("/sync/deleted", s.handleSyncDeleted)
 
 		r.Get("/libraries", s.handleLibraries)
+		// NOTE ON "UNUSED" ROUTES BELOW.
+		//
+		// Several routes here have zero callers in the iOS/tvOS clients. That does NOT make
+		// them dead: /playlists, /downloads and /settings are used extensively by the web
+		// player (web/index.html — 22, 7 and 38 references respectively). An audit that greps
+		// only the Swift clients will report them as removable. They are not.
+		//
+		// Genuinely uncalled by every client today: /libraries/summary, /admin/*, /shows,
+		// /shows/{showName} (superseded by /tv/shows), /tmdb/image, /auth/quickconnect/resolve
+		// (the app resolves via Synology's service directly), and /playback/{sessionId}/stop
+		// — that last one is worth noting, because transcode sessions are consequently only
+		// reaped by timeout rather than closed when the client stops watching.
 		r.Get("/libraries/summary", s.handleLibrariesSummary)
 		r.Get("/items", s.handleItems)
 		r.Get("/items/{id}", s.handleItemDetail)

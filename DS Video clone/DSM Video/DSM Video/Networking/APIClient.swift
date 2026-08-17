@@ -6,7 +6,29 @@ struct APIClient {
   /// When true, adds `Cookie: type=tunnel` to every request — required for QuickConnect relay mode.
   var usesTunnelCookie: Bool = false
 
-  func login(username: String, password: String, timeoutInterval: TimeInterval = 60) async throws -> LoginResponse {
+  /// Request timeout tiers.
+  ///
+  /// These used to be bare literals scattered per call site, with an implicit 60s default on
+  /// `request`/`requestWithRetry` that silently applied to any call not specifying one — so
+  /// `setProgress` (called from the player and the outbox flush) could hang for a full minute
+  /// while `progressBatch`, the same subsystem, used 8s. And `/items` sat at 120s while
+  /// `/search` used 15s for an equivalent query against the same table, an 8x spread with no
+  /// justification: on a cold NAS database search failed while items waited two minutes.
+  enum Timeout {
+    /// Fire-and-forget writes. Failure is recoverable — the outbox retries.
+    static let write: TimeInterval = 8
+    /// Interactive reads. The user is looking at a spinner.
+    static let interactive: TimeInterval = 20
+    /// Bulk reads that legitimately take longer on a cold database (full library pages).
+    static let bulk: TimeInterval = 45
+    /// Authentication. Deliberately generous — the candidate ladder above already imposes
+    /// its own much shorter per-candidate timeouts.
+    static let auth: TimeInterval = 30
+    /// Liveness probes. Must fail fast; a slow probe blocks the reconnect loop.
+    static let probe: TimeInterval = 5
+  }
+
+  func login(username: String, password: String, timeoutInterval: TimeInterval = Timeout.auth) async throws -> LoginResponse {
     let req = LoginRequest(username: username, password: password, otp: nil)
     return try await request(
       path: "/api/v1/auth/login",
@@ -49,7 +71,7 @@ struct APIClient {
     guard let url = comps.url else {
       throw APIError.invalidURL
     }
-    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self, timeoutInterval: 120)
+    return try await request(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self, timeoutInterval: Timeout.bulk)
   }
 
   func search(query: String, limit: Int = 50, offset: Int = 0) async throws -> ItemsResponse {
@@ -134,7 +156,11 @@ struct APIClient {
       path: "/api/v1/items/\(enc)/progress",
       method: "POST",
       body: ProgressRequest(positionSeconds: positionSeconds, durationSeconds: durationSeconds, state: "playing"),
-      response: ProgressResponse.self
+      response: ProgressResponse.self,
+      // A write, not an interactive read: this is called from the player and from the
+      // outbox flush loop. Inheriting the general default let a single stalled write block
+      // the flush; the outbox retries, so failing fast is strictly better.
+      timeoutInterval: Timeout.write
     )
   }
 
@@ -309,7 +335,7 @@ struct APIClient {
     try await request(path: "/api/v1/auth/pairing/generate", method: "POST", body: Optional<Int>.none, response: PairingCodeResponse.self)
   }
 
-  func exchangePairingCode(code: String, timeoutInterval: TimeInterval = 60) async throws -> LoginResponse {
+  func exchangePairingCode(code: String, timeoutInterval: TimeInterval = Timeout.auth) async throws -> LoginResponse {
     let req = PairingCodeExchangeRequest(code: code)
     return try await request(
       path: "/api/v1/auth/pairing/exchange",
@@ -359,7 +385,7 @@ struct APIClient {
     body: B?,
     response: T.Type,
     authorized: Bool = true,
-    timeoutInterval: TimeInterval = 60
+    timeoutInterval: TimeInterval = Timeout.interactive
   ) async throws -> T {
     let url = baseURL.appendingPathComponent(path)
     return try await requestWithRetry(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
@@ -371,7 +397,7 @@ struct APIClient {
     body: B?,
     response: T.Type,
     authorized: Bool = true,
-    timeoutInterval: TimeInterval = 60
+    timeoutInterval: TimeInterval = Timeout.interactive
   ) async throws -> T {
     do {
       return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
@@ -395,7 +421,7 @@ struct APIClient {
     body: B?,
     response: T.Type,
     authorized: Bool = true,
-    timeoutInterval: TimeInterval = 60
+    timeoutInterval: TimeInterval = Timeout.interactive
   ) async throws -> T {
     let url = baseURL.appendingPathComponent(path)
     return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
@@ -410,7 +436,7 @@ struct APIClient {
     body: B?,
     response: T.Type,
     authorized: Bool = true,
-    timeoutInterval: TimeInterval = 60
+    timeoutInterval: TimeInterval = Timeout.interactive
   ) async throws -> T {
     var req = URLRequest(url: url, timeoutInterval: timeoutInterval)
     req.httpMethod = method
@@ -564,14 +590,75 @@ enum APIError: Error {
     case .server(let msg, _):
       // Map known server error codes to friendly, actionable text.
       switch msg {
+
+      // ── Account / access ──────────────────────────────────────────────────────
       case "permission_denied":
         return "Your account isn't allowed to use this app. Ask the server owner to grant you access in DSM → Control Panel → Application Privileges."
       case "invalid_credentials":
         return "Incorrect username or password."
       case "account_disabled":
         return "This account is disabled. Ask the server owner to enable it."
+      case "admin_required":
+        return "This action needs an administrator account."
+      case "missing_credentials":
+        return "Enter both a username and a password."
+
+      // ── Session / token ───────────────────────────────────────────────────────
+      // These are recoverable by signing in again; say that rather than showing jargon.
+      case "invalid_token", "token_revoked", "token_error":
+        return "Your session has expired. Please sign in again."
+      case "missing_token":
+        return "You're signed out. Please sign in again."
+      case "token_generation_failed", "token_signing_failed":
+        return "The server couldn't create a session. Try again, and check the server logs if it persists."
+
+      // ── Pairing ───────────────────────────────────────────────────────────────
+      case "invalid_or_expired_code":
+        return "That pairing code is wrong or has expired. Generate a new one and try again."
+      case "missing_code":
+        return "Enter the pairing code shown on your Apple TV."
+
+      // ── Playback ──────────────────────────────────────────────────────────────
+      // The four most likely playback failures. These used to render as raw snake_case
+      // ("transcode busy"), which tells the user nothing about what to do next.
+      case "transcode_busy":
+        return "The server is already converting other videos. Try again in a few minutes."
+      case "transcode_unavailable", "ffmpeg_failed", "pipe_failed":
+        return "This video can't be prepared for playback right now. Check that DSVideoServer's converter is working."
+      case "media_missing", "path_not_allowed", "stat_failed":
+        return "The video file is missing or was moved. Rescan your library on the NAS."
+      case "invalid_segment", "playlist_not_ready":
+        return "Playback is still starting up. Give it a moment and try again."
+      case "trickplay_unavailable":
+        return "Scrubbing previews aren't ready for this video yet."
+
+      // ── Content lookup ────────────────────────────────────────────────────────
+      case "not_found", "show_not_found":
+        return "That item is no longer in your library."
+      case "invalid_library":
+        return "That library no longer exists. Pull to refresh."
+      case "image_not_found", "no_image_available", "image_fetch_failed", "image_cache_unavailable":
+        return "Artwork isn't available for this item."
+
+      // ── Metadata ──────────────────────────────────────────────────────────────
+      case "tmdb_not_configured":
+        return "TMDb isn't set up on the server, so artwork and descriptions can't be fetched. Add an API key in DSVideoServer's settings."
+      case "tmdb_error":
+        return "Couldn't reach TMDb for artwork. Try again later."
+
+      // ── Rate limiting / server health ─────────────────────────────────────────
+      case "rate_limit_exceeded":
+        return "Too many requests. Wait a moment and try again."
+      case "db_error", "internal_error":
+        return "The server hit an internal error. Check the DSVideoServer logs on your NAS."
+
       default:
-        return msg.replacingOccurrences(of: "_", with: " ")
+        // Anything unmapped still reaches the user, but as a readable sentence rather than
+        // a raw identifier. Malformed-request codes (invalid_json, missing_show_id, …) land
+        // here deliberately: they indicate a client bug, not something a user can fix, and
+        // the diagnostic log carries the exact code for us.
+        let readable = msg.replacingOccurrences(of: "_", with: " ")
+        return readable.prefix(1).uppercased() + readable.dropFirst() + "."
       }
     case .invalidURL: return "Invalid server URL."
     }

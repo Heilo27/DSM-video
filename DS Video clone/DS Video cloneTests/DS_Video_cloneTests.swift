@@ -184,13 +184,15 @@ struct APIErrorTests {
 
   /// An UNKNOWN code still falls back to underscore-stripping, which is what keeps a new
   /// server-side error string readable without a client release.
+  // Unmapped codes now render as a sentence rather than a bare lowercase fragment:
+  // "Some new code." not "some new code". A raw identifier shown to a user is a defect.
   @Test func serverErrorReplacesUnderscoresForUnknownCode() {
-    #expect(APIError.server("some_new_code").userMessage == "some new code")
+    #expect(APIError.server("some_new_code").userMessage == "Some new code.")
   }
 
   @Test func serverErrorPlainMessage() {
     let error = APIError.server("Something went wrong")
-    #expect(error.userMessage == "Something went wrong")
+    #expect(error.userMessage == "Something went wrong.")
   }
 
   @Test func invalidURLErrorMessage() {
@@ -765,6 +767,73 @@ struct AppStateTests {
           #expect(port != 5001, "http must never land on 5001 (TLS-only DSM port)")
         }
       }
+    }
+  }
+
+  // MARK: - Decode tolerance
+  //
+  // Both guards below protect against the same failure shape: a server response that is
+  // slightly different from what Swift declared blows up the ENTIRE decode, so the screen
+  // renders empty and the user is told the server is unreachable. ItemsResponse.total broke
+  // Watchlist on every platform this way before it was caught.
+
+  @Test func syncStatusSurvivesMissingTotalItems() throws {
+    // The server calls totalItems a placeholder it intends to remove. syncStatus() is the
+    // SECOND reconnect probe, so if this ever throws, reconnect fails closed and the app is
+    // permanently unreachable — while showing a connection error for a healthy server.
+    let json = #"{"itemSeq": 42, "progressSeq": 7}"#
+    let resp = try JSONDecoder().decode(SyncStatusResponse.self, from: Data(json.utf8))
+    #expect(resp.itemSeq == 42)
+    #expect(resp.effectiveTotalItems == 0)
+  }
+
+  @Test func subtitleSurvivesPartialPayload() throws {
+    // PlaybackInfo.subtitles is [Subtitle]? specifically to tolerate older servers. That
+    // tolerance was defeated by seven non-optional fields: a subset of keys failed the whole
+    // PlaybackInfo decode and blanked the player instead of degrading to "no subtitles".
+    let json = #"[{"url":"/s/1.m3u8","language":"en"},{"name":"Forced","type":"forced"}]"#
+    let subs = try JSONDecoder().decode([Subtitle].self, from: Data(json.utf8))
+    #expect(subs.count == 2)
+    #expect(subs[0].language == "en")
+    #expect(subs[0].forced == false)          // neutral default, not a throw
+    #expect(subs[0].name == "EN")             // falls back to the language tag, never blank
+    #expect(subs[1].type == "forced")
+    #expect(subs[1].url.isEmpty)              // absent url is valid for image subs
+  }
+
+  @Test func playbackInfoSurvivesMalformedSubtitleEntries() throws {
+    // The end-to-end shape: a playback response whose subtitle entries are incomplete must
+    // still yield a playable item.
+    let json = #"{"kind":"hls","resumePositionSeconds":0,"subtitles":[{"language":"de"}]}"#
+    let info = try? JSONDecoder().decode(PlaybackInfo.self, from: Data(json.utf8))
+    #expect(info != nil, "an incomplete subtitle entry must not blank the whole player")
+  }
+
+  // MARK: - Error message quality
+  //
+  // Every code the server can emit must produce a sentence, never a raw identifier.
+
+  @Test func playbackErrorsAreActionableNotJargon() {
+    for code in ["transcode_busy", "media_missing", "ffmpeg_failed", "transcode_unavailable"] {
+      let msg = APIError.server(code, status: 500).userMessage
+      #expect(!msg.contains("_"), "\(code) leaked a raw identifier: \(msg)")
+      #expect(msg.count > 20, "\(code) produced a uselessly terse message: \(msg)")
+    }
+  }
+
+  @Test func unmappedCodesStillReadAsSentences() {
+    // Unmapped codes indicate a client bug rather than something a user can fix, but they
+    // must still render as prose — "Invalid json." not "invalid_json".
+    let msg = APIError.server("some_future_code", status: 400).userMessage
+    #expect(!msg.contains("_"))
+    #expect(msg.hasSuffix("."))
+    #expect(msg.first?.isUppercase == true)
+  }
+
+  @Test func sessionExpiryTellsTheUserToSignInAgain() {
+    for code in ["invalid_token", "token_revoked", "missing_token"] {
+      let msg = APIError.server(code, status: 401).userMessage.lowercased()
+      #expect(msg.contains("sign in"), "\(code) should point at signing in again")
     }
   }
 }
