@@ -359,6 +359,23 @@ struct TMDbSearchResponse: Decodable {
 struct PairingCodeResponse: Decodable {
   let code: String
   let expiresInSeconds: Int
+
+  /// The server sends `expires_in_seconds` in snake_case — the ONLY snake_case key in an
+  /// otherwise camelCase API (backend main.go, handlePairingGenerate).
+  ///
+  /// Without this mapping the decode threw `keyNotFound` on every call, so
+  /// `generatePairingCode()` always failed and the Apple TV pairing screen could never
+  /// display a code. It failed silently: AppState catches the error into `pairingError`,
+  /// so the UI showed a generic failure rather than anything pointing at a decode problem.
+  ///
+  /// Fixed here rather than by renaming the server key (which would break already-deployed
+  /// clients) or by setting a global `.convertFromSnakeCase` strategy (which would break
+  /// every other response, all of which are camelCase). Same defect class as the
+  /// `ItemsResponse.total` bug that silently broke Watchlist on every platform.
+  enum CodingKeys: String, CodingKey {
+    case code
+    case expiresInSeconds = "expires_in_seconds"
+  }
 }
 
 struct PairingCodeExchangeRequest: Encodable {

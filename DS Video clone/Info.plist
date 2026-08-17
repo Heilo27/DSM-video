@@ -33,6 +33,26 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.entertainment</string>
+	<!-- ATS: cleartext is scoped to the local network ONLY (TASK-777).
+	     NSAllowsLocalNetworking permits http:// to LAN / .local / RFC1918 hosts — the LAN
+	     login candidates — and nothing public.
+
+	     REMOTE ACCESS DEPENDS ON THIS BEING UNDERSTOOD BEFORE IT IS CHANGED.
+
+	     Removing NSAllowsArbitraryLoads in aae7d66 (2026-04-10) silently broke every remote
+	     login, because the only remote path in use was http:// to a raw WAN IP. Nothing
+	     tested that path, so it went unnoticed for months and then cost an entire evening to
+	     rediscover — the app reported "check that DSVideoServer is running" for a server that
+	     was answering fine.
+
+	     The supported remote path is HTTPS to a DDNS hostname with a valid certificate
+	     (e.g. https://<name>.synology.me:5001). That satisfies ATS with NO exception at all,
+	     keeps credentials encrypted, and needs no App Review justification.
+
+	     Do NOT add NSAllowsArbitraryLoads to "fix" a remote-access report. It re-enables
+	     plaintext passwords over the internet. Raw-IP remote access is unsupported by design:
+	     a certificate cannot vouch for an IP address, so https:// to an IP fails validation
+	     and http:// to a public IP is blocked here. Point the user at their DDNS hostname. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

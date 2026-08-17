@@ -819,7 +819,15 @@ struct SetupCredentialsScreen: View {
         username = appState.username
         isReturningUser = true
       }
-      if !appState.savedPassword.isEmpty {
+      // Only prefill from AppState when the user has not typed anything here yet.
+      //
+      // This block re-runs when the view reappears — including after a FAILED login. It
+      // used to overwrite whatever was in the field with appState.savedPassword, and
+      // login() only writes the password to the Keychain on SUCCESS, so a failed attempt
+      // left savedPassword empty and blanked the field. The user then tapped Connect again
+      // with an empty password and got the same generic failure, with no indication that
+      // their password had been silently discarded rather than rejected.
+      if password.isEmpty, !appState.savedPassword.isEmpty {
         password = appState.savedPassword
       }
       useHTTPS = flow.isHTTPS || appState.useHTTPS

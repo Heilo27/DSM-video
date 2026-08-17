@@ -53,14 +53,18 @@ struct NormalizedBaseURLTests {
 
   // MARK: Default port injection
 
-  @Test func addsDefaultPort8090WhenNoPortSpecified() {
+  // These asserted 8090 as the bare-hostname default. That was the defect: 8090 is the
+  // backend listening directly, but a user typing a plain address is reaching DSM, whose
+  // ports are 5000/5001. Coupled with the scheme being ignored, "HTTPS on, no port" built
+  // https://host:5000 — an address nothing answers. The scheme now decides.
+  @Test func addsHTTPPortWhenNoPortSpecified() {
     let url = normalizedBaseURL("192.168.1.100", forceHTTPS: false)
-    #expect(url?.port == 8090)
+    #expect(url?.port == 5000)
   }
 
-  @Test func addsDefaultPort8090ForHostname() {
+  @Test func addsHTTPPortForHostname() {
     let url = normalizedBaseURL("mynas.local", forceHTTPS: false)
-    #expect(url?.port == 8090)
+    #expect(url?.port == 5000)
   }
 
   @Test func customDefaultPortUsed() {
@@ -421,11 +425,13 @@ struct APIModelsCodingTests {
 
   // MARK: PairingCodeResponse decoding
 
+  // This test USED TO ASSERT THE BUG. It fed camelCase `expiresInSeconds`, which the server
+  // has never sent — the real payload is snake_case `expires_in_seconds`. So the test passed
+  // while the actual pairing flow failed on every call, and the green suite was evidence for
+  // nothing. Now it decodes the real wire format.
   @Test func pairingCodeResponseDecodes() throws {
-    let json = """
-    {"code": "ABC-123", "expiresInSeconds": 300}
-    """
-    let resp = try JSONDecoder().decode(PairingCodeResponse.self, from: json.data(using: .utf8)!)
+    let json = #"{"code": "ABC-123", "expires_in_seconds": 300}"#
+    let resp = try JSONDecoder().decode(PairingCodeResponse.self, from: Data(json.utf8))
     #expect(resp.code == "ABC-123")
     #expect(resp.expiresInSeconds == 300)
   }
@@ -646,5 +652,119 @@ struct AppStateTests {
       #expect(!first.message.lowercased().contains("password"))
     }
     log.clear()
+  }
+
+  // MARK: - The connection matrix that actually failed
+  //
+  // normalizedBaseURL was previously tested ONLY with ".local" hostnames. The combination
+  // that broke remote access for an entire evening — a public hostname with HTTPS on and no
+  // port typed — had no coverage at all. These cases are the real ones, taken from the
+  // addresses that were tried live.
+
+  @Test func httpsWithNoPortUsesTheHTTPSPort() {
+    // The bug: this used to append the saved defaultPort (5000, DSM's PLAINTEXT port),
+    // producing https://host:5000 — an address nothing answers. The user sees a generic
+    // "check that the server is running" for a server that is running fine.
+    let url = normalizedBaseURL("dsmvideo.synology.me", forceHTTPS: true)
+    #expect(url?.scheme == "https")
+    #expect(url?.port == 5001, "https with no port must use 5001, got \(String(describing: url?.port))")
+  }
+
+  @Test func httpWithNoPortUsesTheHTTPPort() {
+    let url = normalizedBaseURL("dsmvideo.synology.me", forceHTTPS: false)
+    #expect(url?.scheme == "http")
+    #expect(url?.port == 5000)
+  }
+
+  @Test func explicitPortAlwaysWins() {
+    // A port the user typed must never be overridden by any default.
+    #expect(normalizedBaseURL("dsmvideo.synology.me:5001", forceHTTPS: true)?.port == 5001)
+    #expect(normalizedBaseURL("dsmvideo.synology.me:8090", forceHTTPS: false)?.port == 8090)
+    #expect(normalizedBaseURL("192.168.50.148:8090", forceHTTPS: false)?.port == 8090)
+  }
+
+  @Test func savedPortIsIgnoredWhenItContradictsTheScheme() {
+    // Carrying a stale 5000 onto an https:// URL is what produced the unreachable address.
+    // The scheme must win over a saved preference that cannot work with it.
+    let httpsWithStaleHTTPPort = normalizedBaseURL("dsmvideo.synology.me", forceHTTPS: true, defaultPort: 5000)
+    #expect(httpsWithStaleHTTPPort?.port == 5001, "a saved 5000 must not be carried onto https")
+
+    let httpWithStaleHTTPSPort = normalizedBaseURL("dsmvideo.synology.me", forceHTTPS: false, defaultPort: 5001)
+    #expect(httpWithStaleHTTPSPort?.port == 5000, "a saved 5001 must not be carried onto http")
+  }
+
+  @Test func savedPortIsHonouredWhenCompatible() {
+    // 8090 is the backend listening directly — valid over http, and the user may prefer it.
+    #expect(normalizedBaseURL("192.168.50.148", forceHTTPS: false, defaultPort: 8090)?.port == 8090)
+  }
+
+  @Test func quickConnectHostsNeverGetAPort() {
+    // Relay hosts carry their own port in the URL; appending one breaks the tunnel.
+    let url = normalizedBaseURL("https://synr-us6.EXAMPLE.direct.quickconnect.to", forceHTTPS: true)
+    #expect(url?.port == nil)
+  }
+
+  // MARK: - Pairing decode
+  //
+  // Regression guard for a live silent failure: the server sends `expires_in_seconds` in
+  // snake_case — the only such key in an otherwise camelCase API — while Swift declared
+  // `expiresInSeconds` with no CodingKeys and no global key strategy. The decode threw every
+  // time, so the Apple TV pairing screen could never show a code, and the failure surfaced as
+  // a generic error rather than anything naming a decode problem.
+
+  @Test func pairingCodeDecodesTheRealServerPayload() throws {
+    // Byte-for-byte what POST /api/v1/auth/pairing/generate returned from the live NAS.
+    let json = Data(#"{"code":"198439","expires_in_seconds":600}"#.utf8)
+    let resp = try JSONDecoder().decode(PairingCodeResponse.self, from: json)
+    #expect(resp.code == "198439")
+    #expect(resp.expiresInSeconds == 600)
+  }
+
+  /// End-to-end proof that a failed login names the address it tried.
+  ///
+  /// The regression this guards: for one entire evening the app answered every remote
+  /// failure with "Login failed. Check that DSVideoServer is running on your NAS." while the
+  /// server was answering fine — the app had tried a stale address, or a port speaking the
+  /// wrong scheme, and never said which. A message that names host:port and the transport
+  /// reason turns a multi-hour hunt into a glance.
+  @Test func failedLoginNamesTheAddressAndReason() async {
+    let log = DiagnosticLog.shared
+    log.clear()
+
+    // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — guaranteed unroutable, so this fails fast
+    // and deterministically without depending on the local network.
+    let dead = URL(string: "http://192.0.2.1:5000/")!
+    let client = APIClient(baseURL: dead, token: nil)
+    _ = try? await client.login(username: "u", password: "p", timeoutInterval: 2)
+
+    let netErrors = log.entries.filter { $0.category == .network && $0.level == .error }
+    #expect(!netErrors.isEmpty, "a transport failure must be logged")
+
+    if let first = netErrors.first {
+      // The host must be present — that is the whole point.
+      #expect(first.message.contains("192.0.2.1"))
+      // And it must not blame the credentials.
+      #expect(!first.message.lowercased().contains("password"))
+    }
+    log.clear()
+  }
+
+  /// The scheme/port defaults must never combine into an address that cannot answer.
+  /// This is the specific shape that broke remote access: HTTPS on, no port typed.
+  @Test func noSchemePortCombinationIsSelfDefeating() {
+    for https in [true, false] {
+      for saved in [nil, 5000, 5001, 8090] as [Int?] {
+        guard let url = normalizedBaseURL("example.com", forceHTTPS: https, defaultPort: saved) else {
+          Issue.record("failed to build URL (https: \(https), saved: \(String(describing: saved)))")
+          continue
+        }
+        let port = url.port
+        if https {
+          #expect(port != 5000, "https must never land on 5000 (plaintext DSM port)")
+        } else {
+          #expect(port != 5001, "http must never land on 5001 (TLS-only DSM port)")
+        }
+      }
+    }
   }
 }

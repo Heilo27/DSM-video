@@ -545,6 +545,10 @@ final class AppState {
       }
 
       var lastError: Error?
+      // Every candidate's failure, as "host:port — reason". The user-facing error names
+      // these; without them "Login failed" is indistinguishable across a stale LAN address,
+      // a blocked port, a cert mismatch and a genuine outage.
+      var attemptFailures: [String] = []
       for (index, candidate) in candidates.enumerated() {
         do {
           var tempClient = APIClient(baseURL: candidate.url, token: nil)
@@ -591,6 +595,7 @@ final class AppState {
             why = error.localizedDescription
           }
           dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
+          attemptFailures.append("\(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") — \(why)")
           lastError = error
         }
       }
@@ -601,14 +606,27 @@ final class AppState {
       // behind a misleading "check the QuickConnect ID" message.
       let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
       dlog.error(.auth, "login FAILED — all \(candidates.count) candidate(s) exhausted")
+
+      // NAME WHAT WAS TRIED. The old messages ("Login failed. Check that DSVideoServer is
+      // running on your NAS.") pointed at the server even when the server was answering
+      // perfectly — the app had simply tried a stale address, or a port that speaks a
+      // different scheme, and said nothing about which. Diagnosing that took hours.
+      //
+      // A server that ANSWERED and rejected us is different: its own message is the truth
+      // and must not be buried under connection detail.
       if let apiErr = lastError as? APIError, apiErr.serverReached {
         loginError = apiErr.userMessage
       } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-        loginError = "Couldn't find \"\(qcID)\". Check the QuickConnect ID and try again."
+        let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
+        loginError = "Couldn't reach \"\(qcID)\" on any known address.\(detail)"
+      } else if !attemptFailures.isEmpty {
+        loginError = attemptFailures.count == 1
+          ? "Couldn't reach \(attemptFailures[0])"
+          : "Couldn't reach the server. Tried:\n" + attemptFailures.joined(separator: "\n")
       } else {
         loginError = (lastError as? APIError)?.userMessage
           ?? (lastError as? URLError).map { APIError.connection($0.code).userMessage }
-          ?? "Login failed. Check that DSVideoServer is running on your NAS."
+          ?? "Login failed — no server address could be built. Check the address."
       }
     } catch {
       // Do NOT collapse an unrecognised error into a generic string here: a transport
@@ -1822,7 +1840,31 @@ extension Notification.Name {
   static let networkDidReconnect = Notification.Name("dsm.networkDidReconnect")
 }
 
-func normalizedBaseURL(_ input: String, forceHTTPS: Bool, defaultPort: Int = 8090) -> URL? {
+/// Canonical ports. These are the ONLY port defaults in the app.
+///
+/// There used to be three conflicting sources — this function's signature defaulted to 8090,
+/// AppState.init() read a stored value falling back to 5000, and QuickConnectResolver had its
+/// own 5001/5000 pair. Worse, the scheme did not influence the port at all: turning HTTPS on
+/// without typing a port produced `https://host:5000`, which cannot work because 5000 is
+/// DSM's plaintext port. That combination — HTTPS on, no port — is what a user naturally
+/// enters for a remote address, and it failed with a generic "check that the server is
+/// running" message pointing at a server that was answering perfectly well.
+enum ServerPort {
+  /// DSM's HTTPS port. nginx proxies /api/v1 through to the backend.
+  static let https = 5001
+  /// DSM's HTTP port. Same proxy, no TLS.
+  static let http = 5000
+  /// The backend listening directly, bypassing DSM's nginx. HTTP only.
+  static let backendDirect = 8090
+}
+
+/// Builds the base URL for a server address.
+///
+/// `defaultPort` is a caller-supplied preference (the user's saved Default Port setting). It
+/// is used ONLY when it is consistent with the scheme — an explicit port in the input always
+/// wins, and when no preference applies the scheme decides. Passing nil means "let the scheme
+/// decide", which is what every remote-address path should do.
+func normalizedBaseURL(_ input: String, forceHTTPS: Bool, defaultPort: Int? = nil) -> URL? {
   var s = input.trimmingCharacters(in: .whitespacesAndNewlines)
   guard !s.isEmpty else { return nil }
   if !s.contains("://") {
@@ -1834,12 +1876,25 @@ func normalizedBaseURL(_ input: String, forceHTTPS: Bool, defaultPort: Int = 809
 
   guard var url = URL(string: s), url.host != nil else { return nil }
 
-  // Add default port if none specified.
+  // Add a port only if none was typed.
   // Skip quickconnect.to — it's a relay host, not a DSVideoServer endpoint.
   let host = url.host ?? ""
   if url.port == nil && !host.hasSuffix("quickconnect.to") {
+    // THE SCHEME DECIDES. A saved preference is honoured only when it matches the scheme:
+    // carrying 5000 (plaintext DSM) onto an https:// URL builds an address nothing answers,
+    // and carrying 5001 onto http:// does the same in reverse.
+    let schemeDefault = forceHTTPS ? ServerPort.https : ServerPort.http
+    let port: Int
+    if let preferred = defaultPort, preferred > 0 {
+      let preferredMatchesScheme = forceHTTPS
+        ? (preferred != ServerPort.http)
+        : (preferred != ServerPort.https)
+      port = preferredMatchesScheme ? preferred : schemeDefault
+    } else {
+      port = schemeDefault
+    }
     var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-    components?.port = defaultPort
+    components?.port = port
     if let newURL = components?.url { url = newURL }
   }
 
