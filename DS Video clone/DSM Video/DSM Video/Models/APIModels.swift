@@ -444,3 +444,16 @@ struct SyncDeletedResponse: Decodable {
   let deletedIds: [String]
   let asOf: Int
 }
+
+// MARK: - Genres
+
+struct GenreCount: Decodable, Hashable, Identifiable {
+  let name: String
+  let count: Int
+  var id: String { name }
+}
+
+struct GenresResponse: Decodable {
+  let genres: [GenreCount]
+}
+

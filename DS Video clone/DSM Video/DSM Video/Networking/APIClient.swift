@@ -59,7 +59,32 @@ struct APIClient {
     try await request(path: "/api/v1/libraries", method: "GET", body: Optional<Int>.none, response: LibrariesResponse.self, timeoutInterval: 15)
   }
 
-  func items(libraryId: String, limit: Int = 50, offset: Int = 0) async throws -> ItemsResponse {
+  /// How multiple selected genres combine.
+  enum GenreMode: String {
+    /// Match any selected genre — widens the result set. The default, because with
+    /// multi-select the intuitive first tap is "action OR comedy"; requiring every genre
+    /// yields an empty grid almost immediately on a real library.
+    case any
+    /// Match every selected genre — narrows.
+    case all
+  }
+
+  /// Genres available in a library, most-used first, with counts.
+  ///
+  /// Driven by actual library contents rather than a fixed TMDb list, so the picker can
+  /// never offer a genre that would return nothing.
+  func genres(libraryId: String?) async throws -> GenresResponse {
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/genres"), resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    if let libraryId { comps.queryItems = [URLQueryItem(name: "libraryId", value: libraryId)] }
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none,
+                                      response: GenresResponse.self, timeoutInterval: Timeout.interactive)
+  }
+
+  func items(libraryId: String, limit: Int = 50, offset: Int = 0,
+             genres: [String] = [], genreMode: GenreMode = .any) async throws -> ItemsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
     }
@@ -68,6 +93,13 @@ struct APIClient {
       URLQueryItem(name: "limit", value: String(limit)),
       URLQueryItem(name: "offset", value: String(offset)),
     ]
+    // Filtering happens SERVER-side. Doing it client-side would only ever filter the pages
+    // already loaded — with 500+ items paginated, the filter would appear to work while
+    // silently missing most of the library.
+    if !genres.isEmpty {
+      comps.queryItems?.append(URLQueryItem(name: "genre", value: genres.joined(separator: ",")))
+      comps.queryItems?.append(URLQueryItem(name: "genreMode", value: genreMode.rawValue))
+    }
     guard let url = comps.url else {
       throw APIError.invalidURL
     }

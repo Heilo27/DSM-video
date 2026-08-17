@@ -42,6 +42,11 @@ struct ItemsGridView: View {
   }()
   @State private var searchText: String = ""
   @State private var showSearchSheet: Bool = false
+  // Genre filtering. Applied SERVER-side: filtering locally would only cover pages already
+  // loaded, so on a 500-item library the filter would look right while missing most results.
+  @State private var availableGenres: [GenreCount] = []
+  @State private var selectedGenres: Set<String> = []
+  @State private var genreMode: APIClient.GenreMode = .any
 
   private var displayedItems: [ItemSummary] {
     guard !searchText.isEmpty else { return sortedItems }
@@ -171,7 +176,12 @@ struct ItemsGridView: View {
     //
     // Same defect class as TVMainView's homeLoad (0d240c8), which shipped to a real Apple TV
     // and left the home rails permanently empty, and PlayerSheet (TASK-838).
-    .task(id: library.id) { await load() }
+    .task(id: library.id) {
+      await load()
+      // Genres load after the grid so the content appears first; the filter bar populating
+      // a moment later is fine, an empty grid waiting on a secondary request is not.
+      await loadGenres()
+    }
     #if !os(tvOS)
     // Search is a magnifying-glass button in the nav bar that presents a search
     // sheet, now that the dedicated Search tab is gone.
@@ -209,6 +219,7 @@ struct ItemsGridView: View {
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
         SortChipBar(selection: $sortOption)
+        GenreFilterBar(available: availableGenres, selected: $selectedGenres, mode: $genreMode)
         if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
           Text("Showing cached content")
             .font(.caption2)
@@ -224,6 +235,11 @@ struct ItemsGridView: View {
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.sortOption")
       sortedItems = sorted(items, by: new)
     }
+    .onChange(of: selectedGenres) { _, _ in Task { await load() } }
+    .onChange(of: genreMode) { _, _ in
+      // Only re-query when the mode can actually change the result set.
+      if selectedGenres.count >= 2 { Task { await load() } }
+    }
     #else
     // tvOS: render the SAME SortChipBar the iOS branch uses, as a focusable row above the
     // grid. This branch previously put two sort buttons in
@@ -232,12 +248,19 @@ struct ItemsGridView: View {
     // why the TV had no way to change sort order. Same defect class as the player's
     // top-bar/transport overscan bug: written for iOS, compiled for tvOS, never displayed.
     .safeAreaInset(edge: .top, spacing: 0) {
-      SortChipBar(selection: $sortOption)
+      VStack(spacing: 0) {
+        SortChipBar(selection: $sortOption)
+        GenreFilterBar(available: availableGenres, selected: $selectedGenres, mode: $genreMode)
+      }
     }
     .onChange(of: items) { _, new in sortedItems = sorted(new, by: sortOption) }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.sortOption")
       sortedItems = sorted(items, by: new)
+    }
+    .onChange(of: selectedGenres) { _, _ in Task { await load() } }
+    .onChange(of: genreMode) { _, _ in
+      if selectedGenres.count >= 2 { Task { await load() } }
     }
     #endif
   }
@@ -252,6 +275,19 @@ struct ItemsGridView: View {
       label += ", \(percent) percent watched"
     }
     return label
+  }
+
+  /// Loads the genre list for the picker.
+  ///
+  /// Separate from load() and deliberately failure-tolerant: genres are an enhancement, and
+  /// a server too old to have /genres (or one whose library has no TMDb data yet) must still
+  /// show a working grid. On failure the bar simply renders nothing.
+  private func loadGenres() async {
+    guard !appState.isDemoMode else { return }
+    guard availableGenres.isEmpty else { return }
+    if let resp = try? await appState.api.genres(libraryId: library.id) {
+      availableGenres = resp.genres
+    }
   }
 
   private func load() async {
@@ -276,7 +312,9 @@ struct ItemsGridView: View {
       var seenIDs = Set<String>()
 
       for _ in 0..<maxPages {
-        let response = try await appState.api.items(libraryId: library.id, limit: pageSize, offset: offset)
+        let response = try await appState.api.items(
+          libraryId: library.id, limit: pageSize, offset: offset,
+          genres: Array(selectedGenres), genreMode: genreMode)
         allItems.append(contentsOf: response.items)
 
         // Break if the page returned no NEW ids — guards against a server that keeps

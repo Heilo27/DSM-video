@@ -853,6 +853,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		// (the app resolves via Synology's service directly), and /playback/{sessionId}/stop
 		// — that last one is worth noting, because transcode sessions are consequently only
 		// reaped by timeout rather than closed when the client stops watching.
+		r.Get("/genres", s.handleGenres)
 		r.Get("/libraries/summary", s.handleLibrariesSummary)
 		r.Get("/items", s.handleItems)
 		r.Get("/items/{id}", s.handleItemDetail)
@@ -2171,6 +2172,44 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		where = "WHERE i.library_id = ?"
 		args = append(args, libraryID)
 		orderBy = "ORDER BY i.title ASC"
+	}
+
+	// Genre filter, applied on top of whatever the switch above selected so it composes
+	// with every mode (all / byFolder / justAdded / ...).
+	//
+	// genres is a comma-joined TEXT column ("Action,Comedy"), so matching is done with LIKE
+	// against a comma-wrapped copy. Wrapping both sides is what makes the match exact:
+	// a bare LIKE '%Action%' would also match "Action & Adventure", and LIKE '%Drama%'
+	// would match "Docudrama". ','||genres||',' LIKE '%,Drama,%' cannot.
+	//
+	// genreMode=all narrows (every selected genre must be present), genreMode=any widens
+	// (at least one). Default is "any": with multi-select, the intuitive first tap is
+	// "show me action OR comedy", and "all" quickly yields an empty grid on a real library.
+	if genreParam := strings.TrimSpace(r.URL.Query().Get("genre")); genreParam != "" {
+		var wanted []string
+		for _, g := range strings.Split(genreParam, ",") {
+			if g = strings.TrimSpace(g); g != "" {
+				wanted = append(wanted, g)
+			}
+		}
+		if len(wanted) > 0 {
+			mode := r.URL.Query().Get("genreMode")
+			joiner := " OR "
+			if mode == "all" {
+				joiner = " AND "
+			}
+			var preds []string
+			for _, g := range wanted {
+				preds = append(preds, "(','||IFNULL(i.genres,'')||',') LIKE ?")
+				args = append(args, "%,"+g+",%")
+			}
+			clause := "(" + strings.Join(preds, joiner) + ")"
+			if where == "" {
+				where = "WHERE " + clause
+			} else {
+				where += " AND " + clause
+			}
+		}
 	}
 
 	countSQL := "SELECT COUNT(*) FROM items i " + where
@@ -5804,6 +5843,64 @@ func (s *Server) handleAdminMetadataRefresh(w http.ResponseWriter, r *http.Reque
 		"scope":   scope,
 		"next":    "POST /api/v1/admin/scan to re-query TMDb for these items",
 	})
+}
+
+// handleGenres lists the distinct genres present in a library, with a count for each.
+//
+// Driven by the actual contents rather than a fixed TMDb genre list: a picker offering
+// "Western" when the library holds no westerns is a dead control, and the counts let the UI
+// order by usefulness instead of alphabetically.
+//
+// genres is a comma-joined TEXT column, so this splits in Go rather than SQL — SQLite has no
+// native split, and a recursive CTE over a few thousand rows is slower and far harder to read
+// than one pass here.
+func (s *Server) handleGenres(w http.ResponseWriter, r *http.Request) {
+	libraryID := strings.TrimSpace(r.URL.Query().Get("libraryId"))
+
+	query := `SELECT genres FROM items WHERE genres IS NOT NULL AND genres != ''`
+	var args []any
+	if libraryID != "" {
+		query += ` AND library_id = ?`
+		args = append(args, libraryID)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	defer rows.Close()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var joined string
+		if rows.Scan(&joined) != nil {
+			continue
+		}
+		for _, g := range strings.Split(joined, ",") {
+			if g = strings.TrimSpace(g); g != "" {
+				counts[g]++
+			}
+		}
+	}
+
+	type genreCount struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	out := make([]genreCount, 0, len(counts))
+	for name, n := range counts {
+		out = append(out, genreCount{Name: name, Count: n})
+	}
+	// Most-used first, alphabetical within equal counts so the order is stable across calls.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Name < out[j].Name
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{"genres": out})
 }
 
 func configuredLibraries(cfg Config) []map[string]any {
