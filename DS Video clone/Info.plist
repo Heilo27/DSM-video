@@ -62,8 +62,6 @@
 	<array>
 		<string>_dsvideo._tcp</string>
 	</array>
-	<key>NSCameraUsageDescription</key>
-	<string>Camera access is needed to scan QR codes for pairing with Apple TV.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>DSM Video connects to your Synology NAS on the local network to stream your video library.</string>
 	<key>UIApplicationSceneManifest</key>

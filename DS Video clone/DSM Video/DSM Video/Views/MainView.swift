@@ -1292,20 +1292,57 @@ struct SettingsView: View {
             .multilineTextAlignment(.trailing)
             .frame(minWidth: 70, maxWidth: 120)
         }
+        Toggle("Stay Signed In", isOn: $appState.rememberMe)
       } header: {
         Text("Server")
       } footer: {
         Text("DSVideoServer listens on port 5000 by default. Change this only if you've reconfigured DSVideoServer on your NAS.")
       }
 
+      // Dual addressing. This used to sit on the first-run setup screen as "Remote address
+      // (optional)", where a brand-new user had no way to know whether they needed it —
+      // it is a power-user concept that only makes sense once you already have a working
+      // connection to compare against. It belongs here.
+      Section {
+        HStack {
+          Text("Home")
+          Spacer()
+          TextField("192.168.1.50", text: $appState.lanAddress)
+            #if os(iOS)
+            .keyboardType(.URL)
+            .textInputAutocapitalization(.never)
+            #endif
+            .autocorrectionDisabled()
+            .multilineTextAlignment(.trailing)
+        }
+        HStack {
+          Text("Away")
+          Spacer()
+          TextField("mynas.synology.me", text: $appState.wanAddress)
+            #if os(iOS)
+            .keyboardType(.URL)
+            .textInputAutocapitalization(.never)
+            #endif
+            .autocorrectionDisabled()
+            .multilineTextAlignment(.trailing)
+        }
+      } header: {
+        Text("Addresses")
+      } footer: {
+        Text("Optional. Set both and the app picks whichever works from where you are — your local address at home, your remote one everywhere else. Leave these alone if one address already works.")
+      }
+
       // Pair Apple TV — the GENERATE half of the pairing flow.
       //
       // /auth/pairing/generate requires a bearer token; /auth/pairing/exchange does not. So a
-      // signed-in phone mints the code and a signed-out Apple TV redeems it. Before this
-      // section existed there was no way to produce a code anywhere in the shipping app: the
-      // TV offered only "Generate Pairing Code" (which needs a session it does not have), and
-      // PairingCodeView — the sole caller of exchangePairingCode — is #if !os(tvOS). A
-      // first-time Apple TV therefore could not pair at all.
+      // signed-in phone mints the code and a signed-out Apple TV redeems it. That asymmetry
+      // fixes the direction of the whole flow — it can only ever run phone → TV, never the
+      // reverse, because a first-time TV has no token to generate with.
+      //
+      // This section is where the code comes from. TVPairingView's code field is where it
+      // goes. (A PairingCodeView existed for the opposite direction — phone redeeming a
+      // TV-generated code — which the token requirement makes impossible; it was unreachable
+      // dead code and has been removed.)
       #if os(iOS)
       if appState.sessionToken != nil {
         Section {

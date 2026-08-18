@@ -41,16 +41,11 @@ struct RootView: View {
             TVMainView()
             #else
             if appState.sessionToken == nil {
-                if appState.isReturningUser {
-                    // Returning user: skip wizard, go straight to credentials
-                    NavigationStack {
-                        SetupCredentialsScreen()
-                    }
-                    .environment(SetupFlowState())
-                    .preferredColorScheme(.dark)
-                } else {
-                    ServerSetupView()
-                }
+                // One screen for everyone. The returning-user branch used to route around a
+                // four-screen wizard to reach its final step; with the wizard gone there is
+                // nothing to route around — ServerSetupView prefills the saved address and
+                // credentials and skips the network scan when it recognises the user.
+                ServerSetupView()
             } else {
                 MainView(layout: resolvedLayout)
                     .onAppear {

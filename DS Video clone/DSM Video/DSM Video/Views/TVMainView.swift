@@ -28,7 +28,6 @@ struct TVLoginView: View {
   @State private var server: String = ""
   @State private var username: String = ""
   @State private var password: String = ""
-  @State private var useHTTPS: Bool = false
 
   var body: some View {
     NavigationStack {
@@ -81,6 +80,10 @@ struct TVLoginView: View {
                 .accessibilityAddTraits(.isHeader)
 
               VStack(spacing: 16) {
+                // No HTTPS toggle. login() overwrites useHTTPS from whichever candidate
+                // wins (AppState.swift:575) and buildCandidates() forces http on private
+                // IPs regardless — so the switch never controlled anything. Asking for it
+                // with a remote made a dead setting cost real effort.
                 TextField("Server Address", text: $server)
                   .textInputAutocapitalization(.never)
                   .autocorrectionDisabled()
@@ -99,12 +102,6 @@ struct TVLoginView: View {
                   .textInputAutocapitalization(.never)
                   .autocorrectionDisabled()
                   .frame(maxWidth: 480)
-                Toggle(isOn: $useHTTPS) {
-                  Text("Use HTTPS")
-                    .foregroundStyle(.white)
-                }
-                .frame(maxWidth: 480)
-                .tint(Color.dsAccent)
               }
 
               if let error = appState.loginError {
@@ -116,7 +113,6 @@ struct TVLoginView: View {
               }
 
               Button {
-                appState.useHTTPS = useHTTPS
                 appState.baseURL = server
                 appState.username = username
                 appState.savedPassword = password
@@ -143,7 +139,6 @@ struct TVLoginView: View {
         server = appState.baseURL
         username = appState.username
         password = appState.savedPassword
-        useHTTPS = appState.useHTTPS
       }
       .onChange(of: appState.sessionToken) { _, token in
         if token != nil { dismiss() }

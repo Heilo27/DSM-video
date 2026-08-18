@@ -10,7 +10,9 @@ struct TVPairingView: View {
   @State private var countdown: Int = 0
   @State private var countdownTask: Task<Void, Never>?
   @State private var showManualLogin: Bool = false
-  @State private var discovery = BonjourDiscovery()
+  /// Secondary route: network discovery + manual sign-in, off the main screen so the code
+  /// field is the only thing competing for the remote's first Select press.
+  @State private var showOtherWays: Bool = false
   /// Code typed on THIS device to redeem a pairing code generated on an already-signed-in
   /// phone. This is the direction a first-time Apple TV must use — see the header comment.
   @State private var enteredCode: String = ""
@@ -48,13 +50,38 @@ struct TVPairingView: View {
             .font(.system(size: 42, weight: .bold))
             .foregroundStyle(.white)
 
-          Text(appState.sessionToken == nil
-               ? "On your iPhone or iPad, open DSM Video → Settings → Pair Apple TV, then enter the 6-digit code it shows."
-               : "Enter this code in DSM Video on your iPhone or iPad.")
-            .font(.system(size: 20))
-            .foregroundStyle(Color.dsTextSecondary)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: 900)
+          // WHERE THE CODE COMES FROM. This is the one thing a first-time user cannot
+          // guess, and the old copy buried it in a single run-on sentence that also failed
+          // to state the prerequisite: the phone must ALREADY be signed in. /auth/pairing/
+          // generate requires a bearer token, so a phone that has never connected cannot
+          // mint a code either, and the user would follow the instructions to a button that
+          // is not there. Say the prerequisite first, then the path, then the action.
+          if appState.sessionToken == nil {
+            VStack(spacing: 14) {
+              Text("Get a code from your iPhone or iPad")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.white)
+
+              Text("On a device that's already signed in to \(AppInfo.displayName), open **Settings → Apple TV → Pair Apple TV**. It shows a 6-digit code — type it below.")
+                .font(.system(size: 20))
+                .foregroundStyle(Color.dsTextSecondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 900)
+
+              Text("No signed-in device? Use Other ways to connect at the bottom.")
+                .font(.system(size: 17))
+                .foregroundStyle(Color.dsTextMuted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 900)
+            }
+            .accessibilityElement(children: .combine)
+          } else {
+            Text("Enter this code in \(AppInfo.displayName) on your iPhone or iPad.")
+              .font(.system(size: 20))
+              .foregroundStyle(Color.dsTextSecondary)
+              .multilineTextAlignment(.center)
+              .frame(maxWidth: 900)
+          }
         }
         .padding(.bottom, 56)
 
@@ -67,10 +94,9 @@ struct TVPairingView: View {
         // This screen used to offer only "Generate Pairing Code", which tripped
         // `guard sessionToken != nil` in generatePairingCode() and showed
         // "Must be logged in to generate pairing code." on the sign-in screen. The only
-        // escape was the on-screen keyboard. Worse, the one call site of
-        // exchangePairingCode() lived in PairingCodeView.swift, which is wrapped in
-        // `#if !os(tvOS)` — so the redeem path was compiled out of the TV app entirely and a
-        // virgin Apple TV could not pair at all.
+        // escape was the on-screen keyboard. Worse, the redeem path was compiled out of the
+        // TV app entirely, so a virgin Apple TV could not pair at all. The code field below
+        // is that redeem path; SettingsView on iOS is where the code is minted.
         if appState.sessionToken == nil {
           codeEntry
         } else if isGenerating && pairingCode == nil {
@@ -164,73 +190,30 @@ struct TVPairingView: View {
         }
 
 
-        // Bonjour-discovered servers
-        if !discovery.servers.isEmpty {
-          VStack(spacing: 16) {
-            Text("Found on your network")
-              .font(.system(size: 20, weight: .semibold))
+        // ONE primary path, one secondary route.
+        //
+        // This screen used to render three competing entry points at once: the code field,
+        // a live Bonjour server list, and a "Sign in manually" button. On a remote-driven
+        // screen that is three focus targets fighting for the first Select press, and two of
+        // them lead somewhere strictly worse — TVLoginView asks you to type a server
+        // address, a username AND a password with the on-screen keyboard.
+        //
+        // Pairing is the better answer and is now the whole screen: a signed-in phone
+        // already knows the address, the credentials and the winning scheme, and six digits
+        // transfers all of it. Discovery and manual sign-in still exist for the case where
+        // no phone is to hand — behind one clearly secondary button.
+        if appState.sessionToken == nil {
+          Button {
+            showOtherWays = true
+          } label: {
+            Text("Other ways to connect")
+              .font(.system(size: 19))
               .foregroundStyle(Color.dsTextSecondary)
-              .padding(.top, 32)
-
-            VStack(spacing: 12) {
-              ForEach(discovery.servers) { server in
-                Button {
-                  appState.baseURL = server.baseURL
-                  showManualLogin = true
-                } label: {
-                  HStack(spacing: 16) {
-                    Image(systemName: "server.rack")
-                      .font(.system(size: 22))
-                      .foregroundStyle(Color.dsAccent)
-                    VStack(alignment: .leading, spacing: 2) {
-                      Text(server.name)
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(.white)
-                      Text(server.baseURL)
-                        .font(.system(size: 16))
-                        .foregroundStyle(Color.dsTextMuted)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                      .foregroundStyle(Color.dsTextMuted)
-                      .accessibilityHidden(true)
-                  }
-                  .padding(.horizontal, 32)
-                  .padding(.vertical, 18)
-                  .background(Color(white: 0.1))
-                  .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                  .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                      .stroke(Color.dsBorderStrong, lineWidth: 1)
-                  )
-                }
-                .buttonStyle(.card)
-                .frame(maxWidth: 600)
-              }
-            }
-            .focusSection()
           }
-        } else if discovery.isScanning {
-          HStack(spacing: 12) {
-            ProgressView().tint(Color.dsTextMuted)
-            Text("Scanning network…")
-              .font(.system(size: 18))
-              .foregroundStyle(Color.dsTextMuted)
-          }
-          .padding(.top, 24)
+          .buttonStyle(.bordered)
+          .padding(.top, 40)
+          .accessibilityHint("Connect by choosing a server on your network, or by typing your server address and password")
         }
-
-        // Manual login fallback. TASK-715: use .bordered (outline) rather than
-        // .borderedProminent so it reads as a secondary action and its focused state
-        // is visually distinct from the prominent "Generate Pairing Code" button.
-        Button("Sign in manually") {
-          showManualLogin = true
-        }
-        .buttonStyle(.bordered)
-        .font(.system(size: 19))
-        .foregroundStyle(Color.dsTextSecondary)
-        .padding(.top, 40)
-        .accessibilityHint("Opens manual login form")
       }
       .padding(60)
     }
@@ -238,6 +221,13 @@ struct TVPairingView: View {
     .fullScreenCover(isPresented: $showManualLogin) {
       TVLoginView()
         .environment(appState)
+    }
+    .fullScreenCover(isPresented: $showOtherWays) {
+      TVOtherWaysView(onManualLogin: {
+        showOtherWays = false
+        showManualLogin = true
+      })
+      .environment(appState)
     }
     .onAppear {
       if appState.sessionToken == nil {
@@ -248,12 +238,9 @@ struct TVPairingView: View {
         // Signed in: this device can hand a code to another device.
         Task { await generate() }
       }
-      // Always scan for servers on the local network
-      discovery.startScan()
     }
     .onDisappear {
       countdownTask?.cancel()
-      discovery.stopScan()
     }
     .onChange(of: pairingCode) { _, newCode in
       // TASK-406: stop the countdown whenever pairingCode is cleared (e.g. from outside)
@@ -377,6 +364,128 @@ struct TVPairingView: View {
     } else {
       error = appState.pairingError ?? "Failed to generate code."
     }
+  }
+}
+
+// MARK: - Other Ways To Connect
+//
+// The fallback for when no signed-in phone is available. Discovery lives here rather than on
+// the pairing screen so it is not a third focus target competing with the code field.
+
+private struct TVOtherWaysView: View {
+  @Environment(AppState.self) private var appState
+  @Environment(\.dismiss) private var dismiss
+  let onManualLogin: () -> Void
+
+  @State private var discovery = BonjourDiscovery()
+
+  var body: some View {
+    ZStack {
+      Color.black.ignoresSafeArea()
+      RadialGradient(
+        colors: [Color(white: 0.07), Color.black],
+        center: .center,
+        startRadius: 50,
+        endRadius: 700
+      )
+      .ignoresSafeArea()
+
+      VStack(spacing: 40) {
+        VStack(spacing: 12) {
+          Text("Other Ways To Connect")
+            .font(.system(size: 42, weight: .bold))
+            .foregroundStyle(.white)
+            .accessibilityAddTraits(.isHeader)
+
+          Text("Pairing from your iPhone is quicker — but if you don't have it to hand, pick your server below or sign in by hand.")
+            .font(.system(size: 20))
+            .foregroundStyle(Color.dsTextSecondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 900)
+        }
+
+        if !discovery.servers.isEmpty {
+          VStack(spacing: 16) {
+            Text("Found on your network")
+              .font(.system(size: 20, weight: .semibold))
+              .foregroundStyle(Color.dsTextSecondary)
+
+            VStack(spacing: 12) {
+              ForEach(discovery.servers) { server in
+                Button {
+                  appState.baseURL = server.baseURL
+                  onManualLogin()
+                } label: {
+                  HStack(spacing: 16) {
+                    Image(systemName: "server.rack")
+                      .font(.system(size: 22))
+                      .foregroundStyle(Color.dsAccent)
+                    VStack(alignment: .leading, spacing: 2) {
+                      Text(server.name)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(.white)
+                      Text(server.baseURL)
+                        .font(.system(size: 16))
+                        .foregroundStyle(Color.dsTextMuted)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                      .foregroundStyle(Color.dsTextMuted)
+                      .accessibilityHidden(true)
+                  }
+                  .padding(.horizontal, 32)
+                  .padding(.vertical, 18)
+                  .background(Color(white: 0.1))
+                  .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                      .stroke(Color.dsBorderStrong, lineWidth: 1)
+                  )
+                }
+                .buttonStyle(.card)
+                .frame(maxWidth: 600)
+                .accessibilityLabel("\(server.name), \(server.baseURL)")
+              }
+            }
+            .focusSection()
+          }
+        } else if discovery.isScanning {
+          HStack(spacing: 12) {
+            ProgressView().tint(Color.dsTextMuted)
+            Text("Scanning network…")
+              .font(.system(size: 18))
+              .foregroundStyle(Color.dsTextMuted)
+          }
+        } else {
+          Text("No servers found on your network.")
+            .font(.system(size: 18))
+            .foregroundStyle(Color.dsTextMuted)
+        }
+
+        // Always focusable, whatever discovery returns — a tvOS screen with no focusable
+        // element cannot be escaped with the remote.
+        VStack(spacing: 20) {
+          Button {
+            onManualLogin()
+          } label: {
+            Text("Enter server address manually")
+              .font(.system(size: 20, weight: .semibold))
+              .padding(.horizontal, 48)
+              .padding(.vertical, 20)
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(Color.dsAccent)
+
+          Button("Back") { dismiss() }
+            .buttonStyle(.bordered)
+            .font(.system(size: 19))
+            .foregroundStyle(Color.dsTextSecondary)
+        }
+      }
+      .padding(60)
+    }
+    .onAppear { discovery.startScan() }
+    .onDisappear { discovery.stopScan() }
   }
 }
 
