@@ -152,7 +152,7 @@ struct GestureVideoPlayer: View {
 
     #if os(tvOS)
     @FocusState private var focusedControl: TVFocusField?
-    enum TVFocusField { case playPause, hidden }
+    enum TVFocusField { case playPause, captions, speed, hidden }
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -615,6 +615,10 @@ struct GestureVideoPlayer: View {
                             .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Subtitles and Audio")
+                    #if os(tvOS)
+                    .buttonStyle(.plain)
+                    .focused($focusedControl, equals: .captions)
+                    #endif
 
                     // Fill mode toggle (iOS only — Dynamic Island concern)
                     #if os(iOS)
@@ -648,6 +652,8 @@ struct GestureVideoPlayer: View {
                             .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Playback speed: \(playbackRate == 1.0 ? "normal" : "\(playbackRate, specifier: "%.2g") times")")
+                    .buttonStyle(.plain)
+                    .focused($focusedControl, equals: .speed)
                     #else
                     Menu {
                         ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
@@ -673,6 +679,9 @@ struct GestureVideoPlayer: View {
                     #endif
                 }
             }
+            #if os(tvOS)
+            .focusSection()
+            #endif
             // Same title-safe fix as the bottom transport row: tvOS needs 60pt
             // horizontally. The trailing controls in this bar were sitting in the
             // overscan region on a real TV for the same reason.
@@ -1109,6 +1118,23 @@ struct GestureVideoPlayer: View {
             return
         }
         if showControls {
+            // Route Select to whichever control actually holds focus. The focus sink
+            // swallows Select for the whole overlay, so without this the top-row
+            // buttons could be focused but never activated.
+            switch focusedControl {
+            case .captions:
+                showCaptionsPicker = true
+                hideControlsTask?.cancel()
+                return
+            case .speed:
+                let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+                let currentIdx = speeds.firstIndex(where: { abs($0 - playbackRate) < 0.01 }) ?? 2
+                setPlaybackRate(speeds[(currentIdx + 1) % speeds.count])
+                scheduleHideControls()
+                return
+            default:
+                break
+            }
             togglePlayPause()
             if isPlaying { scheduleHideControls() }
         } else {
@@ -1122,10 +1148,39 @@ struct GestureVideoPlayer: View {
     // is debounced — it fires once after ~0.6s of no input, or immediately on Select.
     // First press just reveals controls if they were hidden.
     private func handleTVMoveCommand(direction: MoveCommandDirection) {
+        // Up/down move focus between the transport row and the top action row
+        // (subtitles / playback speed). Without this the top row was unreachable:
+        // its buttons had no focus targets, so focus stayed pinned to play/pause.
+        if direction == .up || direction == .down {
+            guard showControls else {
+                withAnimation(.easeInOut(duration: 0.25)) { showControls = true }
+                scheduleHideControls()
+                return
+            }
+            hideControlsTask?.cancel()
+            switch (direction, focusedControl) {
+            case (.up, .playPause), (.up, .hidden), (.up, .none):
+                focusedControl = .captions
+            case (.down, .captions), (.down, .speed):
+                focusedControl = .playPause
+            default:
+                break
+            }
+            scheduleHideControls()
+            return
+        }
         guard direction == .left || direction == .right else { return }
         guard !blockDpadSeek else { return }
         guard showControls else {
             withAnimation(.easeInOut(duration: 0.25)) { showControls = true }
+            scheduleHideControls()
+            return
+        }
+        // While focus is on the top action row, left/right moves between those
+        // buttons instead of scrubbing the timeline.
+        if focusedControl == .captions || focusedControl == .speed {
+            hideControlsTask?.cancel()
+            focusedControl = (direction == .right) ? .speed : .captions
             scheduleHideControls()
             return
         }
