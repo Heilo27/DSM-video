@@ -6042,14 +6042,19 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			return fmt.Errorf("scan: begin tx: %w", err)
 		}
 		for _, row := range batch {
+			// Allocate a change_seq ONLY when this scan actually changes the row.
+			// Previously every scanned file burned a sequence number and rewrote
+			// change_seq unconditionally, so a periodic scan of an unchanged library
+			// marked all N items as "changed" every 5 minutes. item_seq climbed by N
+			// per scan (reaching 110M on a 5,108-item library) and every client
+			// re-downloaded the entire library on every sync cycle — 17.5TB of reads.
+			// The upsert below carries a WHERE clause so an identical row is a no-op;
+			// we detect that via RowsAffected and give the burned seq back.
 			var seq int64
 			_ = tx.QueryRowContext(ctx,
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
-			if seq > 0 {
-				s.cachedItemSeq.Store(seq)
-			}
-			if _, err := tx.Exec(
+			res, err := tx.Exec(
 				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels)
 				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET
@@ -6069,12 +6074,37 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				   video_width=COALESCE(excluded.video_width, items.video_width),
 				   video_height=COALESCE(excluded.video_height, items.video_height),
 				   audio_channels=COALESCE(excluded.audio_channels, items.audio_channels),
-				   change_seq=excluded.change_seq`,
+				   change_seq=excluded.change_seq
+				 WHERE items.library_id IS NOT excluded.library_id
+				    OR items.type IS NOT excluded.type
+				    OR items.path IS NOT excluded.path
+				    OR items.added_at IS NOT excluded.added_at
+				    OR items.duration_seconds IS NOT COALESCE(excluded.duration_seconds, items.duration_seconds)
+				    OR items.video_codec IS NOT COALESCE(excluded.video_codec, items.video_codec)
+				    OR items.audio_codec IS NOT COALESCE(excluded.audio_codec, items.audio_codec)
+				    OR items.container IS NOT COALESCE(excluded.container, items.container)
+				    OR items.needs_transcode IS NOT COALESCE(excluded.needs_transcode, items.needs_transcode)
+				    OR items.show_folder_id IS NOT COALESCE(excluded.show_folder_id, items.show_folder_id)
+				    OR items.video_width IS NOT COALESCE(excluded.video_width, items.video_width)
+				    OR items.video_height IS NOT COALESCE(excluded.video_height, items.video_height)
+				    OR items.audio_channels IS NOT COALESCE(excluded.audio_channels, items.audio_channels)
+				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
+				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
 				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
 				row.videoWidth, row.videoHeight, row.audioChannels,
-			); err != nil {
+			)
+			if err != nil {
 				log.Printf("scan: upsert failed for %s: %v", row.path, err)
+			} else if n, aErr := res.RowsAffected(); aErr == nil && n == 0 {
+				// Row already matched — the WHERE suppressed the write. Roll the
+				// sequence back so an idle library never advances item_seq.
+				_, _ = tx.ExecContext(ctx,
+					`UPDATE sync_state SET value = value - 1 WHERE key = 'item_seq' AND value = ?`, seq)
+				seq = 0
+			}
+			if seq > 0 {
+				s.cachedItemSeq.Store(seq)
 			}
 			st := existing[row.id]
 			if tmdbClient != nil && !st.metadataFetched && row.typ != "homeVideo" {
