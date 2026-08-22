@@ -293,6 +293,51 @@ func main() {
 		WHERE key = 'item_seq' AND value = 0 AND (SELECT COUNT(*) FROM items) > 0;
 	`)
 
+	// Runaway item_seq repair. A scan bug (fixed) previously allocated a sequence
+	// number for every file on every 5-minute pass whether or not the row changed,
+	// driving item_seq to 110,235,720 against a 5,108-item library. Clients compare
+	// their cursor to this value, so an inflated counter makes every sync cycle look
+	// like the entire library changed — the NAS served ~36,000 paged requests and
+	// 17.5TB of reads before it was caught.
+	//
+	// Clamp on startup when the counter is wildly beyond what the data can justify.
+	// MAX(change_seq) is the highest sequence any row actually carries; anything far
+	// above that is counter inflation, not real history. Rebasing to that maximum
+	// keeps every existing change_seq valid and strictly below item_seq, so delta
+	// sync stays correct and no client re-downloads anything.
+	// Detection note: the buggy scan wrote its inflated counter into items.change_seq
+	// as well, so item_seq and MAX(change_seq) ran away together and comparing them
+	// finds nothing. The usable signal is item_seq measured against the ITEM COUNT —
+	// a healthy library's sequence numbers stay within a small multiple of N.
+	// The live failure sat at ~21,500x; heavy but legitimate churn is well under 1,000x.
+	{
+		var itemSeq, itemCount int64
+		_ = db.QueryRow(`SELECT value FROM sync_state WHERE key = 'item_seq'`).Scan(&itemSeq)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&itemCount)
+		if itemCount > 0 && itemSeq > 1000*itemCount && itemSeq > 100000 {
+			// Rebase the counter and every row onto a compact range in one transaction:
+			// change_seq is renumbered by current order, so relative ordering (all that
+			// delta sync depends on) is preserved exactly. Clients whose stored cursor is
+			// now above item_seq will re-sync once, then stay quiet.
+			tx, txErr := db.Begin()
+			if txErr == nil {
+				_, e1 := tx.Exec(`
+					WITH renum AS (
+						SELECT id, ROW_NUMBER() OVER (ORDER BY change_seq ASC, rowid ASC) AS n FROM items
+					)
+					UPDATE items SET change_seq = (SELECT n FROM renum WHERE renum.id = items.id)`)
+				_, e2 := tx.Exec(`UPDATE sync_state SET value = ? WHERE key = 'item_seq'`, itemCount)
+				if e1 == nil && e2 == nil && tx.Commit() == nil {
+					log.Printf("[sync] repaired runaway item_seq: %d -> %d across %d items (was %.0fx item count)",
+						itemSeq, itemCount, itemCount, float64(itemSeq)/float64(itemCount))
+				} else {
+					_ = tx.Rollback()
+					log.Printf("[sync] runaway item_seq detected (%d for %d items) but repair failed", itemSeq, itemCount)
+				}
+			}
+		}
+	}
+
 	// Initialize transcode components
 	prober := transcode.NewProber(cfg.FFprobePath)
 

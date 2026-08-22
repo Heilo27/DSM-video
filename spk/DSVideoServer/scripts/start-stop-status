@@ -56,8 +56,24 @@ pid_alive() {
   return 0
 }
 
+# Rotate the log before every start and cap it while running. The server appends
+# to a single file forever via nohup; with no rotation this reached 345MB on the
+# live NAS and would eventually fill the package volume. Keep one previous
+# generation so a crash's context survives a restart.
+LOG_MAX_BYTES=20971520   # 20MB
+rotate_log() {
+  [ -f "${LOG}" ] || return 0
+  _sz="$(wc -c < "${LOG}" 2>/dev/null || echo 0)"
+  if [ "${_sz}" -gt "${LOG_MAX_BYTES}" ]; then
+    mv -f "${LOG}" "${LOG}.1" 2>/dev/null || true
+    : > "${LOG}"
+    echo "[${PACKAGE}] log rotated at ${_sz} bytes (previous kept as ${LOG}.1)" >> "${LOG}"
+  fi
+}
+
 start() {
   mkdir -p "${VAR}"
+  rotate_log
 
   # Ensure the live nginx conf matches our package source — DSM may regenerate
   # it from a stale cache on restarts, service events, or cert renewals.
@@ -186,6 +202,22 @@ start() {
   nohup "${GO_BINARY}" >> "${LOG}" 2>&1 &
   echo $! > "${PIDFILE}"
   echo "[${PACKAGE}] started (pid $(cat "${PIDFILE}"))" >> "${LOG}"
+
+  # Watchdog: the server holds ${LOG} open for append, so rotating out from under
+  # it would leak the inode and stop reclaiming space. Truncate in place instead —
+  # append-mode writes continue correctly against a truncated file.
+  (
+    while [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}" 2>/dev/null || echo 0)"; do
+      sleep 300
+      [ -f "${LOG}" ] || continue
+      _sz="$(wc -c < "${LOG}" 2>/dev/null || echo 0)"
+      if [ "${_sz}" -gt "${LOG_MAX_BYTES}" ]; then
+        cp -f "${LOG}" "${LOG}.1" 2>/dev/null || true
+        : > "${LOG}"
+        echo "[${PACKAGE}] log truncated in place at ${_sz} bytes" >> "${LOG}"
+      fi
+    done
+  ) >/dev/null 2>&1 &
 
   # Verify the process stays alive for a couple seconds
   sleep 2
