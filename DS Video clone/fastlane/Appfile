@@ -1,3 +1,14 @@
-app_identifier("HeiloProjects.DSReel.tvOS")
+# The Fastfile passes app_identifier explicitly to every deliver/pilot call
+# (IOS_BUNDLE_ID / TVOS_BUNDLE_ID), so this is only a fallback default.
+#
+# Both iOS and tvOS ship under the SAME bundle ID — they are one app record in
+# App Store Connect, distinguished by the `platform:` parameter on deliver.
+# (A previous Appfile said HeiloProjects.DSReel.tvOS, which is not a bundle ID
+# that exists in DSM Video.xcodeproj.)
+app_identifier("HeiloProjects.DSReel")
 apple_id("rprimeau27@gmail.com")
-team_id("HeiloProjects")
+
+# NOTE: team_id must be the 10-character Apple Developer Team ID (e.g. "A1B2C3D4E5"),
+# not the team NAME. It is intentionally omitted here — auth goes through the
+# App Store Connect API key in ~/.appstoreconnect/config.json, which carries the
+# team context already. Add it only if a lane starts asking which team to use.

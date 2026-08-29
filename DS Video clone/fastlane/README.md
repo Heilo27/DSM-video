@@ -15,6 +15,30 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 ## iOS
 
+### ios bump
+
+```sh
+[bundle exec] fastlane ios bump
+```
+
+
+
+### ios set_build
+
+```sh
+[bundle exec] fastlane ios set_build
+```
+
+
+
+### ios doctor
+
+```sh
+[bundle exec] fastlane ios doctor
+```
+
+
+
 ### ios upload_metadata
 
 ```sh
@@ -47,6 +71,30 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 
 
+### ios ship_ios
+
+```sh
+[bundle exec] fastlane ios ship_ios
+```
+
+
+
+### ios fetch_profiles_tvos
+
+```sh
+[bundle exec] fastlane ios fetch_profiles_tvos
+```
+
+
+
+### ios build_and_upload_tvos
+
+```sh
+[bundle exec] fastlane ios build_and_upload_tvos
+```
+
+
+
 ### ios upload_metadata_tvos
 
 ```sh
@@ -67,6 +115,30 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 ```sh
 [bundle exec] fastlane ios release_tvos
+```
+
+
+
+### ios ship_tvos
+
+```sh
+[bundle exec] fastlane ios ship_tvos
+```
+
+
+
+### ios ship_all
+
+```sh
+[bundle exec] fastlane ios ship_all
+```
+
+
+
+### ios check_capabilities
+
+```sh
+[bundle exec] fastlane ios check_capabilities
 ```
 
 
@@ -123,14 +195,6 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 ```sh
 [bundle exec] fastlane ios attach_build
-```
-
-
-
-### ios readiness2
-
-```sh
-[bundle exec] fastlane ios readiness2
 ```
 
 

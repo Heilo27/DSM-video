@@ -1,13 +1,20 @@
-This update keeps your library ready to play and improves everyday playback.
+This update fixes Apple TV pairing, player controls, and keeping your place.
 
-ALWAYS READY TO PLAY
-Newly added videos are now converted automatically in the background to the format that plays back fastest on Apple TV, with no setup required. While a title is being prepared, the app lets you know.
+PAIRING AND SIGN-IN
+• A first-time Apple TV can now pair. The flow previously could not complete at all.
+• Home screen rails now load right after pairing instead of staying empty.
+• Non-admin accounts can now sign in — a bad session parameter was rejecting them.
+• Unreachable servers no longer report as "wrong password."
 
-PLAYBACK FIXES
-• Fixed the scrubber and seeking on transcoded video so the timeline and skip controls are accurate.
-• Improved reliability for MKV and AVI titles with the latest server update — fewer "playback failed" interruptions.
-• More dependable artwork loading throughout, including after reconnecting.
+PLAYER CONTROLS
+• Playback speed and subtitle buttons are now reachable with the remote.
+• "Mark Unwatched" now works reliably.
+• Fixed playback progress being lost or reverting to an older position.
 
-Plus general performance and interface refinements.
+FIND IT FASTER
+• New multi-select genre filter — combine genres to narrow your library.
+• Your Watchlist now loads. It previously came up empty on every device.
+
+Plus more dependable artwork loading, better show matching, and general performance refinements.
 
 Thanks for using DSM Video on Apple TV. Keep the feedback coming.

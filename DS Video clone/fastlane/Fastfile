@@ -2,18 +2,168 @@ require 'json'
 
 default_platform(:ios)
 
+# ──────────────────────────────────────────────────────
+# Release version — SINGLE SOURCE OF TRUTH.
+# Must match MARKETING_VERSION in DSM Video.xcodeproj.
+# Bump here and in Xcode together, or run `fastlane bump version:X.Y.Z`
+# which updates both.
+#
+# NOTE: 1.3.4 is already READY_FOR_SALE on tvOS and 1.3.3 on iOS.
+# ASC will not let you re-create a shipped version record.
+# ──────────────────────────────────────────────────────
+VERSION = "1.3.5"
+
 # iOS bundle ID
 IOS_BUNDLE_ID  = "HeiloProjects.DSReel"
 # tvOS bundle ID (same app as iOS in ASC — platform param distinguishes it)
 TVOS_BUNDLE_ID = "HeiloProjects.DSReel"
 
+# Xcode schemes (both are SHARED — see xcshareddata/xcschemes/)
+IOS_SCHEME  = "DSM Video"
+TVOS_SCHEME = "DS Video clone tvOS"
+
+# fastlane runs lanes with CWD set to the fastlane/ directory, so every path to
+# project files must be anchored to the repo root explicitly.
+ROOT      = File.expand_path("..", __dir__)
+XCODEPROJ = File.join(ROOT, "DSM Video.xcodeproj")
+
+# Apple Developer Team ID (from DEVELOPMENT_TEAM in the Xcode project)
+TEAM_ID   = "752QKBCTJR"
+
 def api_key
-  config = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
+  config_path = File.expand_path("~/.appstoreconnect/config.json")
+  unless File.exist?(config_path)
+    UI.user_error!(
+      "Missing ~/.appstoreconnect/config.json.\n" \
+      "This machine has not been set up for ASC uploads. See fastlane/README.md " \
+      "— you need config.json plus the AuthKey_*.p8 private key. Neither is in " \
+      "git (they are secrets); copy them from the machine that already works."
+    )
+  end
+  config = JSON.parse(File.read(config_path))
+  key_path = File.expand_path(config["privateKeyPath"])
+  unless File.exist?(key_path)
+    UI.user_error!("ASC private key not found at #{key_path} (from config.json privateKeyPath).")
+  end
   app_store_connect_api_key(
     key_id:        config["keyId"],
     issuer_id:     config["issuerId"],
-    key_filepath:  File.expand_path(config["privateKeyPath"])
+    key_filepath:  key_path
   )
+end
+
+# Guard against submitting from a beta/mismatched Xcode. Beta Xcode builds to a
+# device fine but fails archive-submit with INVALID_BINARY — a failure that only
+# surfaces after a full archive+upload cycle. Fail fast instead.
+def check_xcode
+  out       = `xcodebuild -version 2>/dev/null`
+  ver       = out.lines[0].to_s.strip                       # "Xcode 27.0"
+  build_num = out.lines[1].to_s.strip.sub("Build version ", "") # "27A5194q"
+  dev_path  = `xcode-select -p 2>/dev/null`.strip
+  UI.message("#{ver} (#{build_num}) at #{dev_path}")
+
+  # Three independent beta signals. Any one of them means App Store Connect will
+  # reject the archive with INVALID_BINARY *after* a full archive+upload cycle —
+  # so fail here instead, where it costs seconds rather than half an hour.
+  #   1. version string literally says beta
+  #   2. the active developer dir is an Xcode-beta.app
+  #   3. the build number ends in a lowercase letter (Apple's beta convention;
+  #      GM/release builds end in a digit, e.g. 16C5032a is beta, 16C5032 is not)
+  reasons = []
+  reasons << "version string says beta"            if ver.downcase.include?("beta")
+  reasons << "active Xcode is #{dev_path}"         if dev_path.downcase.include?("beta")
+  reasons << "build number #{build_num} is a beta" if build_num =~ /[a-z]\z/
+
+  unless reasons.empty?
+    UI.user_error!(
+      "BETA XCODE DETECTED — App Store Connect will reject this archive with " \
+      "INVALID_BINARY.\n" \
+      "Signals: #{reasons.join('; ')}\n\n" \
+      "Fix: install a release Xcode from the App Store, then point at it:\n" \
+      "  sudo xcode-select -s /Applications/Xcode.app\n" \
+      "Verify with: xcodebuild -version   (build number must NOT end in a letter)\n\n" \
+      "To build locally anyway (NOT for submission), set ALLOW_BETA_XCODE=1."
+    ) unless ENV["ALLOW_BETA_XCODE"] == "1"
+    UI.important("ALLOW_BETA_XCODE=1 set — continuing despite: #{reasons.join('; ')}")
+  end
+  ver
+end
+
+# Verify the Xcode project's MARKETING_VERSION matches VERSION above, so the
+# binary you upload and the ASC version record you push metadata to agree.
+def check_version_match
+  pbx = File.read("#{XCODEPROJ}/project.pbxproj")
+  found = pbx.scan(/MARKETING_VERSION = ([0-9.]+);/).flatten.uniq
+  if found.empty?
+    UI.important("Could not read MARKETING_VERSION from project — skipping check.")
+    return
+  end
+  unless found == [VERSION]
+    UI.user_error!(
+      "Version mismatch: Fastfile VERSION=#{VERSION} but project MARKETING_VERSION=" \
+      "#{found.join(', ')}.\nRun: fastlane bump version:#{VERSION}"
+    )
+  end
+  UI.success("Version check OK — #{VERSION} in both Fastfile and Xcode project.")
+end
+
+# ──────────────────────────────────────────────────────
+# Version management
+# ──────────────────────────────────────────────────────
+platform :ios do
+
+  # Bump MARKETING_VERSION across every target in the Xcode project AND report
+  # the Fastfile constant that must be edited to match.
+  #   fastlane bump version:1.3.6
+  lane :bump do |options|
+    v = options[:version]
+    UI.user_error!("Usage: fastlane bump version:X.Y.Z") if v.to_s.empty?
+    unless v =~ /\A\d+\.\d+(\.\d+)?\z/
+      UI.user_error!("Version must look like 1.3.6, got '#{v}'")
+    end
+    path = "#{XCODEPROJ}/project.pbxproj"
+    body = File.read(path)
+    updated = body.gsub(/MARKETING_VERSION = [0-9.]+;/, "MARKETING_VERSION = #{v};")
+    File.write(path, updated)
+    UI.success("Set MARKETING_VERSION = #{v} in all targets.")
+    UI.important("Now edit fastlane/Fastfile:  VERSION = \"#{v}\"")
+  end
+
+  # Set the build number (CFBundleVersion) across all targets.
+  #   fastlane set_build build:2
+  lane :set_build do |options|
+    b = options[:build]
+    UI.user_error!("Usage: fastlane set_build build:N") if b.to_s.empty?
+    path = "#{XCODEPROJ}/project.pbxproj"
+    body = File.read(path)
+    File.write(path, body.gsub(/CURRENT_PROJECT_VERSION = [0-9]+;/, "CURRENT_PROJECT_VERSION = #{b};"))
+    UI.success("Set CURRENT_PROJECT_VERSION = #{b} in all targets.")
+  end
+
+  # Print everything a fresh machine needs to confirm before submitting.
+  lane :doctor do
+    # Report-only: doctor must never abort, it exists to show you the whole picture.
+    begin
+      check_xcode
+    rescue => e
+      UI.error("XCODE: #{e.message.lines.first.to_s.strip}")
+    end
+    UI.message("Fastfile VERSION = #{VERSION}")
+    pbx = File.read("#{XCODEPROJ}/project.pbxproj")
+    UI.message("Project MARKETING_VERSION = #{pbx.scan(/MARKETING_VERSION = ([0-9.]+);/).flatten.uniq.join(', ')}")
+    UI.message("Project CURRENT_PROJECT_VERSION = #{pbx.scan(/CURRENT_PROJECT_VERSION = ([0-9]+);/).flatten.uniq.join(', ')}")
+    cfg = File.expand_path("~/.appstoreconnect/config.json")
+    UI.message("ASC config: #{File.exist?(cfg) ? 'PRESENT' : 'MISSING — see fastlane/README.md'}")
+    if File.exist?(cfg)
+      kp = File.expand_path(JSON.parse(File.read(cfg))["privateKeyPath"])
+      UI.message("ASC key:    #{File.exist?(kp) ? 'PRESENT' : "MISSING at #{kp}"}")
+    end
+    %W[#{XCODEPROJ}/xcshareddata/xcschemes/#{IOS_SCHEME}.xcscheme
+       #{XCODEPROJ}/xcshareddata/xcschemes/#{TVOS_SCHEME}.xcscheme].each do |s|
+      UI.message("Scheme #{File.basename(s)}: #{File.exist?(s) ? 'SHARED OK' : 'MISSING'}")
+    end
+  end
+
 end
 
 # ──────────────────────────────────────────────────────
@@ -26,7 +176,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
-      app_version:         "1.3.3",
+      app_version:         VERSION,
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
@@ -44,20 +194,21 @@ platform :ios do
 
   # Archive the Release build and upload the binary to App Store Connect / TestFlight.
   # The metadata/submit lanes use skip_binary_upload, so this lane is what actually
-  # gets the .ipa to ASC. Version/build come from the project (currently 1.3.0 / 1).
+  # gets the .ipa to ASC.
   lane :build_and_upload do
-    # The "DSM Video" iOS scheme is now SHARED (xcshareddata/xcschemes/DSM Video.xcscheme)
+    check_xcode
+    check_version_match
+    # The "DSM Video" iOS scheme is SHARED (xcshareddata/xcschemes/DSM Video.xcscheme)
     # pointing at the iOS app target. Previously it was an implicit user scheme fastlane
     # couldn't see, so fastlane silently fell back to the only shared scheme — the tvOS
-    # one — and produced "DSM Video tvOS.app" at 1.3.2 (a closed ASC train). With the
-    # shared iOS scheme, this archives the iOS app target (HeiloProjects.DSReel, 1.3.0).
+    # one — and produced "DSM Video tvOS.app" against a closed ASC train.
     build_app(
-      project:        "DSM Video.xcodeproj",
-      scheme:         "DSM Video",
+      project:        XCODEPROJ,
+      scheme:         IOS_SCHEME,
       configuration:  "Release",
       export_method:  "app-store",
       clean:          true,
-      output_directory: "build",
+      output_directory: File.join(ROOT, "build"),
       output_name:    "DSM Video.ipa",
       xcargs:         "-allowProvisioningUpdates"
     )
@@ -74,7 +225,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
-      app_version:         "1.3.3",
+      app_version:         VERSION,
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
@@ -102,6 +253,14 @@ platform :ios do
     submit
   end
 
+  # Full iOS pipeline from a clean checkout: archive → upload → metadata → submit.
+  lane :ship_ios do
+    build_and_upload
+    UI.important("Binary uploaded. Waiting for ASC processing before submit...")
+    wait_for_processing(platform_name: "IOS")
+    release
+  end
+
 end
 
 # ──────────────────────────────────────────────────────
@@ -111,11 +270,82 @@ end
 # ──────────────────────────────────────────────────────
 platform :ios do
 
+  # Fetch (or create) the App Store provisioning profiles for the tvOS app AND its
+  # Top Shelf extension via the ASC API key, then install them locally.
+  #
+  # Why this exists: the tvOS targets use MANUAL signing with named profiles
+  # ("DSM Video tvOS App Store v2", "DSM Video Shelf"). Those profiles are signing
+  # assets tied to the Apple account — they are NOT in git and cannot be. On a
+  # fresh machine, `archive` succeeds but `exportArchive` fails with
+  #   "requires a provisioning profile with the App Groups feature"
+  # Switching to automatic signing does not help either, because a machine with no
+  # Xcode Apple ID reports "No Accounts". The API key is the only path that works
+  # unattended, so fetch the profiles explicitly before exporting.
+  # Pass force:true to REGENERATE profiles rather than reuse cached ones:
+  #   fastlane fetch_profiles_tvos force:true
+  # Needed when an App ID gained a capability (e.g. App Groups) after the existing
+  # profile was issued — a stale profile will not carry the new entitlement.
+  lane :fetch_profiles_tvos do |options|
+    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
+    key_path = File.expand_path(cfg["privateKeyPath"])
+    [TVOS_BUNDLE_ID, "#{TVOS_BUNDLE_ID}.shelf"].each do |bundle|
+      UI.message("Fetching tvOS App Store profile for #{bundle}")
+      sigh(
+        api_key:        api_key,
+        app_identifier: bundle,
+        platform:       "tvos",
+        force:          options[:force] ? true : false
+      )
+    end
+    UI.success("tvOS provisioning profiles installed.")
+  end
+
+  # Archive the tvOS Release build and upload the binary to ASC / TestFlight.
+  # This is the lane that was missing — tvOS previously required a manual
+  # Xcode archive+upload before submit_tvos could run.
+  lane :build_and_upload_tvos do
+    check_xcode
+    check_version_match
+
+    # Provisioning must be fetched BEFORE export. The tvOS targets use manual
+    # signing, and `archive` will happily succeed without valid profiles — it is
+    # `exportArchive` that fails, after the long part is already done.
+    fetch_profiles_tvos(force: true)
+
+    build_app(
+      project:        XCODEPROJ,
+      scheme:         TVOS_SCHEME,
+      configuration:  "Release",
+      export_method:  "app-store",
+      destination:    "generic/platform=tvOS",
+      clean:          true,
+      output_directory: File.join(ROOT, "build"),
+      output_name:    "DSM Video tvOS.ipa",
+      xcargs:         "-allowProvisioningUpdates",
+      export_team_id: TEAM_ID,
+      export_options: {
+        signingStyle: "manual",
+        provisioningProfiles: {
+          TVOS_BUNDLE_ID            => "#{TVOS_BUNDLE_ID} AppStore",
+          "#{TVOS_BUNDLE_ID}.shelf" => "#{TVOS_BUNDLE_ID}.shelf AppStore"
+        }
+      }
+    )
+    upload_to_testflight(
+      api_key:             api_key,
+      app_identifier:      TVOS_BUNDLE_ID,
+      app_platform:        "appletvos",
+      ipa:                 File.join(ROOT, "build", "DSM Video tvOS.ipa"),
+      skip_waiting_for_build_processing: true,
+      skip_submission:     true
+    )
+  end
+
   lane :upload_metadata_tvos do
     deliver(
       api_key:             api_key,
       app_identifier:      TVOS_BUNDLE_ID,
-      app_version:         "1.3.3",
+      app_version:         VERSION,
       metadata_path:       "metadata/tvos",
       platform:            "appletvos",
       skip_binary_upload:  true,
@@ -136,7 +366,7 @@ platform :ios do
     deliver(
       api_key:             api_key,
       app_identifier:      TVOS_BUNDLE_ID,
-      app_version:         "1.3.3",
+      app_version:         VERSION,
       metadata_path:       "metadata/tvos",
       platform:            "appletvos",
       skip_binary_upload:  true,
@@ -162,6 +392,82 @@ platform :ios do
     submit_tvos
   end
 
+  # Full tvOS pipeline from a clean checkout: archive → upload → metadata → submit.
+  lane :ship_tvos do
+    build_and_upload_tvos
+    UI.important("tvOS binary uploaded. Waiting for ASC processing before submit...")
+    wait_for_processing(platform_name: "TV_OS")
+    release_tvos
+  end
+
+end
+
+# ──────────────────────────────────────────────────────
+# Both platforms, one command
+# ──────────────────────────────────────────────────────
+platform :ios do
+  lane :ship_all do
+    ship_ios
+    ship_tvos
+  end
+end
+
+# ──────────────────────────────────────────────────────
+# Diagnostics / helpers
+# ──────────────────────────────────────────────────────
+
+def asc_token
+  cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
+  require 'spaceship'
+  Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+    key_id:   cfg["keyId"],
+    issuer_id: cfg["issuerId"],
+    filepath: File.expand_path(cfg["privateKeyPath"])
+  )
+end
+
+# Poll ASC until a VALID build exists for VERSION on the given platform.
+# platform_name is "IOS" or "TV_OS".
+def wait_for_processing(platform_name:, timeout_min: 45)
+  asc_token
+  app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+  deadline = Time.now + (timeout_min * 60)
+  loop do
+    build = app.get_builds(includes: "preReleaseVersion", limit: 20).find do |b|
+      b.pre_release_version&.version == VERSION && b.processing_state == "VALID"
+    end
+    if build
+      UI.success("Build #{VERSION} (#{build.version}) is VALID and ready to submit.")
+      return build
+    end
+    if Time.now > deadline
+      UI.user_error!("Timed out after #{timeout_min}m waiting for a VALID #{VERSION} build.")
+    end
+    UI.message("Still processing... re-checking in 60s")
+    sleep 60
+  end
+end
+
+platform :ios do
+  # Report which capabilities each App ID actually has on the developer portal.
+  # App Groups must be enabled on BOTH the tvOS app and the Top Shelf App ID, or
+  # exportArchive fails with "requires a provisioning profile with the App Groups
+  # feature" no matter how many times you refetch profiles.
+  lane :check_capabilities do
+    asc_token
+    %w[HeiloProjects.DSReel HeiloProjects.DSReel.shelf].each do |bid|
+      b = Spaceship::ConnectAPI::BundleId.all.find { |x| x.identifier == bid }
+      if b.nil?
+        UI.error("#{bid}: NOT FOUND on the developer portal")
+        next
+      end
+      caps = b.get_capabilities.map(&:capability_type)
+      has = caps.include?("APP_GROUPS")
+      UI.message("#{bid}")
+      UI.message("   APP_GROUPS: #{has ? 'ENABLED' : 'MISSING  <-- this blocks export'}")
+      UI.message("   all caps:   #{caps.join(', ')}")
+    end
+  end
 end
 
 platform :ios do
@@ -169,9 +475,9 @@ platform :ios do
     n = latest_testflight_build_number(
       api_key: api_key,
       app_identifier: IOS_BUNDLE_ID,
-      version: "1.3.0"
+      version: VERSION
     )
-    UI.message("LATEST_1_3_0_BUILD=#{n}")
+    UI.message("LATEST_#{VERSION}_BUILD=#{n}")
   end
 end
 
@@ -180,7 +486,7 @@ platform :ios do
     upload_to_testflight(
       api_key: api_key,
       app_identifier: IOS_BUNDLE_ID,
-      ipa: "build/DSM Video.ipa",
+      ipa: File.join(ROOT, "build", "DSM Video.ipa"),
       skip_waiting_for_build_processing: true,
       skip_submission: true
     )
@@ -190,28 +496,17 @@ end
 
 platform :ios do
   lane :list_builds do
-    require 'spaceship'
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
-      key_id: JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))["keyId"],
-      issuer_id: JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))["issuerId"],
-      filepath: File.expand_path(JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))["privateKeyPath"])
-    )
+    asc_token
     app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
-    builds = app.get_builds(includes: "preReleaseVersion", limit: 8)
-    builds.each do |b|
-      v = b.pre_release_version&.version
-      UI.message("BUILD ver=#{v} build=#{b.version} state=#{b.processing_state} uploaded=#{b.uploaded_date}")
+    app.get_builds(includes: "preReleaseVersion", limit: 8).each do |b|
+      UI.message("BUILD ver=#{b.pre_release_version&.version} build=#{b.version} state=#{b.processing_state} uploaded=#{b.uploaded_date}")
     end
   end
 end
 
 platform :ios do
   lane :asc_state do
-    require 'spaceship'
-    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
-      key_id: cfg["keyId"], issuer_id: cfg["issuerId"],
-      filepath: File.expand_path(cfg["privateKeyPath"]))
+    asc_token
     app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
     UI.message("=== LIVE / EDIT versions ===")
     app.get_app_store_versions(includes: "build", limit: 10).each do |v|
@@ -221,14 +516,14 @@ platform :ios do
 end
 
 platform :ios do
-  # Create (if needed) the 1.3.3 App Store version record and push its metadata.
+  # Create (if needed) the App Store version record and push its metadata.
   # The binary upload does NOT create the store-version record; deliver must, or
   # metadata push fails with "Cannot find edit app store version".
   lane :create_version_and_metadata do
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
-      app_version:         "1.3.3",
+      app_version:         VERSION,
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
@@ -240,12 +535,10 @@ end
 
 platform :ios do
   lane :readiness do
-    require 'spaceship'
-    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(key_id: cfg["keyId"], issuer_id: cfg["issuerId"], filepath: File.expand_path(cfg["privateKeyPath"]))
+    asc_token
     app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
-    v = app.get_app_store_versions(filter: {versionString: "1.3.3"}, includes: "build").first
-    UI.message("VERSION 1.3.3 state=#{v&.app_store_state}")
+    v = app.get_app_store_versions(filter: {versionString: VERSION}, includes: "build").first
+    UI.message("VERSION #{VERSION} state=#{v&.app_store_state}")
     b = v&.build
     UI.message("BUILD attached=#{b ? "#{b.version} (#{b.processing_state})" : "NONE"}")
     UI.message("releaseNotes_set=#{!v&.release_notes.to_s.empty? rescue 'n/a'}")
@@ -253,50 +546,26 @@ platform :ios do
 end
 
 platform :ios do
-  # Attach the VALID 1.3.3 build to the 1.3.3 App Store version. Uploading a build
-  # and creating a version don't auto-link them — the version shows "no build" and
+  # Attach the VALID build to the App Store version. Uploading a build and
+  # creating a version don't auto-link them — the version shows "no build" and
   # submission is blocked until the build is selected.
   lane :attach_build do
-    require 'spaceship'
-    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(key_id: cfg["keyId"], issuer_id: cfg["issuerId"], filepath: File.expand_path(cfg["privateKeyPath"]))
+    asc_token
     app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
-    version = app.get_app_store_versions(filter: {versionString: "1.3.3"}).first
-    build = app.get_builds(includes: "preReleaseVersion").find { |b| b.pre_release_version&.version == "1.3.3" && b.processing_state == "VALID" }
-    if build.nil?
-      UI.user_error!("No VALID 1.3.3 build found to attach")
-    end
+    version = app.get_app_store_versions(filter: {versionString: VERSION}).first
+    build = app.get_builds(includes: "preReleaseVersion").find { |b| b.pre_release_version&.version == VERSION && b.processing_state == "VALID" }
+    UI.user_error!("No VALID #{VERSION} build found to attach") if build.nil?
     version.select_build(build_id: build.id)
-    UI.success("ATTACHED build #{build.version} to version 1.3.3")
-  end
-end
-
-platform :ios do
-  lane :readiness2 do
-    require 'spaceship'
-    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(key_id: cfg["keyId"], issuer_id: cfg["issuerId"], filepath: File.expand_path(cfg["privateKeyPath"]))
-    app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
-    v = app.get_app_store_versions(filter: {versionString: "1.3.3"}, includes: "build").first
-    UI.message("state=#{v&.app_store_state}")
-    UI.message("build=#{v&.build ? "#{v.build.version} (#{v.build.processing_state})" : "NONE"}")
+    UI.success("ATTACHED build #{build.version} to version #{VERSION}")
   end
 end
 
 platform :ios do
   lane :final_checklist do
-    require 'spaceship'
-    cfg = JSON.parse(File.read(File.expand_path("~/.appstoreconnect/config.json")))
-    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(key_id: cfg["keyId"], issuer_id: cfg["issuerId"], filepath: File.expand_path(cfg["privateKeyPath"]))
+    asc_token
     app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
-    # Age rating
-    begin
-      info = app.fetch_app_info rescue nil
-      UI.message("APP name=#{app.name} sku=#{app.sku}")
-    rescue => e
-      UI.message("appinfo err=#{e.message}")
-    end
-    v = app.get_app_store_versions(filter: {versionString: "1.3.3"}, includes: "build").first
+    UI.message("APP name=#{app.name} sku=#{app.sku}")
+    v = app.get_app_store_versions(filter: {versionString: VERSION}, includes: "build").first
     UI.message("VERSION state=#{v&.app_store_state} build=#{v&.build&.version} releaseType=#{v&.release_type}")
   end
 end

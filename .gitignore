@@ -49,3 +49,11 @@ backend/dsvideo-backend
 DS Video clone/build/
 DS Video clone/build-device/
 DS Video clone/build-iphone/
+
+# Provisioning profiles fetched by `fastlane fetch_profiles_tvos` (signing
+# assets tied to the Apple account — regenerate, never commit)
+*.mobileprovision
+
+# fastlane run artifact (regenerated every run)
+fastlane/report.xml
+DS Video clone/fastlane/report.xml

@@ -1,15 +1,21 @@
-This update makes getting connected simpler and keeps your library ready to play.
+This update focuses on getting you signed in, keeping your place, and finding what you want to watch.
 
-SIMPLER SETUP
-Connecting to your NAS is now a single, clear screen — choose Tailscale, a direct address, or QuickConnect. When you enter an address directly, the app also scans your local network and offers any servers it finds, so you can tap instead of type.
+SIGNING IN THAT ACTUALLY WORKS
+• Non-admin accounts can now sign in — a bad session parameter was rejecting them outright.
+• Unreachable servers no longer report as "wrong password," so you can tell a network problem from a login problem.
+• Connection errors now say what actually went wrong instead of failing silently.
+• Signing out properly ends your session on the server.
 
-ALWAYS READY TO PLAY
-Newly added videos are now converted automatically in the background to the format that plays back fastest, with no setup required. While a title is being prepared, the app lets you know.
+FIND IT FASTER
+• New multi-select genre filter — combine genres to narrow your library.
+• Your Watchlist now loads. It previously came up empty on every device.
+• Fixed library grids on iPad not reloading when you switch libraries in the sidebar.
 
-PLAYBACK FIXES
-• Fixed the scrubber and seeking on transcoded video so the timeline and skip controls are accurate.
-• Improved reliability for MKV and AVI titles with the latest server update.
+KEEPING YOUR PLACE
+• "Mark Unwatched" now works reliably.
+• Fixed playback progress being lost or reverting to an older position.
+• Moving a file no longer signs you out.
 
-Plus general interface polish and refinements throughout.
+Plus improved artwork loading, better filename and show matching, and a round of interface polish.
 
 Thanks for using DSM Video. Keep the feedback coming.
