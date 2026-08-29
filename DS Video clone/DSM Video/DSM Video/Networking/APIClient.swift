@@ -14,7 +14,15 @@ struct APIClient {
   /// while `progressBatch`, the same subsystem, used 8s. And `/items` sat at 120s while
   /// `/search` used 15s for an equivalent query against the same table, an 8x spread with no
   /// justification: on a cold NAS database search failed while items waited two minutes.
-  enum Timeout {
+  ///
+  /// `nonisolated` is required, not cosmetic. The project builds with
+  /// SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor, which would make these constants
+  /// MainActor-isolated — but they are used as *default parameter values*, and
+  /// those are evaluated in a nonisolated context at each call site. Under Swift 5
+  /// that is a warning; newer toolchains (and Xcode Cloud) promote it to an error.
+  /// These are plain compile-time constants with no shared mutable state, so
+  /// opting them out of isolation is correct rather than a workaround.
+  nonisolated enum Timeout {
     /// Fire-and-forget writes. Failure is recoverable — the outbox retries.
     static let write: TimeInterval = 8
     /// Interactive reads. The user is looking at a spinner.
