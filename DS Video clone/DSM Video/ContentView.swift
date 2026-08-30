@@ -7,6 +7,9 @@
 
 import SwiftUI
 import os.log
+#if canImport(UIKit)
+import UIKit  // UIAccessibility.isReduceMotionEnabled
+#endif
 
 // Debug logger — filter by subsystem "com.dsm.launch" or "com.dsm.orientation" in Console.app
 private let launchLog = Logger(subsystem: "com.dsm.launch", category: "animation")
@@ -167,6 +170,19 @@ private struct LaunchAnimationView: View {
     /// compressing or skipping the entire sequence.
     @MainActor
     private func runSequence() async {
+        // Reduce Motion: skip the whole sequence.
+        //
+        // The full run is ~2.4s of counter-rotating rings, a laser, and a FULL-SCREEN
+        // WHITE FLASH, on every cold launch, with no way to skip. For a vestibular- or
+        // photosensitive user that is a hostile way to open an app. .accessibilityHidden
+        // hides it from VoiceOver but does nothing here. Hand off immediately instead —
+        // the app content is already in the view tree behind the overlay, so there is
+        // nothing to wait for.
+        if UIAccessibility.isReduceMotionEnabled {
+            launchLog.info("Reduce Motion enabled — skipping launch animation")
+            onComplete()
+            return
+        }
         launchLog.info("Phase 1: rings spinning")
         withAnimation(.linear(duration: 1.2)) {
             ring1Rotation = 360 * 2.5    // inner: clockwise fast

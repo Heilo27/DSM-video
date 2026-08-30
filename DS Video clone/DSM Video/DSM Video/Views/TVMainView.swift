@@ -115,7 +115,15 @@ struct TVLoginView: View {
               Button {
                 appState.baseURL = server
                 appState.username = username
-                appState.savedPassword = password
+                // setPassword() is the intended seam (it is what the iOS path uses);
+                // assigning savedPassword directly bypassed it.
+                appState.setPassword(password)
+                // Clear the previous failure BEFORE starting the attempt. login() only
+                // nils loginError after its re-entrancy guard, and the whole call is one
+                // MainActor task, so the stale message stayed on screen for the entire
+                // multi-candidate cascade — up to ~15s of a user with a CORRECT password
+                // reading "Incorrect username or password" while it was succeeding.
+                appState.loginError = nil
                 Task { await appState.login() }
               } label: {
                 if appState.isLoggingIn {

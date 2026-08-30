@@ -88,12 +88,22 @@ struct DiagnosticLogView: View {
         // Plain Button rather than Toggle(.button): the .button toggle style does not exist
         // on tvOS. A Button reads its state in the label, works with the focus engine, and
         // behaves identically on both platforms.
+        // VoiceOver: the checkmark glyph and the mutating filter label are meaningless
+        // read aloud ("Errors only checkmark"), so state and behaviour are spelled out.
         Button(errorsOnly ? "Errors only ✓" : "Errors only") { errorsOnly.toggle() }
+          .accessibilityLabel("Errors only")
+          .accessibilityValue(errorsOnly ? "On" : "Off")
+          .accessibilityHint("Shows only error entries")
         Button(filter == nil ? "All" : filter!.rawValue) { cycleFilter() }
+          .accessibilityLabel("Category filter")
+          .accessibilityValue(filter?.rawValue ?? "All")
+          .accessibilityHint("Cycles through log categories")
         Button("Clear") {
           DiagnosticLog.shared.clear()
           entries = []
         }
+        .accessibilityLabel("Clear log")
+        .accessibilityHint("Deletes all diagnostic entries")
       }
       .font(.system(.caption, design: .monospaced))
       Text("\(visible.count) entries — newest first")

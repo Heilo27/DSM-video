@@ -45,6 +45,17 @@ struct ItemDetailView: View {
     downloadManager.isDownloading(itemId: itemID)
   }
 
+  /// Playback is impossible when the NAS is unreachable and the title isn't on disk.
+  ///
+  /// Browsing offline works (ItemsGridView serves cached items from LocalStore) and the
+  /// offline banner is honest, but the Play button was never gated — so a user browsing
+  /// cached posters with the NAS down tapped Play and got a failure overlay. The UI was
+  /// showing content it could not deliver, then failing on tap. Downloaded titles play
+  /// from disk and stay enabled.
+  private var playUnavailableOffline: Bool {
+    appState.serverUnreachable && !isDownloaded
+  }
+
   private var downloadProgress: Double {
     downloadManager.downloadProgress[itemID] ?? 0
   }
@@ -253,7 +264,10 @@ struct ItemDetailView: View {
     .shadow(color: Color.dsAccent.opacity(focused ? 0.7 : 0.3), radius: focused ? 10 : 5, x: 0, y: 3)
     .focused($focusedAction, equals: .play)
     .prefersDefaultFocus(in: actionNamespace)
+    .disabled(playUnavailableOffline)
+    .opacity(playUnavailableOffline ? 0.4 : 1)
     .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
+    .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
   }
 
   private var tvStartOverButton: some View {
@@ -381,8 +395,11 @@ struct ItemDetailView: View {
               .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             }
             .buttonStyle(.plain)
+            .disabled(playUnavailableOffline)
+            .opacity(playUnavailableOffline ? 0.4 : 1)
             .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel(isDownloaded ? "Play \(detail?.title ?? fallbackTitle), downloaded" : "Play \(detail?.title ?? fallbackTitle)")
+            .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
 
             if savedPositionSeconds > 0 {
               Button {
@@ -945,6 +962,11 @@ struct ItemDetailView: View {
     do {
       detail = try await appState.api.itemDetail(id: itemID)
     } catch {
+      // Classify the failure like every sibling load path does. Without this a 401 here
+      // never cleared the session and never set serverUnreachable, so the offline banner
+      // stayed hidden and the user sat on an authenticated-looking screen that could not
+      // load anything.
+      appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Unknown error."
     }
   }

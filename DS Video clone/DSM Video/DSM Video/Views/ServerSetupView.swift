@@ -267,6 +267,10 @@ struct SetupConnectScreen: View {
           .submitLabel(.next)
           .focused($focusedField, equals: .address)
           .onSubmit { focusedField = .username }
+          // Without an explicit label VoiceOver reads the placeholder as the field's
+          // NAME — "192.168.1.50 or mynas.synology.me" — on the app's most critical screen.
+          .accessibilityLabel("Server address")
+          .accessibilityHint("Your NAS IP address, hostname, QuickConnect ID, or Tailscale address")
       }
       .padding(.horizontal, 16)
       .frame(minHeight: 52)

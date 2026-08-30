@@ -2660,7 +2660,16 @@ private struct SubtitleAudioPickerView: View {
             try? FileManager.default.removeItem(at: destURL)
             try FileManager.default.moveItem(at: localURL, to: destURL)
             showSubtitleDownload = false
-            subtitleDownloadMessage = "Subtitles saved — restart playback to apply."
+            // Honest message. The .srt is written to Documents/Subtitles/ and NOTHING
+            // reads it — not on restart, not ever. The old copy ("restart playback to
+            // apply") promised behaviour the app does not implement, so a user would
+            // restart, see no subtitles, and conclude playback was broken.
+            //
+            // Rendering an external SRT needs a real side-loading path (AVMutableComposition
+            // with a text track, or a custom renderer); until that exists this only saves
+            // the file. The whole feature is inert in shipping builds anyway —
+            // OpenSubtitlesAPIKey is empty, so the entry point is hidden.
+            subtitleDownloadMessage = "Subtitle file saved. Loading external subtitles into the player isn't supported yet."
         } catch {
             subtitleDownloadError = "Download failed: \(error.localizedDescription)"
         }

@@ -274,6 +274,8 @@ private struct TVShowDetailSplitView: View {
         await resolveResumePoint(for: resp.seasons)
       }
     } catch {
+      // Classify the failure so session/offline state stays accurate (see ItemDetailView.load).
+      appState.handleConnectionFailure(error)
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       if seasons.isEmpty { self.error = msg }
     }
@@ -548,6 +550,7 @@ private struct TVSeasonSection: View {
     } catch {
       let nsErr = error as NSError
       if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
+      appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }
   }
@@ -1169,6 +1172,7 @@ private struct TVShowDetailScrollView: View {
       error = nil
       await resolveResume()
     } catch {
+      appState.handleConnectionFailure(error)
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       showLog.error("load: failed — \(msg, privacy: .public)")
       if seasons.isEmpty { self.error = msg }
@@ -1392,6 +1396,7 @@ private struct iOSSeasonSection: View {
     } catch is CancellationError {
       self.error = nil
     } catch {
+      appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }
   }

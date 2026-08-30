@@ -358,6 +358,10 @@ struct ItemsGridView: View {
       sortedItems = sorted(items, by: sortOption)
       error = nil
     } catch {
+      // Classify the failure so session/offline state stays accurate (see ItemDetailView.load).
+      // The cached fallback below still runs — this only makes the app's own view of the
+      // connection honest, so the offline banner appears instead of silent staleness.
+      appState.handleConnectionFailure(error)
       let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
       if items.isEmpty {
         // Network failed — try LocalStore as offline fallback before showing error.
