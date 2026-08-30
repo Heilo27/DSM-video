@@ -573,18 +573,18 @@ private struct SearchResultCell: View {
       // Metadata
       VStack(alignment: .leading, spacing: 4) {
         Text(item.title)
-          .font(.system(size: 15, weight: .semibold))
+          .font(.subheadline.weight(.semibold))
           .foregroundStyle(Color.dsTextPrimary)
           .lineLimit(2)
 
         if !metaSubtitle.isEmpty {
           Text(metaSubtitle)
-            .font(.system(size: 12))
+            .font(.caption)
             .foregroundStyle(Color.dsTextMuted)
         }
 
         Text(typeLabel)
-          .font(.system(size: 11, weight: .medium))
+          .font(.caption2.weight(.medium))
           .foregroundStyle(Color.dsAccent)
           .padding(.horizontal, 7)
           .padding(.vertical, 2)

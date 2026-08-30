@@ -180,11 +180,11 @@ private struct TVHomeView: View {
           VStack(alignment: .leading, spacing: 56) {
             if let loadError = appState.homeError, appState.homeAllRailsEmpty {
               VStack(spacing: 32) {
-                ContentUnavailableView(
-                  "Unable to Load",
-                  systemImage: "exclamationmark.triangle",
-                  description: Text(loadError)
-                )
+                DSContentUnavailable(
+            title: "Unable to Load",
+            systemImage: "exclamationmark.triangle",
+            description: loadError
+          )
                 .foregroundStyle(.white)
 
                 Button {
@@ -252,11 +252,11 @@ private struct TVHomeView: View {
                   && appState.homeJustAdded.isEmpty
                   && appState.homeRecentlyWatched.isEmpty
                   && appState.homeLibraries.isEmpty {
-                ContentUnavailableView(
-                  "No Libraries",
-                  systemImage: "film.stack",
-                  description: Text("No video libraries were found on your NAS.")
-                )
+                DSContentUnavailable(
+            title: "No Libraries",
+            systemImage: "film.stack",
+            description: "No video libraries were found on your NAS."
+          )
                 .foregroundStyle(.white)
                 .padding(.top, 40)
                 Button("Refresh") { Task { await appState.homeLoad() } }
@@ -1108,11 +1108,11 @@ private struct TVSearchView: View {
               // TASK-801: give the empty-results region a focusable action so focus
               // has a home here (not only the search field / toolbar).
               VStack(spacing: 24) {
-                ContentUnavailableView(
-                  "No Results",
-                  systemImage: "magnifyingglass",
-                  description: Text("No videos match \"\(searchText)\"")
-                )
+                DSContentUnavailable(
+            title: "No Results",
+            systemImage: "magnifyingglass",
+            description: "No videos match \"\(searchText)\""
+          )
                 .foregroundStyle(.white)
 
                 Button("Clear Search") {

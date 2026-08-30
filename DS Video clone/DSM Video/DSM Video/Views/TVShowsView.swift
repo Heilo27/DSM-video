@@ -137,10 +137,10 @@ struct TVShowsView: View {
           #endif
       } else if let error {
         VStack(spacing: 24) {
-          ContentUnavailableView(
-            "Couldn't load shows",
+          DSContentUnavailable(
+            title: "Couldn't load shows",
             systemImage: "exclamationmark.triangle",
-            description: Text(error)
+            description: error
           )
           Button("Retry") {
             Task { await load() }
@@ -155,10 +155,10 @@ struct TVShowsView: View {
         #endif
       } else if shows.isEmpty {
         VStack(spacing: 24) {
-          ContentUnavailableView(
-            "No TV Shows",
+          DSContentUnavailable(
+            title: "No TV Shows",
             systemImage: "tv",
-            description: Text("No TV shows found in this library.")
+            description: "No TV shows found in this library."
           )
           // TASK-799: give the empty state a focusable action so tvOS focus has a home.
           Button("Refresh") {
@@ -175,10 +175,10 @@ struct TVShowsView: View {
       } else {
         #if os(tvOS)
         if displayedShows.isEmpty && !searchText.isEmpty {
-          ContentUnavailableView(
-            "No Results",
+          DSContentUnavailable(
+            title: "No Results",
             systemImage: "magnifyingglass",
-            description: Text("No shows match \"\(searchText)\"")
+            description: "No shows match \"\(searchText)\""
           )
           .foregroundStyle(.white)
           .padding(.top, 60)
@@ -206,10 +206,10 @@ struct TVShowsView: View {
         }
         #else
         if displayedShows.isEmpty && !searchText.isEmpty {
-          ContentUnavailableView(
-            "No Results",
+          DSContentUnavailable(
+            title: "No Results",
             systemImage: "magnifyingglass",
-            description: Text("No shows match \"\(searchText)\"")
+            description: "No shows match \"\(searchText)\""
           )
           .foregroundStyle(.white)
           .padding(.top, 60)

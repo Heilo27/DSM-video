@@ -30,11 +30,17 @@ struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
     NavigationStack {
       Group {
         if query.trimmingCharacters(in: .whitespaces).isEmpty {
-          ContentUnavailableView("Search", systemImage: "magnifyingglass",
-                                 description: Text("Type a title to search this library."))
+          DSContentUnavailable(
+            title: "Search",
+            systemImage: "magnifyingglass",
+            description: "Type a title to search this library."
+          )
         } else if results.isEmpty {
-          ContentUnavailableView("No Results", systemImage: "magnifyingglass",
-                                 description: Text("No matches for \"\(query)\""))
+          DSContentUnavailable(
+            title: "No Results",
+            systemImage: "magnifyingglass",
+            description: "No matches for \"\(query)\""
+          )
         } else {
           List(results) { item in
             NavigationLink {
@@ -85,13 +91,21 @@ struct LibrariesView: View {
       } else if let error {
         // FIX-18: retry button for transient network failures on the libraries screen
         VStack(spacing: 12) {
-          ContentUnavailableView("Couldn't load libraries", systemImage: "exclamationmark.triangle", description: Text(error))
+          DSContentUnavailable(
+            title: "Couldn't load libraries",
+            systemImage: "exclamationmark.triangle",
+            description: error
+          )
           Button("Retry") { Task { await load() } }
             .buttonStyle(.borderedProminent)
             .accessibilityLabel("Retry loading libraries")
         }
       } else if libraries.isEmpty {
-        ContentUnavailableView("No Libraries", systemImage: "square.grid.2x2", description: Text("No video libraries found on your server."))
+        DSContentUnavailable(
+            title: "No Libraries",
+            systemImage: "square.grid.2x2",
+            description: "No video libraries found on your server."
+          )
       } else {
         // Each library is a labeled, clearly-bounded artwork card: a section
         // title above ("Movies" / "TV Shows"), then a bordered box with a small
@@ -411,21 +425,21 @@ struct LibraryHomeView: View {
           .accessibilityAddTraits(.updatesFrequently)
       } else if let error = appState.homeError {
         VStack(spacing: 16) {
-          ContentUnavailableView(
-            "Couldn't load content",
+          DSContentUnavailable(
+            title: "Couldn't load content",
             systemImage: "exclamationmark.triangle",
-            description: Text(error)
+            description: error
           )
           Button("Retry") { Task { await appState.homeLoad() } }
             .buttonStyle(.bordered)
             .accessibilityLabel("Retry loading content")
         }
       } else if appState.homeAllRailsEmpty && !appState.homeIsLoading && !appState.homeIsCacheDecoding {
-        ContentUnavailableView(
-          "Nothing here yet",
-          systemImage: "play.rectangle",
-          description: Text("Add videos to your NAS to get started.")
-        )
+        DSContentUnavailable(
+            title: "Nothing here yet",
+            systemImage: "play.rectangle",
+            description: "Add videos to your NAS to get started."
+          )
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {

@@ -102,10 +102,10 @@ struct ItemsGridView: View {
         // otherwise a genuinely empty library shows "No Videos". Previously both
         // could render stacked above an empty grid.
         if displayedItems.isEmpty && !searchText.isEmpty {
-          ContentUnavailableView(
-            "No Results",
+          DSContentUnavailable(
+            title: "No Results",
             systemImage: "magnifyingglass",
-            description: Text("No videos match \"\(searchText)\"")
+            description: "No videos match \"\(searchText)\""
           )
           .foregroundStyle(.white)
           .padding(.top, 60)

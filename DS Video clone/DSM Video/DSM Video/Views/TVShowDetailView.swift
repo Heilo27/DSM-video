@@ -191,11 +191,11 @@ private struct TVShowDetailSplitView: View {
           // TASK-792: the empty branch must expose a focusable action, otherwise the
           // tvOS focus engine lands nowhere and the user can only escape via Menu.
           VStack(spacing: 24) {
-            ContentUnavailableView(
-              "No Episodes Found",
-              systemImage: "tv.slash",
-              description: Text("This show's episodes couldn't be found on the server. They may have been moved or removed.")
-            )
+            DSContentUnavailable(
+            title: "No Episodes Found",
+            systemImage: "tv.slash",
+            description: "This show's episodes couldn't be found on the server. They may have been moved or removed."
+          )
             .foregroundStyle(.white)
 
             HStack(spacing: 20) {

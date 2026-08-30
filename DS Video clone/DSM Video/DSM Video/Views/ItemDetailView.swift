@@ -253,6 +253,10 @@ struct ItemDetailView: View {
       }
         .font(.headline.weight(.semibold))
         .foregroundStyle(Color.dsAccentOn)
+        // Fixed 260x54 with no scale factor clipped the label at accessibility text
+        // sizes — on the screen's PRIMARY action.
+        .minimumScaleFactor(0.7)
+        .lineLimit(1)
         .frame(width: 260, height: 54)
         .background(Color.dsAccent.brightness(focused ? 0.12 : 0))
         .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
@@ -280,6 +284,8 @@ struct ItemDetailView: View {
       Label("Start Over", systemImage: "arrow.counterclockwise")
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
+        .minimumScaleFactor(0.7)
+        .lineLimit(1)
         .frame(width: 260, height: 54)
         .background(focused ? Color.dsSurfaceRaised : Color.dsSurfaceHigh)
         .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
@@ -597,11 +603,11 @@ struct ItemDetailView: View {
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(
           VStack(spacing: 12) {
-            ContentUnavailableView(
-              "Couldn't load details",
-              systemImage: "exclamationmark.triangle",
-              description: Text(error)
-            )
+            DSContentUnavailable(
+            title: "Couldn't load details",
+            systemImage: "exclamationmark.triangle",
+            description: error
+          )
             // FIX-18: retry button so users aren't stuck on error without navigating away
             Button("Retry") { Task { await load() } }
               .buttonStyle(.borderedProminent)
@@ -1393,7 +1399,11 @@ private struct PlayerSheet: View {
         }
       } else if let error {
         VStack(spacing: 20) {
-          ContentUnavailableView("Playback failed", systemImage: "exclamationmark.triangle", description: Text(error))
+          DSContentUnavailable(
+            title: "Playback failed",
+            systemImage: "exclamationmark.triangle",
+            description: error
+          )
             .foregroundStyle(.white)
           Button("Dismiss") { dismiss() }
             .buttonStyle(.borderedProminent)
@@ -1689,7 +1699,8 @@ private struct _NextEpisodeOverlayView: View {
       }
       .padding(28)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
-      .padding(.horizontal, 32)
+      // 60 matches the title-safe inset used everywhere else on tvOS; 32 sat inside it.
+      .padding(.horizontal, 60)
       .padding(.bottom, 60)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -17,12 +17,14 @@ struct ErrorRetryView: View {
 
   var body: some View {
     VStack(spacing: 12) {
-      ContentUnavailableView(
-        title,
+      // Compose the themed empty state rather than re-rolling ContentUnavailableView with
+      // a manual .foregroundStyle(.white). Two "canonical" components that didn't know
+      // about each other meant a styling change to one silently skipped the other.
+      DSContentUnavailable(
+        title: title,
         systemImage: "exclamationmark.triangle",
-        description: Text(message)
+        description: message
       )
-      .foregroundStyle(.white)
 
       if let retry {
         Button("Retry", action: retry)

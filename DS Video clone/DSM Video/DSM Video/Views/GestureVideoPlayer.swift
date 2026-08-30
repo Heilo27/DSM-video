@@ -2694,9 +2694,17 @@ private struct SubtitleDownloadSheet: View {
                     ProgressView("Searching OpenSubtitles…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let err = error {
-                    ContentUnavailableView("Search Failed", systemImage: "exclamationmark.triangle", description: Text(err))
+                    DSContentUnavailable(
+            title: "Search Failed",
+            systemImage: "exclamationmark.triangle",
+            description: err
+          )
                 } else if results.isEmpty {
-                    ContentUnavailableView("No Results", systemImage: "captions.bubble", description: Text("No subtitles found for \"\(itemTitle)\""))
+                    DSContentUnavailable(
+            title: "No Results",
+            systemImage: "captions.bubble",
+            description: "No subtitles found for \"\(itemTitle)\""
+          )
                 } else {
                     List(results) { result in
                         Button {

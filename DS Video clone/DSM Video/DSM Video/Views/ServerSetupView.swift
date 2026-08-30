@@ -603,7 +603,7 @@ private struct HelpTopic: View {
               ZStack {
                 Circle().fill(Color.dsAccent).frame(width: 24, height: 24)
                 Text("\(index + 1)")
-                  .font(.system(size: 12, weight: .semibold))
+                  .font(.caption.weight(.semibold))
                   .foregroundStyle(Color.dsAccentOn)
               }
               .accessibilityHidden(true)

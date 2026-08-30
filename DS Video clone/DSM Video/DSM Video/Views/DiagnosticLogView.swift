@@ -34,13 +34,13 @@ struct DiagnosticLogView: View {
       header
 
       if visible.isEmpty {
-        ContentUnavailableView(
-          "No log entries",
-          systemImage: "doc.text.magnifyingglass",
-          description: Text(errorsOnly
+        DSContentUnavailable(
+            title: "No log entries",
+            systemImage: "doc.text.magnifyingglass",
+            description: errorsOnly
                             ? "No warnings or errors recorded."
-                            : "Use the app, then return here.")
-        )
+                            : "Use the app, then return here."
+          )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         ScrollView {
