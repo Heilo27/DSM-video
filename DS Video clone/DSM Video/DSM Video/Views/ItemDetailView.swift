@@ -121,6 +121,24 @@ struct ItemDetailView: View {
       .toolbar {
         ToolbarItem(placement: .topBarTrailing) {
           Menu {
+            // Watched state is derived from position, so "watched" writes position ==
+            // duration and "unwatched" writes 0. Without this there was no way to clear a
+            // stray resume point: an accidental tap parked a title in Continue Watching
+            // permanently, since only playing it to the end could evict it.
+            if let dur = detail?.durationSeconds, dur > 0 {
+              let watched = PlaybackProgress.isFinished(
+                positionSeconds: savedPositionSeconds, durationSeconds: dur)
+              Button(
+                watched ? "Mark as Unwatched" : "Mark as Watched",
+                systemImage: watched ? "eye.slash" : "checkmark.circle"
+              ) {
+                Task {
+                  await appState.setWatched(
+                    itemId: itemID, durationSeconds: dur, watched: !watched)
+                  savedPositionSeconds = watched ? 0 : dur
+                }
+              }
+            }
             Button("Fix Metadata", systemImage: "magnifyingglass") {
               showMetadataFixer = true
             }
@@ -231,7 +249,7 @@ struct ItemDetailView: View {
 
   #if os(tvOS)
   @FocusState private var focusedAction: ActionButton?
-  enum ActionButton: Hashable { case play, fromBeginning, watchlist }
+  enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched }
 
   private var tvPlayButton: some View {
     let focused = focusedAction == .play
@@ -325,6 +343,37 @@ struct ItemDetailView: View {
     .disabled(detail == nil)
     .accessibilityLabel(inList ? "Remove from Watchlist" : "Add to Watchlist")
   }
+
+  /// Mark watched / unwatched. tvOS has no toolbar, so this sits in the action row beside
+  /// Watchlist. Watched state is derived from position, so this writes position == duration
+  /// (watched) or 0 (unwatched) — see AppState.setWatched.
+  private var tvWatchedButton: some View {
+    let focused = focusedAction == .watched
+    let dur = detail?.durationSeconds ?? 0
+    let isWatched = dur > 0 && PlaybackProgress.isFinished(
+      positionSeconds: savedPositionSeconds, durationSeconds: dur)
+    return Button {
+      guard dur > 0 else { return }
+      Task {
+        await appState.setWatched(itemId: itemID, durationSeconds: dur, watched: !isWatched)
+        savedPositionSeconds = isWatched ? 0 : dur
+      }
+    } label: {
+      Image(systemName: isWatched ? "checkmark.circle.fill" : "checkmark.circle")
+        .font(.system(size: 22, weight: .semibold))
+        .foregroundStyle(isWatched ? Color.dsAccent : .white)
+        .frame(width: 54, height: 54)
+        .background(focused ? Color.dsSurfaceRaised : Color.dsSurfaceHigh)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
+        .scaleEffect(focused ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+    .buttonStyle(.plain)
+    .focusEffectDisabled()
+    .focused($focusedAction, equals: .watched)
+    .disabled(dur <= 0)
+    .accessibilityLabel(isWatched ? "Mark as unwatched" : "Mark as watched")
+  }
   #endif
 
   @ViewBuilder
@@ -371,6 +420,7 @@ struct ItemDetailView: View {
                 .allowsHitTesting(savedPositionSeconds > 0)
                 .accessibilityHidden(savedPositionSeconds == 0)
               tvWatchlistButton
+              tvWatchedButton
             }
             .focusScope(actionNamespace)
           }

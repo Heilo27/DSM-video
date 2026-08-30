@@ -1645,6 +1645,26 @@ final class AppState {
     }
   }
 
+  /// Mark an item fully watched, or clear its progress entirely.
+  ///
+  /// Watched state in this app is DERIVED from position (PlaybackProgress.isFinished), and
+  /// the only writer was implicit playback progress — so there was no way to mark something
+  /// watched that you saw elsewhere, and no way to evict a title from Continue Watching
+  /// short of playing it to the end. An accidental tap parked a film there permanently.
+  ///
+  /// Implemented on the existing progress endpoint rather than a new one: writing
+  /// position == duration reads as finished everywhere (rails, badges, resume), and
+  /// writing 0 clears it. Both route through recordProgress, so they inherit its
+  /// local-first write and retry outbox and work offline.
+  func setWatched(itemId: String, durationSeconds: Int, watched: Bool) async {
+    await recordProgress(
+      itemId: itemId,
+      positionSeconds: watched ? durationSeconds : 0,
+      durationSeconds: durationSeconds
+    )
+    await refreshProgressFromLocal()
+  }
+
   /// Uploads progress the server has not confirmed. Idempotent and safe to call often —
   /// returns immediately when the outbox is empty.
   ///
