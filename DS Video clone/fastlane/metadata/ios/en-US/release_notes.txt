@@ -1,21 +1,24 @@
-This update focuses on getting you signed in, keeping your place, and finding what you want to watch.
+This update fixes playback interruptions, adds mark as watched, and makes search and your watchlist reachable everywhere.
 
-SIGNING IN THAT ACTUALLY WORKS
-• Non-admin accounts can now sign in — a bad session parameter was rejecting them outright.
-• Unreachable servers no longer report as "wrong password," so you can tell a network problem from a login problem.
-• Connection errors now say what actually went wrong instead of failing silently.
-• Signing out properly ends your session on the server.
+PLAYBACK THAT RECOVERS
+• A phone call, Siri, or another app no longer leaves playback stuck — audio resumes properly afterward.
+• Unplugging headphones or removing AirPods now pauses cleanly instead of leaving the player in a stuck state.
+• If your NAS drops off the network mid-video, you now get a clear message and can retry, instead of an endless loading spinner.
+• Audio keeps playing when you lock your screen. You can turn this off in Settings.
 
-FIND IT FASTER
-• New multi-select genre filter — combine genres to narrow your library.
-• Your Watchlist now loads. It previously came up empty on every device.
-• Fixed library grids on iPad not reloading when you switch libraries in the sidebar.
+NEW CONTROLS
+• Mark as Watched and Mark as Unwatched — clear a stray resume point or catch up on something you watched elsewhere.
+• Playback Speed is now in Settings, so it's easy to find and easy to set back to normal.
 
-KEEPING YOUR PLACE
-• "Mark Unwatched" now works reliably.
-• Fixed playback progress being lost or reverting to an older position.
-• Moving a file no longer signs you out.
+FIND YOUR STUFF
+• Search now works from the Home screen on iPhone and searches your whole library, not just one section.
+• Your Watchlist is now reachable on iPad.
+• Play is clearly unavailable for videos that aren't downloaded when your NAS is offline, instead of failing after you tap.
 
-Plus improved artwork loading, better filename and show matching, and a round of interface polish.
+ACCESSIBILITY
+• The launch animation is skipped when Reduce Motion is on.
+• Better VoiceOver labels on setup and diagnostics, and text that scales properly at larger sizes.
+
+Plus consistent empty screens and a round of layout polish.
 
 Thanks for using DSM Video. Keep the feedback coming.

@@ -1,20 +1,21 @@
-This update fixes Apple TV pairing, player controls, and keeping your place.
+This update fixes the remote controls in the player, adds mark as watched, and brings your Watchlist to Apple TV.
 
-PAIRING AND SIGN-IN
-• A first-time Apple TV can now pair. The flow previously could not complete at all.
-• Home screen rails now load right after pairing instead of staying empty.
-• Non-admin accounts can now sign in — a bad session parameter was rejecting them.
-• Unreachable servers no longer report as "wrong password."
+PLAYER CONTROLS THAT WORK
+• Every button in the player is now reachable with the remote — skip to start, back 15, forward 15, and skip to end previously could not be selected at all.
+• Playback speed is now also in Settings. If your videos were stuck playing fast with no way to change it, this fixes it.
+• Menu now closes the controls first instead of exiting playback entirely.
+• Pressing Menu during the next-episode countdown no longer starts the next episode anyway.
 
-PLAYER CONTROLS
-• Playback speed and subtitle buttons are now reachable with the remote.
-• "Mark Unwatched" now works reliably.
-• Fixed playback progress being lost or reverting to an older position.
+NEW ON APPLE TV
+• Your Watchlist now appears on the Home screen. Saved items were previously impossible to view.
+• Mark as Watched and Mark as Unwatched on any video.
 
-FIND IT FASTER
-• New multi-select genre filter — combine genres to narrow your library.
-• Your Watchlist now loads. It previously came up empty on every device.
+FIXES
+• Long descriptions no longer push the cast and Next Episode button off screen where the remote couldn't reach them.
+• Content sits properly inside the safe area, so nothing crops at the edges of your TV.
+• Signing in no longer shows an old error message while a correct password is working.
+• If your NAS drops off the network mid-video, you get a clear message instead of an endless spinner.
 
-Plus more dependable artwork loading, better show matching, and general performance refinements.
+Plus consistent empty screens and layout polish throughout.
 
 Thanks for using DSM Video on Apple TV. Keep the feedback coming.
