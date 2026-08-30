@@ -71,6 +71,7 @@ private enum SidebarSelection: Hashable {
   case home
   case search
   case downloads
+  case watchlist
   case settings
   case library(Library)
 }
@@ -123,6 +124,8 @@ private struct SplitView: View {
       EmptyView()
     case .search:
       SearchView(isEmbedded: true)
+    case .watchlist:
+      WatchlistView(isEmbedded: true)
     case .downloads:
       DownloadsView(isEmbedded: true)
     case .settings:
@@ -167,6 +170,11 @@ private struct SidebarView: View {
           .tag(SidebarSelection.search)
         Label("Downloads", systemImage: "arrow.down.circle")
           .tag(SidebarSelection.downloads)
+        // Watchlist had no sidebar entry, so on every regular-width device (all iPads,
+        // and iPhone Pro Max in landscape) the bookmark button on the detail screen
+        // saved into a list with no door. The feature existed and was unreachable.
+        Label("Watchlist", systemImage: "bookmark")
+          .tag(SidebarSelection.watchlist)
       } header: {
         SidebarSectionHeader("Browse")
       }
@@ -261,7 +269,7 @@ private struct SidebarSectionHeader: View {
 }
 
 
-private struct SearchView: View {
+struct SearchView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   var isEmbedded: Bool = false
@@ -626,6 +634,9 @@ private struct SearchResultCell: View {
 struct WatchlistView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  /// The iPad split layout already owns a NavigationStack; nesting a second one breaks
+  /// push navigation into ItemDetailView. Matches DownloadsView / SearchView / SettingsView.
+  var isEmbedded: Bool = false
 
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
@@ -633,7 +644,14 @@ struct WatchlistView: View {
   }
 
   var body: some View {
-    NavigationStack {
+    if isEmbedded {
+      content
+    } else {
+      NavigationStack { content }
+    }
+  }
+
+  private var content: some View {
       Group {
         // TASK-851: a load FAILURE must not render as "you have nothing saved". Check the
         // error flag BEFORE the empty state, or a network blip silently tells the user
@@ -676,7 +694,6 @@ struct WatchlistView: View {
       .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
         Task { await appState.loadWatchlist() }
       }
-    }
   }
 }
 
@@ -1251,6 +1268,11 @@ struct SettingsView: View {
   // TASK-738: defaults to true via DownloadManager's registerDefaults.
   @AppStorage("dsReel.downloadsWifiOnly") private var downloadsWifiOnly: Bool = true
   // TASK-739: subtitle appearance (defaults registered in SubtitleStyle).
+  // Mirrors the player's persisted rate so speed is recoverable OUTSIDE playback.
+  // A stored non-1x rate survives every session; without a Settings entry the only way
+  // back was the in-player control, which on tvOS was unreachable entirely in 1.3.4.
+  @AppStorage("dsReel.playbackRate") private var playbackRate: Double = 1.0
+  @AppStorage("dsReel.continueAudioInBackground") private var continueAudioInBackground: Bool = true
   @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
   @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
   @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
@@ -1391,10 +1413,21 @@ struct SettingsView: View {
           Text("720p").tag("720p")
           Text("480p").tag("480p")
         }
+
+        Picker("Playback Speed", selection: $playbackRate) {
+          Text("0.5\u{00D7}").tag(0.5)
+          Text("0.75\u{00D7}").tag(0.75)
+          Text("Normal").tag(1.0)
+          Text("1.25\u{00D7}").tag(1.25)
+          Text("1.5\u{00D7}").tag(1.5)
+          Text("2\u{00D7}").tag(2.0)
+        }
+
+        Toggle("Keep Playing in Background", isOn: $continueAudioInBackground)
       } header: {
         Text("Playback")
       } footer: {
-        Text("Caps transcoded video resolution. Useful on slower connections. Direct-play streams are not affected.")
+        Text("Video quality caps transcoded resolution; direct-play streams are unaffected. Keep Playing in Background lets audio continue when you lock the screen or switch apps.")
       }
 
       Section {

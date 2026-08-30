@@ -28,6 +28,8 @@ private nonisolated let orientLog = Logger(subsystem: "com.dsm.orientation", cat
 /// - Double-tap right side to skip forward 10 seconds
 /// - Single tap to show/hide controls
 struct GestureVideoPlayer: View {
+    // Used by the tvOS Menu handler to close the player once controls are already hidden.
+    @Environment(\.dismiss) private var dismiss
     let url: URL
     let title: String
     var resumePosition: Double = 0
@@ -76,10 +78,20 @@ struct GestureVideoPlayer: View {
     @State private var controlsInteractive: Bool = true
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
-    // TASK-738: persist playback speed across sessions (was resetting to 1× each launch).
+    // Playback speed persists across sessions (TASK-738), but ONLY for rates the user
+    // can plausibly have chosen on purpose and can get back out of.
+    //
+    // A stored non-1× rate used to be restored unconditionally and forever. Combined with
+    // the speed control living two focus steps deep behind a 2.5s auto-hide on tvOS, a
+    // single accidental Select on the Apple TV left EVERY video playing at that rate with
+    // no discoverable way back — the setting outlived the session, the title, and the
+    // user's memory of having set it. Restoring only a sane, in-range value and clamping
+    // anything else back to 1× means a bad state cannot become permanent.
     @State private var playbackRate: Float = {
         let stored = UserDefaults.standard.float(forKey: "dsReel.playbackRate")
-        return stored > 0 ? stored : 1.0
+        let allowed: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        guard stored > 0, allowed.contains(where: { abs($0 - stored) < 0.01 }) else { return 1.0 }
+        return stored
     }()
     @State private var isBuffering: Bool = true
     @State private var playerError: String?
@@ -124,6 +136,17 @@ struct GestureVideoPlayer: View {
     @State private var skipHideTask: Task<Void, Never>?
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var timeObserver: Any?
+    // Honour UIBackgroundModes: audio (Info.plist). User-controllable because for a video
+    // app "keep playing when I lock the screen" is a real preference either way.
+    @AppStorage("dsReel.continueAudioInBackground") private var continueAudioInBackground: Bool = true
+    // Audio-session observers (iOS). Held so they can be removed on teardown — a leaked
+    // observer would fire against a torn-down player.
+    @State private var interruptionObserver: NSObjectProtocol?
+    @State private var routeChangeObserver: NSObjectProtocol?
+    // Stall/failure observers, so a mid-stream network drop surfaces as an error instead
+    // of an infinite spinner.
+    @State private var stallObserver: NSObjectProtocol?
+    @State private var failedToEndObserver: NSObjectProtocol?
     // MARK: ACKNOWLEDGED (TASK-199): Set<AnyCancellable> in @State is a known pattern limitation
     // for struct-based SwiftUI views. The subscriptions established in setupPlayer() are stored
     // here and manually cleared in cleanup(). Moving to @StateObject would require a class wrapper
@@ -152,7 +175,13 @@ struct GestureVideoPlayer: View {
 
     #if os(tvOS)
     @FocusState private var focusedControl: TVFocusField?
-    enum TVFocusField { case playPause, captions, speed, hidden }
+    // Every rendered tvOS control needs a case here. The transport row previously had
+    // five buttons and ONE focus target (playPause), so skip-to-start, ±15s and
+    // skip-to-end were decorative — the same defect that made speed/captions
+    // unreachable, surviving in a second place because the earlier fix was applied
+    // per-button instead of to the row.
+    enum TVFocusField { case playPause, captions, speed, hidden,
+                        skipStart, back15, forward15, skipEnd, skipIntro }
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -175,6 +204,7 @@ struct GestureVideoPlayer: View {
             .onAppear {
                 setupPlayer()
                 setupVolumeObserver()
+                setupAudioInterruptionObserver()
                 #if os(iOS)
                 lockLandscape()
                 loadTrickplay()
@@ -196,6 +226,14 @@ struct GestureVideoPlayer: View {
                     #if os(iOS)
                     // Don't pause if PiP is active — the player must keep running.
                     guard !isPiPActive else { return }
+                    // Info.plist declares UIBackgroundModes: audio. Force-pausing here
+                    // contradicted that outright: the app paid the App Review cost of the
+                    // entitlement, registered Now Playing / lock-screen controls (see
+                    // setupNowPlaying), and then killed the audio the moment the screen
+                    // locked — so the lock-screen play button drove playback the app had
+                    // just deliberately stopped. Honour the declared capability instead
+                    // and keep audio running; the user can pause from the lock screen.
+                    guard !continueAudioInBackground else { return }
                     #endif
                     // Pause playback when backgrounded. Progress sync is handled by
                     // the parent PlayerSheet's own scenePhase handler to avoid a double write.
@@ -316,6 +354,21 @@ struct GestureVideoPlayer: View {
             #if os(tvOS)
             .onPlayPauseCommand { togglePlayPause() }
             .onMoveCommand { direction in handleTVMoveCommand(direction: direction) }
+            // Menu dismisses the topmost layer, not the whole player.
+            //
+            // Controls auto-show on ANY d-pad press, so nudging the remote put the overlay
+            // up; pressing Menu to undo that then tore down the entire player and lost the
+            // playback session. Standard tvOS behaviour is for Menu to back out one level
+            // at a time — hide the controls first, and only exit if they were already
+            // hidden (which is what the user means by Menu on a bare video).
+            .onExitCommand {
+                if showControls {
+                    hideControlsTask?.cancel()
+                    withAnimation(.easeInOut(duration: 0.25)) { showControls = false }
+                } else {
+                    dismiss()
+                }
+            }
             #endif
         #endif
     }
@@ -725,6 +778,13 @@ struct GestureVideoPlayer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Skip to start")
                 .accessibilityAddTraits(.isButton)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .skipStart)
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .skipStart ? 1.15 : 1.0)
+                .brightness(focusedControl == .skipStart ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                #endif
 
                 // Rewind 15s
                 Button {
@@ -742,6 +802,13 @@ struct GestureVideoPlayer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Rewind \(Int(skipBackwardSeconds)) seconds")
                 .accessibilityAddTraits(.isButton)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .back15)
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .back15 ? 1.15 : 1.0)
+                .brightness(focusedControl == .back15 ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                #endif
 
                 // Play / Pause
                 Button {
@@ -777,6 +844,13 @@ struct GestureVideoPlayer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Forward \(Int(skipForwardSeconds)) seconds")
                 .accessibilityAddTraits(.isButton)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .forward15)
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .forward15 ? 1.15 : 1.0)
+                .brightness(focusedControl == .forward15 ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                #endif
 
                 // Skip to end
                 Button {
@@ -793,6 +867,13 @@ struct GestureVideoPlayer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Skip to end")
                 .accessibilityAddTraits(.isButton)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .skipEnd)
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .skipEnd ? 1.15 : 1.0)
+                .brightness(focusedControl == .skipEnd ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                #endif
             }
             #if os(tvOS)
             .focusSection()
@@ -1132,6 +1213,31 @@ struct GestureVideoPlayer: View {
                 setPlaybackRate(speeds[(currentIdx + 1) % speeds.count])
                 scheduleHideControls()
                 return
+            case .skipStart:
+                seek(to: 0, tight: true)
+                currentTime = 0
+                scheduleHideControls()
+                return
+            case .back15:
+                let t = max(0, currentTime - skipBackwardSeconds)
+                seek(to: t)
+                currentTime = t
+                showSkipAnimation(direction: .backward)
+                scheduleHideControls()
+                return
+            case .forward15:
+                let t = min(duration, currentTime + skipForwardSeconds)
+                seek(to: t)
+                currentTime = t
+                showSkipAnimation(direction: .forward)
+                scheduleHideControls()
+                return
+            case .skipEnd:
+                let t = max(0, duration - 3)
+                seek(to: t, tight: true)
+                currentTime = t
+                scheduleHideControls()
+                return
             default:
                 break
             }
@@ -1159,10 +1265,16 @@ struct GestureVideoPlayer: View {
             }
             hideControlsTask?.cancel()
             switch (direction, focusedControl) {
-            case (.up, .playPause), (.up, .hidden), (.up, .none):
+            case (.up, .playPause), (.up, .hidden), (.up, .none),
+                 (.up, .skipStart), (.up, .back15), (.up, .forward15), (.up, .skipEnd):
                 focusedControl = .captions
             case (.down, .captions), (.down, .speed):
                 focusedControl = .playPause
+            // Down from play/pause enters the skip-button row. Left/right on play/pause is
+            // reserved for scrubbing (the common case), so it cannot double as the way in;
+            // down is the free axis and keeps the scrub gesture untouched.
+            case (.down, .playPause):
+                focusedControl = .back15
             default:
                 break
             }
@@ -1181,6 +1293,20 @@ struct GestureVideoPlayer: View {
         if focusedControl == .captions || focusedControl == .speed {
             hideControlsTask?.cancel()
             focusedControl = (direction == .right) ? .speed : .captions
+            scheduleHideControls()
+            return
+        }
+        // Transport row: left/right walks the five buttons. Scrubbing stays on the row's
+        // CENTRE (play/pause) so the common case — nudge left/right to seek — is unchanged;
+        // stepping off play/pause is what enters button-to-button navigation. Without this
+        // the four skip buttons had no way to receive focus at all.
+        let transportOrder: [TVFocusField] = [.skipStart, .back15, .playPause, .forward15, .skipEnd]
+        if let idx = transportOrder.firstIndex(where: { $0 == focusedControl }), focusedControl != .playPause {
+            hideControlsTask?.cancel()
+            let next = direction == .right ? idx + 1 : idx - 1
+            if transportOrder.indices.contains(next) {
+                focusedControl = transportOrder[next]
+            }
             scheduleHideControls()
             return
         }
@@ -1273,6 +1399,31 @@ struct GestureVideoPlayer: View {
         // on its own when the connection recovers — no user action required.
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
+
+        // A mid-stream failure on an HLS feed does NOT transition playerItem.status to
+        // .failed — it arrives as a notification. Without these, a NAS that drops off the
+        // network mid-film leaves the spinner turning forever with no error and no retry.
+        // This is the single most likely failure for an app streaming off home Wi-Fi.
+        stallObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.playbackStalledNotification,
+            object: playerItem,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in isBuffering = true }
+        }
+
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+            object: playerItem,
+            queue: .main
+        ) { note in
+            let underlying = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            Task { @MainActor in
+                isBuffering = false
+                playerError = underlying.map { Self.friendlyPlayerError($0) }
+                    ?? "Lost connection to the server. Check that your NAS is reachable, then try again." 
+            }
+        }
 
         // Observe playback status
         player?.publisher(for: \.timeControlStatus)
@@ -1545,6 +1696,13 @@ struct GestureVideoPlayer: View {
             player?.removeTimeObserver(observer)
             timeObserver = nil
         }
+        for observer in [interruptionObserver, routeChangeObserver, stallObserver, failedToEndObserver] {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
+        interruptionObserver = nil
+        routeChangeObserver = nil
+        stallObserver = nil
+        failedToEndObserver = nil
         player?.pause()
         #if os(iOS)
         // AVAudioSession.setActive can block on the main thread (hang risk). Teardown
@@ -1782,6 +1940,69 @@ struct GestureVideoPlayer: View {
     }
     #endif
 
+    // Audio-session interruptions (phone call, Siri, another app taking the session) and
+    // route changes (AirPods removed, headphones unplugged).
+    //
+    // Without these, iOS pauses the player behind the app's back and nothing ever tells
+    // the view: `isPlaying` stays true, the button keeps showing "pause", and the session
+    // is left deactivated so even a manual tap on play can fail silently. The user sees a
+    // frozen frame and a control that does nothing.
+    //
+    // .began  -> reflect the pause the system already performed.
+    // .ended  -> only resume if the system says .shouldResume (i.e. the interruption
+    //            owner released it and we had been playing). Re-activate first, because
+    //            the session was deactivated underneath us.
+    // route change with .oldDeviceUnavailable -> headphones/AirPods pulled. Apple's
+    //            convention is to STAY paused; resuming blasts audio out the speaker.
+    private func setupAudioInterruptionObserver() {
+        #if os(iOS)
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+
+        interruptionObserver = center.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: session,
+            queue: .main
+        ) { note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            Task { @MainActor in
+                switch type {
+                case .began:
+                    // The system has already stopped audio; sync our state to reality.
+                    isPlaying = false
+                case .ended:
+                    let optsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                    let opts = AVAudioSession.InterruptionOptions(rawValue: optsRaw)
+                    guard opts.contains(.shouldResume) else {
+                        isPlaying = false
+                        return
+                    }
+                    try? session.setActive(true)
+                    player?.rate = playbackRate
+                    isPlaying = true
+                @unknown default:
+                    break
+                }
+            }
+        }
+
+        routeChangeObserver = center.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: session,
+            queue: .main
+        ) { note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
+                  reason == .oldDeviceUnavailable else { return }
+            Task { @MainActor in
+                player?.pause()
+                isPlaying = false
+            }
+        }
+        #endif
+    }
+
     private func setupVolumeObserver() {
         #if os(iOS)
         let audioSession = AVAudioSession.sharedInstance()
@@ -1917,6 +2138,25 @@ private extension GestureVideoPlayer {
             case -11850: return "Playback failed. The media is not accessible."
             case -11819: return "The operation was cancelled."
             case -11821: return "Cannot connect to the server."
+            case -11829: return "This video's format isn't supported."
+            default: break
+            }
+        }
+        // The most likely errors for a NAS on home Wi-Fi are transport failures, not
+        // AVFoundation ones. Left unmapped they fall through to Apple's opaque
+        // "The operation could not be completed", which tells the user nothing.
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorNotConnectedToInternet:
+                return "No network connection."
+            case NSURLErrorNetworkConnectionLost:
+                return "Lost connection to the server mid-playback. Check your network and try again."
+            case NSURLErrorTimedOut:
+                return "The server stopped responding. Check that your NAS is awake and reachable."
+            case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost:
+                return "Can't reach your NAS. Check that it's powered on and on the same network."
+            case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted:
+                return "Secure connection to the server failed."
             default: break
             }
         }

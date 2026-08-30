@@ -531,6 +531,44 @@ struct LibraryHomeView: View {
     // .active event; it has been removed. networkDidReconnect (above) still drives a
     // homeLoad when the coordinator switches address.
     .background(Color.black.ignoresSafeArea())
+    // Global search entry point.
+    //
+    // iPhone dropped the Search TAB to stay at five and avoid the system "More" collapse,
+    // which left SearchView — a debounced, server-backed search with recent-search history
+    // — instantiated ONLY in the iPad sidebar. On iPhone the sole search was a per-library
+    // sheet filtering the already-loaded page in memory, so answering "do I have this film?"
+    // required knowing whether it was a movie or a show first. The screen shipped in the
+    // binary and could not be opened.
+    //
+    // A toolbar item is not enough on its own: Cinematic hides the nav bar entirely
+    // (see .toolbar above), so the button is ALSO rendered as a floating overlay on that
+    // theme. Exactly one of the two is live for any given theme.
+    .toolbar {
+      if !ThemeHolder.shared.current.usesCinematicChrome {
+        ToolbarItem(placement: .topBarTrailing) {
+          NavigationLink { SearchView(isEmbedded: true) } label: {
+            Image(systemName: "magnifyingglass")
+          }
+          .accessibilityLabel("Search")
+          .accessibilityHint("Search all movies and TV shows")
+        }
+      }
+    }
+    .overlay(alignment: .topTrailing) {
+      if ThemeHolder.shared.current.usesCinematicChrome {
+        NavigationLink { SearchView(isEmbedded: true) } label: {
+          Image(systemName: "magnifyingglass")
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 44, height: 44)
+            .background(.ultraThinMaterial, in: Circle())
+        }
+        .accessibilityLabel("Search")
+        .accessibilityHint("Search all movies and TV shows")
+        .padding(.trailing, 16)
+        .padding(.top, 8)
+      }
+    }
 
     if isEmbedded {
       content

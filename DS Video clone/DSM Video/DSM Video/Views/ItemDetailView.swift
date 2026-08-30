@@ -518,6 +518,19 @@ struct ItemDetailView: View {
               .font(.body)
               .foregroundStyle(.white.opacity(0.88))
               .fixedSize(horizontal: false, vertical: true)
+              // tvOS: the panel is hard-capped at 52% of screen height and .clipped(),
+              // with no ScrollView (the iOS path has one). An unbounded summary therefore
+              // grew until it pushed the Cast section — and, on episodes, the Next Episode
+              // button — outside the clip region, where the focus engine cannot reach them
+              // because there is nothing to scroll. Content silently disappeared, and only
+              // for long synopses, so short test items looked fine.
+              //
+              // A ScrollView is not the fix here: tvOS scrolls via FOCUS, and Text is not
+              // focusable, so a scroll view containing only text still cannot be driven by
+              // the remote. Bounding the text is what keeps the focusable rows on screen.
+              #if os(tvOS)
+              .lineLimit(4)
+              #endif
           }
 
           if let cast = detail?.cast, !cast.isEmpty {
@@ -1668,6 +1681,14 @@ private struct _NextEpisodeOverlayView: View {
       // countdown hits "Play Now" instead of falling through to the player beneath.
       DispatchQueue.main.async { focused = .playNow }
     }
+    // Menu had the same fall-through problem as Select, with a worse outcome. Because
+    // this is a ZStack sibling rather than a sheet, Menu was not intercepted here: it
+    // reached the player and dismissed it, while showNextEpisodeOverlay stayed true and
+    // the countdown task kept running — so it could still reach zero and fire
+    // onPlayNextEpisode, auto-advancing to the next episode AFTER the user pressed Menu
+    // to leave. Treating Menu as "Stay" cancels the countdown, which is what the user
+    // meant: dismiss the prompt, do not start the next episode.
+    .onExitCommand { onStay() }
   }
 }
 #endif

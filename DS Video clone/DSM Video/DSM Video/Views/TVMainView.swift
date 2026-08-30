@@ -208,6 +208,17 @@ private struct TVHomeView: View {
                 TVLandscapeRail(title: "Continue Watching", items: appState.homeContinueWatching)
               }
 
+              // Watchlist rail.
+              //
+              // Every tvOS detail screen renders a watchlist button (ItemDetailView's
+              // tvWatchlistButton), but there was NO screen anywhere on Apple TV that
+              // displayed the list — items could be saved and never seen again. A rail
+              // is the right shape here: it reuses the existing focus/layout pattern and
+              // needs no new navigation destination.
+              if !appState.watchlistItems.isEmpty {
+                TVLandscapeRail(title: "Watchlist", items: appState.watchlistItems)
+              }
+
               // Just Added rail
               if !appState.homeJustAdded.isEmpty {
                 TVLandscapeRail(title: "Just Added", items: appState.homeJustAdded)
@@ -349,7 +360,13 @@ private struct TVHomeView: View {
     //
     // Keying on sessionToken also covers re-login after a session expiry, which
     // previously left the same stale-empty state behind.
-    .task(id: appState.sessionToken) { await appState.homeLoad() }
+    .task(id: appState.sessionToken) {
+      await appState.homeLoad()
+      // homeLoad populates the three progress rails; the watchlist is refreshed only as
+      // step 6 of a delta sync, which may not have run yet on first paint. Load it here
+      // so the Watchlist rail is populated when the home screen first appears.
+      await appState.loadWatchlist()
+    }
     // TASK-835: GestureVideoPlayer.cleanup() posts .playerDidDismiss on both platforms, but
     // only LibraryHomeView (iOS) observed it. Without this, exiting the player on Apple TV
     // left Continue Watching showing the pre-playback state until the 30s heartbeat happened
@@ -933,6 +950,10 @@ private struct TVSettingsView: View {
   // TASK-746: playback + subtitle prefs, shared keys with the iOS SettingsView so a
   // setting changed on either platform applies on both. Slider is unavailable on
   // tvOS, so subtitle size/background use Pickers over discrete steps.
+  // Mirrors the player's persisted rate so speed is recoverable OUTSIDE playback.
+  // The in-player control is two focus steps deep behind a 2.5s auto-hide; a user who
+  // set 2× by accident previously had no way to discover or undo it.
+  @AppStorage("dsReel.playbackRate") private var playbackRate: Double = 1.0
   @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
   @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
   @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
@@ -960,6 +981,16 @@ private struct TVSettingsView: View {
             Text("720p").tag("720p")
             Text("480p").tag("480p")
           }
+
+          Picker("Playback Speed", selection: $playbackRate) {
+            Text("0.5×").tag(0.5)
+            Text("0.75×").tag(0.75)
+            Text("Normal").tag(1.0)
+            Text("1.25×").tag(1.25)
+            Text("1.5×").tag(1.5)
+            Text("2×").tag(2.0)
+          }
+          .accessibilityHint("Speed applied when a video starts. Also adjustable during playback.")
         }
 
         Section("Subtitles") {
