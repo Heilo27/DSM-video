@@ -1078,12 +1078,18 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 		}
 
 		{
-			snippet := body
-			if len(snippet) > 220 {
-				snippet = snippet[:220]
-			}
-			log.Printf("[WebAPI] Auth login DSM proxy response: status=%d bytes=%d set_cookie=%v body_snippet=%q",
-				status, len(body), hdr.Values("Set-Cookie"), string(snippet))
+			// Never log Set-Cookie or the response body here. DSM's Set-Cookie carries
+			// `id=<SID>` and the body carries {"sid":"..."} — and a DSM SID is a COMPLETE
+			// credential in this system: getWebAPISession accepts it from a cookie, query
+			// param, or form field, and validateDSMSession will mint a full JWT for anyone
+			// who presents it. Anything that can read the package log (another DSM app, a
+			// lower-privilege shell account, a support bundle the user emails) could replay
+			// it and be signed in as that user, with no password.
+			//
+			// redactSensitiveParams does not cover this — it rewrites r.URL query params
+			// only, not response headers or bodies. Log shape, never content.
+			log.Printf("[WebAPI] Auth login DSM proxy response: status=%d bytes=%d set_cookie_count=%d",
+				status, len(body), len(hdr.Values("Set-Cookie")))
 		}
 
 		var loginResult struct {

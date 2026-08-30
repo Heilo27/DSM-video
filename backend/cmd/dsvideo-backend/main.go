@@ -863,6 +863,18 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	// image with fetch() + the Authorization header and hand the result to <img> as a blob
 	// URL. Credentials stay in headers — which also matters because URLs land in access
 	// logs and browser history. Re-gate this route at the same time as that lands.
+	// STILL PUBLIC — but the stated blocker is now only Top Shelf, not the web UI.
+	//
+	// The note above said to re-gate once the web UI fetched images with an Authorization
+	// header into blob URLs. That has landed (web/index.html _loadAuthedImage), so the web
+	// UI no longer needs this route public. The remaining consumer is the tvOS Top Shelf
+	// extension, which hands a bare URL to TVTopShelfSectionedItem.setImageURL and cannot
+	// attach a header — re-gating would change its artwork from intermittent to never.
+	//
+	// This is therefore a product decision, not a pure fix: gate it and lose Top Shelf
+	// artwork, or keep the path oracle (item IDs are "it_"+hex(absolute path), so 200-vs-404
+	// enumerates the NAS's titles and directory tree unauthenticated and unthrottled).
+	// A signed, expiring, item-scoped image URL would satisfy both; that is the real fix.
 	r.Get("/images/{id}", s.handleImage)
 
 	r.Group(func(r chi.Router) {
@@ -2207,7 +2219,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 			where += "i.path LIKE ? ESCAPE '\\'"
 			args = append(args, "%/"+escapedFolder+"/%")
 		}
-		orderBy = "ORDER BY i.title ASC"
+		orderBy = "ORDER BY i.title ASC, i.id ASC"
 	default:
 		// "all" or empty - all items in library
 		if libraryID == "" {
@@ -2216,7 +2228,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		}
 		where = "WHERE i.library_id = ?"
 		args = append(args, libraryID)
-		orderBy = "ORDER BY i.title ASC"
+		orderBy = "ORDER BY i.title ASC, i.id ASC"
 	}
 
 	// Genre filter, applied on top of whatever the switch above selected so it composes
@@ -2384,7 +2396,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
 		 WHERE LOWER(i.title) LIKE LOWER(?)
-		 ORDER BY i.title ASC
+		 ORDER BY i.title ASC, i.id ASC
 		 LIMIT ? OFFSET ?`,
 		u.ID, pattern, limit, offset,
 	)
@@ -4545,13 +4557,30 @@ type progressRequest struct {
 // progress / watchlist / downloads INSERTs so a scripted client cannot write unbounded
 // rows for arbitrary (non-existent) item IDs — which bloats the tables and, for progress,
 // bumps progress_seq on every fake write forcing every device into a full re-sync.
-func (s *Server) itemExists(itemID string) bool {
+// itemExists reports whether the item is present, and whether the answer is TRUSTWORTHY.
+//
+// The second return matters: `err == nil` alone conflated "row absent" with "the query
+// failed". A transient SQLITE_BUSY — easy to hit, since a library scan holds the write
+// lock across a bulk DELETE — made this report "gone", handleProgress answered 404
+// not_found, and the client treats 404 as a PERMANENT rejection: it calls
+// dropPendingProgress and clears the row from its outbox without retrying and without
+// telling the user. A watch position is destroyed by a lock contention window.
+//
+// Callers must distinguish: absent -> 404, unknown -> 500 (which the client retries).
+func (s *Server) itemExists(itemID string) (exists bool, known bool) {
 	if itemID == "" {
-		return false
+		return false, true
 	}
 	var one int
 	err := s.db.QueryRow("SELECT 1 FROM items WHERE id = ?", itemID).Scan(&one)
-	return err == nil
+	if err == nil {
+		return true, true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, true
+	}
+	log.Printf("[itemExists] query failed for %s: %v (treating as unknown, not missing)", itemID, err)
+	return false, false
 }
 
 // pathWithinMediaRoot reports whether a DB-stored media path resolves inside one of the
@@ -4609,7 +4638,13 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// TASK-797: reject progress for a non-existent item BEFORE writing / bumping seq.
-	if !s.itemExists(itemID) {
+	if exists, known := s.itemExists(itemID); !exists {
+		if !known {
+			// The DB could not answer. A 404 here would make the client drop the write
+			// permanently; a 500 is retried by the outbox.
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -5567,7 +5602,13 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 
 	// TASK-797: only mark real items for download.
-	if !s.itemExists(itemID) {
+	if exists, known := s.itemExists(itemID); !exists {
+		if !known {
+			// The DB could not answer. A 404 here would make the client drop the write
+			// permanently; a 500 is retried by the outbox.
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -5688,7 +5729,13 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 
 	// TASK-797: only watchlist real items.
-	if !s.itemExists(itemID) {
+	if exists, known := s.itemExists(itemID); !exists {
+		if !known {
+			// The DB could not answer. A 404 here would make the client drop the write
+			// permanently; a 500 is retried by the outbox.
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -6034,6 +6081,29 @@ type metaPendingItem struct {
 
 func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, root string, tmdbClient *metadata.TMDbClient) error {
 	root = filepath.Clean(root)
+
+	// Refuse to scan a root that isn't there. This guards the stale-purge below, which
+	// deletes every DB row whose path wasn't seen during the walk.
+	//
+	// The walk callback swallows errors (`if err != nil { return nil }`) including the
+	// ROOT's own, so an unmounted volume produced zero visited files and a nil walkErr —
+	// indistinguishable from "the user deleted everything". The purge then dropped the
+	// whole library AND wrote a tombstone per item into deleted_items with a real
+	// change_seq, so delta sync propagated the deletion to every iOS/tvOS client, wiping
+	// their caches too.
+	//
+	// This is not hypothetical: the startup scan fires 5s after boot, and a NAS whose
+	// media sits on an external, encrypted, or network volume can easily still be
+	// mounting at that point. One reboot with bad timing = the entire library and all
+	// its TMDb metadata gone, re-fetched from scratch under rate limiting.
+	//
+	// Fail closed: an unreadable root is an ERROR, not an empty library.
+	if fi, err := os.Stat(root); err != nil {
+		return fmt.Errorf("scan: library root %q unavailable (skipping to protect existing rows): %w", root, err)
+	} else if !fi.IsDir() {
+		return fmt.Errorf("scan: library root %q is not a directory (skipping to protect existing rows)", root)
+	}
+
 	videoExt := map[string]bool{
 		".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".avi": true, ".ts": true,
 		".webm": true,
@@ -6082,6 +6152,9 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		if len(batch) == 0 {
 			return nil
 		}
+		// Highest change_seq allocated in this batch. Published to the in-memory cache
+		// only after the transaction commits — see the CAS block below.
+		var maxSeq int64
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("scan: begin tx: %w", err)
@@ -6149,7 +6222,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				seq = 0
 			}
 			if seq > 0 {
-				s.cachedItemSeq.Store(seq)
+				// Deliberately NOT publishing to cachedItemSeq here — see the commit below.
+				maxSeq = seq
 			}
 			st := existing[row.id]
 			if tmdbClient != nil && !st.metadataFetched && row.typ != "homeVideo" {
@@ -6159,6 +6233,27 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		if err := tx.Commit(); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("scan: commit: %w", err)
+		}
+		// Publish to the in-memory cache ONLY after the transaction is durable.
+		//
+		// This used to run per-row inside the loop above, before Commit. getSyncSeqs()
+		// serves cachedItemSeq without consulting the DB once warm, so a failed commit
+		// left every client being told a sequence number that had been rolled back and
+		// never persisted. Clients advance their cursor to it and then never ask for the
+		// items whose real change_seq falls in the gap — silent, permanent data loss on
+		// the client with no error surfaced anywhere.
+		//
+		// CompareAndSwap-max rather than a blind Store: a concurrent writer (the playback
+		// self-heal path calls updateCodecInfo in its own goroutine) can interleave, and a
+		// blind Store could publish the LOWER of two sequences last, under-reporting the
+		// counter and stranding every change in between.
+		if maxSeq > 0 {
+			for {
+				cur := s.cachedItemSeq.Load()
+				if maxSeq <= cur || s.cachedItemSeq.CompareAndSwap(cur, maxSeq) {
+					break
+				}
+			}
 		}
 		batch = batch[:0]
 		return nil
@@ -6446,6 +6541,21 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	cast := strings.Join(meta.Cast, ",")
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	// Allocate a change_seq for this row. Without it, TMDb enrichment was invisible to
+	// every client, permanently.
+	//
+	// The scan inserts a new item with a fresh change_seq, the client syncs and shows the
+	// raw filename with no artwork, and enrichment then rewrites title/poster/year/rating
+	// AT THE SAME SEQUENCE seconds later. Delta sync only ever asks for change_seq > cursor,
+	// so the client's cursor is already past it: the filename-title and blank poster stick
+	// forever, across relaunches and reconnects. It also defeated the admin metadata-refresh
+	// endpoint, which clears metadata_fetched_at and re-fetches into the same dead seq.
+	//
+	// Compounding it, the client's image cache-buster is keyed on change_seq
+	// (APIClient.imageURL(id:width:version:)), so even a corrected poster kept serving the
+	// stale cached URL. The codec-update path (updateCodecInfo) and the show-level TMDb fix
+	// already do this correctly; the per-item enrichment path never did.
+	metaSeq := s.incrementSeq("item_seq")
 	_, err = s.db.Exec(`
 		UPDATE items SET
 			tmdb_id = ?,
@@ -6465,13 +6575,14 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 			season_number = ?,
 			episode_number = ?,
 			episode_title = ?,
-			metadata_fetched_at = ?
+			metadata_fetched_at = ?,
+			change_seq = ?
 		WHERE id = ?`,
 		meta.TMDbID, meta.IMDbID, meta.Title, meta.OriginalTitle, meta.Overview,
 		meta.Year, meta.PosterPath, meta.BackdropPath, meta.Rating, genres,
 		meta.Director, cast, nullableInt(meta.Runtime*60), // runtime in seconds
 		meta.ShowName, nullableInt(meta.SeasonNumber), nullableInt(meta.EpisodeNumber),
-		meta.EpisodeTitle, now, itemID,
+		meta.EpisodeTitle, now, metaSeq, itemID,
 	)
 
 	if err != nil {
