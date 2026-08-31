@@ -1192,12 +1192,17 @@ struct GestureVideoPlayer: View {
 
     #if os(tvOS)
     private func handleTVSelectPress() {
-        // TASK-663: if a scrub is in progress, Select commits it immediately rather
-        // than toggling playback.
-        if isScrubbing {
-            commitTVScrub()
-            return
-        }
+        // NOTE: the old "if isScrubbing { commitTVScrub(); return }" branch is gone.
+        //
+        // isScrubbing is now unreachable on tvOS — the interactive Slider and the drag
+        // gesture that set it are both #if os(iOS), and the d-pad scrub-preview mode was
+        // replaced by a direct ±15s skip. But while that mode existed, a single stray
+        // left/right press latched isScrubbing true, and this branch then swallowed EVERY
+        // Select: play/pause did nothing at all, with no visible reason, until the user
+        // backed out to the detail screen and re-entered. Reported from a real living
+        // room. Even with the cause removed, routing Select through a mode flag that only
+        // one code path can clear is a trap, so the branch goes with it — Select now
+        // always does the thing the focused control says it does.
         if showControls {
             // Route Select to whichever control actually holds focus. The focus sink
             // swallows Select for the whole overlay, so without this the top-row
@@ -1296,50 +1301,31 @@ struct GestureVideoPlayer: View {
             scheduleHideControls()
             return
         }
-        // Transport row: left/right walks the five buttons. Scrubbing stays on the row's
-        // CENTRE (play/pause) so the common case — nudge left/right to seek — is unchanged;
-        // stepping off play/pause is what enters button-to-button navigation. Without this
-        // the four skip buttons had no way to receive focus at all.
-        let transportOrder: [TVFocusField] = [.skipStart, .back15, .playPause, .forward15, .skipEnd]
-        if let idx = transportOrder.firstIndex(where: { $0 == focusedControl }), focusedControl != .playPause {
-            hideControlsTask?.cancel()
-            let next = direction == .right ? idx + 1 : idx - 1
-            if transportOrder.indices.contains(next) {
-                focusedControl = transportOrder[next]
-            }
-            scheduleHideControls()
-            return
-        }
         guard duration > 0 else { return }
 
-        // Accelerate when presses come in quick succession.
-        let now = Date()
-        if now.timeIntervalSince(lastScrubPressAt) < 0.45 {
-            scrubStepRepeat = min(scrubStepRepeat + 1, 12)
-        } else {
-            scrubStepRepeat = 0
-        }
-        lastScrubPressAt = now
-        let step: Double = scrubStepRepeat >= 8 ? 60 : (scrubStepRepeat >= 3 ? 30 : tvDpadSeekSeconds)
-
-        // Enter scrub mode (preview only — no seek yet).
-        if !isScrubbing {
-            isScrubbing = true
-            scrubStartTime = currentTime
-            scrubTime = currentTime
-        }
-        hideControlsTask?.cancel()  // keep controls up while actively scrubbing
-        let delta = direction == .right ? step : -step
-        scrubTime = max(0, min(duration, scrubTime + delta))
-        showScrubPreview = true
-
-        // Debounce the commit.
-        scrubCommitTask?.cancel()
-        scrubCommitTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(600))
-            guard !Task.isCancelled else { return }
-            commitTVScrub()
-        }
+        // Left/right is a direct 15-second skip. Always.
+        //
+        // It used to be a debounced scrub-preview: press repeatedly, watch a preview
+        // position slide, and 600ms after you stopped it committed a seek. That fought
+        // the focus engine for the same axis, which is why the transport row's buttons
+        // could not be reached — left/right could not both walk the row and scrub, so
+        // scrubbing won and four rendered buttons were dead. Reserving the axis for the
+        // one action people actually want from a d-pad (skip back / skip forward) makes
+        // the behaviour predictable and frees on-screen selection for everything else:
+        // up/down reaches captions, speed, and the transport buttons, and Select
+        // activates them.
+        //
+        // No acceleration ladder and no preview: one press, one 15s jump, seek issued
+        // immediately. The seek coalescer upstream already handles rapid repeats
+        // correctly (latest-wins with an in-flight guard), so holding the direction
+        // still scans quickly without a second debouncing mechanism layered on top.
+        hideControlsTask?.cancel()
+        let delta = direction == .right ? skipForwardSeconds : -skipBackwardSeconds
+        let target = max(0, min(duration, currentTime + delta))
+        currentTime = target
+        seek(to: target)
+        showSkipAnimation(direction: direction == .right ? .forward : .backward)
+        scheduleHideControls()
     }
 
     // Commit the previewed scrub position to an actual seek and exit scrub mode.
