@@ -326,8 +326,20 @@ func main() {
 						SELECT id, ROW_NUMBER() OVER (ORDER BY change_seq ASC, rowid ASC) AS n FROM items
 					)
 					UPDATE items SET change_seq = (SELECT n FROM renum WHERE renum.id = items.id)`)
+				// deleted_items was written from the SAME inflated counter, so it has to be
+				// rebased in the same transaction. Leaving it alone strands every tombstone
+				// permanently above item_seq: /sync/deleted returns the whole history on
+				// every request, and any tombstone naming a since-rescanned item makes the
+				// client delete a row that exists. Clamp them to the new ceiling so they
+				// stay ordered and fall below all future deletions.
+				_, e3 := tx.Exec(
+					`UPDATE deleted_items SET change_seq = ? WHERE change_seq > ?`, itemCount, itemCount)
+				// Drop tombstones for items that exist again — a rescan re-added them, so
+				// the deletion is no longer true and must never be replayed.
+				_, e4 := tx.Exec(
+					`DELETE FROM deleted_items WHERE item_id IN (SELECT id FROM items)`)
 				_, e2 := tx.Exec(`UPDATE sync_state SET value = ? WHERE key = 'item_seq'`, itemCount)
-				if e1 == nil && e2 == nil && tx.Commit() == nil {
+				if e1 == nil && e2 == nil && e3 == nil && e4 == nil && tx.Commit() == nil {
 					log.Printf("[sync] repaired runaway item_seq: %d -> %d across %d items (was %.0fx item count)",
 						itemSeq, itemCount, itemCount, float64(itemSeq)/float64(itemCount))
 				} else {
@@ -4993,8 +5005,25 @@ func (s *Server) handleSyncDeleted(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	itemSeq, _ := s.getSyncSeqs()
 
+	// NEVER report a tombstone for an item that currently exists.
+	//
+	// Observed live on a real NAS: 2,156 tombstones, 2,057 of them carrying change_seq
+	// values up to 110,235,720 from the runaway-counter incident — and 1,011 of those
+	// naming items that are still in `items` right now. The startup repair rebases
+	// items.change_seq and item_seq (to 5,462 here) but never touches deleted_items, so
+	// every tombstone stayed above every live sequence. Result: on each sync the client
+	// asked for deletions since its cursor, received a thousand stale tombstones, and
+	// deleted items it had just downloaded — the home rails computed from a library the
+	// client kept emptying, so Continue Watching and Just Added rendered blank forever.
+	//
+	// The NOT EXISTS join is the durable fix: a tombstone is only meaningful while the
+	// row is actually gone. It is also self-healing for every client already in this
+	// state, with no app update required, and it costs one indexed anti-join.
 	rows, err := s.db.Query(
-		`SELECT item_id FROM deleted_items WHERE change_seq > ? ORDER BY change_seq ASC`, since)
+		`SELECT d.item_id FROM deleted_items d
+		 WHERE d.change_seq > ?
+		   AND NOT EXISTS (SELECT 1 FROM items i WHERE i.id = d.item_id)
+		 ORDER BY d.change_seq ASC`, since)
 	if err != nil {
 		// Table may not exist yet — return empty list gracefully
 		writeJSON(w, http.StatusOK, map[string]any{"deletedIds": []string{}, "asOf": itemSeq})
