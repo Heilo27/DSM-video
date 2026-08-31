@@ -104,10 +104,26 @@ struct DiagnosticLogView: View {
         }
         .accessibilityLabel("Clear log")
         .accessibilityHint("Deletes all diagnostic entries")
+        // Refresh lives HERE, not only in .toolbar: tvOS does not reliably render
+        // ToolbarItem, which is how the library search control shipped invisible on the
+        // TV. Entries are captured once in .onAppear, so without a working refresh this
+        // screen shows a stale snapshot — on the one device where re-opening it is the
+        // only other way to reload.
+        Button("Refresh") { entries = DiagnosticLog.shared.entries }
+          .accessibilityLabel("Refresh log")
+          .accessibilityHint("Reloads the newest entries")
       }
+      #if os(tvOS)
+      .font(.system(.title3, design: .monospaced))
+      #else
       .font(.system(.caption, design: .monospaced))
+      #endif
       Text("\(visible.count) entries — newest first")
+      #if os(tvOS)
+        .font(.system(.body, design: .monospaced))
+      #else
         .font(.system(.caption2, design: .monospaced))
+      #endif
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal)
@@ -126,23 +142,42 @@ struct DiagnosticLogView: View {
 
   // MARK: - Row
 
+  /// Row typography is deliberately platform-split.
+  ///
+  /// The whole point of this screen is that it gets PHOTOGRAPHED from across a living
+  /// room and sent over chat. `.caption` monospaced is fine held in the hand at 12
+  /// inches and is illegible on a television at ten feet — which would make the one
+  /// diagnostic surface built for the Apple TV useless on the Apple TV. tvOS gets a
+  /// real reading size and a wider category gutter to match.
+  #if os(tvOS)
+  private static let rowFont: Font = .system(.body, design: .monospaced)
+  private static let tagFont: Font = .system(.callout, design: .monospaced)
+  private static let tagWidth: CGFloat = 110
+  private static let rowSpacing: CGFloat = 14
+  #else
+  private static let rowFont: Font = .system(.caption, design: .monospaced)
+  private static let tagFont: Font = .system(.caption2, design: .monospaced)
+  private static let tagWidth: CGFloat = 62
+  private static let rowSpacing: CGFloat = 8
+  #endif
+
   private func row(_ entry: DiagnosticLog.Entry) -> some View {
-    HStack(alignment: .firstTextBaseline, spacing: 8) {
+    HStack(alignment: .firstTextBaseline, spacing: Self.rowSpacing) {
       Text(Self.timeFormatter.string(from: entry.date))
-        .font(.system(.caption, design: .monospaced))
+        .font(Self.rowFont)
         .foregroundStyle(.secondary)
 
       Text(entry.level.symbol)
-        .font(.system(.caption, design: .monospaced).bold())
+        .font(Self.rowFont.bold())
         .foregroundStyle(color(for: entry.level))
 
       Text(entry.category.rawValue)
-        .font(.system(.caption2, design: .monospaced).bold())
+        .font(Self.tagFont.bold())
         .foregroundStyle(.white.opacity(0.6))
-        .frame(width: 62, alignment: .leading)
+        .frame(width: Self.tagWidth, alignment: .leading)
 
       Text(entry.message)
-        .font(.system(.caption, design: .monospaced))
+        .font(Self.rowFont)
         .foregroundStyle(entry.level == .info ? .white : color(for: entry.level))
         .fixedSize(horizontal: false, vertical: true)
 

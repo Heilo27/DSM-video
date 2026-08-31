@@ -1024,6 +1024,20 @@ private struct TVSettingsView: View {
         Section("Server") {
           LabeledContent("Connected To", value: appState.baseURL.isEmpty ? "Unknown" : appState.baseURL)
           LabeledContent("Signed in as", value: appState.username)
+
+          // The diagnostic log was ONLY reachable from the iOS Settings screen
+          // (MainView's SettingsView), which tvOS never renders — ContentView routes
+          // tvOS straight to TVMainView. So the screen written specifically for "the
+          // device that is hardest to debug" shipped on the device that is easiest to
+          // debug, and not on the Apple TV. DiagnosticLog itself was always recording
+          // here; there was simply no way to read it without a Mac attached.
+          NavigationLink {
+            DiagnosticLogView()
+          } label: {
+            Label("Diagnostic Log", systemImage: "stethoscope")
+          }
+          .accessibilityLabel("Diagnostic Log")
+          .accessibilityHint("Recent activity, for troubleshooting sign-in and loading problems")
         }
 
         Section {
