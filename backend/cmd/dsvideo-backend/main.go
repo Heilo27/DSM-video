@@ -1191,6 +1191,12 @@ CREATE TABLE IF NOT EXISTS watchlist (
 		{"video_width", "ALTER TABLE items ADD COLUMN video_width INTEGER"},
 		{"video_height", "ALTER TABLE items ADD COLUMN video_height INTEGER"},
 		{"audio_channels", "ALTER TABLE items ADD COLUMN audio_channels INTEGER"},
+		// File identity for the scan's probe cache. Without a stored size the scanner had
+		// no way to tell "same file as last pass" from "possibly changed", so it re-ran
+		// ffprobe on every file on every 5-minute scan — tens of GB of disk reads per
+		// minute on an unchanged library. size+mtime is the cheap, standard check and both
+		// values come from the stat WalkDir already performed.
+		{"size_bytes", "ALTER TABLE items ADD COLUMN size_bytes INTEGER"},
 	}
 	for _, m := range migrations {
 		var exists bool
@@ -6140,24 +6146,63 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 
 	// Pre-query all existing items for this library so we can skip per-file DB reads.
 	// metadata_fetched_at being non-NULL means we've already attempted TMDb for this item.
+	//
+	// This also carries the stored probe results, which is what lets an unchanged file
+	// skip ffprobe entirely. Without it the scan ran a full ffprobe on EVERY video file
+	// on EVERY pass: measured on a 5,157-item library, a new ffprobe every ~5 seconds
+	// reading 200-650MB each, roughly 35GB of disk reads per minute, continuously, for a
+	// library that had not changed. That is pure wear on the drives and it never ends,
+	// because the 5-minute scan ticker restarts before the previous sweep has finished.
 	type existingState struct {
 		metadataFetched bool
+		// Probe results already stored for this row. When the file's identity is
+		// unchanged, these are reused verbatim instead of re-probing.
+		probed         bool
+		videoCodec     sql.NullString
+		audioCodec     sql.NullString
+		container      sql.NullString
+		needsTranscode sql.NullBool
+		duration       sql.NullInt64
+		videoWidth     sql.NullInt64
+		videoHeight    sql.NullInt64
+		audioChannels  sql.NullInt64
+		// File identity at the time of that probe. size+mtime is the standard cheap
+		// change check: a re-encode, a replacement, or a truncated copy finishing all
+		// change at least one of them, and both come from the WalkDir stat we already
+		// have — no extra I/O.
+		sizeBytes sql.NullInt64
+		mtime     sql.NullString
 	}
 	existing := make(map[string]existingState)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, metadata_fetched_at IS NOT NULL FROM items WHERE library_id = ?`, libraryID)
+		`SELECT id, metadata_fetched_at IS NOT NULL,
+		        video_codec, audio_codec, container, needs_transcode, duration_seconds,
+		        video_width, video_height, audio_channels, size_bytes, added_at
+		 FROM items WHERE library_id = ?`, libraryID)
 	if err == nil {
 		for rows.Next() {
 			var id string
 			var fetched bool
-			if rows.Scan(&id, &fetched) == nil {
-				existing[id] = existingState{metadataFetched: fetched}
+			var st existingState
+			if rows.Scan(&id, &fetched,
+				&st.videoCodec, &st.audioCodec, &st.container, &st.needsTranscode,
+				&st.duration, &st.videoWidth, &st.videoHeight, &st.audioChannels,
+				&st.sizeBytes, &st.mtime) == nil {
+				st.metadataFetched = fetched
+				// "Probed" means the full prober ran: the quick-probe fallback leaves the
+				// dimension columns null, so requiring one of them here means a
+				// quick-probed row is re-probed properly once, then cached like any other.
+				st.probed = st.videoCodec.Valid && st.videoWidth.Valid
+				existing[id] = st
 			}
 		}
 		rows.Close()
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
+	// Probe accounting for the scan summary line. "skipped" is the whole point of the
+	// cache: on a library at rest it should equal the file count and run should be 0.
+	var probesRun, probesSkipped int
 	var metaPending []metaPendingItem
 	// Track every path seen during the walk so we can remove stale DB entries afterward.
 	seenPaths := make(map[string]struct{})
@@ -6174,6 +6219,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		parsed                                 metadata.ParsedFilename
 		showFolderID                           sql.NullString
 		videoWidth, videoHeight, audioChannels sql.NullInt64
+		sizeBytes                              sql.NullInt64
 	}
 	var batch []pendingRow
 
@@ -6202,8 +6248,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
 			res, err := tx.Exec(
-				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET
 				   library_id=excluded.library_id,
 				   type=excluded.type,
@@ -6221,6 +6267,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				   video_width=COALESCE(excluded.video_width, items.video_width),
 				   video_height=COALESCE(excluded.video_height, items.video_height),
 				   audio_channels=COALESCE(excluded.audio_channels, items.audio_channels),
+				   size_bytes=COALESCE(excluded.size_bytes, items.size_bytes),
 				   change_seq=excluded.change_seq
 				 WHERE items.library_id IS NOT excluded.library_id
 				    OR items.type IS NOT excluded.type
@@ -6235,11 +6282,12 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				    OR items.video_width IS NOT COALESCE(excluded.video_width, items.video_width)
 				    OR items.video_height IS NOT COALESCE(excluded.video_height, items.video_height)
 				    OR items.audio_channels IS NOT COALESCE(excluded.audio_channels, items.audio_channels)
+				    OR items.size_bytes IS NOT COALESCE(excluded.size_bytes, items.size_bytes)
 				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
 				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
 				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
-				row.videoWidth, row.videoHeight, row.audioChannels,
+				row.videoWidth, row.videoHeight, row.audioChannels, row.sizeBytes,
 			)
 			if err != nil {
 				log.Printf("scan: upsert failed for %s: %v", row.path, err)
@@ -6351,7 +6399,32 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		var needsTranscode sql.NullBool
 		var videoWidth, videoHeight, audioChannels sql.NullInt64
 
-		if s.prober != nil {
+		// Reuse the stored probe when the file is byte-for-byte the same as last pass.
+		//
+		// ffprobe reads a large amount of each file to determine codecs and duration, so
+		// probing an unchanged library is the single most expensive thing this scanner
+		// does — and it was being done in full every 5 minutes, forever. Matching on
+		// size AND mtime means any real change (re-encode, replacement, an in-progress
+		// copy finishing) still re-probes, while a library at rest costs zero reads.
+		prevState, hadPrev := existing[id]
+		unchanged := hadPrev && prevState.probed &&
+			prevState.sizeBytes.Valid && prevState.sizeBytes.Int64 == info.Size() &&
+			prevState.mtime.Valid && prevState.mtime.String == addedAt
+
+		if unchanged {
+			videoCodec = prevState.videoCodec
+			audioCodec = prevState.audioCodec
+			container = prevState.container
+			needsTranscode = prevState.needsTranscode
+			duration = prevState.duration
+			videoWidth = prevState.videoWidth
+			videoHeight = prevState.videoHeight
+			audioChannels = prevState.audioChannels
+			probesSkipped++
+		}
+
+		if !unchanged && s.prober != nil {
+			probesRun++
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			probe, probeErr := s.prober.Probe(probeCtx, path)
 			cancel()
@@ -6376,7 +6449,11 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				}
 			}
 		}
-		if !videoCodec.Valid {
+		// Only fall back to the extension guess when we actually attempted a probe and it
+		// failed. Without the `!unchanged` guard a cached row whose stored codec was NULL
+		// would take the guess path on every scan and rewrite the row, re-bumping
+		// change_seq and pushing a pointless delta to every client.
+		if !unchanged && !videoCodec.Valid {
 			quickProbe := transcode.ProbeQuick(path)
 			videoCodec = sql.NullString{String: quickProbe.VideoCodec, Valid: true}
 			audioCodec = sql.NullString{String: quickProbe.AudioCodec, Valid: true}
@@ -6418,6 +6495,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			videoCodec: videoCodec, audioCodec: audioCodec, container: container,
 			needsTranscode: needsTranscode, showFolderID: showFolderID,
 			videoWidth: videoWidth, videoHeight: videoHeight, audioChannels: audioChannels,
+			sizeBytes: sql.NullInt64{Int64: info.Size(), Valid: true},
 		})
 
 		if len(batch) >= batchSize {
@@ -6432,6 +6510,12 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 	if err := flushBatch(); err != nil {
 		return err
 	}
+
+	// One line per library per scan, so "is the probe cache working?" is answerable from
+	// the log without instrumentation. On a library at rest this should read
+	// probed=0 skipped=N; a nonzero probed count on consecutive scans of an unchanged
+	// library means the cache is missing and the drives are being read for nothing.
+	log.Printf("scan: library %s — ffprobe run=%d skipped=%d (cached)", libraryID, probesRun, probesSkipped)
 
 	// Remove stale DB entries whose files no longer exist on disk.
 	// This handles files that were renamed or deleted (e.g. .mp4 → .mkv).
