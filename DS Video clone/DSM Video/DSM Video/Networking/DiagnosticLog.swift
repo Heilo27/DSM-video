@@ -209,9 +209,17 @@ final class DiagnosticLog: @unchecked Sendable {
   }
 }
 
-/// Shorthand used at call sites. `nonisolated` so it is reachable from actors and
-/// callbacks, not just the main actor — see the note on the logging methods above.
-nonisolated(unsafe) let dlog = DiagnosticLog.shared
+/// Shorthand used at call sites.
+///
+/// `nonisolated` (not `nonisolated(unsafe)`): the project builds with
+/// SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor, so a bare `let` here is MainActor-bound and
+/// unreachable from LocalStore (an `actor`) or a URLSession callback — which is precisely
+/// where the failures worth logging happen.
+///
+/// The plain `nonisolated` form is what this needs. `nonisolated(unsafe)` was the first
+/// attempt and Xcode Cloud rejected it as redundant, because DiagnosticLog is already
+/// Sendable and no unsafe opt-out is required to share it.
+nonisolated let dlog = DiagnosticLog.shared
 
 extension URLError.Code {
   /// Human-readable name for the log. A raw code like `-1004` means nothing in a photograph
