@@ -40,7 +40,11 @@ final class DiagnosticLog: @unchecked Sendable {
     let level: Level
     let message: String
 
-    init(date: Date, category: Category, level: Level, message: String) {
+    // `nonisolated`: Entry is an immutable Sendable value type, but the project's default
+    // MainActor isolation would otherwise bind its init to the main actor — making it
+    // unconstructible from the nonisolated log() path that exists precisely so actors and
+    // callbacks can record diagnostics.
+    nonisolated init(date: Date, category: Category, level: Level, message: String) {
       self.id = UUID()
       self.date = date
       self.category = category
@@ -100,7 +104,7 @@ final class DiagnosticLog: @unchecked Sendable {
 
   // MARK: - Writing
 
-  func log(_ category: Category, _ level: Level, _ message: String) {
+  nonisolated func log(_ category: Category, _ level: Level, _ message: String) {
     let entry = Entry(date: Date(), category: category, level: level, message: message)
     queue.async { [weak self] in
       guard let self else { return }
@@ -117,9 +121,19 @@ final class DiagnosticLog: @unchecked Sendable {
     }
   }
 
-  func info(_ category: Category, _ message: String) { log(category, .info, message) }
-  func warn(_ category: Category, _ message: String) { log(category, .warn, message) }
-  func error(_ category: Category, _ message: String) { log(category, .error, message) }
+  // `nonisolated` on the whole write surface. The project builds with
+  // SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor, so without this these are MainActor-bound
+  // and unreachable from any other domain — including LocalStore, which is an `actor`,
+  // and any URLSession callback. That is exactly where the interesting failures happen:
+  // a diagnostic log you cannot call from the failing code is useless.
+  //
+  // Safe because DiagnosticLog is already @unchecked Sendable and every mutation goes
+  // through its own serial queue (see the type's header). Isolation was the obstacle
+  // here, never thread-safety. Under Swift 5 these are warnings; Xcode Cloud's newer
+  // toolchain promotes them to errors, which is how this surfaced.
+  nonisolated func info(_ category: Category, _ message: String) { log(category, .info, message) }
+  nonisolated func warn(_ category: Category, _ message: String) { log(category, .warn, message) }
+  nonisolated func error(_ category: Category, _ message: String) { log(category, .error, message) }
 
   // MARK: - Reading
 
@@ -195,8 +209,9 @@ final class DiagnosticLog: @unchecked Sendable {
   }
 }
 
-/// Shorthand used at call sites.
-let dlog = DiagnosticLog.shared
+/// Shorthand used at call sites. `nonisolated` so it is reachable from actors and
+/// callbacks, not just the main actor — see the note on the logging methods above.
+nonisolated(unsafe) let dlog = DiagnosticLog.shared
 
 extension URLError.Code {
   /// Human-readable name for the log. A raw code like `-1004` means nothing in a photograph

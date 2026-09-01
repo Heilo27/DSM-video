@@ -1197,6 +1197,13 @@ CREATE TABLE IF NOT EXISTS watchlist (
 		// minute on an unchanged library. size+mtime is the cheap, standard check and both
 		// values come from the stat WalkDir already performed.
 		{"size_bytes", "ALTER TABLE items ADD COLUMN size_bytes INTEGER"},
+		// Records that the FULL prober ran for this row, as opposed to the extension-guess
+		// fallback. Inferring it from "video_width IS NOT NULL" cannot tell "never properly
+		// probed" apart from "probed fine, but ffprobe could not read dimensions" — which is
+		// what damaged or truncated files look like. Those files then failed the cache test
+		// on every pass and were re-probed forever: a small, permanent version of the very
+		// bug the cache exists to prevent. An explicit marker cannot be ambiguous.
+		{"probed_at", "ALTER TABLE items ADD COLUMN probed_at TEXT"},
 	}
 	for _, m := range migrations {
 		var exists bool
@@ -6172,12 +6179,14 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		// have — no extra I/O.
 		sizeBytes sql.NullInt64
 		mtime     sql.NullString
+		probedAt  sql.NullString
 	}
 	existing := make(map[string]existingState)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, metadata_fetched_at IS NOT NULL,
 		        video_codec, audio_codec, container, needs_transcode, duration_seconds,
-		        video_width, video_height, audio_channels, size_bytes, added_at
+		        video_width, video_height, audio_channels, size_bytes, added_at,
+		        probed_at
 		 FROM items WHERE library_id = ?`, libraryID)
 	if err == nil {
 		for rows.Next() {
@@ -6187,12 +6196,12 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			if rows.Scan(&id, &fetched,
 				&st.videoCodec, &st.audioCodec, &st.container, &st.needsTranscode,
 				&st.duration, &st.videoWidth, &st.videoHeight, &st.audioChannels,
-				&st.sizeBytes, &st.mtime) == nil {
+				&st.sizeBytes, &st.mtime, &st.probedAt) == nil {
 				st.metadataFetched = fetched
-				// "Probed" means the full prober ran: the quick-probe fallback leaves the
-				// dimension columns null, so requiring one of them here means a
-				// quick-probed row is re-probed properly once, then cached like any other.
-				st.probed = st.videoCodec.Valid && st.videoWidth.Valid
+				// A row counts as probed when the marker is set. Rows written before this
+				// column existed fall back to the old dimension heuristic so they migrate
+				// naturally: they re-probe once, get stamped, and are cached from then on.
+				st.probed = st.probedAt.Valid || (st.videoCodec.Valid && st.videoWidth.Valid)
 				existing[id] = st
 			}
 		}
@@ -6220,6 +6229,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		showFolderID                           sql.NullString
 		videoWidth, videoHeight, audioChannels sql.NullInt64
 		sizeBytes                              sql.NullInt64
+		probedAt                               sql.NullString
 	}
 	var batch []pendingRow
 
@@ -6248,8 +6258,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
 			res, err := tx.Exec(
-				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes, probed_at)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET
 				   library_id=excluded.library_id,
 				   type=excluded.type,
@@ -6268,6 +6278,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				   video_height=COALESCE(excluded.video_height, items.video_height),
 				   audio_channels=COALESCE(excluded.audio_channels, items.audio_channels),
 				   size_bytes=COALESCE(excluded.size_bytes, items.size_bytes),
+				   probed_at=COALESCE(excluded.probed_at, items.probed_at),
 				   change_seq=excluded.change_seq
 				 WHERE items.library_id IS NOT excluded.library_id
 				    OR items.type IS NOT excluded.type
@@ -6287,7 +6298,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
 				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
-				row.videoWidth, row.videoHeight, row.audioChannels, row.sizeBytes,
+				row.videoWidth, row.videoHeight, row.audioChannels, row.sizeBytes, row.probedAt,
 			)
 			if err != nil {
 				log.Printf("scan: upsert failed for %s: %v", row.path, err)
@@ -6411,7 +6422,10 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			prevState.sizeBytes.Valid && prevState.sizeBytes.Int64 == info.Size() &&
 			prevState.mtime.Valid && prevState.mtime.String == addedAt
 
+		var probedAt sql.NullString
 		if unchanged {
+			// Carry the existing marker forward untouched.
+			probedAt = prevState.probedAt
 			videoCodec = prevState.videoCodec
 			audioCodec = prevState.audioCodec
 			container = prevState.container
@@ -6428,6 +6442,14 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			probe, probeErr := s.prober.Probe(probeCtx, path)
 			cancel()
+			// Stamp on any completed probe ATTEMPT, not on a successful field read. A
+			// damaged file that ffprobe opens but cannot report dimensions for has still
+			// been probed — re-probing it next pass would read the whole file again and
+			// learn nothing. Only a genuine error leaves the marker unset, so a transient
+			// failure (timeout, locked file) is retried next scan.
+			if probeErr == nil {
+				probedAt = sql.NullString{String: now, Valid: true}
+			}
 			if probeErr == nil && probe != nil {
 				videoCodec = sql.NullString{String: probe.VideoCodec, Valid: true}
 				audioCodec = sql.NullString{String: probe.AudioCodec, Valid: true}
@@ -6496,6 +6518,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			needsTranscode: needsTranscode, showFolderID: showFolderID,
 			videoWidth: videoWidth, videoHeight: videoHeight, audioChannels: audioChannels,
 			sizeBytes: sql.NullInt64{Int64: info.Size(), Valid: true},
+			probedAt:  probedAt,
 		})
 
 		if len(batch) >= batchSize {
@@ -6516,6 +6539,28 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 	// probed=0 skipped=N; a nonzero probed count on consecutive scans of an unchanged
 	// library means the cache is missing and the drives are being read for nothing.
 	log.Printf("scan: library %s — ffprobe run=%d skipped=%d (cached)", libraryID, probesRun, probesSkipped)
+
+	// Guardrail: a settled library must converge on zero probes.
+	//
+	// The scanner previously re-probed every file on every pass — ~35GB of disk reads per
+	// minute, forever, on a library nobody was using. It was invisible because nothing
+	// reported it; it took watching ffprobe processes spawn on the NAS to find. The cache
+	// fixed that, but the same failure can return through any change that makes the
+	// cache-hit test stop matching (a new column read before it is written, a stat field
+	// that drifts, a probe that never stamps its marker). This is the alarm for that.
+	//
+	// Warn only after the warm-up pass has had a chance to populate the cache: probes on a
+	// library that has ALSO cached most of its rows means the cache is leaking, whereas a
+	// first scan legitimately probes everything.
+	if probesSkipped > 0 && probesRun > 0 {
+		leakRatio := float64(probesRun) / float64(probesRun+probesSkipped)
+		if leakRatio > 0.02 {
+			log.Printf("scan: WARNING library %s re-probed %d of %d files (%.1f%%) despite a warm cache — "+
+				"the probe cache is not holding, and these are full-file reads on every scan. "+
+				"Check that probed_at/size_bytes are being written and that mtime is stable.",
+				libraryID, probesRun, probesRun+probesSkipped, leakRatio*100)
+		}
+	}
 
 	// Remove stale DB entries whose files no longer exist on disk.
 	// This handles files that were renamed or deleted (e.g. .mp4 → .mkv).

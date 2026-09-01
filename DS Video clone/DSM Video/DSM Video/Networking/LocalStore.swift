@@ -148,11 +148,14 @@ actor LocalStore {
   private func clearFileProtection(from url: URL) {
     let fm = FileManager.default
     guard fm.fileExists(atPath: url.path) else { return }
-    let current = (try? fm.attributesOfItem(atPath: url.path)[.protectionKey]) as? FileProtectionType
-    guard current != nil, current != .none else { return }
+    // Spell the optional out. `current != .none` on an Optional resolves to
+    // Optional<FileProtectionType>.none (i.e. nil), not FileProtectionType.none — the
+    // compiler warns because it means the opposite of what it reads like.
+    guard let current = (try? fm.attributesOfItem(atPath: url.path)[.protectionKey]) as? FileProtectionType,
+          current != FileProtectionType.none else { return }
     do {
       try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: url.path)
-      log.info("cleared file protection on \(url.lastPathComponent) — was \(String(describing: current))")
+      log.info("cleared file protection on \(url.lastPathComponent) — was \(current.rawValue)")
     } catch {
       log.error("failed clearing file protection on \(url.lastPathComponent): \(error.localizedDescription)")
     }
