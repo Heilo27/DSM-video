@@ -106,16 +106,58 @@ actor LocalStore {
     applyFileProtection(to: dbURL)
     applyFileProtection(to: docs.appendingPathComponent("dsreel.db-wal"))
     applyFileProtection(to: docs.appendingPathComponent("dsreel.db-shm"))
+
+    #if os(tvOS)
+    // Existing tvOS installs already carry .complete on disk from a previous version, and
+    // the attribute persists across app updates — guarding the setter alone would fix new
+    // installs and leave every current one broken. Clear it explicitly.
+    clearFileProtection(from: dbURL)
+    clearFileProtection(from: docs.appendingPathComponent("dsreel.db-wal"))
+    clearFileProtection(from: docs.appendingPathComponent("dsreel.db-shm"))
+    #endif
   }
 
+  /// iOS only. `.complete` makes the file unreadable while the device is LOCKED, which is
+  /// the right privacy posture for a phone — a stolen handset should not yield the user's
+  /// library. tvOS has no lock state and no passcode, so there is nothing to unlock the
+  /// class key: an Apple TV can end up unable to read or write its own database, and both
+  /// SQLite failures here are silent (`try?`, and `exec` ignores its result).
+  ///
+  /// The observable symptom was the home rails being permanently empty on tvOS. The cursor
+  /// write (setItemSeq) never persisted and the item rows read back empty, so every 30s
+  /// cycle re-synced the ENTIRE library from since=0 — confirmed in the server log: 5,005
+  /// sync/items requests paging 0 -> 5,056 and restarting at 0, ~4MB every 30 seconds,
+  /// forever. queryRails() then ran against an empty table and returned nothing, which is
+  /// why Just Added and Continue Watching never appeared while genre filtering, captions
+  /// and playback speed — none of which touch LocalStore — all worked fine.
   private func applyFileProtection(to url: URL) {
+    #if os(iOS)
     let fm = FileManager.default
     guard fm.fileExists(atPath: url.path) else { return }
     try? fm.setAttributes(
       [.protectionKey: FileProtectionType.complete],
       ofItemAtPath: url.path
     )
+    #endif
   }
+
+  #if os(tvOS)
+  /// Undo a protection class written by an earlier build. `.none` is correct on tvOS:
+  /// the device has no lock state, so there is no window in which protection could apply,
+  /// and leaving `.complete` in place makes the database unreadable to its own app.
+  private func clearFileProtection(from url: URL) {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: url.path) else { return }
+    let current = (try? fm.attributesOfItem(atPath: url.path)[.protectionKey]) as? FileProtectionType
+    guard current != nil, current != .none else { return }
+    do {
+      try fm.setAttributes([.protectionKey: FileProtectionType.none], ofItemAtPath: url.path)
+      log.info("cleared file protection on \(url.lastPathComponent) — was \(String(describing: current))")
+    } catch {
+      log.error("failed clearing file protection on \(url.lastPathComponent): \(error.localizedDescription)")
+    }
+  }
+  #endif
 
   private func migrate() throws {
     // Baseline schema — safe to run on any existing DB (all IF NOT EXISTS)
@@ -743,13 +785,32 @@ actor LocalStore {
     }
   }
 
+  /// Persist the delta-sync watermark. Failures are LOUD, not silent.
+  ///
+  /// This used to ignore both the prepare failure and the step result. When the write
+  /// could not land — as happened on tvOS, where a file-protection class the device can
+  /// never unlock made the database unwritable — the cursor silently stayed at 0 and the
+  /// client re-downloaded the entire library every 30 seconds indefinitely, with nothing
+  /// anywhere reporting a problem. A cursor that does not persist is the difference
+  /// between an incremental sync and an infinite one, so it has to be observable.
   func setItemSeq(_ seq: Int) {
     guard let db else { return }
     var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', ?)", -1, &stmt, nil) == SQLITE_OK else { return }
+    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', ?)", -1, &stmt, nil) == SQLITE_OK else {
+      let msg = String(cString: sqlite3_errmsg(db))
+      log.error("setItemSeq: prepare failed — \(msg)")
+      dlog.error(.library, "sync cursor NOT saved (prepare): \(msg)")
+      return
+    }
     defer { sqlite3_finalize(stmt) }
     sqlite3_bind_int64(stmt, 1, Int64(seq))
-    sqlite3_step(stmt)
+    if sqlite3_step(stmt) != SQLITE_DONE {
+      let msg = String(cString: sqlite3_errmsg(db))
+      log.error("setItemSeq: write failed — \(msg)")
+      // Surfaced in the on-device diagnostic log: without this the only symptom is
+      // "the rails are empty", which points at the rails rather than at persistence.
+      dlog.error(.library, "sync cursor NOT saved — every sync will restart from 0: \(msg)")
+    }
   }
 
   func setProgressSeq(_ seq: Int) {

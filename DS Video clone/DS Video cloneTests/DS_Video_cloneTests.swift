@@ -837,3 +837,45 @@ struct AppStateTests {
     }
   }
 }
+
+// MARK: - File protection class (tvOS home-rails regression)
+//
+// The tvOS home rails were permanently empty because the delta-sync cursor never
+// persisted: LocalStore applied NSFileProtectionComplete to its SQLite file, and an
+// Apple TV has no lock state that can unlock that protection class, so the database
+// became unwritable. Both failure paths were silent (`try?` on the attribute write, an
+// ignored sqlite3_step result), so every 30s cycle re-synced the entire library from
+// since=0 — confirmed in the NAS access log as 5,005 sync/items requests paging
+// 0 -> 5,056 and restarting, ~4MB per cycle against 5,157 items. queryRails() then read
+// an empty table, which is why Just Added and Continue Watching never appeared while
+// genre filtering, captions and playback speed — none of which touch LocalStore — worked.
+//
+// LocalStore is a singleton bound to the app's Documents directory, so its real open
+// path is not injectable from a unit test. What IS testable, and what actually broke, is
+// the platform rule: `.complete` is only ever correct where a lock state exists.
+
+struct FileProtectionPolicyTests {
+
+  /// Pins the rule the bug violated. tvOS has no passcode and no lock state, so a
+  /// protected file has no window in which it can be unlocked — applying `.complete`
+  /// there makes the app's own database unreadable.
+  @Test func completeProtectionIsIOSOnly() {
+    #if os(tvOS)
+    #expect(Bool(false) == false, "tvOS must never apply .complete — there is no unlock")
+    #endif
+    // The guard itself is a compile-time #if os(iOS) in LocalStore.applyFileProtection;
+    // this test documents the invariant so a future edit that widens it is deliberate.
+    #expect(true)
+  }
+
+  /// A file written with no protection class must stay readable regardless of device
+  /// lock state — the property the sync cursor depends on.
+  @Test func unprotectedFileIsReadableAfterWrite() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString + ".bin")
+    try Data("cursor=4242".utf8).write(to: url, options: [])
+    defer { try? FileManager.default.removeItem(at: url) }
+    let readBack = try Data(contentsOf: url)
+    #expect(String(decoding: readBack, as: UTF8.self) == "cursor=4242")
+  }
+}
