@@ -33,6 +33,7 @@ type ProbeResult struct {
 	Height         int       // Video height
 	AudioChannels  int       // Channel count of the primary audio stream (e.g. 2, 6, 8)
 	Bitrate        int64     // Overall bitrate in bps
+	VideoCodecTag  string    // FourCC of the video sample entry, e.g. "hvc1", "hev1", "avc1"
 	NeedsTranscode bool      // Pre-computed flag for whether transcoding is needed
 	Chapters       []Chapter // Chapter list (may be empty)
 	EmbeddedSubs   []EmbeddedSubtitle // Text-based embedded subtitle streams (may be empty)
@@ -65,6 +66,7 @@ type ffprobeOutput struct {
 		Index      int               `json:"index"`
 		CodecType  string            `json:"codec_type"`
 		CodecName  string            `json:"codec_name"`
+		CodecTag   string            `json:"codec_tag_string"`
 		Width      int               `json:"width,omitempty"`
 		Height     int               `json:"height,omitempty"`
 		Channels   int               `json:"channels,omitempty"`
@@ -163,6 +165,7 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 		case "video":
 			if result.VideoCodec == "" { // Take first video stream
 				result.VideoCodec = normalizeVideoCodec(stream.CodecName)
+				result.VideoCodecTag = strings.ToLower(stream.CodecTag)
 				result.Width = stream.Width
 				result.Height = stream.Height
 			}
@@ -343,16 +346,16 @@ func normalizeAudioCodec(codec string) string {
 
 // needsTranscode determines if a file needs transcoding for Apple device playback.
 func needsTranscode(result *ProbeResult) bool {
-	// Check container compatibility
-	containerOK := result.Container == "mp4" || result.Container == "mov" || result.Container == "m4v"
-
-	// Check video codec compatibility (H.264 and HEVC are natively supported)
-	videoOK := result.VideoCodec == "h264" || result.VideoCodec == "hevc"
-
-	// Check audio codec compatibility (AAC is the safe option)
-	audioOK := result.AudioCodec == "aac"
-
-	return !containerOK || !videoOK || !audioOK
+	// Delegate to the single decision function rather than re-deriving compatibility here.
+	//
+	// This used to be a hand-rolled copy of the same container/video/audio checks, and the
+	// duplication had teeth: the hev1 fix was added to DecidePlayback* but the SCANNER
+	// writes items.needs_transcode from THIS function, so every hev1 file stayed marked
+	// DirectPlay and kept rendering as a black screen with audio on Apple TV. Two places
+	// deciding the same thing means a fix to one is silently absent from the other.
+	return DecidePlaybackWithTag(
+		result.VideoCodec, result.AudioCodec, result.Container, result.VideoCodecTag,
+	) != DirectPlay
 }
 
 // ExtractEmbeddedSubtitle extracts one text subtitle stream from a container to a

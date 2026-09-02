@@ -133,6 +133,8 @@ type HLSSession struct {
 	VideoPath          string
 	OutputDir          string
 	Mode               PlaybackMode
+	// Source video codec, used to decide whether the hvc1 relabel applies on a copy.
+	VideoCodec         string
 	MaxHeight          int
 	UseABR             bool // true when multi-variant ABR ladder is active
 	SubtitleTracks     []SubtitleTrack
@@ -345,11 +347,30 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		maxHeight = defaultTranscodeMaxHeight
 	}
 
+	// Resolve the source video codec so runFFmpegOnce knows whether the hvc1 relabel
+	// applies to a stream copy. Cheap: a metadata-only ffprobe, and only on session
+	// start. Failure is non-fatal — an empty codec just skips the relabel.
+	// ffprobe sits beside ffmpeg in every install path this package supports (the SPK
+	// bundles both in bin/, and NewProber's own fallback finds it on PATH otherwise).
+	ffprobePath := ""
+	if g.config.FFmpegPath != "" {
+		ffprobePath = filepath.Join(filepath.Dir(g.config.FFmpegPath), "ffprobe")
+	}
+	videoCodec := ""
+	if p := NewProber(ffprobePath); p != nil {
+		pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+		if pr, perr := p.Probe(pctx, videoPath); perr == nil && pr != nil {
+			videoCodec = pr.VideoCodec
+		}
+		pcancel()
+	}
+
 	session := &HLSSession{
 		SessionID:      sessionID,
 		VideoPath:      videoPath,
 		OutputDir:      outputDir,
 		Mode:           mode,
+		VideoCodec:     videoCodec,
 		MaxHeight:      maxHeight,
 		UseABR:         useABR,
 		SubtitleTracks: subtitles,
@@ -743,6 +764,23 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 			)
 		} else {
 			args = append(args, "-c:v", "copy")
+			// Relabel HEVC to hvc1 on the way out.
+			//
+			// `-c:v copy` preserves the source sample entry, so a file tagged hev1 stays
+			// hev1 through a remux — and AVFoundation refuses to initialise an HEVC
+			// decoder from hev1 in MP4/fMP4: audio plays, video renders BLACK, no error.
+			// Routing these to remux only helps if the remux actually rewrites the tag.
+			//
+			// -tag:v hvc1 is a container-level relabel of the copied stream (ffmpeg also
+			// moves the parameter sets into the sample description); it does not
+			// re-encode, so the cost stays that of a copy.
+			//
+			// Scoped to `v:0` via the codec-conditional specifier so an H.264 remux is
+			// untouched — tagging an AVC stream hvc1 would produce a file nothing can
+			// play, which is a worse failure than the one being fixed.
+			if strings.EqualFold(session.VideoCodec, "hevc") {
+				args = append(args, "-tag:v", "hvc1")
+			}
 		}
 	case FullTranscode:
 		switch {

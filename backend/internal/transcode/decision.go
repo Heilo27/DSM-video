@@ -91,12 +91,46 @@ func DecidePlayback(videoCodec, audioCodec, container string) PlaybackMode {
 	return FullTranscode
 }
 
+// hevcTagIsAppleCompatible reports whether an HEVC video sample entry can be played
+// directly by AVFoundation.
+//
+// Apple requires the `hvc1` FourCC for HEVC in MP4/MOV. With `hev1` the parameter sets
+// (VPS/SPS/PPS) live in-band in the bitstream rather than in the sample description, and
+// AVPlayer will not initialise a decoder from it: the file opens, the audio track plays,
+// and the video renders BLACK. No error is raised — which is exactly what makes it hard
+// to diagnose from the client side.
+//
+// The two encodings are otherwise identical. Fixing it is a container-level rewrite, not
+// a re-encode: `ffmpeg -c copy -tag:v hvc1` relabels the sample entry and moves the
+// parameter sets, costing a remux rather than a full transcode.
+//
+// Found on a real library: 15 of 17 HEVC movies carried hev1 and played as audio-only on
+// Apple TV (Sleeping Beauty 1959, The Three Musketeers 1993, Rear Window, North by
+// Northwest, and others). An empty tag is treated as compatible — some probes do not
+// report one, and assuming the worst there would needlessly transcode working files.
+func hevcTagIsAppleCompatible(tag string) bool {
+	return tag != "hev1"
+}
+
+// DecidePlaybackWithTag is DecidePlayback plus the video sample-entry FourCC, which is
+// the only way to catch the hev1 case above. Callers that have a probe should prefer
+// DecidePlaybackFromProbe, which routes here.
+func DecidePlaybackWithTag(videoCodec, audioCodec, container, videoCodecTag string) PlaybackMode {
+	mode := DecidePlayback(videoCodec, audioCodec, container)
+	// Only DirectPlay is unsafe here: remux and transcode both rewrite the container and
+	// will emit hvc1 (or h264) regardless of what the source was tagged.
+	if mode == DirectPlay && videoCodec == "hevc" && !hevcTagIsAppleCompatible(videoCodecTag) {
+		return RemuxOnly
+	}
+	return mode
+}
+
 // DecidePlaybackFromProbe determines playback mode from a ProbeResult.
 func DecidePlaybackFromProbe(probe *ProbeResult) PlaybackMode {
 	if probe == nil {
 		return FullTranscode // Safe fallback
 	}
-	return DecidePlayback(probe.VideoCodec, probe.AudioCodec, probe.Container)
+	return DecidePlaybackWithTag(probe.VideoCodec, probe.AudioCodec, probe.Container, probe.VideoCodecTag)
 }
 
 // PlaybackDecision contains detailed information about the playback decision.
