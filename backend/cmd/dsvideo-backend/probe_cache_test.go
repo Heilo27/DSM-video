@@ -67,35 +67,37 @@ func TestMissingStoredIdentityForcesReprobe(t *testing.T) {
 	}
 }
 
-// Clearing probed_at must actually force a re-probe.
+// probed_at is the SOLE authority for "the full prober has run on this row".
 //
-// The first version of this predicate was `probedAt.Valid || (videoCodec.Valid &&
-// videoWidth.Valid)`, so a fully-populated row still counted as probed with a NULL
-// stamp — and because the cache-hit branch carries the old stamp forward, the row could
-// never be re-probed OR re-stamped. Setting probed_at = NULL, the obvious way to say
-// "look at this file again", silently did nothing. Found after relabelling 78 files from
-// hev1 to hvc1: the new tags were never picked up.
-func probedPredicate(probedAtValid, sizeValid, codecValid, widthValid bool) bool {
-	return probedAtValid || (!sizeValid && codecValid && widthValid)
-}
+// Two failures came from trying to be clever here instead. First the predicate was
+// `probedAt.Valid || (videoCodec.Valid && videoWidth.Valid)`, so a populated row counted
+// as probed with a NULL stamp — clearing the column to force a re-probe silently did
+// nothing, and the row could never be re-stamped either. Then it was narrowed to
+// `!sizeBytes.Valid && ...`, which invalidated every already-cached row at once and put
+// the scanner back to probing the whole library every 5 minutes (observed live as
+// run=4625 skipped=29 on a 5,157-item library).
+//
+// The rule is now just `probedAt.Valid`, with a one-time backfill in migrate() for rows
+// that predate the column. Read-time inference cannot tell "old row" from "deliberately
+// cleared", and being wrong in either direction is expensive.
+func probedPredicate(probedAtValid bool) bool { return probedAtValid }
 
 func TestClearingProbedAtForcesReprobe(t *testing.T) {
-	// Modern row (has size_bytes) with the stamp cleared: must NOT count as probed.
-	if probedPredicate(false, true, true, true) {
+	if probedPredicate(false) {
 		t.Fatal("a cleared probed_at must force a re-probe, or the stamp can never be restored")
 	}
 }
 
-func TestLegacyRowWithoutSizeStillUsesFallback(t *testing.T) {
-	// Pre-migration row: no size_bytes, no stamp, but real probe data. Treat as probed so
-	// the whole library is not re-probed on the upgrade that adds the column.
-	if !probedPredicate(false, false, true, true) {
-		t.Fatal("legacy rows must migrate without a full-library re-probe")
+func TestStampedRowIsAlwaysProbed(t *testing.T) {
+	if !probedPredicate(true) {
+		t.Fatal("an explicit stamp is authoritative even when dimensions are unreadable")
 	}
 }
 
-func TestStampedRowIsAlwaysProbed(t *testing.T) {
-	if !probedPredicate(true, true, false, false) {
-		t.Fatal("an explicit stamp is authoritative even when dimensions are unreadable")
+// Guards the regression directly: a row with full probe data but no stamp must NOT be
+// treated as probed at read time. Migration backfills those; inference must not.
+func TestPopulatedRowWithoutStampIsNotProbed(t *testing.T) {
+	if probedPredicate(false) {
+		t.Fatal("read-time inference is what caused both regressions — the stamp is the only input")
 	}
 }

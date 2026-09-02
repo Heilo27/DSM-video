@@ -1212,6 +1212,31 @@ CREATE TABLE IF NOT EXISTS watchlist (
 			if _, err := db.Exec(m.sql); err != nil {
 				return fmt.Errorf("migration %s: %w", m.column, err)
 			}
+			// One-time backfill, immediately after the column is created.
+			//
+			// probed_at is the sole authority for "has the full prober run on this row",
+			// and it must stay that way so clearing it is a usable way to force a
+			// re-probe. But rows written before the column existed have real probe data
+			// and no stamp, and treating them as unprobed would re-probe the ENTIRE
+			// library at once — full-file ffmpeg reads on every item. Stamp them here,
+			// where "the column was just added" is unambiguous, rather than inferring it
+			// at read time where an old row and a deliberately-cleared row are
+			// indistinguishable.
+			//
+			// The dimension check identifies rows the FULL prober handled; rows that only
+			// got the extension-guess fallback are left unstamped and get one proper
+			// probe, which is the intended behaviour.
+			if m.column == "probed_at" {
+				res, bErr := db.Exec(
+					`UPDATE items SET probed_at = ?
+					 WHERE probed_at IS NULL AND video_codec IS NOT NULL AND video_width IS NOT NULL`,
+					time.Now().UTC().Format(time.RFC3339))
+				if bErr != nil {
+					log.Printf("[migrate] probed_at backfill failed: %v", bErr)
+				} else if n, _ := res.RowsAffected(); n > 0 {
+					log.Printf("[migrate] backfilled probed_at on %d already-probed rows", n)
+				}
+			}
 		}
 	}
 
@@ -6198,20 +6223,22 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				&st.duration, &st.videoWidth, &st.videoHeight, &st.audioChannels,
 				&st.sizeBytes, &st.mtime, &st.probedAt) == nil {
 				st.metadataFetched = fetched
-				// A row counts as probed when the marker is set. Rows written before this
-				// column existed fall back to the old dimension heuristic so they migrate
-				// naturally: they re-probe once, get stamped, and are cached from then on.
-				// The legacy fallback applies ONLY to rows predating the probed_at column —
-				// i.e. those whose size_bytes was never recorded either. Once size_bytes
-				// exists, probed_at is the sole authority.
+				// probed_at is the SOLE authority. No fallback heuristic.
 				//
-				// Without that restriction, clearing probed_at to force a re-probe did
-				// nothing: the row still satisfied the fallback, `unchanged` stayed true,
-				// and the branch carried the NULL stamp forward — so the row was never
-				// re-probed and probed_at could never become set again. That is exactly
-				// what happened after the hev1 relabel, when the new tags needed picking
-				// up. A NULL stamp must mean "re-probe me".
-				st.probed = st.probedAt.Valid || (!st.sizeBytes.Valid && st.videoCodec.Valid && st.videoWidth.Valid)
+				// A NULL stamp means "re-probe me" — that is what makes clearing the
+				// column a usable operator action (it is how the hev1 relabel got picked
+				// up). Any fallback that infers "probed" from other columns defeats that,
+				// because the cache-hit branch then carries the NULL forward and the row
+				// can never be re-probed OR re-stamped.
+				//
+				// Rows predating this column are handled by a one-time backfill in
+				// migrate(), NOT here. Inferring it at read time cannot distinguish "old
+				// row" from "deliberately cleared", and getting that wrong is expensive in
+				// both directions: too lenient and a forced re-probe silently does
+				// nothing; too strict and every cached row is invalidated at once, which
+				// put the scanner back to probing the whole library every 5 minutes
+				// (observed live as run=4625 skipped=29).
+				st.probed = st.probedAt.Valid
 				existing[id] = st
 			}
 		}
