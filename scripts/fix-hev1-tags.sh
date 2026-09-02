@@ -33,6 +33,16 @@
 #   sh fix-hev1-tags.sh --limit 3            # convert 3 files, verify, then continue
 #   sh fix-hev1-tags.sh                      # convert everything
 #
+# KNOWN LIMITATION — run it twice.
+#   The file list is built once, up front, and each conversion replaces a file in the
+#   tree while the loop is still walking it. On a real run of 100 files this caused the
+#   first pass to convert 44 and exit CLEANLY (converted=51 skipped=5072 failed=0) with
+#   34 still tagged hev1 — it skipped alternating episodes in the same folder. A second
+#   pass converted the remainder and a direct disk scan then confirmed zero hev1 left.
+#   Nothing is lost or corrupted, the sweep is just incomplete, and it is safe to re-run
+#   because already-hvc1 files are skipped. Always verify by scanning the DISK afterwards
+#   rather than trusting this script's own counters.
+#
 set -u
 
 FFMPEG=${FFMPEG:-/var/packages/DSVideoServer/target/bin/ffmpeg}

@@ -66,3 +66,36 @@ func TestMissingStoredIdentityForcesReprobe(t *testing.T) {
 		t.Fatal("no stored size means we cannot claim the file is unchanged")
 	}
 }
+
+// Clearing probed_at must actually force a re-probe.
+//
+// The first version of this predicate was `probedAt.Valid || (videoCodec.Valid &&
+// videoWidth.Valid)`, so a fully-populated row still counted as probed with a NULL
+// stamp — and because the cache-hit branch carries the old stamp forward, the row could
+// never be re-probed OR re-stamped. Setting probed_at = NULL, the obvious way to say
+// "look at this file again", silently did nothing. Found after relabelling 78 files from
+// hev1 to hvc1: the new tags were never picked up.
+func probedPredicate(probedAtValid, sizeValid, codecValid, widthValid bool) bool {
+	return probedAtValid || (!sizeValid && codecValid && widthValid)
+}
+
+func TestClearingProbedAtForcesReprobe(t *testing.T) {
+	// Modern row (has size_bytes) with the stamp cleared: must NOT count as probed.
+	if probedPredicate(false, true, true, true) {
+		t.Fatal("a cleared probed_at must force a re-probe, or the stamp can never be restored")
+	}
+}
+
+func TestLegacyRowWithoutSizeStillUsesFallback(t *testing.T) {
+	// Pre-migration row: no size_bytes, no stamp, but real probe data. Treat as probed so
+	// the whole library is not re-probed on the upgrade that adds the column.
+	if !probedPredicate(false, false, true, true) {
+		t.Fatal("legacy rows must migrate without a full-library re-probe")
+	}
+}
+
+func TestStampedRowIsAlwaysProbed(t *testing.T) {
+	if !probedPredicate(true, true, false, false) {
+		t.Fatal("an explicit stamp is authoritative even when dimensions are unreadable")
+	}
+}

@@ -6201,7 +6201,17 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				// A row counts as probed when the marker is set. Rows written before this
 				// column existed fall back to the old dimension heuristic so they migrate
 				// naturally: they re-probe once, get stamped, and are cached from then on.
-				st.probed = st.probedAt.Valid || (st.videoCodec.Valid && st.videoWidth.Valid)
+				// The legacy fallback applies ONLY to rows predating the probed_at column —
+				// i.e. those whose size_bytes was never recorded either. Once size_bytes
+				// exists, probed_at is the sole authority.
+				//
+				// Without that restriction, clearing probed_at to force a re-probe did
+				// nothing: the row still satisfied the fallback, `unchanged` stayed true,
+				// and the branch carried the NULL stamp forward — so the row was never
+				// re-probed and probed_at could never become set again. That is exactly
+				// what happened after the hev1 relabel, when the new tags needed picking
+				// up. A NULL stamp must mean "re-probe me".
+				st.probed = st.probedAt.Valid || (!st.sizeBytes.Valid && st.videoCodec.Valid && st.videoWidth.Valid)
 				existing[id] = st
 			}
 		}
