@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -548,6 +549,18 @@ func main() {
 			if n := len(hlsVictims); n > 0 {
 				log.Printf("[playSessions] reaped %d idle HLS session(s)", n)
 			}
+
+			// Reap persisted rows on the same idle clock. Uses last_access rather than the
+			// in-memory map so rows left behind by a restart (whose map entries no longer
+			// exist) are also cleaned up — otherwise the table would only ever grow.
+			cutoff := now.Add(-playSessionIdleGrace).UTC().Format(time.RFC3339)
+			if res, err := s.db.Exec(`DELETE FROM play_sessions WHERE last_access < ?`, cutoff); err == nil {
+				if n, _ := res.RowsAffected(); n > 0 {
+					log.Printf("[playSessions] reaped %d persisted session row(s)", n)
+				}
+			} else {
+				log.Printf("[playSessions] persisted reap failed: %v", err)
+			}
 		}
 	}()
 
@@ -756,8 +769,69 @@ func main() {
 		log.Printf("WARNING: DSVIDEO_BASE_URL not set — stream URLs will use Host header heuristic. Set DSVIDEO_BASE_URL to the public URL of this server for reliable QuickConnect/relay playback.")
 	}
 	log.Printf("DS Video backend listening on %s", cfg.ListenAddr)
-	if err := http.ListenAndServe(cfg.ListenAddr, r); err != nil {
+
+	// Explicit http.Server rather than ListenAndServe, so shutdown can be graceful and so
+	// the connection timeouts below actually exist.
+	//
+	// Timeouts: there were none. The listener binds all interfaces, and this NAS is often
+	// reachable from outside via QuickConnect, Tailscale or a forwarded port, so a handful
+	// of slow connections could hold goroutines open indefinitely (Slowloris). ReadHeader
+	// is the important one; ReadTimeout/WriteTimeout are deliberately NOT set, because a
+	// video range request legitimately streams for minutes and a write deadline would cut
+	// it mid-file.
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 20 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// SIGTERM is how DSM stops a package. Without a handler, Go's default killed the
+	// process instantly: in-flight HLS segment writes were cut mid-file, `defer db.Close()`
+	// and `defer cleanupManager.Stop()` never ran (deferred funcs do not run on an
+	// unhandled signal), and the SQLite WAL was never checkpointed. Every package upgrade
+	// did this to whoever was watching.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	select {
+	case err := <-serverErr:
 		log.Fatal(err)
+	case sig := <-stop:
+		log.Printf("received %s — shutting down gracefully", sig)
+
+		// 8 seconds, against the 10 the DSM stop script waits before SIGKILL. That leaves
+		// ~2s for the teardown below. Short requests (API calls, segment fetches) finish
+		// cleanly; a long open stream is cut at the deadline, but the client sees a clean
+		// connection close and re-requests the range, which players handle — and with play
+		// sessions now persisted, the session it reconnects to still exists.
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("graceful shutdown timed out: %v (proceeding with teardown)", err)
+		}
+
+		// Explicit teardown, in order. NOT relying on defer: the whole point is that
+		// defers were never running.
+		if cleanupManager != nil {
+			cleanupManager.Stop()
+		}
+		// TRUNCATE (not PASSIVE) so the WAL is folded back into the database and the next
+		// start — possibly of an older binary, after a downgrade — opens a clean file.
+		if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("shutdown checkpoint: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			log.Printf("shutdown db close: %v", err)
+		}
+		log.Printf("shutdown complete")
 	}
 }
 
@@ -1109,6 +1183,30 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (key, user_id)
 );
+
+-- Play sessions, persisted so playback survives a server restart.
+--
+-- These lived only in an in-memory map, so every restart — a package upgrade, a crash,
+-- an OOM kill — invalidated every session ID a client was holding. The next segment or
+-- range request 404'd and playback died with a spinner, even though the client still had
+-- seconds of buffer and the file had not moved. HLS is designed to ride out exactly that
+-- gap; there was simply nothing left to reconnect TO.
+--
+-- The row is tiny (an id, an item, a path, a mode) and is reaped on the same idle clock
+-- as the in-memory entry, so this does not accumulate.
+CREATE TABLE IF NOT EXISTS play_sessions (
+    session_id    TEXT PRIMARY KEY,
+    item_id       TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    hls_dir       TEXT,
+    playback_mode INTEGER NOT NULL DEFAULT 0,
+    transcoding   INTEGER NOT NULL DEFAULT 0,
+    user_id       TEXT,
+    created_at    TEXT NOT NULL,
+    last_access   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_play_sessions_last_access ON play_sessions(last_access);
 
 CREATE TABLE IF NOT EXISTS playlists (
   id TEXT PRIMARY KEY,
@@ -3486,6 +3584,9 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	u := userFromCtx(r.Context())
+	// Persist alongside the in-memory entry so the session survives a restart. Best
+	// effort: a failure here costs restart-resumption, not playback.
+	s.persistPlaySession(sessionID, ps, u.ID)
 	resume, _ := s.getProgress(u.ID, itemID)
 	var resumePos any = 0
 	if resume != nil {
@@ -4550,13 +4651,20 @@ func (s *Server) getSession(sessionID string) (PlaySession, bool) {
 	// streaming session as live. This needs a write to the map value, so take the full
 	// lock rather than RLock (PlaySession is a value, not a pointer — we re-store it).
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ps, ok := s.playSessions[sessionID]
 	if ok {
 		ps.LastAccess = time.Now()
 		s.playSessions[sessionID] = ps
 	}
-	return ps, ok
+	s.mu.Unlock()
+	if ok {
+		return ps, true
+	}
+	// Cache miss: this may be a session created before a restart. Try the persisted
+	// table before giving up, so a client whose buffer outlived the outage reconnects
+	// instead of dying on a 404. rehydratePlaySession takes s.mu itself, hence the
+	// explicit Unlock above rather than a defer.
+	return s.rehydratePlaySession(sessionID)
 }
 
 // handlePlaybackStop releases a play session immediately at the client's request (P0-1).
@@ -4574,6 +4682,11 @@ func (s *Server) handlePlaybackStop(w http.ResponseWriter, r *http.Request) {
 		delete(s.playSessions, sessionID)
 	}
 	s.mu.Unlock()
+	// Drop the persisted row too, or a stopped session would rehydrate on the next
+	// request and the table would grow without bound.
+	if _, err := s.db.Exec(`DELETE FROM play_sessions WHERE session_id = ?`, sessionID); err != nil {
+		log.Printf("[playsession] delete %s failed: %v", sessionID, err)
+	}
 
 	if ok && ps.Kind == "hls" && s.hlsGenerator != nil {
 		if err := s.hlsGenerator.StopSession(sessionID); err != nil {
@@ -4631,6 +4744,80 @@ func (s *Server) itemExists(itemID string) (exists bool, known bool) {
 	}
 	log.Printf("[itemExists] query failed for %s: %v (treating as unknown, not missing)", itemID, err)
 	return false, false
+}
+
+// persistPlaySession mirrors an in-memory session to SQLite so it survives a restart.
+//
+// Best effort by design: a write failure costs the ability to resume after a restart, not
+// playback itself, so it is logged and swallowed rather than failing the request.
+func (s *Server) persistPlaySession(sessionID string, ps PlaySession, userID string) {
+	_, err := s.db.Exec(
+		`INSERT INTO play_sessions
+		   (session_id, item_id, path, kind, hls_dir, playback_mode, transcoding, user_id, created_at, last_access)
+		 VALUES(?,?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(session_id) DO UPDATE SET last_access = excluded.last_access`,
+		sessionID, ps.ItemID, ps.Path, ps.Kind, ps.HLSDir, int(ps.PlaybackMode),
+		boolToInt(ps.Transcoding), userID,
+		ps.CreatedAt.UTC().Format(time.RFC3339), ps.LastAccess.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		log.Printf("[playsession] persist %s failed: %v (playback unaffected; restart-resume lost)", sessionID, err)
+	}
+}
+
+// rehydratePlaySession rebuilds an in-memory session from SQLite after a restart.
+//
+// Called only on a cache MISS, so the hot path is untouched. Returns false when the id is
+// genuinely unknown, so a bogus session still 404s.
+//
+// DIRECT sessions rehydrate completely: the row is just "session X is file Y", and the
+// file is still on disk, so the client's next Range request is served and playback
+// continues from its buffer. HLS sessions are NOT resumed here — their ffmpeg process
+// died with the old server and the segment directory is gone; a stale entry would serve
+// 404s for segments that no longer exist, which is worse than a clean restart.
+func (s *Server) rehydratePlaySession(sessionID string) (PlaySession, bool) {
+	var ps PlaySession
+	var hlsDir sql.NullString
+	var mode, transcoding int
+	var createdAt, lastAccess string
+	err := s.db.QueryRow(
+		`SELECT item_id, path, kind, hls_dir, playback_mode, transcoding, created_at, last_access
+		 FROM play_sessions WHERE session_id = ?`, sessionID,
+	).Scan(&ps.ItemID, &ps.Path, &ps.Kind, &hlsDir, &mode, &transcoding, &createdAt, &lastAccess)
+	if err != nil {
+		return PlaySession{}, false
+	}
+	if ps.Kind != "direct" {
+		// See above: only direct play can be resumed without the original ffmpeg.
+		return PlaySession{}, false
+	}
+	// The file must still exist and still be inside a configured media root — a restart
+	// is not a reason to relax either check.
+	if !s.pathWithinMediaRoot(ps.Path) {
+		log.Printf("[playsession] SECURITY: rehydrate %s rejected — path outside media roots", sessionID)
+		return PlaySession{}, false
+	}
+	if _, statErr := os.Stat(ps.Path); statErr != nil {
+		return PlaySession{}, false
+	}
+	ps.HLSDir = hlsDir.String
+	ps.PlaybackMode = transcode.PlaybackMode(mode)
+	ps.Transcoding = transcoding != 0
+	ps.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	ps.LastAccess = time.Now()
+
+	s.mu.Lock()
+	s.playSessions[sessionID] = ps
+	s.mu.Unlock()
+	log.Printf("[playsession] rehydrated %s after restart (item=%s)", sessionID, ps.ItemID)
+	return ps, true
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // pathWithinMediaRoot reports whether a DB-stored media path resolves inside one of the
