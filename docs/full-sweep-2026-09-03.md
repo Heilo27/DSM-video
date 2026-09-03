@@ -300,3 +300,63 @@ returns 401, but in HEAD that route is registered public (`main.go:931`). Local 
 7. Security: rate-limit the WebAPI login proxy; plan signed image URLs
 
 Nothing was modified. All findings are read-only observations, hand-verified where marked.
+
+---
+
+# Remediation — same day
+
+All P0s and P1s fixed, plus the P2s worth the risk. Commits `4c824c3` (fixes) and
+`5c547c1` (package).
+
+## Verification after the fixes
+
+| Check | Before | After |
+|---|---|---|
+| `go build` / `go vet` | clean | clean |
+| `go test -race ./...` | 58 tests | **65 tests**, race-clean |
+| iOS unit tests | 78 | **84** |
+| iOS build (Debug + Release) | 1 warning | **0 warnings** |
+| tvOS build (Debug + Release) | clean | **clean** |
+| `scripts/check-tvos-focus.sh` | did not exist | **passes, and verified to catch the historical bug** |
+
+## The two process fixes
+
+**1. The tvOS focus bug now has a mechanical guard.** `scripts/check-tvos-focus.sh`
+fails if any `TVFocusField` case is unbound or unreachable. I verified it works by
+deleting the `.skipIntro` binding — reproducing the exact shipped bug — and confirming
+it fails, then passes once restored. Rules didn't hold for three recurrences; this does.
+
+**2. Both "dead catch clause" bugs now have tests.** `RetryLadderTests` asserts the
+retry fires on `APIError.connection` and never on a server answer. This is the class
+that produced TASK-834 *and* the bug that TASK-834's own fix introduced.
+
+## Deliberately not fixed
+
+- **Top Shelf `playAction` == `displayAction`** (LOW). Making Play start playback needs
+  an autoPlay flag plumbed through the deep link and nav path. Real but low-value, and
+  navigation state in this app has a history of breaking subtly — not worth the risk at
+  the end of a large pass.
+- **Anonymous `/images/{id}` enumeration oracle** (MEDIUM). Unchanged: it is a product
+  decision, not a bug. Gating it kills tvOS Top Shelf artwork, which cannot attach an
+  auth header. The right fix is signed, expiring, item-scoped image URLs — a feature.
+- **`/webapi` `subtitles[].url` serving master.m3u8** (MEDIUM, latent). No client
+  dereferences the field. Worth fixing when that plane is next touched.
+
+## Deployment status — NOT deployed
+
+The package is built and verified but **is not installed on the NAS**.
+
+DSM's auto-block locked SSH out mid-transfer (the documented trap: rapid repeated
+SSH/sudo calls). I stopped rather than keep retrying, which would have escalated to a
+full IP lockout. **Nothing was half-applied** — the running service was never stopped,
+and `curl` confirms it healthy (web UI 200, API 401 as expected for an unauthenticated
+probe).
+
+To finish, either clear the block (Control Panel → Security → Account → Auto Block →
+remove 192.168.50.x) and re-run the staged deploy, or install
+`build/spk/DSVideoServer-0.3.4-0001-x64.spk` through Package Center → Manual Install.
+
+Note the deployed server is currently **older than this tree** — its `/api/v1/version`
+and `/api/v1/images/{id}` both return 401, while HEAD serves both publicly. That last
+one is why Top Shelf artwork is blank today: the client is correct, the deployed server
+is behind.
