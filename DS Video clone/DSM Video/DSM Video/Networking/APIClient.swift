@@ -190,9 +190,13 @@ struct APIClient {
     return try await request(url: url, method: "GET", body: Optional<Int>.none, response: PlaybackInfo.self, timeoutInterval: 15)
   }
 
-  func setProgress(id: String, positionSeconds: Int, durationSeconds: Int) async throws {
+  /// Returns whether the server actually stored the write. `false` means it was
+  /// superseded by a newer write and silently discarded — not an error, but not a
+  /// success either, so callers must not treat a 200 alone as "saved".
+  @discardableResult
+  func setProgress(id: String, positionSeconds: Int, durationSeconds: Int) async throws -> Bool {
     let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-    _ = try await request(
+    let resp = try await request(
       path: "/api/v1/items/\(enc)/progress",
       method: "POST",
       body: ProgressRequest(positionSeconds: positionSeconds, durationSeconds: durationSeconds, state: "playing"),
@@ -202,6 +206,8 @@ struct APIClient {
       // the flush; the outbox retries, so failing fast is strictly better.
       timeoutInterval: Timeout.write
     )
+    // Absent (older server) is treated as applied — only an explicit false is a discard.
+    return resp.applied ?? true
   }
 
   func progressBatch(ids: [String]) async throws -> ProgressBatchResponse {
@@ -441,18 +447,32 @@ struct APIClient {
   ) async throws -> T {
     do {
       return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
-    } catch let urlError as URLError where [
-      .timedOut, .networkConnectionLost, .notConnectedToInternet,
-      // TASK-788: LAN→WAN auto-switch produces a transient .cannotConnectToHost /
-      // .cannotFindHost / .dnsLookupFailed on the first request after the network
-      // changes (old LAN IP unreachable, or WAN host not yet resolving). A single
-      // bounded retry papers over the blip while the reconnect cascade catches up —
-      // handleConnectionFailure already treats these as serverUnreachable.
-      .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed
-    ].contains(urlError.code) {
+    } catch let error as APIError where Self.isRetryableTransport(error) {
+      // MUST match APIError.connection, not a bare URLError.
+      //
+      // request() wraps every URLError it catches into APIError.connection(code) — so the
+      // previous `catch let urlError as URLError` clause could never match and this entire
+      // retry ladder was dead from the day that wrap landed. The LAN→WAN blip it was
+      // written for (TASK-788) went unretried, and search / item detail / genres /
+      // watchlist / TV shows all failed hard on a network switch instead.
       try await Task.sleep(nanoseconds: 1_000_000_000)
       return try await request(url: url, method: method, body: body, response: response, authorized: authorized, timeoutInterval: timeoutInterval)
     }
+  }
+
+  /// Transport failures worth exactly one retry.
+  ///
+  /// TASK-788: a LAN→WAN auto-switch produces a transient .cannotConnectToHost /
+  /// .cannotFindHost / .dnsLookupFailed on the first request after the network changes
+  /// (old LAN IP unreachable, or WAN host not yet resolving). A single bounded retry
+  /// papers over the blip while the reconnect cascade catches up — handleConnectionFailure
+  /// already treats these as serverUnreachable.
+  static func isRetryableTransport(_ error: APIError) -> Bool {
+    guard case .connection(let code) = error else { return false }
+    return [
+      .timedOut, .networkConnectionLost, .notConnectedToInternet,
+      .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+    ].contains(code)
   }
 
   private func request<T: Decodable, B: Encodable>(

@@ -118,14 +118,16 @@ func (m *CleanupManager) cleanupInactive() {
 	threshold := now.Add(-m.config.InactivityTimeout)
 
 	for _, sessionID := range m.generator.AllSessions() {
-		session, ok := m.generator.GetSession(sessionID)
+		// MUST be LastAccessOf, not GetSession: GetSession stamps LastAccess = now,
+		// which made this comparison always false and left the reaper dead.
+		lastAccess, ok := m.generator.LastAccessOf(sessionID)
 		if !ok {
 			continue
 		}
 
 		// Check if session is stale
-		if session.LastAccess.Before(threshold) {
-			log.Printf("[transcode] Cleaning up inactive session %s (last access: %v)", sessionID, session.LastAccess)
+		if lastAccess.Before(threshold) {
+			log.Printf("[transcode] Cleaning up inactive session %s (last access: %v)", sessionID, lastAccess)
 			if err := m.generator.StopSession(sessionID); err != nil {
 				log.Printf("[transcode] Failed to cleanup session %s: %v", sessionID, err)
 			}
@@ -232,12 +234,13 @@ func (m *CleanupManager) ListSessions() []SessionInfo {
 			OutputDir: dirPath,
 		}
 
-		// Check if there's an active generator session
+		// Check if there's an active generator session. Snapshot under the lock, and
+		// do NOT use GetSession — listing sessions must not refresh their liveness.
 		if m.generator != nil {
-			if session, ok := m.generator.GetSession(sessionID); ok {
-				info.LastAccess = session.LastAccess
-				info.CompletedAt = session.CompletedAt
-				info.IsActive = session.CompletedAt == nil
+			if lastAccess, completedAt, ok := m.generator.SessionSnapshot(sessionID); ok {
+				info.LastAccess = lastAccess
+				info.CompletedAt = completedAt
+				info.IsActive = completedAt == nil
 			}
 		}
 

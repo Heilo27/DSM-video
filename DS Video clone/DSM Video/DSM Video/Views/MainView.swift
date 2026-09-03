@@ -707,6 +707,18 @@ struct DownloadsView: View {
   @State private var usedByAppBytes: Int64 = 0
   @State private var showPlayer = false
   @State private var playerItem: DownloadedItem?
+  /// Progress-write throttle, mirroring PlayerSheet (ItemDetailView).
+  /// The player ticks every 0.5s, and each tick here did a full JSON read + decode +
+  /// re-encode + atomic write, PLUS a SQLite write and a network POST — unthrottled, in
+  /// the one playback mode that should be the cheapest.
+  @State private var lastSyncTime: Date = .distantPast
+  @State private var lastSyncedPosition: Int = 0
+  /// Latest reported values, updated on EVERY tick so exit can persist an exact position
+  /// even when the throttle suppressed the write.
+  @State private var livePosition: Int = 0
+  @State private var liveDuration: Int = 0
+  private let syncInterval: TimeInterval = 10
+  private let seekThreshold: Int = 15
 
   private let downloadManager = DownloadManager.shared
 
@@ -809,9 +821,35 @@ struct DownloadsView: View {
           url: URL(fileURLWithPath: item.videoPath),
           title: item.title,
           resumePosition: Double(item.resumePositionSeconds),
-          onDismiss: { showPlayer = false },
+          onDismiss: {
+            // TASK-838 pattern (see PlayerSheet): persist the LIVE position on exit, not
+            // the throttled one — otherwise every close loses up to 10s of progress.
+            let exitPosition = livePosition > 0 ? livePosition : lastSyncedPosition
+            let dur = liveDuration > 0 ? liveDuration : item.durationSeconds
+            if exitPosition > 0 && dur > 0 {
+              DownloadManager.shared.updateResumePosition(itemId: item.id, positionSeconds: exitPosition)
+              Task { await appState.recordProgress(itemId: item.id, positionSeconds: exitPosition, durationSeconds: dur) }
+            }
+            showPlayer = false
+          },
           onProgressUpdate: { currentTime, duration in
             let pos = Int(currentTime)
+            // Always track the live values so onDismiss can persist an exact final
+            // position regardless of where the throttle happens to land.
+            livePosition = pos
+            liveDuration = duration > 0 ? Int(duration) : item.durationSeconds
+
+            // Throttle: at most every 10s, or immediately on a 15s+ seek, or on the
+            // first real tick. Without this every 0.5s tick did a full JSON read +
+            // decode + re-encode + atomic write, a SQLite write AND a network POST.
+            let now = Date()
+            let isFirstSync = lastSyncedPosition == 0 && pos > 5
+            guard now.timeIntervalSince(lastSyncTime) >= syncInterval
+                    || abs(pos - lastSyncedPosition) >= seekThreshold
+                    || isFirstSync else { return }
+            lastSyncTime = now
+            lastSyncedPosition = pos
+
             DownloadManager.shared.updateResumePosition(
               itemId: item.id,
               positionSeconds: pos

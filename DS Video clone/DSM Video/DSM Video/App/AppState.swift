@@ -744,15 +744,56 @@ final class AppState {
       }
     } else if let urlErr = error as? URLError {
       switch urlErr.code {
-      case .notConnectedToInternet, .networkConnectionLost:
+      // Only .notConnectedToInternet means "this device has no network." Recovery for
+      // isOffline comes exclusively from NWPathMonitor, which fires on a PATH CHANGE.
+      //
+      // .networkConnectionLost must NOT set it: that error means one TCP connection died
+      // (server restart, NAT timeout, Wi-Fi hiccup) while the interface stayed satisfied.
+      // The path never changed, so the monitor never fired, so isOffline was never
+      // cleared — and homeLoad/foregroundRefresh/runDeltaSync all hard-return while it's
+      // set. One dropped connection pinned the app on "No internet connection." over
+      // stale rails until relaunch. It's a server-reachability failure, so treat it as one.
+      case .notConnectedToInternet:
         isOffline = true
-      case .cannotConnectToHost, .cannotFindHost, .timedOut,
+      case .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .timedOut,
            .dnsLookupFailed, .secureConnectionFailed:
         serverUnreachable = true
       default:
         break
       }
     }
+  }
+
+  /// Turns a pairing failure into a message that names the ACTUAL cause.
+  ///
+  /// Every failure mode used to collapse to "Invalid pairing code." — including a
+  /// timeout, a DNS failure, and an unreachable NAS. The user then re-entered a code
+  /// that was perfectly valid, repeatedly, with no hint the server was the problem.
+  static func pairingErrorMessage(_ error: Error?) -> String {
+    if let apiErr = error as? APIError {
+      if case .connection = apiErr {
+        // Never reached the server: the code was never even checked.
+        return "Couldn't reach your server. Check that it's on and connected, then try again."
+      }
+      // The server DID answer and rejected us — its message is the accurate one.
+      return apiErr.userMessage
+    }
+    if error is URLError {
+      return "Couldn't reach your server. Check that it's on and connected, then try again."
+    }
+    return "That code didn't work. Check the code and try again."
+  }
+
+  /// Safety net for the offline flag: trust the CURRENT path, not the last edge.
+  ///
+  /// `isOffline` gates every sync entry point, and its only clearer is NWPathMonitor's
+  /// pathUpdateHandler — which fires on a path CHANGE. If the flag is ever set while the
+  /// path is already satisfied, no change is coming and the app is stranded until
+  /// relaunch. Called on foreground, where a stale flag is most likely and most costly.
+  func reconcileOfflineFlag() {
+    guard isOffline, let path = networkMonitor?.currentPath, path.status == .satisfied else { return }
+    homeLog.info("reconcileOfflineFlag: path is satisfied but isOffline was set — clearing")
+    isOffline = false
   }
 
   /// Call after a successful API operation to clear network error state.
@@ -764,6 +805,10 @@ final class AppState {
     let wasDown = serverUnreachable || isOffline
     serverUnreachable = false
     isOffline = false
+    // Also clear the banner. homeError was only ever nil'd on entry to a FOREGROUND load,
+    // so a successful background/heartbeat-driven sync left "Can't reach your server."
+    // pinned above fully-populated, correct rails until the user pulled to refresh.
+    homeError = nil
     // Connectivity just came back — push anything recorded while we were offline. This is
     // the single choke point every reconnect path funnels through, so hooking it here
     // covers foreground revalidation, QuickConnect re-resolution, and manual retry alike.
@@ -908,7 +953,10 @@ final class AppState {
       }
       homeLog.warning("backgroundReconnect: all \(maxAttempts) attempts exhausted — soft-logging out for clean reconnect")
       serverUnreachable = false
-      softLogout(reason: "Connection could not be restored. Sign in again to reconnect.")
+      // Name the real cause. Ten minutes of failed reconnects means the SERVER was
+      // unreachable — the credentials were never in question. The old wording
+      // ("Sign in again to reconnect") sent users to retype a password that was fine.
+      softLogout(reason: "Couldn't reach your server for several minutes. Check that it's on, then sign in to reconnect.")
     }
   }
 
@@ -1025,7 +1073,7 @@ final class AppState {
         }
       }
       dlog.error(.auth, "pairing FAILED — all QuickConnect candidates exhausted")
-      loginError = (lastError as? APIError)?.userMessage ?? "Invalid pairing code."
+      loginError = Self.pairingErrorMessage(lastError)
       return
     }
 
@@ -1042,7 +1090,7 @@ final class AppState {
       sessionToken = resp.token
       startHeartbeatTimer()
     } catch {
-      loginError = (error as? APIError)?.userMessage ?? "Invalid pairing code."
+      loginError = Self.pairingErrorMessage(error)
     }
   }
 
@@ -1068,8 +1116,15 @@ final class AppState {
 
   // Background fetch task handle — cancelled on forceRefresh/logout
   private var homeBackgroundFetchTask: Task<Void, Never>?
+  /// Bumped by clearHomeState(). Detached rail computations capture it and drop their
+  /// result if it changed while they were running.
+  private var homeStateGeneration: UInt64 = 0
 
   func clearHomeState() {
+    // Invalidate any in-flight off-actor rail computation. Cancelling
+    // homeBackgroundFetchTask is not enough — recomputeHomeRails runs in a detached task
+    // that is never stored, so it cannot be cancelled and must be fenced instead.
+    homeStateGeneration &+= 1
     homeBackgroundFetchTask?.cancel()
     homeBackgroundFetchTask = nil
     homeLibraries = []
@@ -1115,6 +1170,7 @@ final class AppState {
   private func recomputeHomeRails(from items: [ItemSummary]) {
     homeLog.debug("recomputeHomeRails: triggered — \(items.count) items")
     let t = Date()
+    let generation = homeStateGeneration
     Task.detached(priority: .userInitiated) { [weak self] in
       let (cont, added, watched) = Self.computeHomeRails(items)
       let elapsed = String(format: "%.3f", Date().timeIntervalSince(t))
@@ -1122,6 +1178,15 @@ final class AppState {
       // during the heavy lift, silently drop the result (TASK-434).
       guard let self else { return }
       await MainActor.run {
+        // The [weak self] check above is NOT sufficient: AppState is the app root and
+        // does not deallocate on logout, so an in-flight recompute landed after
+        // clearHomeState() had zeroed the rails — repopulating them with the PREVIOUS
+        // user's content behind the login screen, and (via the homeJustAdded didSet)
+        // rewriting the Top Shelf snapshot that logout had just deleted.
+        guard generation == self.homeStateGeneration else {
+          self.homeLog.info("recomputeHomeRails: stale result dropped (state was cleared mid-compute)")
+          return
+        }
         self.homeContinueWatching = cont
         self.homeJustAdded = added
         self.homeRecentlyWatched = watched
@@ -1344,6 +1409,7 @@ final class AppState {
   /// were backgrounded. Runs a background delta sync (heartbeat + changed items
   /// only — not a full reload) and skips when offline or already busy.
   func foregroundRefresh() async {
+    reconcileOfflineFlag()
     guard !isDemoMode, !isOffline, !serverUnreachable else { return }
     guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else { return }
     await runDeltaSyncWithBackgroundTask()
@@ -1803,6 +1869,9 @@ final class AppState {
         // Restore at the original position (clamped) so ordering is preserved.
         let insertAt = min(removedIndex ?? 0, watchlistItems.count)
         watchlistItems.insert(item, at: insertAt)
+        // A bare catch swallowed 401s here: the write silently no-op'd while the UI kept
+        // looking authenticated. loadWatchlist already routes failures this way.
+        handleConnectionFailure(error)
       }
     } else {
       watchlistItems.insert(item, at: 0)
@@ -1810,6 +1879,7 @@ final class AppState {
         try await api.addToWatchlist(id: item.id)
       } catch {
         watchlistItems.removeAll(where: { $0.id == item.id })
+        handleConnectionFailure(error)
       }
     }
   }
@@ -1824,7 +1894,15 @@ final class AppState {
   /// Writes the Just Added rail (up to 10 items) to the shared App Group container
   /// so the Top Shelf extension can display them when the app is focused.
   func writeTopShelfSnapshot() {
-    guard !homeJustAdded.isEmpty else { return }
+    // An empty rail must CLEAR the shelf, not leave the previous contents advertised.
+    // The early-return here meant any non-logout path to an empty homeJustAdded (server
+    // unreachable, library removed, a failed load that cleared the rails) left a stale
+    // topshelf.json on disk — so the Top Shelf kept offering titles that deep-linked into
+    // items the user may no longer have access to.
+    guard !homeJustAdded.isEmpty else {
+      deleteTopShelfSnapshot()
+      return
+    }
     guard let container = FileManager.default.containerURL(
       forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
     ) else { return }

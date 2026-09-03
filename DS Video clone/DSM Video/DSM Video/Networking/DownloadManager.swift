@@ -109,15 +109,29 @@ final class DownloadManager: NSObject {
   // in urlSessionDidFinishEvents(forBackgroundURLSession:) after all events are processed.
   var backgroundCompletionHandler: (() -> Void)?
 
+  /// Supplies the CURRENT session token at resume time.
+  ///
+  /// Resume used to reuse the token captured when the download first started, but that
+  /// token is deliberately NOT persisted (it is a credential, and the paused-meta file is
+  /// plain JSON). After a relaunch the restored value was `nil` AND the `_sid` had been
+  /// stripped from the saved URL — so both auth paths were dead and every resume 401'd,
+  /// reported to the user as "check your connection". Set by the app at launch.
+  var tokenProvider: (() -> String?)?
+
   override private init() {
     // TASK-738: default downloads to Wi-Fi only unless the user opts into cellular.
     UserDefaults.standard.register(defaults: ["dsReel.downloadsWifiOnly": true])
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
     config.isDiscretionary = false
     config.sessionSendsLaunchEvents = true
-    backgroundSession = URLSession(configuration: config, delegate: nil, delegateQueue: OperationQueue())
+    // Placeholder so the stored property is initialised before super.init(); it is
+    // replaced below and never used to start a task. Deliberately NOT a second
+    // background session with the same identifier — creating two live sessions that
+    // share an identifier is undefined, and the OS could deliver relaunch events to the
+    // delegate-less one, so downloads finishing while suspended never reported.
+    backgroundSession = URLSession(configuration: .ephemeral)
     super.init()
-    // Re-assign with self as delegate now that super.init() has completed.
+    // The real background session, with self as delegate now that super.init() has run.
     backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
     loadPersistedResumeData()
   }
@@ -326,21 +340,30 @@ final class DownloadManager: NSObject {
       // Clear paused state and restart from the beginning.
       pendingDownloadInfo.removeValue(forKey: itemId)
       removePersistedResumeData(for: itemId)
+      // Prefer a freshly-supplied token: info.token is nil after a relaunch because the
+      // credential is deliberately not persisted.
       startDownload(
         itemId: itemId,
         title: info.title,
         year: info.year,
         videoURL: videoURL,
         posterURL: info.posterURL,
-        token: info.token,
+        token: info.token ?? tokenProvider?(),
         durationSeconds: info.durationSeconds
       )
     } else {
       // Neither resume data nor video URL available — cannot resume.
-      // Clear orphaned metadata and surface an error by removing paused state.
+      // Surface it: clearing state silently made the row vanish on tap with no
+      // explanation of why.
       pendingDownloadInfo.removeValue(forKey: itemId)
       pausedDownloads.removeValue(forKey: itemId)
       removePersistedResumeData(for: itemId)
+      failedDownloads[itemId] = FailedDownload(
+        id: itemId, title: info.title, videoURL: info.videoURL,
+        posterURL: info.posterURL, token: nil, year: info.year,
+        durationSeconds: info.durationSeconds, isPermanent: false,
+        message: "This download can't be resumed. Tap to start it again."
+      )
     }
   }
 
@@ -786,8 +809,11 @@ extension DownloadManager: URLSessionDownloadDelegate {
       guard let itemId = downloadTasks[downloadTask] else { return }
       if let error {
         let nsError = error as NSError
-        if nsError.code == NSURLErrorCancelled, let data = resumeData {
-          // Download was paused (cancel with resume data) — save resume data, leave pendingDownloadInfo intact
+        // Keep resume data whenever the system hands it to us, not only on an explicit
+        // pause. A Wi-Fi blip arrives as .networkConnectionLost WITH resume data; the old
+        // `code == Cancelled` condition discarded it, so a multi-GB partial restarted
+        // from byte 0.
+        if let data = resumeData {
           pausedDownloads[itemId] = data
           persistResumeData(data, for: itemId)
           persistPausedMeta(for: itemId)
@@ -802,12 +828,19 @@ extension DownloadManager: URLSessionDownloadDelegate {
           // Genuine failure (not a pause). TASK-782: surface it so the Downloads UI
           // shows "Download failed — retry" rather than the row silently vanishing.
           // A user-initiated cancel (code == Cancelled) is not a failure and is skipped.
-          if nsError.code != NSURLErrorCancelled, let info = pendingDownloadInfo[itemId] {
+          if let info = pendingDownloadInfo[itemId] {
+            // A cancel that produced NO resume data is a lost download, not a pause —
+            // the user pressed Pause and the partial is unrecoverable. Say so instead of
+            // dropping the row silently. Message matches the actual cause: a genuine
+            // transport failure is worth retrying, a dead pause is not.
+            let wasCancel = nsError.code == NSURLErrorCancelled
             failedDownloads[itemId] = FailedDownload(
               id: itemId, title: info.title, videoURL: info.videoURL,
               posterURL: info.posterURL, token: info.token, year: info.year,
               durationSeconds: info.durationSeconds, isPermanent: false,
-              message: "Download failed. Check your connection and retry."
+              message: wasCancel
+                ? "This download couldn't be paused and has to start over."
+                : "Download failed. Check your connection and retry."
             )
           }
           // Clean up pendingDownloadInfo too (failedDownloads now carries the retry context).

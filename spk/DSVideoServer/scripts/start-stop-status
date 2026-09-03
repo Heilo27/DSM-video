@@ -130,8 +130,10 @@ start() {
       DSVIDEO_JWT_SECRET="$(cat "${SECRET_FILE}")"
     else
       DSVIDEO_JWT_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-      echo "${DSVIDEO_JWT_SECRET}" > "${SECRET_FILE}"
-      chmod 600 "${SECRET_FILE}"
+      # Create with 600 already applied. Writing first and chmod'ing after leaves the
+      # signing key world-readable at the default umask for the window in between.
+      ( umask 077; echo "${DSVIDEO_JWT_SECRET}" > "${SECRET_FILE}" )
+      chmod 600 "${SECRET_FILE}" 2>/dev/null || true
     fi
   fi
   export DSVIDEO_JWT_SECRET

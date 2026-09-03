@@ -57,3 +57,4 @@ DS Video clone/build-iphone/
 # fastlane run artifact (regenerated every run)
 fastlane/report.xml
 DS Video clone/fastlane/report.xml
+backend/dsvideo-backend-new

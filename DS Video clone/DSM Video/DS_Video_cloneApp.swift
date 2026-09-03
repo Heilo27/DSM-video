@@ -105,6 +105,17 @@ struct DS_Video_cloneApp: App {
             RootView()
                 .environment(appState)
                 .environment(\.theme, activeTheme)
+                .task {
+                    // Let resumed downloads fetch a LIVE token. The token captured when a
+                    // download started is deliberately not persisted (it's a credential),
+                    // so after a relaunch every resume attempted an unauthenticated
+                    // request and 401'd.
+                    // appState is owned by the scene for the app's lifetime, and
+                    // DownloadManager is a singleton — capturing it strongly here is
+                    // correct and matches the lifetimes involved.
+                    let state = appState
+                    DownloadManager.shared.tokenProvider = { state.sessionToken }
+                }
                 .onChange(of: themeIDRaw) { _, _ in
                     ThemeHolder.shared.current = activeTheme
                 }

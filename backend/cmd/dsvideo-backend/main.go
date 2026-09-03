@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -1419,13 +1420,29 @@ CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);
 // incrementSeq atomically increments a sync counter and returns the new value.
 // Returns 0 and logs an error if the DB write fails (TASK-611).
 // Also updates the in-memory cache so getSyncSeqs avoids a DB round-trip (TASK-579).
+// incrementSeq bumps a sync sequence and returns the new value, or 0 on failure.
+//
+// A 0 return is NOT a usable sequence: it fails the progress upsert's
+// `WHERE excluded.write_seq > progress.write_seq` guard (silently discarding the
+// write) and hides an item from any client whose delta cursor is > 0. Callers on a
+// write path that the client can retry should use incrementSeqErr and surface the
+// failure instead of storing a 0.
 func (s *Server) incrementSeq(key string) int64 {
+	seq, err := s.incrementSeqErr(key)
+	if err != nil {
+		return 0
+	}
+	return seq
+}
+
+// incrementSeqErr is incrementSeq with the error surfaced rather than flattened to 0.
+func (s *Server) incrementSeqErr(key string) (int64, error) {
 	var newVal int64
 	if err := s.db.QueryRow(
 		`UPDATE sync_state SET value = value + 1 WHERE key = ? RETURNING value`, key,
 	).Scan(&newVal); err != nil {
 		log.Printf("[incrementSeq] failed to increment %q: %v", key, err)
-		return 0
+		return 0, err
 	}
 	switch key {
 	case "item_seq":
@@ -1433,7 +1450,7 @@ func (s *Server) incrementSeq(key string) int64 {
 	case "progress_seq":
 		s.cachedProgressSeq.Store(newVal)
 	}
-	return newVal
+	return newVal, nil
 }
 
 // getSyncSeqs returns the current item_seq and progress_seq.
@@ -1557,6 +1574,19 @@ type loginResponse struct {
 // Returns true (and writes a 429 response) when the limit is exceeded.
 // Stale windows are cleaned up on each call for that IP.
 func (s *Server) checkAuthRateLimit(w http.ResponseWriter, r *http.Request) bool {
+	if !s.authRateLimitExceeded(r) {
+		return false
+	}
+	w.Header().Set("Retry-After", "60")
+	writeErr(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+	return true
+}
+
+// authRateLimitExceeded records an auth attempt for the caller's IP and reports whether
+// the fixed window is now exhausted. Split out from checkAuthRateLimit so the WebAPI
+// plane can share one counter with the REST plane while emitting a Synology-shaped
+// error body instead of the REST one.
+func (s *Server) authRateLimitExceeded(r *http.Request) bool {
 	const maxAttempts = 10
 	const windowSeconds = 60
 
@@ -1582,12 +1612,7 @@ func (s *Server) checkAuthRateLimit(w http.ResponseWriter, r *http.Request) bool
 	exceeded := entry.count > maxAttempts
 	s.authRateMu.Unlock()
 
-	if exceeded {
-		w.Header().Set("Retry-After", "60")
-		writeErr(w, http.StatusTooManyRequests, "rate_limit_exceeded")
-		return true
-	}
-	return false
+	return exceeded
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -3494,7 +3519,13 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Detect subtitle files alongside the video for HLS subtitle renditions.
 	subtitleOffset := 0.0
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("subtitleOffset"), 64); err == nil {
-		subtitleOffset = v
+		// ParseFloat accepts "NaN"/"Inf", and this value is formatted into ffmpeg's
+		// -itsoffset. Reject non-finite input and clamp to a sane range so a crafted
+		// query can't push a garbage argument into a subprocess.
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			const maxSubtitleOffset = 600.0 // ±10 minutes is far beyond any real desync
+			subtitleOffset = math.Max(-maxSubtitleOffset, math.Min(maxSubtitleOffset, v))
+		}
 	}
 	subtitleTracks := findSubtitleFiles(path, subtitleOffset)
 	// TASK-739: also expose text subtitle tracks embedded in the container (e.g. MKV
@@ -4410,9 +4441,20 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 
 	// Stop ffmpeg if the client disconnects. Kill the whole process group
 	// (negative pid) so no child is orphaned; fall back to killing the process.
+	// The quit channel is the second exit path. Without it this goroutine woke on the
+	// handler's own context cancellation — which fires when the handler RETURNS, i.e.
+	// after cmd.Wait() below already reaped the process — and then signalled a pgid the
+	// kernel may have recycled onto an unrelated process group.
+	quit := make(chan struct{})
+	defer close(quit)
 	done := r.Context().Done()
 	go func() {
-		<-done
+		select {
+		case <-done:
+		case <-quit:
+			// ffmpeg already exited and was reaped; the pid/pgid is no longer ours.
+			return
+		}
 		if cmd.Process != nil {
 			if pgid, gerr := syscall.Getpgid(cmd.Process.Pid); gerr == nil {
 				_ = syscall.Kill(-pgid, syscall.SIGKILL)
@@ -4911,7 +4953,16 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	// timestamp comparison can order writes inside a second — hence a real sequence number.
 	// A deliberate restart-from-zero is now honoured, because it always carries a higher seq.
 	// duration is refreshed alongside so a re-probe that corrects runtime still lands.
-	writeSeq := s.incrementSeq("progress_seq")
+	// Must be incrementSeqErr: a flattened 0 here loses the upsert's
+	// `WHERE excluded.write_seq > progress.write_seq` race against every existing row,
+	// so a transient DB error would silently discard the write while still answering
+	// {"ok":true}. 500 instead, and let the client's outbox retry.
+	writeSeq, seqErr := s.incrementSeqErr("progress_seq")
+	if seqErr != nil {
+		s.progressMu.Unlock()
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
 	res, err := s.db.Exec(
 		"INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq) VALUES(?,?,?,?,?,?) "+
 			"ON CONFLICT(item_id, user_id) DO UPDATE SET "+
@@ -5532,11 +5583,20 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 				s.tmdbClient = metadata.NewTMDbClient(value)
 				s.tmdbMu.Unlock()
 				log.Println("TMDb client reinitialized with new API key, triggering rescan")
-				go func() {
-					if err := s.scanAll(context.Background()); err != nil {
-						log.Printf("rescan after TMDb key update failed: %v", err)
-					}
-				}()
+				// Gate on scanInProgress like every other scan launcher. Two concurrent
+				// walks of a large library on this box duplicate all ffprobe I/O, stack a
+				// second 10-goroutine TMDb pool, and race the stale-purge against the
+				// other scan's upserts.
+				if s.scanInProgress.CompareAndSwap(false, true) {
+					go func() {
+						defer s.scanInProgress.Store(false)
+						if err := s.scanAll(context.Background()); err != nil {
+							log.Printf("rescan after TMDb key update failed: %v", err)
+						}
+					}()
+				} else {
+					log.Println("rescan after TMDb key update skipped — a scan is already running")
+				}
 			} else {
 				s.tmdbMu.Lock()
 				s.tmdbClient = nil
@@ -6014,12 +6074,13 @@ func (s *Server) handleWatchlistRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
+	// DELETE is idempotent, matching its POST counterpart (INSERT OR IGNORE): removing
+	// something already absent is success, not an error. Returning 404 here made the
+	// client's optimistic removal revert and the row visibly reappear on a double-tap,
+	// a retry after a flaky-but-successful first request, or a second device.
+	// `removed` reports whether this call is the one that did it.
 	n, _ := res.RowsAffected()
-	if n == 0 {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n > 0})
 }
 
 // -------------------------
@@ -6132,12 +6193,19 @@ func (s *Server) handleAdminScan(w http.ResponseWriter, r *http.Request) {
 	}
 	// Get TMDb client from request header (allows per-user API keys)
 	tmdbClient := s.getTMDbClient(r)
+	// Gate on scanInProgress: an admin hitting this while the 5-minute ticker scan is
+	// mid-walk otherwise runs two full library scans concurrently on the NAS.
+	if !s.scanInProgress.CompareAndSwap(false, true) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": false, "reason": "scan_already_running"})
+		return
+	}
 	go func() {
+		defer s.scanInProgress.Store(false)
 		if err := s.scanAllWithClient(context.Background(), tmdbClient); err != nil {
 			log.Printf("scan failed: %v", err)
 		}
 	}()
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "started": true})
 }
 
 // handleAdminMetadataRefresh clears metadata_fetched_at so items are re-queried against
@@ -6832,13 +6900,25 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			work <- item
 		}
 		close(work)
+		// Wait for the pool before returning. Previously this fired and forgot, so
+		// scanInProgress cleared — reporting the scanner idle — while up to 10 workers
+		// per library were still hitting TMDb and writing to SQLite. Successive scans
+		// stacked those pools. Also pass the scan's ctx, not context.Background(), so
+		// shutdown actually cancels in-flight metadata fetches.
+		var wg sync.WaitGroup
 		for i := 0; i < numWorkers; i++ {
+			wg.Add(1)
 			go func() {
+				defer wg.Done()
 				for item := range work {
-					s.fetchAndStoreMetadataWithClient(context.Background(), item.id, item.parsed, item.typ, tmdbClient)
+					if ctx.Err() != nil {
+						return
+					}
+					s.fetchAndStoreMetadataWithClient(ctx, item.id, item.parsed, item.typ, tmdbClient)
 				}
 			}()
 		}
+		wg.Wait()
 	}
 
 	return nil

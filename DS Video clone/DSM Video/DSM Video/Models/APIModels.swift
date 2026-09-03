@@ -349,6 +349,12 @@ struct ProgressRequest: Encodable {
 
 struct ProgressResponse: Decodable {
   let ok: Bool
+  /// Whether the server actually STORED this write, or discarded it as superseded by a
+  /// newer one (its upsert is guarded by `excluded.write_seq > progress.write_seq`).
+  /// The server added this field specifically so a discarded write stops looking like a
+  /// successful one — a flat 200 is how "Mark Unwatched" appeared to work while changing
+  /// nothing. Optional so older servers that omit it still decode.
+  let applied: Bool?
 }
 
 struct ProgressBatchResponse: Decodable {

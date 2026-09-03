@@ -388,8 +388,14 @@ struct AuthenticatedImage: View {
     // Register before awaiting so any concurrent caller sees the task immediately
     await ImageCache.shared.registerTask(fetchTask, for: url)
 
+    // The clear MUST survive cancellation. This `.task` is cancelled whenever the cell
+    // scrolls away — the common case — and the await below then throws straight past a
+    // plain trailing call, leaving the entry in inFlightTasks forever. fetchOrJoin then
+    // hands that dead task to every future caller and isWarm reports true, so the
+    // prefetcher skips the URL permanently: the cell stays grey for the rest of the run.
+    defer { Task { await ImageCache.shared.clearInFlightTask(for: url) } }
+
     let result = await fetchTask.value
-    await ImageCache.shared.clearInFlightTask(for: url)
 
     // Clear the spinner before the staleness check, not after. Gating this on
     // isCurrent() left a superseded fetch spinning forever on a cell that had moved
@@ -538,11 +544,17 @@ struct AuthenticatedImage: View {
 
     await MacImageCache.shared.registerTask(fetchTask, for: url)
 
+    // Cancellation-safe: see the UIKit body. Without the defer, a cell scrolling away
+    // mid-fetch strands the entry in inFlightTasks permanently.
+    defer { Task { await MacImageCache.shared.clearInFlightTask(for: url) } }
+
+    // Cache INSIDE the task, so an image that was fully downloaded is kept even if this
+    // view's task is cancelled while suspended on the await below — otherwise the work
+    // is thrown away and the next viewer re-downloads it.
     let result = await fetchTask.value
     if let nsImage = result {
       await MacImageCache.shared.setImage(nsImage, for: url)
     }
-    await MacImageCache.shared.clearInFlightTask(for: url)
 
     // See the UIKit body: clear the spinner before the staleness check, never after.
     isLoading = false

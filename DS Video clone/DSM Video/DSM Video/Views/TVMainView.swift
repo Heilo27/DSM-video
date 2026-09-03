@@ -397,6 +397,17 @@ private struct TVHomeView: View {
       navPath = [id]
       appState.pendingDeepLinkItemID = nil
     }
+    // .onChange only observes SUBSEQUENT changes. onOpenURL fires at the WindowGroup
+    // level even while signed out, so a cold launch from a Top Shelf tile set the ID
+    // while the pairing screen was up; by the time this view was constructed the value
+    // was already there, the change never came, and the deep link was silently dropped —
+    // the user landed on Home instead of the item they picked.
+    .task {
+      if let id = appState.pendingDeepLinkItemID {
+        navPath = [id]
+        appState.pendingDeepLinkItemID = nil
+      }
+    }
   }
 }
 

@@ -180,8 +180,15 @@ struct GestureVideoPlayer: View {
     // skip-to-end were decorative — the same defect that made speed/captions
     // unreachable, surviving in a second place because the earlier fix was applied
     // per-button instead of to the row.
+    // THIRD occurrence of the same defect. Every case below MUST satisfy all three:
+    //   1. bound to a view with .focused($focusedControl, equals: .case)
+    //   2. reachable — some (direction, field) pair in handleTVMoveCommand assigns it
+    //   3. actionable — a case in handleTVSelectPress, or Select falls through to play/pause
+    // `skipIntro` previously existed here and satisfied none of them: the case was added
+    // by the fix meant to close this bug and never wired to anything.
     enum TVFocusField { case playPause, captions, speed, hidden,
-                        skipStart, back15, forward15, skipEnd, skipIntro }
+                        skipStart, back15, forward15, skipEnd, skipIntro,
+                        close, goToShow }
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -197,6 +204,15 @@ struct GestureVideoPlayer: View {
                 || lower.hasSuffix(" op")
             return matchesKeyword && ch.startSecs < 300
         }
+    }
+
+    /// True while playback sits inside the intro chapter, i.e. while the Skip Intro
+    /// pill is on screen. Single source of truth shared by the view and the tvOS focus
+    /// graph — the graph must not route focus to a button that isn't rendered.
+    private var showSkipIntroNow: Bool {
+        guard let intro = introChapter else { return false }
+        let t = isScrubbing ? scrubTime : currentTime
+        return t >= intro.startSecs && t < intro.endSecs
     }
 
     var body: some View {
@@ -589,6 +605,14 @@ struct GestureVideoPlayer: View {
                         .background(Color.white.opacity(0.12), in: Circle())
                 }
                 .accessibilityLabel("Close")
+                #if os(tvOS)
+                .buttonStyle(.plain)
+                .focused($focusedControl, equals: .close)
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .close ? 1.15 : 1.0)
+                .brightness(focusedControl == .close ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                #endif
 
                 if let goToShow = onGoToShow {
                     Button {
@@ -618,6 +642,14 @@ struct GestureVideoPlayer: View {
                         .background(Color.white.opacity(0.12), in: Capsule())
                     }
                     .accessibilityLabel("Go to TV show")
+                    #if os(tvOS)
+                    .buttonStyle(.plain)
+                    .focused($focusedControl, equals: .goToShow)
+                    .focusEffectDisabled()
+                    .scaleEffect(focusedControl == .goToShow ? 1.15 : 1.0)
+                    .brightness(focusedControl == .goToShow ? 0.25 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                    #endif
                 }
 
                 Spacer()
@@ -826,6 +858,14 @@ struct GestureVideoPlayer: View {
                 .accessibilityAddTraits(.isButton)
                 #if os(tvOS)
                 .focused($focusedControl, equals: .playPause)
+                // Matches its four siblings. Play/Pause was the DEFAULT focused control
+                // (showControls sets it) yet the only one in the row with no focus
+                // treatment — so the control holding focus most of the time was the one
+                // that looked least focused.
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .playPause ? 1.15 : 1.0)
+                .brightness(focusedControl == .playPause ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
                 #endif
 
                 // Forward 15s
@@ -885,11 +925,7 @@ struct GestureVideoPlayer: View {
             // are consumed here and don't bleed through to the gesture overlay below.
             VStack(spacing: 4) {
                 // Skip intro button — shown when inside intro chapter bounds
-                let showSkipIntro: Bool = {
-                    guard let intro = introChapter else { return false }
-                    let t = isScrubbing ? scrubTime : currentTime
-                    return t >= intro.startSecs && t < intro.endSecs
-                }()
+                let showSkipIntro = showSkipIntroNow
                 if showSkipIntro, let intro = introChapter {
                     HStack {
                         Spacer()
@@ -909,7 +945,21 @@ struct GestureVideoPlayer: View {
                         .accessibilityLabel("Skip intro")
                         .accessibilityAddTraits(.isButton)
                         .padding(.trailing, 4)
+                        #if os(tvOS)
+                        // Was rendered with no focus binding at all: visible during every
+                        // episode intro and impossible to select with the remote.
+                        .focused($focusedControl, equals: .skipIntro)
+                        .focusEffectDisabled()
+                        .scaleEffect(focusedControl == .skipIntro ? 1.12 : 1.0)
+                        .brightness(focusedControl == .skipIntro ? 0.25 : 0)
+                        .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                        #endif
                     }
+                    #if os(tvOS)
+                    // Own focus section so the transient Skip Intro row is reachable
+                    // without competing with the transport row below it.
+                    .focusSection()
+                    #endif
                 }
 
                 // Progress / scrub bar
@@ -1243,6 +1293,30 @@ struct GestureVideoPlayer: View {
                 currentTime = t
                 scheduleHideControls()
                 return
+            case .skipIntro:
+                if let intro = introChapter {
+                    seek(to: intro.endSecs, tight: true)
+                    currentTime = intro.endSecs
+                    focusedControl = .playPause
+                }
+                scheduleHideControls()
+                return
+            case .close:
+                onProgressUpdate?(currentTime, duration)
+                onDismiss?()
+                return
+            case .goToShow:
+                if let goToShow = onGoToShow {
+                    onProgressUpdate?(currentTime, duration)
+                    onDismiss?()
+                    // Same 400ms deferral as the button body: dismissing the cover and
+                    // popping the NavigationLink on one runloop pass corrupts nav state.
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(400))
+                        goToShow()
+                    }
+                }
+                return
             default:
                 break
             }
@@ -1269,11 +1343,32 @@ struct GestureVideoPlayer: View {
                 return
             }
             hideControlsTask?.cancel()
+            // Vertical graph, top to bottom:
+            //   row 0: close / goToShow          (top-left actions)
+            //   row 1: captions / speed          (top-right actions)
+            //   row 2: skipIntro                 (only while showSkipIntro)
+            //   row 3: skipStart back15 playPause forward15 skipEnd
+            // Every case in TVFocusField must appear as a destination somewhere here,
+            // or its button is rendered-but-unreachable — the bug this row keeps hitting.
             switch (direction, focusedControl) {
+            // Up out of the transport row → the Skip Intro pill when it's showing,
+            // otherwise straight to the top-right actions.
             case (.up, .playPause), (.up, .hidden), (.up, .none),
                  (.up, .skipStart), (.up, .back15), (.up, .forward15), (.up, .skipEnd):
+                focusedControl = showSkipIntroNow ? .skipIntro : .captions
+            case (.up, .skipIntro):
+                focusedControl = .captions
+            // Up from the top-right actions → the top-left actions (Close / Show).
+            case (.up, .captions), (.up, .speed):
+                focusedControl = .close
+            case (.up, .close), (.up, .goToShow):
+                break // already the top row
+            // Down from the top-left actions → top-right actions.
+            case (.down, .close), (.down, .goToShow):
                 focusedControl = .captions
             case (.down, .captions), (.down, .speed):
+                focusedControl = showSkipIntroNow ? .skipIntro : .playPause
+            case (.down, .skipIntro):
                 focusedControl = .playPause
             // Down from play/pause enters the skip-button row. Left/right on play/pause is
             // reserved for scrubbing (the common case), so it cannot double as the way in;
@@ -1298,6 +1393,30 @@ struct GestureVideoPlayer: View {
         if focusedControl == .captions || focusedControl == .speed {
             hideControlsTask?.cancel()
             focusedControl = (direction == .right) ? .speed : .captions
+            scheduleHideControls()
+            return
+        }
+        // Same for the top-left action row (Close / Show).
+        if focusedControl == .close || focusedControl == .goToShow {
+            hideControlsTask?.cancel()
+            if onGoToShow != nil {
+                focusedControl = (direction == .right) ? .goToShow : .close
+            }
+            scheduleHideControls()
+            return
+        }
+        // And for the transport row. skipStart / forward15 / skipEnd previously had
+        // focus bindings but NO code path that assigned them: left/right here fell
+        // through to the seek below, so focus entered at back15 and could never move.
+        // Three rendered buttons were permanently dead.
+        if focusedControl == .skipStart || focusedControl == .back15
+            || focusedControl == .forward15 || focusedControl == .skipEnd {
+            hideControlsTask?.cancel()
+            let row: [TVFocusField] = [.skipStart, .back15, .playPause, .forward15, .skipEnd]
+            if let current = focusedControl, let idx = row.firstIndex(of: current) {
+                let next = direction == .right ? idx + 1 : idx - 1
+                if row.indices.contains(next) { focusedControl = row[next] }
+            }
             scheduleHideControls()
             return
         }
@@ -1952,13 +2071,15 @@ struct GestureVideoPlayer: View {
         ) { note in
             guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            // Extract the Sendable payload BEFORE the Task: capturing `note` itself in a
+            // @Sendable closure is a Swift 6 error (Notification is not Sendable).
+            let optsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             Task { @MainActor in
                 switch type {
                 case .began:
                     // The system has already stopped audio; sync our state to reality.
                     isPlaying = false
                 case .ended:
-                    let optsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
                     let opts = AVAudioSession.InterruptionOptions(rawValue: optsRaw)
                     guard opts.contains(.shouldResume) else {
                         isPlaying = false

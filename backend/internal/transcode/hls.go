@@ -401,7 +401,11 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 	return session, nil
 }
 
-// GetSession returns an existing session by ID.
+// GetSession returns an existing session by ID and marks it as recently accessed.
+//
+// NOTE: this has a SIDE EFFECT — it stamps LastAccess = now. Any caller that wants
+// to *test* staleness must use LastAccessOf instead, or the test is self-defeating
+// (the read refreshes the very field being compared). See LastAccessOf.
 func (g *HLSGenerator) GetSession(sessionID string) (*HLSSession, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -411,6 +415,53 @@ func (g *HLSGenerator) GetSession(sessionID string) (*HLSSession, bool) {
 		session.LastAccess = time.Now()
 	}
 	return session, ok
+}
+
+// LastAccessOf returns a session's last-access time WITHOUT refreshing it.
+//
+// The inactivity reaper previously called GetSession, which stamps LastAccess = now
+// before the caller compares it against now-InactivityTimeout — so the comparison was
+// always false and the reaper never evicted anything. Read-only by design.
+func (g *HLSGenerator) LastAccessOf(sessionID string) (time.Time, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	session, ok := g.sessions[sessionID]
+	if !ok {
+		return time.Time{}, false
+	}
+	return session.LastAccess, true
+}
+
+// SessionSnapshot returns a session's liveness fields under the lock, without
+// refreshing LastAccess. For diagnostics/listing — a status read must not keep a
+// session alive.
+func (g *HLSGenerator) SessionSnapshot(sessionID string) (lastAccess time.Time, completedAt *time.Time, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	session, found := g.sessions[sessionID]
+	if !found {
+		return time.Time{}, nil, false
+	}
+	return session.LastAccess, session.CompletedAt, true
+}
+
+// SessionError returns a session's terminal error, read under the generator lock.
+//
+// Callers must NOT reach through the *HLSSession returned by GetSession to read this:
+// GetSession releases g.mu before returning, so every field access by the caller races
+// the transcode goroutine's writes. An interface value is two words, so a torn read can
+// yield a non-nil type word with a nil data word — and calling .Error() on that panics.
+func (g *HLSGenerator) SessionError(sessionID string) (error, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	session, ok := g.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	return session.Error, true
 }
 
 // StopSession stops and cleans up a session.
@@ -1020,9 +1071,10 @@ func (g *HLSGenerator) WaitForPlaylist(ctx context.Context, sessionID string, ti
 			return nil
 		}
 
-		// Check if session has error
-		if session, ok := g.GetSession(sessionID); ok && session.Error != nil {
-			return session.Error
+		// Check if session has error. Read under the lock — reaching through the
+		// pointer from GetSession races the transcode goroutine's write.
+		if sessErr, ok := g.SessionError(sessionID); ok && sessErr != nil {
+			return sessErr
 		}
 
 		time.Sleep(100 * time.Millisecond)
@@ -1050,11 +1102,13 @@ type SessionStats struct {
 
 // Stats returns statistics for a session.
 func (g *HLSGenerator) Stats(sessionID string) (*SessionStats, error) {
+	// Snapshot every field under the lock. Releasing g.mu first and then reading
+	// through the pointer races the transcode goroutine, which writes Error and
+	// CompletedAt under that same lock.
 	g.mu.Lock()
 	session, ok := g.sessions[sessionID]
-	g.mu.Unlock()
-
 	if !ok {
+		g.mu.Unlock()
 		return nil, fmt.Errorf("session not found")
 	}
 
@@ -1065,13 +1119,14 @@ func (g *HLSGenerator) Stats(sessionID string) (*SessionStats, error) {
 		CompletedAt: session.CompletedAt,
 		LastAccess:  session.LastAccess,
 	}
-
 	if session.Error != nil {
 		stats.Error = session.Error.Error()
 	}
+	outputDir := session.OutputDir
+	g.mu.Unlock()
 
 	// Count segments and calculate size
-	entries, err := os.ReadDir(session.OutputDir)
+	entries, err := os.ReadDir(outputDir)
 	if err == nil {
 		for _, entry := range entries {
 			if !entry.IsDir() {

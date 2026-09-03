@@ -403,6 +403,12 @@ private struct TVSeasonSection: View {
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
+  /// Drives the season header's focus highlight — `.buttonStyle(.plain)` provides none.
+  @FocusState private var isHeaderFocused: Bool
+  /// Set once the user has focused an episode inside this section. Latches deliberately:
+  /// a late async resolve must never collapse a section the user has entered, and focus
+  /// briefly reads as unfocused while moving between rows.
+  @State private var hasFocusInside = false
   // Default collapsed — only open if this season contains the highlighted episode
   @State private var isExpanded: Bool
   @State private var error: String?
@@ -449,9 +455,18 @@ private struct TVSeasonSection: View {
         // TASK-710: guarantee a tall, full-width hit/focus region so the d-pad reliably
         // lands on the season header rather than skipping past a thin frame.
         .frame(minHeight: 60)
+        .background(
+          RoundedRectangle(cornerRadius: 8)
+            .fill(isHeaderFocused ? Color(white: 0.22) : Color.clear)
+        )
         .contentShape(Rectangle())
       }
+      // .buttonStyle(.plain) suppresses tvOS's default focus chrome, so without an
+      // explicit highlight this header focused INVISIBLY — the user couldn't tell whether
+      // Select would collapse the season or open the first episode. Matches
+      // TVEpisodeNavRow, which sits directly beneath it and already does this.
       .buttonStyle(.plain)
+      .focused($isHeaderFocused)
       .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
 
       Rectangle()
@@ -492,7 +507,10 @@ private struct TVSeasonSection: View {
                 allSeasons: allSeasons,
                 currentSeasonIndex: seasonIdx,
                 autoPlay: ep.id == highlightEpisodeID
-              )
+              ),
+              onFocusChange: { focused in
+                if focused { hasFocusInside = true }
+              }
             )
 
             Rectangle()
@@ -521,7 +539,15 @@ private struct TVSeasonSection: View {
         } else if newHighlight != nil {
           // A specific season has been resolved — collapse any section that was
           // opened only as a placeholder (the lowest-season default).
-          isExpanded = false
+          //
+          // ...unless the user is already IN this section. resolveResumePoint runs
+          // async (up to 5 sequential season fetches), so it can land seconds after the
+          // user started moving down the auto-expanded season's episodes — collapsing it
+          // destroyed the focused row out from under them with nothing to restore to.
+          // Their position wins over a late placeholder correction.
+          if !hasFocusInside {
+            isExpanded = false
+          }
         }
       }
     }
@@ -562,6 +588,9 @@ private struct TVEpisodeNavRow<Destination: View>: View {
   let ep: ItemSummary
   let isHighlighted: Bool
   let destination: Destination
+  /// Reports focus up to the owning season section, which must not collapse itself while
+  /// the user is inside it (see the highlightSeason onChange).
+  var onFocusChange: ((Bool) -> Void)? = nil
   @FocusState private var isFocused: Bool
 
   var body: some View {
@@ -576,6 +605,7 @@ private struct TVEpisodeNavRow<Destination: View>: View {
     }
     .buttonStyle(.plain)
     .focused($isFocused)
+    .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
   }
 }
 
@@ -1713,6 +1743,19 @@ private struct TVShowMetadataFixerSheet: View {
             .font(.caption)
             .listRowBackground(Color(white: 0.08))
         }
+
+        #if os(tvOS)
+        // The toolbar below is compiled out on tvOS, which removed this sheet's ONLY two
+        // actions — not just their styling. Search was reachable only via keyboard submit
+        // and Cancel not at all (Menu was the sole undocumented way out). Put them in the
+        // content, where tvOS can actually focus them.
+        Section {
+          Button("Search Again") { Task { await search() } }
+            .disabled(isSearching)
+          Button("Cancel") { dismiss() }
+        }
+        .listRowBackground(Color(white: 0.1))
+        #endif
       }
       .navigationTitle("Fix Show Metadata")
       #if !os(tvOS)

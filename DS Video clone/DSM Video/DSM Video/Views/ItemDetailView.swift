@@ -942,6 +942,18 @@ struct ItemDetailView: View {
         .foregroundStyle(.white)
         .accessibilityAddTraits(.isHeader)
 
+      #if os(tvOS)
+      // tvOS scrolls by FOCUS, and this row contains only non-focusable views — so a
+      // horizontal ScrollView here could never be driven by the remote and everyone past
+      // the visible width was unreachable. Same reasoning already applied to the summary
+      // text above. Show a bounded, fully-visible subset instead of a scroller that lies.
+      HStack(alignment: .top, spacing: 24) {
+        ForEach(Array(ordered.prefix(6).enumerated()), id: \.offset) { _, person in
+          castAvatar(person)
+        }
+      }
+      .padding(.vertical, 2)
+      #else
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(alignment: .top, spacing: 14) {
           ForEach(Array(ordered.enumerated()), id: \.offset) { _, person in
@@ -950,12 +962,26 @@ struct ItemDetailView: View {
         }
         .padding(.vertical, 2)
       }
+      #endif
     }
   }
 
   @ViewBuilder
   private func castAvatar(_ person: ItemDetail.Person) -> some View {
+    // tvOS is a fixed 1920x1080 layout viewed from ~10 feet: a 64pt circle with
+    // .caption2 labels is unreadable there. Same reasoning DiagnosticLogView already
+    // applies to its own text.
+    #if os(tvOS)
+    let avatarSize: CGFloat = 120
+    let nameFont: Font = .system(size: 22, weight: .medium)
+    let roleFont: Font = .system(size: 18)
+    let cellWidth: CGFloat = 150
+    #else
     let avatarSize: CGFloat = 64
+    let nameFont: Font = .caption.weight(.medium)
+    let roleFont: Font = .caption2
+    let cellWidth: CGFloat = 84
+    #endif
     VStack(spacing: 6) {
       Group {
         // 64pt avatar → 192px at 3x, which lands on the server's 342 rung.
@@ -981,17 +1007,17 @@ struct ItemDetailView: View {
       .overlay(Circle().strokeBorder(Color.dsBorderSubtle, lineWidth: 0.5))
 
       Text(person.name)
-        .font(.caption.weight(.medium))
+        .font(nameFont)
         .foregroundStyle(.white)
         .lineLimit(1)
       if let role = person.role, !role.isEmpty {
         Text(role)
-          .font(.caption2)
+          .font(roleFont)
           .foregroundStyle(Color.dsTextSecondary)
           .lineLimit(1)
       }
     }
-    .frame(width: 84)
+    .frame(width: cellWidth)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
   }

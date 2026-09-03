@@ -1040,6 +1040,17 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 
 	case "login":
 		log.Printf("[WebAPI] Auth login ENTER (build=%s) ua=%q", BuildVersion, r.Header.Get("User-Agent"))
+		// Rate-limit this plane too. checkAuthRateLimit was wired only to the REST
+		// /auth/login and /auth/pairing/exchange, so /webapi/entry.cgi?api=SYNO.API.Auth
+		// &method=login proxied straight through to DSM at full speed — an unthrottled
+		// DSM credential brute-force path that bypassed our own limiter. Shares the same
+		// per-IP counter as the REST plane; DSM code 407 = too many failed attempts.
+		if s.authRateLimitExceeded(r) {
+			log.Printf("[WebAPI] Auth login rate-limited for %s", r.RemoteAddr)
+			w.Header().Set("Retry-After", "60")
+			writeWebAPIError(w, 407)
+			return
+		}
 		// If the session belongs to another DSM app (e.g. webman, FileStation),
 		// proxy the entire request to auth.cgi so DSM web UI login is unaffected.
 		// "VideoStation" sessions are ours: the DS Video app uses session=VideoStation.
@@ -1405,6 +1416,11 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 		limit = 10000
 	}
 	offset := parseInt(r.FormValue("offset"), 0)
+	// Clamp: parseInt accepts negatives, and the REST equivalents clamp both bounds.
+	// An unclamped offset is a free CPU-burn primitive (huge OFFSET scans and discards).
+	if offset < 0 {
+		offset = 0
+	}
 	sortBy := r.FormValue("sort_by")
 	sortDir := r.FormValue("sort_direction")
 
@@ -1455,17 +1471,10 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 			continue
 		}
 
-		// Get watch status
-		p, _ := s.getProgress(session.UserID, id)
-		var watchStatus map[string]any
-		if p != nil {
-			pos, _ := p["positionSeconds"].(int)
-			dur, _ := p["durationSeconds"].(int)
-			watchStatus = map[string]any{
-				"time":       pos,
-				"total_time": dur,
-			}
-		}
+		// Watch status is resolved AFTER this loop in a single batched query. Calling
+		// getProgress per row issued one SELECT per movie while `rows` was still open,
+		// holding a connection through N round-trips — and contending with the scanner's
+		// write lock. The REST twin already does this as a join.
 
 		// Derive a stable mapper_id from the item's database ID (hash-based,
 		// sort-order independent). Collision detection ensures uniqueness within
@@ -1493,13 +1502,30 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 		if rating.Valid {
 			movie["rating"] = rating.Float64
 		}
-		if watchStatus != nil {
-			movie["watch_status"] = watchStatus
-		}
 		// Store the internal ID as a tag for lookup
 		movie["_internal_id"] = id
 
 		movies = append(movies, movie)
+	}
+	rows.Close()
+
+	// One batched progress query for the whole page, now that `rows` is closed.
+	movieIDs := make([]string, 0, len(movies))
+	for _, m := range movies {
+		if iid, ok := m["_internal_id"].(string); ok {
+			movieIDs = append(movieIDs, iid)
+		}
+	}
+	progressByID := s.getProgressBatch(session.UserID, movieIDs)
+	for _, m := range movies {
+		iid, _ := m["_internal_id"].(string)
+		p, ok := progressByID[iid]
+		if !ok {
+			continue
+		}
+		pos, _ := p["positionSeconds"].(int)
+		dur, _ := p["durationSeconds"].(int)
+		m["watch_status"] = map[string]any{"time": pos, "total_time": dur}
 	}
 
 	// Store ID mapping for this session (mapper_id -> internal_id)
@@ -1616,6 +1642,11 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 		limit = 10000
 	}
 	offset := parseInt(r.FormValue("offset"), 0)
+	// Clamp: parseInt accepts negatives, and the REST equivalents clamp both bounds.
+	// An unclamped offset is a free CPU-burn primitive (huge OFFSET scans and discards).
+	if offset < 0 {
+		offset = 0
+	}
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
@@ -1845,6 +1876,11 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 
 	limit := parseInt(r.FormValue("limit"), 10000)
 	offset := parseInt(r.FormValue("offset"), 0)
+	// Clamp: parseInt accepts negatives, and the REST equivalents clamp both bounds.
+	// An unclamped offset is a free CPU-burn primitive (huge OFFSET scans and discards).
+	if offset < 0 {
+		offset = 0
+	}
 
 	var folderName string
 	if tvshowIDStr != "" {
@@ -2087,6 +2123,16 @@ func (s *Server) webAPIStreamingOpen(w http.ResponseWriter, r *http.Request, ses
 	var path string
 	err := s.db.QueryRow("SELECT path FROM items WHERE id = ?", internalID).Scan(&path)
 	if err != nil {
+		writeWebAPIError(w, 1101)
+		return
+	}
+
+	// Enforce the media-root containment guard before the path becomes a servable
+	// session. handlePlayback and rehydratePlaySession both do this; this handler was
+	// the one path->ServeFile route that skipped it, so a tampered items.path row would
+	// have been served from here and nowhere else.
+	if !s.pathWithinMediaRoot(path) {
+		log.Printf("[WebAPI] Streaming open REFUSED: path outside media roots for item %s", internalID)
 		writeWebAPIError(w, 1101)
 		return
 	}

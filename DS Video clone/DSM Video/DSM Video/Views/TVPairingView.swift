@@ -18,6 +18,9 @@ struct TVPairingView: View {
   @State private var enteredCode: String = ""
   @State private var isRedeeming: Bool = false
   @State private var redeemError: String?
+  /// Last 6-digit code auto-submitted, so a failed attempt (which now KEEPS the code in
+  /// the field so the user can correct one digit) doesn't retry itself in a loop.
+  @State private var lastAttemptedCode: String?
   @FocusState private var codeFieldFocused: Bool
 
   var body: some View {
@@ -283,7 +286,15 @@ struct TVPairingView: View {
           let digits = newValue.filter(\.isNumber)
           if digits != newValue { enteredCode = String(digits.prefix(6)); return }
           if digits.count > 6 { enteredCode = String(digits.prefix(6)); return }
-          if digits.count == 6 { Task { await redeem() } }
+          // Clear a stale error as soon as the user edits, so the screen doesn't accuse
+          // them of a bad code while they're fixing it.
+          if digits.count < 6 { redeemError = nil; lastAttemptedCode = nil }
+          // Auto-submit once per distinct code. The field is no longer wiped on failure,
+          // so without this guard the sixth digit would re-fire redeem() endlessly.
+          if digits.count == 6, digits != lastAttemptedCode {
+            lastAttemptedCode = digits
+            Task { await redeem() }
+          }
         }
 
       if isRedeeming {
@@ -325,8 +336,12 @@ struct TVPairingView: View {
     redeemError = nil
     await appState.exchangePairingCode(code)
     if appState.sessionToken == nil {
+      // appState now distinguishes "server unreachable" from "bad code" — surface that
+      // rather than flattening every failure to "wrong code".
       redeemError = appState.loginError ?? "That code didn't work. Check it and try again."
-      enteredCode = ""
+      // Do NOT wipe the field. Clearing it meant a single mistyped digit — or a briefly
+      // unreachable NAS with a perfectly good code — cost the user all six digits again
+      // on the on-screen keyboard. They can edit in place; the Connect button retries.
     }
     // On success TVMainView swaps to TVHomeView, and its .task(id: sessionToken) loads the rails.
   }

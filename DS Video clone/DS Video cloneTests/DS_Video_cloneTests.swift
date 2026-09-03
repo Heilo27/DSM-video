@@ -879,3 +879,79 @@ struct FileProtectionPolicyTests {
     #expect(String(decoding: readBack, as: UTF8.self) == "cursor=4242")
   }
 }
+
+// MARK: - Retry-ladder regression (full-sweep 2026-09-03)
+
+/// The bounded transport retry (TASK-788) was DEAD CODE for a month.
+///
+/// `request()` wraps every `URLError` it catches into `APIError.connection(code)`, but
+/// `requestWithRetry` caught `URLError` — a type it could never see. The wrap landed in
+/// `20d9d8a` (2026-08-15), one commit chain after the retry itself (`3f462ea`,
+/// 2026-07-03), and silently disabled it: search, item detail, genres, watchlist and TV
+/// shows all failed hard on a LAN→WAN switch instead of retrying once.
+///
+/// This is the same shape as TASK-834, where error wrapping killed the `.http(401)` auth
+/// branch. Both were invisible to the compiler and to code review. A test is the only
+/// thing that catches it.
+struct RetryLadderTests {
+
+  @Test func retriesTheTransportFailuresTheLadderWasWrittenFor() {
+    let retryable: [URLError.Code] = [
+      .timedOut, .networkConnectionLost, .notConnectedToInternet,
+      .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+    ]
+    for code in retryable {
+      #expect(
+        APIClient.isRetryableTransport(.connection(code)),
+        "APIError.connection(\(code)) must be retryable — this is the shape request() actually throws"
+      )
+    }
+  }
+
+  /// A server that ANSWERED must never be retried: it already made a decision, and
+  /// replaying the request would double a write.
+  @Test func doesNotRetryServerAnswers() {
+    #expect(APIClient.isRetryableTransport(.server("invalid_token", status: 401)) == false)
+    #expect(APIClient.isRetryableTransport(.server("not_found", status: 404)) == false)
+    #expect(APIClient.isRetryableTransport(.http(500)) == false)
+    #expect(APIClient.isRetryableTransport(.network) == false)
+    #expect(APIClient.isRetryableTransport(.invalidURL) == false)
+  }
+
+  /// Transport failures that are NOT transient must not burn a retry.
+  @Test func doesNotRetryPermanentTransportFailures() {
+    #expect(APIClient.isRetryableTransport(.connection(.userAuthenticationRequired)) == false)
+    #expect(APIClient.isRetryableTransport(.connection(.badURL)) == false)
+  }
+}
+
+// MARK: - Progress `applied` regression (full-sweep 2026-09-03)
+
+/// The server reports whether a progress write was actually stored or discarded as stale
+/// (its upsert is guarded by `excluded.write_seq > progress.write_seq`). The client
+/// decoded only `ok` and threw that signal away — so the exact failure the field was added
+/// to prevent ("Mark Unwatched appeared to work while changing nothing") stayed live.
+struct ProgressAppliedTests {
+
+  @Test func decodesAppliedFalse() throws {
+    let json = Data(#"{"ok":true,"applied":false}"#.utf8)
+    let resp = try JSONDecoder().decode(ProgressResponse.self, from: json)
+    #expect(resp.ok)
+    #expect(resp.applied == false, "a discarded write must be visible to the client")
+  }
+
+  @Test func decodesAppliedTrue() throws {
+    let json = Data(#"{"ok":true,"applied":true}"#.utf8)
+    let resp = try JSONDecoder().decode(ProgressResponse.self, from: json)
+    #expect(resp.applied == true)
+  }
+
+  /// An older server omits the field entirely; that must still decode (and is treated as
+  /// applied by the caller, preserving previous behaviour).
+  @Test func toleratesServerThatOmitsApplied() throws {
+    let json = Data(#"{"ok":true}"#.utf8)
+    let resp = try JSONDecoder().decode(ProgressResponse.self, from: json)
+    #expect(resp.ok)
+    #expect(resp.applied == nil)
+  }
+}
