@@ -1648,6 +1648,15 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 		offset = 0
 	}
 
+	// Both REST handlers open with this guard; this one did not. With TVPath unset,
+	// filepath.Clean("") is "." so tvRoot becomes "./", the prefix strip is a no-op, and
+	// every episode groups under its top-level path component — a library of nonsense
+	// "shows" rather than an honest empty list.
+	if s.cfg.TVPath == "" {
+		writeWebAPISuccess(w, map[string]any{"total": 0, "tvshow": []any{}})
+		return
+	}
+
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
 	rows, err := s.db.Query(`
@@ -1684,24 +1693,21 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 			continue
 		}
 
-		var folderName string
-		rel := strings.TrimPrefix(path, tvRoot)
-		parts := strings.SplitN(rel, "/", 2)
-		if len(parts) > 1 {
-			folderName = parts[0]
-		} else {
-			base := filepath.Base(path)
-			folderName = strings.TrimSuffix(base, filepath.Ext(base))
-		}
+		folderName := showFolderFromPath(path, tvRoot)
 		if folderName == "" {
 			continue
 		}
 
-		info, exists := showMap[folderName]
+		// Shared grouping key — see showGroupKey. This plane grouped on the folder alone,
+		// so the DS Video app showed a series split across differently-named folders twice
+		// while the native clients showed it once.
+		mapKey := showGroupKey(folderName, showName)
+
+		info, exists := showMap[mapKey]
 		if !exists {
 			info = &showInfo{folderName: folderName, displayName: folderName}
-			showMap[folderName] = info
-			showOrder = append(showOrder, folderName)
+			showMap[mapKey] = info
+			showOrder = append(showOrder, mapKey)
 		}
 
 		if showName.Valid && showName.String != "" && info.displayName == info.folderName {

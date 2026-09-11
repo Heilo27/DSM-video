@@ -3022,27 +3022,23 @@ func (s *Server) handleShowsList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Always group by folder name from path for consistency
-		var folderName string
-		rel := strings.TrimPrefix(path, tvRoot)
-		parts := strings.SplitN(rel, "/", 2)
-		if len(parts) > 1 {
-			folderName = parts[0]
-		} else {
-			// Root-level file, use filename without extension
-			base := filepath.Base(path)
-			folderName = strings.TrimSuffix(base, filepath.Ext(base))
-		}
-
+		folderName := showFolderFromPath(path, tvRoot)
 		if folderName == "" {
 			continue
 		}
 
-		info, exists := showMap[folderName]
+		// Group on the SHARED key, so a series split across differently-named folders is
+		// one show here too. This handler used to group on the folder alone — under a
+		// comment claiming it did so "for consistency" — while /tv/shows merged on the
+		// TMDb name, so the same library reported a different show count depending on
+		// which endpoint you asked.
+		mapKey := showGroupKey(folderName, showName)
+
+		info, exists := showMap[mapKey]
 		if !exists {
 			info = &showInfo{folderName: folderName, displayName: folderName}
-			showMap[folderName] = info
-			showOrder = append(showOrder, folderName)
+			showMap[mapKey] = info
+			showOrder = append(showOrder, mapKey)
 		}
 
 		// Prefer TMDb show_name as display name
@@ -5194,6 +5190,46 @@ const itemUpsertSQL = `INSERT INTO items(id, library_id, type, title, year, path
 				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
 				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`
 
+// showFolderFromPath derives a TV show's on-disk folder name from an episode path.
+//
+// One definition, because there were six — and they disagreed. The SCANNER required a real
+// subdirectory and stored NULL for a root-level episode, while four of the READERS fell
+// back to the filename stem. So for a root-level file the stored show_folder_id was NULL
+// while readers synthesised a folder name from the filename, and anything joining the
+// stored column against a reader-derived name silently missed (the sibling-poster fallback
+// does exactly that join).
+//
+// The fallback is the right answer: a root-level episode still belongs to *something*, and
+// returning "" would drop it from every listing. Callers that specifically need "was this
+// in a real folder" should check for a path separator themselves rather than re-deriving.
+func showFolderFromPath(path, tvRoot string) string {
+	rel := strings.TrimPrefix(path, tvRoot)
+	if parts := strings.SplitN(rel, "/", 2); len(parts) > 1 && parts[0] != "" {
+		return parts[0]
+	}
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// showGroupKey returns the key under which an episode's show is grouped.
+//
+// A show is ONE show even when its episodes are spread across differently-named folders —
+// "Daredevil" and "Daredevil (2015)" are the same series and must not appear twice. The
+// TMDb show name is the identity when we have one; the folder is the fallback for
+// unmatched content.
+//
+// This existed three times with two different answers: /tv/shows merged on the TMDb name,
+// while /shows and the DS Video plane grouped on the folder alone. The same library
+// therefore reported a different number of shows depending on which endpoint you asked,
+// and a re-folded series appeared twice in two of the three. Lowercased so folder-case
+// differences cannot split a show.
+func showGroupKey(folderName string, showName sql.NullString) string {
+	if showName.Valid && showName.String != "" {
+		return strings.ToLower(showName.String)
+	}
+	return folderName
+}
+
 func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
@@ -7105,6 +7141,16 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 
 		// TASK-571: compute showFolderID once at scan time and store it in the DB
 		// so it remains stable even if TVPath config changes later.
+		// Deliberately NOT showFolderFromPath: this column stores a REAL directory or
+		// nothing at all.
+		//
+		// showFolderFromPath falls back to the filename stem so a root-level episode still
+		// appears in listings. That is right for display, and wrong here: the sibling-poster
+		// fallback matches this value with `path LIKE tvRoot || folder || '/%'`, a prefix
+		// that only exists when the folder is an actual directory. A stem stored here would
+		// match nothing and quietly cost every root-level episode its show poster.
+		//
+		// The two rules differ on purpose; the shared helper's doc comment says so.
 		var showFolderID sql.NullString
 		if libraryID == "lib_tv" && s.cfg.TVPath != "" {
 			tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
@@ -8177,25 +8223,11 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		var folderName string
-		rel := strings.TrimPrefix(path, tvRoot)
-		parts := strings.SplitN(rel, "/", 2)
-		if len(parts) > 1 {
-			folderName = parts[0]
-		} else {
-			base := filepath.Base(path)
-			folderName = strings.TrimSuffix(base, filepath.Ext(base))
-		}
+		folderName := showFolderFromPath(path, tvRoot)
 		if folderName == "" {
 			continue
 		}
-
-		// Use TMDb show_name (lowercased) as the dedup key when available so that
-		// episodes split across differently-named folders for the same show merge correctly.
-		mapKey := folderName
-		if showName.Valid && showName.String != "" {
-			mapKey = strings.ToLower(showName.String)
-		}
+		mapKey := showGroupKey(folderName, showName)
 
 		info, exists := showMap[mapKey]
 		if !exists {
