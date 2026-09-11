@@ -1315,19 +1315,19 @@ func (s *Server) handleWebAPIInfo(w http.ResponseWriter, r *http.Request, method
 		"version_string": "3.2.0-3028",
 
 		// Core flags
-		"is_manager":  true,
-		"running":     true,
-		"onlylive":    false,
+		"is_manager":   true,
+		"running":      true,
+		"onlylive":     false,
 		"enablecinema": false,
 
 		// Codec / streaming flags
-		"support_dolby": false,
-		"support_ac3":   false,
-		"support_dts":   false,
-		"support_remux": true,
-		"support_transcode":           false,
-		"support_hardware_transcode":  false,
-		"support_software_transcode":  false,
+		"support_dolby":                  false,
+		"support_ac3":                    false,
+		"support_dts":                    false,
+		"support_remux":                  true,
+		"support_transcode":              false,
+		"support_hardware_transcode":     false,
+		"support_software_transcode":     false,
 		"support_fhd_hardware_transcode": false,
 		"support_dtv_transcode":          false,
 
@@ -1340,7 +1340,7 @@ func (s *Server) handleWebAPIInfo(w http.ResponseWriter, r *http.Request, method
 		// Privileges (older VideoStation.Info payloads include this)
 		"privilege": map[string]any{
 			"dtv":                false,
-			"offline_conversion":  false,
+			"offline_conversion": false,
 			"renderer":           true,
 			"sharing":            true,
 		},
@@ -2417,16 +2417,43 @@ func (s *Server) handleWebAPIWatchStatus(w http.ResponseWriter, r *http.Request,
 	position, _ := strconv.Atoi(timeStr)
 	totalDuration, _ := strconv.Atoi(totalTimeStr)
 
+	// Same bounds as the REST path (handleProgress). strconv errors were discarded here and
+	// no range was enforced, so an absurd value reached the row — the exact shape that
+	// crash-looped 32-bit clients and which the REST bound was added to stop.
+	const maxProgressSeconds = 32 * 24 * 60 * 60
+	if position < 0 || totalDuration < 0 ||
+		position > maxProgressSeconds || totalDuration > maxProgressSeconds {
+		writeWebAPIError(w, 100)
+		return
+	}
+
+	// Allocate a write_seq and bump progress_seq, exactly as the REST path does.
+	//
+	// This write previously did NEITHER. Two consequences, both silent:
+	//   - With no write_seq, a row inserted here kept the column's 0 default, so the REST
+	//     upsert's `WHERE excluded.write_seq > progress.write_seq` guard compared against a
+	//     stale ordinal — reinstating the last-write-wins behaviour that guard exists to
+	//     prevent, and which previously destroyed real watch progress.
+	//   - With no progress_seq bump, delta sync never learned anything changed, so watching
+	//     in the DS Video app was invisible to every other device, permanently.
+	writeSeq, seqErr := s.incrementSeqErr("progress_seq")
+	if seqErr != nil {
+		writeWebAPIError(w, 100)
+		return
+	}
+
 	// Update progress in database
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(`
-		INSERT INTO progress (item_id, user_id, position_seconds, duration_seconds, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO progress (item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(item_id, user_id) DO UPDATE SET
 			position_seconds = excluded.position_seconds,
 			duration_seconds = excluded.duration_seconds,
-			updated_at = excluded.updated_at`,
-		internalID, session.UserID, position, totalDuration, now)
+			updated_at = excluded.updated_at,
+			write_seq = excluded.write_seq
+		WHERE excluded.write_seq > progress.write_seq`,
+		internalID, session.UserID, position, totalDuration, now, writeSeq)
 
 	if err != nil {
 		writeWebAPIError(w, 100)

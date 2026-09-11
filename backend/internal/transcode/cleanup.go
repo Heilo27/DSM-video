@@ -136,6 +136,14 @@ func (m *CleanupManager) cleanupInactive() {
 }
 
 // cleanupOrphanedDirs removes transcode directories that don't have active sessions.
+// reservedCacheDirs are subdirectories of TempDir that are NOT transcode sessions and must
+// survive both the orphan sweep and shutdown. Keep in sync with the paths built in
+// main.go (trickplayDir, and the embedded-subtitle cache).
+var reservedCacheDirs = map[string]bool{
+	"trickplay":     true,
+	"embedded_subs": true,
+}
+
 func (m *CleanupManager) cleanupOrphanedDirs() {
 	entries, err := os.ReadDir(m.config.TempDir)
 	if err != nil {
@@ -149,6 +157,21 @@ func (m *CleanupManager) cleanupOrphanedDirs() {
 		}
 
 		sessionID := entry.Name()
+
+		// NEVER touch the long-lived caches that live alongside session dirs.
+		//
+		// TempDir is TranscodeDir, and the server also keeps trickplay sprites and
+		// extracted embedded subtitles in TranscodeDir/<name>/<itemID>/. To this loop those
+		// were just directories with no matching session, so after InactivityTimeout with
+		// no NEW entry created (a directory's mtime only bumps when a child is added — the
+		// steady state for a settled library) it deleted the entire cache.
+		//
+		// Both are expensive to rebuild: a trickplay sprite is a full-file ffmpeg pass and
+		// subtitle extraction is many seconds per file, and both draw on the same ffmpeg
+		// budget live playback competes for. Deleting them was pure self-inflicted work.
+		if reservedCacheDirs[sessionID] {
+			continue
+		}
 
 		// Skip if there's an active session
 		if m.generator != nil {
@@ -187,9 +210,23 @@ func (m *CleanupManager) cleanupAll() {
 		}
 	}
 
-	// Remove the entire temp directory
-	if err := os.RemoveAll(m.config.TempDir); err != nil {
-		log.Printf("[transcode] Failed to remove temp directory: %v", err)
+	// Remove session directories — but NOT the long-lived caches beside them.
+	//
+	// This used to be os.RemoveAll(TempDir), which deleted the trickplay sprites and
+	// extracted subtitles too. Those are caches, not session scratch: rebuilding them is a
+	// full-file ffmpeg pass each, competing with playback for the same budget. Since this
+	// runs on every SIGTERM, every package upgrade silently threw them away.
+	entries, err := os.ReadDir(m.config.TempDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if reservedCacheDirs[entry.Name()] {
+			continue
+		}
+		if rErr := os.RemoveAll(filepath.Join(m.config.TempDir, entry.Name())); rErr != nil {
+			log.Printf("[transcode] Failed to remove %s: %v", entry.Name(), rErr)
+		}
 	}
 }
 
@@ -203,13 +240,13 @@ func (m *CleanupManager) CleanupSession(sessionID string) error {
 
 // SessionInfo contains information about a session for cleanup purposes.
 type SessionInfo struct {
-	SessionID     string
-	OutputDir     string
-	LastAccess    time.Time
-	CompletedAt   *time.Time
-	IsActive      bool
-	SizeBytes     int64
-	SegmentCount  int
+	SessionID    string
+	OutputDir    string
+	LastAccess   time.Time
+	CompletedAt  *time.Time
+	IsActive     bool
+	SizeBytes    int64
+	SegmentCount int
 }
 
 // ListSessions returns information about all sessions.

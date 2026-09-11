@@ -586,6 +586,27 @@ func main() {
 				log.Printf("[purge] revoked_tokens cleanup: %v", dbErr)
 			}
 
+			// Deletion tombstones — retain 90 days, then drop.
+			//
+			// Nothing purged this table. Every scan that saw a renamed or removed file
+			// appended a row forever, and the library-normalize conversion renames in bulk
+			// (.mkv -> .mp4), so it grew fastest exactly when the library was healthiest.
+			// It reached 2,156 rows on the real library. Each /sync/deleted call from every
+			// client pays an anti-join across the whole table.
+			//
+			// 90 days is the contract: a client offline LONGER than this cannot learn about
+			// deletions incrementally and must do a full resync. That is the correct
+			// trade — the alternative is keeping every tombstone forever so a device that
+			// has been off for a year can catch up incrementally, which costs every other
+			// device on every sync.
+			const tombstoneRetention = 90 * 24 * time.Hour
+			cutoff := time.Now().UTC().Add(-tombstoneRetention).Format(time.RFC3339)
+			if res, dbErr := s.db.Exec(`DELETE FROM deleted_items WHERE deleted_at < ?`, cutoff); dbErr != nil {
+				log.Printf("[purge] deleted_items cleanup: %v", dbErr)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("[purge] removed %d deletion tombstones older than 90 days", n)
+			}
+
 			// Auth rate limit entries — delete entries whose window has expired.
 			// sync.Map Range+Delete is safe without an external mutex.
 			nowT := time.Now()
@@ -1336,33 +1357,6 @@ CREATE TABLE IF NOT EXISTS watchlist (
 			// got the extension-guess fallback are left unstamped and get one proper
 			// probe, which is the intended behaviour.
 
-			// Force ONE re-probe of HEVC rows so the newly-added tag gets populated.
-			//
-			// Existing rows have video_codec_tag NULL, and the scanner skips re-probing
-			// anything whose file identity is unchanged — so without this the column would
-			// stay empty forever and the hev1 guard would remain exactly as dead as it was
-			// before the column existed. Clearing probed_at is the established way to
-			// demand a re-probe (the block below does the inverse).
-			//
-			// Scoped to HEVC deliberately: it is the only codec whose FourCC changes the
-			// playback decision, and re-probing a whole library on a 4-core NAS is the
-			// kind of thundering scan this codebase has fought before. On the library this
-			// was written against that is ~100 files, not ~5,000.
-			//
-			// Ordering note: this sets probed_at = NULL and the block below sets it
-			// non-NULL, but they cannot fight. Each runs only in the pass where ITS OWN
-			// column was just added, and a given column is added exactly once.
-			if m.column == "video_codec_tag" {
-				res, bErr := db.Exec(
-					`UPDATE items SET probed_at = NULL
-					 WHERE video_codec = 'hevc' AND video_codec_tag IS NULL`)
-				if bErr != nil {
-					log.Printf("[migrate] video_codec_tag re-probe scheduling failed: %v", bErr)
-				} else if n, _ := res.RowsAffected(); n > 0 {
-					log.Printf("[migrate] scheduled %d HEVC rows for one re-probe to capture the codec tag", n)
-				}
-			}
-
 			if m.column == "probed_at" {
 				res, bErr := db.Exec(
 					`UPDATE items SET probed_at = ?
@@ -1373,6 +1367,38 @@ CREATE TABLE IF NOT EXISTS watchlist (
 				} else if n, _ := res.RowsAffected(); n > 0 {
 					log.Printf("[migrate] backfilled probed_at on %d already-probed rows", n)
 				}
+			}
+		}
+	}
+
+	// Force ONE re-probe of HEVC rows so the newly-added video_codec_tag gets populated.
+	//
+	// Deliberately OUTSIDE the per-column loop above. Inside it, this ran in the pass that
+	// added video_codec_tag — which on a FRESH database is BEFORE probed_at exists, so the
+	// statement failed with "no such column: probed_at". Harmless there (a new database has
+	// no rows to re-probe) but it logged a real error, and on an existing database whose
+	// probed_at column was added in the same startup it would have skipped the backfill
+	// entirely. Caught by running the server against a fresh database rather than by
+	// reading the code. Out here both columns are guaranteed to exist.
+	//
+	// Idempotent by construction: it only touches rows that still have a NULL tag, so once
+	// they are re-probed it matches nothing and costs a single indexed scan at startup.
+	//
+	// Scoped to HEVC on purpose — it is the only codec whose FourCC changes the playback
+	// decision, and re-probing a whole library on a 4-core NAS is the kind of thundering
+	// scan this codebase has fought before (~100 files here, not ~5,000).
+	{
+		var tagCol, probedCol bool
+		_ = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name='video_codec_tag'`).Scan(&tagCol)
+		_ = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name='probed_at'`).Scan(&probedCol)
+		if tagCol && probedCol {
+			res, bErr := db.Exec(
+				`UPDATE items SET probed_at = NULL
+				 WHERE video_codec = 'hevc' AND video_codec_tag IS NULL`)
+			if bErr != nil {
+				log.Printf("[migrate] video_codec_tag re-probe scheduling failed: %v", bErr)
+			} else if n, _ := res.RowsAffected(); n > 0 {
+				log.Printf("[migrate] scheduled %d HEVC rows for one re-probe to capture the codec tag", n)
 			}
 		}
 	}
@@ -1401,6 +1427,13 @@ CREATE TABLE IF NOT EXISTS watchlist (
 	// Step 3: Create indexes AFTER columns are guaranteed to exist
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_items_library_added ON items(library_id, added_at)",
+		// The default library browse is `WHERE library_id = ? ORDER BY title, id`, and the
+		// default limit is the whole library. Without a (library_id, title) index SQLite
+		// resolved the filter from idx_items_library_season and then sorted every matching
+		// row in a TEMP B-TREE — ~5,000 rows on this library, on every browse, on a 4-core
+		// NAS. `id` is the tiebreaker the query uses, so including it keeps the sort fully
+		// index-satisfied rather than partially.
+		"CREATE INDEX IF NOT EXISTS idx_items_library_title ON items(library_id, title, id)",
 		"CREATE INDEX IF NOT EXISTS idx_items_tmdb_id ON items(tmdb_id)",
 		"CREATE INDEX IF NOT EXISTS idx_items_change_seq ON items(change_seq)",
 		// Episode query indexes — prevent full table scans under concurrent load
@@ -3525,21 +3558,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// contain that time, and playback stalled. The client now asks for a session that
 	// starts near the position it wants. Ignored for direct play and remux, which are
 	// byte-range seekable already.
-	startSeconds := 0.0
-	if v, err := strconv.ParseFloat(r.URL.Query().Get("start"), 64); err == nil {
-		// Reject non-finite and negative input; clamp to the item's runtime so a bad value
-		// cannot start ffmpeg past the end of the file.
-		if !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 {
-			startSeconds = v
-		}
-	}
-	// Never start past the end: leave at least a few seconds of media, or the session
-	// produces an empty playlist and the client sees "resource unavailable".
-	if itemDuration.Valid && itemDuration.Int64 > 0 {
-		if limit := float64(itemDuration.Int64) - 10; startSeconds > limit {
-			startSeconds = math.Max(0, limit)
-		}
-	}
+	startSeconds := clampStartSeconds(r.URL.Query().Get("start"), itemDuration)
 
 	// Quality cap: map ?quality= param to a max height for transcoding
 	qualityParam := r.URL.Query().Get("quality")
@@ -4290,7 +4309,16 @@ func (s *Server) updateCodecInfo(itemID string, probe *transcode.ProbeResult) {
 	if probe == nil {
 		return
 	}
-	seq := s.incrementSeq("item_seq")
+	// incrementSeqErr, not incrementSeq: a flattened 0 would be written into change_seq,
+	// and delta sync filters `change_seq > since` — so the row would be invisible to every
+	// client whose cursor has moved past 0, i.e. all of them. For THIS path that means an
+	// item whose codec was just corrected keeps being transcoded on every device forever.
+	// Better to skip the update and let the next scan retry than to orphan the row.
+	seq, seqErr := s.incrementSeqErr("item_seq")
+	if seqErr != nil || seq <= 0 {
+		log.Printf("updateCodecInfo: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, seqErr)
+		return
+	}
 	_, err := s.db.Exec(
 		`UPDATE items SET video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
 		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
@@ -4333,7 +4361,11 @@ func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.
 
 	// Different-path conversion → re-key + migrate FK rows in one transaction.
 	if newID != itemID {
-		seq := s.incrementSeq("item_seq")
+		seq, seqErr := s.incrementSeqErr("item_seq")
+		if seqErr != nil || seq <= 0 {
+			log.Printf("[normalize] could not allocate change_seq for re-key %s -> %s (%v) — deferring", itemID, newID, seqErr)
+			return
+		}
 		if err := normalize.RekeyAndMigrate(s.db, itemID, newID, cleanPath, probe, seq); err != nil {
 			log.Printf("[normalize] re-key %s -> %s (%s) failed, falling back to path-only repoint: %v",
 				itemID, newID, cleanPath, err)
@@ -4346,7 +4378,11 @@ func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.
 	}
 
 	// Same-path conversion (or re-key fallback): repoint path + codec on the existing id.
-	seq := s.incrementSeq("item_seq")
+	seq, seqErr := s.incrementSeqErr("item_seq")
+	if seqErr != nil || seq <= 0 {
+		log.Printf("[normalize] could not allocate change_seq for repoint of %s (%v) — deferring", itemID, seqErr)
+		return
+	}
 	_, err := s.db.Exec(
 		`UPDATE items SET path = ?, video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
 		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
@@ -4947,6 +4983,70 @@ func boolToInt(b bool) int {
 // tampered/mis-scanned items.path can never become an ffmpeg-driven arbitrary-file
 // read/probe primitive. Empty roots are ignored; if no root is configured this returns
 // false (fail closed).
+// clampStartSeconds parses and bounds the ?start= transcode offset.
+//
+// Returns 0 — start at the beginning, the historical behaviour — for anything it cannot
+// safely honour: absent, unparseable, negative, NaN, or infinite.
+//
+// The duration bound is NOT optional. When the runtime is unknown (a row whose probe never
+// read one — real libraries have these), an unbounded value used to pass straight through
+// to ffmpeg's -ss, which then seeks past EOF and yields an empty playlist the client
+// reports as "resource unavailable". With no duration to bound against, the only safe
+// answer is to ignore the offset entirely rather than trust it.
+// allocItemSeqTx allocates the next item_seq inside an open transaction.
+//
+// Split out so the stale-purge can distinguish "allocation failed" from "allocated 0",
+// which it previously could not: the error was discarded and a 0 was written into a
+// tombstone that delta sync can never return.
+// publishItemSeq advances the cached item_seq to at most `seq`, never backwards.
+//
+// CompareAndSwap-max rather than a blind Store: concurrent writers exist (the playback
+// self-heal path runs updateCodecInfo in its own goroutine), and a blind Store can publish
+// the LOWER of two sequences last — under-reporting the counter and stranding every change
+// in between.
+//
+// MUST be called only AFTER the transaction that allocated the sequence has COMMITTED.
+// Publishing from inside an open transaction advertises a value that a rollback then
+// discards; clients advance their cursor past it and never ask for the items in the gap,
+// which is silent and permanent client-side data loss.
+func (s *Server) publishItemSeq(seq int64) {
+	if seq <= 0 {
+		return
+	}
+	for {
+		cur := s.cachedItemSeq.Load()
+		if seq <= cur || s.cachedItemSeq.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
+}
+
+func allocItemSeqTx(ctx context.Context, tx *sql.Tx, out *int64) error {
+	return tx.QueryRowContext(ctx,
+		`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+	).Scan(out)
+}
+
+func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return 0
+	}
+	if !duration.Valid || duration.Int64 <= 0 {
+		// Unknown runtime: cannot bound it, so do not honour it.
+		return 0
+	}
+	// Leave a few seconds of media so the session can never produce an empty playlist.
+	limit := float64(duration.Int64) - 10
+	if limit <= 0 {
+		return 0
+	}
+	if v > limit {
+		return limit
+	}
+	return v
+}
+
 func (s *Server) pathWithinMediaRoot(path string) bool {
 	cleanedPath := filepath.Clean(path)
 	for _, root := range []string{s.cfg.MoviesPath, s.cfg.TVPath, s.cfg.HomePath} {
@@ -6956,22 +7056,39 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		if len(staleIDs) > 0 {
 			log.Printf("scan: removing %d stale items from library %s", len(staleIDs), libraryID)
 			staleTx, err := s.db.BeginTx(ctx, nil)
+			var maxPurgeSeq int64
 			if err == nil {
 				for _, sid := range staleIDs {
 					// Assign a real change_seq so clients can detect the deletion via delta sync.
 					var seq int64
-					_ = staleTx.QueryRowContext(ctx,
-						`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
-					).Scan(&seq)
-					if seq > 0 {
-						s.cachedItemSeq.Store(seq)
+					seqErr := allocItemSeqTx(ctx, staleTx, &seq)
+					// A tombstone written with change_seq = 0 is INVISIBLE to delta sync:
+					// handleSyncDeleted filters `WHERE change_seq > ?` and every client's
+					// cursor is above 0 within moments of first use. The row would be gone
+					// from the server while every device kept showing it forever, with
+					// nothing reporting a problem. If the sequence could not be allocated,
+					// skip this deletion — the next scan retries it — rather than record a
+					// deletion that can never propagate.
+					if seqErr != nil || seq <= 0 {
+						log.Printf("scan: could not allocate change_seq for deletion of %s (%v) — deferring to next scan", sid, seqErr)
+						continue
+					}
+					if seq > maxPurgeSeq {
+						maxPurgeSeq = seq
 					}
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx,
 						`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,?)`,
 						sid, seq, now)
 				}
-				_ = staleTx.Commit()
+				// Publish only AFTER the commit succeeds — see publishItemSeq. A rollback
+				// here previously left clients holding a cursor for sequences that were
+				// never persisted.
+				if cErr := staleTx.Commit(); cErr != nil {
+					log.Printf("scan: stale-purge commit failed for library %s: %v — no deletions applied", libraryID, cErr)
+				} else {
+					s.publishItemSeq(maxPurgeSeq)
+				}
 			}
 		}
 	}
@@ -7102,7 +7219,11 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	// (APIClient.imageURL(id:width:version:)), so even a corrected poster kept serving the
 	// stale cached URL. The codec-update path (updateCodecInfo) and the show-level TMDb fix
 	// already do this correctly; the per-item enrichment path never did.
-	metaSeq := s.incrementSeq("item_seq")
+	metaSeq, metaSeqErr := s.incrementSeqErr("item_seq")
+	if metaSeqErr != nil || metaSeq <= 0 {
+		log.Printf("metadata: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, metaSeqErr)
+		return
+	}
 	_, err = s.db.Exec(`
 		UPDATE items SET
 			tmdb_id = ?,
@@ -7592,13 +7713,20 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Collected and published only AFTER the commit below — see publishItemSeq. Publishing
+	// from inside the transaction advertised sequences a rollback would then discard.
+	var maxShowSeq int64
 	for _, id := range affectedIDs {
 		var seq int64
-		_ = tx.QueryRowContext(ctx,
-			`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
-		).Scan(&seq)
-		if seq > 0 {
-			s.cachedItemSeq.Store(seq)
+		if seqErr := allocItemSeqTx(ctx, tx, &seq); seqErr != nil || seq <= 0 {
+			// change_seq = 0 is below every client's cursor, so the row would be invisible
+			// to delta sync forever. Fail the request instead of silently orphaning it.
+			log.Printf("tmdb-fix: could not allocate change_seq for %s (%v)", id, seqErr)
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if seq > maxShowSeq {
+			maxShowSeq = seq
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE items SET
@@ -7627,6 +7755,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
+	s.publishItemSeq(maxShowSeq)
 
 	// Background: re-fetch per-episode TMDb metadata (titles, episode numbers, thumbnails)
 	// using the newly assigned tmdbID. This runs asynchronously so the HTTP response is fast.
@@ -8194,28 +8323,20 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		for i, r := range rawRows {
 			ids[i] = r.id
 		}
-		placeholders := strings.Repeat("?,", len(ids))
-		placeholders = placeholders[:len(placeholders)-1]
-		pArgs := make([]any, len(ids)+1)
-		pArgs[0] = u.ID
-		for i, id := range ids {
-			pArgs[i+1] = id
-		}
-		pRows, pErr := s.db.Query(
-			"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ? AND item_id IN ("+placeholders+")",
-			pArgs...)
-		if pErr == nil {
-			defer pRows.Close()
-			for pRows.Next() {
-				var itemID, updatedAt string
-				var pos, dur int
-				if pRows.Scan(&itemID, &pos, &dur, &updatedAt) == nil {
-					progressMap[itemID] = map[string]any{
-						"positionSeconds": pos,
-						"durationSeconds": dur,
-						"updatedAt":       updatedAt,
-					}
-				}
+		// CHUNKED. This built one IN(...) list sized to the whole result, and the episode
+		// query has no LIMIT — so a show with more episodes than SQLITE_MAX_VARIABLE_NUMBER
+		// (999 by default) produced a statement that failed to prepare. The error was
+		// checked only as `if pErr == nil`, with no else, so every episode came back with
+		// NO progress data and nothing logged. Long-running serials and anime libraries hit
+		// this. getProgressBatch already exists and does the chunking correctly.
+		const chunk = 500
+		for off := 0; off < len(ids); off += chunk {
+			hi := off + chunk
+			if hi > len(ids) {
+				hi = len(ids)
+			}
+			for id, pm := range s.getProgressBatch(u.ID, ids[off:hi]) {
+				progressMap[id] = pm
 			}
 		}
 	}

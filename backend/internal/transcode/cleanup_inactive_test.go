@@ -1,6 +1,8 @@
 package transcode
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -103,5 +105,66 @@ func TestSessionErrorReadsUnderLock(t *testing.T) {
 
 	if _, ok := g.SessionError("missing"); ok {
 		t.Error("SessionError reported ok for a session that does not exist")
+	}
+}
+
+// The trickplay and embedded-subtitle caches live INSIDE TempDir, alongside session
+// directories. Both cleanup paths used to treat them as orphaned sessions:
+//
+//   - cleanupOrphanedDirs deleted any directory with no matching session once it was older
+//     than InactivityTimeout. A directory's mtime only bumps when a new child is created,
+//     so a settled library's caches aged out and were deleted every couple of hours.
+//   - cleanupAll did os.RemoveAll(TempDir) on every SIGTERM, so every package upgrade
+//     wiped them wholesale.
+//
+// Rebuilding either is a full-file ffmpeg pass drawing on the same budget live playback
+// competes for, so this was pure self-inflicted work on a NAS with no hardware encoder.
+
+func TestOrphanSweepPreservesCaches(t *testing.T) {
+	tmp := t.TempDir()
+	g := NewHLSGenerator(HLSConfig{})
+	m := NewCleanupManager(CleanupConfig{InactivityTimeout: time.Millisecond, TempDir: tmp}, g)
+
+	// Two long-lived caches and one genuinely orphaned session dir, all stale.
+	for _, name := range []string{"trickplay", "embedded_subs", "sess_orphaned"} {
+		if err := os.MkdirAll(filepath.Join(tmp, name, "item1"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+	time.Sleep(5 * time.Millisecond) // age everything past the timeout
+
+	m.cleanupOrphanedDirs()
+
+	for _, name := range []string{"trickplay", "embedded_subs"} {
+		if _, err := os.Stat(filepath.Join(tmp, name)); err != nil {
+			t.Errorf("%s cache was deleted by the orphan sweep: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "sess_orphaned")); err == nil {
+		t.Error("a genuinely orphaned session directory should still be reclaimed")
+	}
+}
+
+func TestShutdownPreservesCaches(t *testing.T) {
+	tmp := t.TempDir()
+	g := NewHLSGenerator(HLSConfig{})
+	m := NewCleanupManager(CleanupConfig{InactivityTimeout: time.Hour, TempDir: tmp}, g)
+
+	for _, name := range []string{"trickplay", "embedded_subs", "sess_live"} {
+		if err := os.MkdirAll(filepath.Join(tmp, name, "item1"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+
+	m.cleanupAll()
+
+	for _, name := range []string{"trickplay", "embedded_subs"} {
+		if _, err := os.Stat(filepath.Join(tmp, name)); err != nil {
+			t.Errorf("%s cache was deleted on shutdown — every upgrade would rebuild it: %v", name, err)
+		}
+	}
+	// Session scratch SHOULD go: it is unusable after a restart.
+	if _, err := os.Stat(filepath.Join(tmp, "sess_live")); err == nil {
+		t.Error("session scratch should be removed on shutdown")
 	}
 }

@@ -68,7 +68,22 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 	// Clear any stale temp from a previously-killed run before starting fresh.
 	_ = os.Remove(tmp)
 
-	args := buildFFmpegArgs(src, tmp, action, maxHeight)
+	// Probe the source so a remux can carry the hvc1 relabel when it needs to.
+	//
+	// Without it the remux copied the video stream verbatim, so an hev1-tagged HEVC file
+	// came out of normalize STILL tagged hev1 — which the tagged playback decision
+	// correctly re-flags as needing a remux, so the worker converted the same file again
+	// on the next scan, forever. Observed live: the same title remuxed three times in one
+	// session, input path identical to output path. Probe failure is not fatal; it just
+	// means no relabel, which is the old behaviour.
+	srcTag := ""
+	if ffprobePath != "" {
+		if pr, perr := transcode.NewProber(ffprobePath).Probe(ctx, src); perr == nil && pr != nil {
+			srcTag = pr.VideoCodecTag
+		}
+	}
+
+	args := buildFFmpegArgs(src, tmp, action, maxHeight, srcTag)
 
 	// nice -n 19 <ffmpeg> <args...> — background priority, identical wrapping to
 	// transcode/hls.go so the two ffmpeg paths schedule consistently.
@@ -117,22 +132,35 @@ func TargetOutputPath(src string) string {
 
 // buildFFmpegArgs assembles the ffmpeg argument list (excluding the binary itself)
 // for the given action. Ported directly from convert-library.sh convert_one.
-func buildFFmpegArgs(src, tmp string, action Action, maxHeight int) []string {
+func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag string) []string {
 	if action == ActionRemux {
 		// Copy video, transcode audio to AAC, repackage to MP4. +igndts on top of
 		// +genpts repairs the broken DTS some MKVs carry. -map 0:a:0? makes audio
 		// optional (a video-only file remuxes fine).
-		return []string{
+		out := []string{
 			"-nostdin", "-y",
 			"-fflags", "+genpts+igndts",
 			"-i", src,
 			"-map", "0:v:0", "-map", "0:a:0?",
 			"-c:v", "copy",
+		}
+		// Relabel hev1 -> hvc1 on the copied stream.
+		//
+		// Apple will not initialise an HEVC decoder from an hev1 sample entry: audio plays
+		// and the picture stays black. It is a container-level relabel, not a re-encode, so
+		// it costs nothing on top of the copy we are already doing. Omitting it made this
+		// conversion a NO-OP for exactly the files it most needed to fix, and the worker
+		// re-ran it on every scan because the output still failed the same check.
+		if strings.EqualFold(srcVideoTag, "hev1") {
+			out = append(out, "-tag:v", "hvc1")
+		}
+		out = append(out,
 			"-c:a", "aac", "-b:a", "192k", "-ac", "2",
 			"-movflags", "+faststart",
 			"-avoid_negative_ts", "make_zero",
 			tmp,
-		}
+		)
+		return out
 	}
 
 	// ActionEncode: full re-encode to H.264, capped at maxHeight, never upscaling
