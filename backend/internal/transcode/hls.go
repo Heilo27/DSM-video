@@ -130,6 +130,14 @@ type SubtitleTrack struct {
 // HLSSession represents an active transcoding session.
 type HLSSession struct {
 	SessionID string
+	// OwnerKey identifies WHO is watching WHAT — typically "<userID>|<itemID>".
+	//
+	// A viewer watches one thing at a time, so a new session with the same OwnerKey is the
+	// same person continuing (seeking, retrying, changing subtitle offset) rather than a
+	// competing stream. Superseding their own prior session is both correct and the thing
+	// that stops a scrub burst from exhausting the concurrency budget against itself.
+	// Empty means "unkeyed" and never supersedes anything.
+	OwnerKey  string
 	VideoPath string
 	OutputDir string
 	Mode      PlaybackMode
@@ -280,7 +288,7 @@ func (g *HLSGenerator) vaapiDevicePresent() bool {
 // behaviour — start at the beginning. A non-zero value makes the resulting playlist cover
 // [startSeconds, end] with its own timeline starting at 0, so callers must offset any
 // position they report to a player by the same amount.
-func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode, maxHeight int, subtitles []SubtitleTrack, startSeconds float64) (*HLSSession, error) {
+func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode, maxHeight int, subtitles []SubtitleTrack, startSeconds float64, ownerKey string) (*HLSSession, error) {
 	g.mu.Lock()
 
 	// Check if session already exists (re-open of the same title). Do this BEFORE
@@ -291,14 +299,83 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		return existing, nil
 	}
 
+	// SUPERSEDE this viewer's own prior session for the same title.
+	//
+	// Every /playback request mints a fresh random session id, so a viewer scrubbing a
+	// transcoded title issued a brand-new ffmpeg per seek. Three drags in a few seconds
+	// filled MaxConcurrent, and the eviction path below refuses to evict anything touched
+	// within the last 20 seconds — so the fourth seek hard-failed with "maximum concurrent
+	// transcodes reached" and playback was locked out for the remainder of the grace
+	// window, by the user's own abandoned sessions.
+	//
+	// A person watches one thing at a time. A new session with the same OwnerKey is that
+	// same person continuing — seeking, retrying after an error, nudging subtitle offset —
+	// not a competing stream. Their previous session is therefore dead the moment this one
+	// is requested, and stopping it here both frees its slot and kills an ffmpeg that is
+	// transcoding a position nobody will watch.
+	//
+	// Done BEFORE the admission check so the freed slot is available to this request, and
+	// deliberately WITHOUT an idle grace: superseding yourself is not contention.
+	if ownerKey != "" {
+		var superseded []string
+		for id, sess := range g.sessions {
+			if sess.OwnerKey == ownerKey && id != sessionID {
+				superseded = append(superseded, id)
+			}
+		}
+		if len(superseded) > 0 {
+			g.mu.Unlock()
+			for _, id := range superseded {
+				log.Printf("[HLS] superseding own session %s (owner=%s)", id, ownerKey)
+				_ = g.StopSession(id)
+			}
+			g.mu.Lock()
+		}
+	}
+
 	// Check if we've hit the concurrent limit. If so, try to reclaim a slot from
 	// the most-idle session: an HLS transcode holds its slot for the whole title,
 	// so a client that navigated away without sending Stop would otherwise block
 	// all new playback forever. Evict the oldest session idle past the grace window.
+	// Reclaim finished sessions unconditionally, whether or not we are at the limit.
+	//
+	// A completed transcode decrements g.active but its map entry — and its OutputDir,
+	// holding every fMP4 segment of the film — stays until something stops it. On this
+	// hardware a transcode finishes well before the viewer does (~5x realtime), so the
+	// normal case was a completed session sitting on roughly a gigabyte of segments for up
+	// to two hours. Nothing is served from a completed session once the client has the
+	// playlist, so holding it buys nothing.
+	//
+	// Uses an idle grace so a session that JUST completed is not yanked out from under a
+	// client still fetching its final segments.
+	{
+		const completedGrace = 60 * time.Second
+		var finished []string
+		for id, sess := range g.sessions {
+			if sess.CompletedAt != nil && time.Since(*sess.CompletedAt) > completedGrace {
+				finished = append(finished, id)
+			}
+		}
+		if len(finished) > 0 {
+			g.mu.Unlock()
+			for _, id := range finished {
+				log.Printf("[HLS] reclaiming completed session %s", id)
+				_ = g.StopSession(id)
+			}
+			g.mu.Lock()
+		}
+	}
+
 	if g.active >= g.config.MaxConcurrent {
+		// Prefer a LIVE victim: evicting a completed session frees disk but no slot
+		// (g.active was already decremented when its transcode finished), so choosing one
+		// here would consume the single eviction attempt and still fail the re-check.
 		victimID := ""
 		var oldest time.Time
 		for id, s := range g.sessions {
+			if s.CompletedAt != nil {
+				continue
+			}
 			if s.LastAccess.Before(oldest) || victimID == "" {
 				oldest = s.LastAccess
 				victimID = id
@@ -388,6 +465,7 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		MaxHeight:      maxHeight,
 		UseABR:         useABR,
 		SubtitleTracks: subtitles,
+		OwnerKey:       ownerKey,
 		StartSeconds:   startSeconds,
 		StartedAt:      time.Now(),
 		LastAccess:     time.Now(),

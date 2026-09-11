@@ -3603,6 +3603,15 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := randID("sess_")
 
+	// Identifies this viewer + this title, so StartSession can supersede the SAME viewer's
+	// earlier session rather than treating a seek as a competing stream. Falls back to the
+	// item alone when there is no user in context (the WebAPI plane), which is still the
+	// right grouping: it is the same title either way.
+	ownerKey := itemID
+	if u := userFromCtx(r.Context()); u.ID != "" {
+		ownerKey = u.ID + "|" + itemID
+	}
+
 	// Detect subtitle files alongside the video for HLS subtitle renditions.
 	subtitleOffset := 0.0
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("subtitleOffset"), 64); err == nil {
@@ -3668,7 +3677,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 		// Start HLS transcoding session
 		if s.hlsGenerator != nil {
-			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode, maxHeight, subtitleTracks, startSeconds)
+			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode, maxHeight, subtitleTracks, startSeconds, ownerKey)
 			if err != nil {
 				log.Printf("Failed to start transcode session: %v", err)
 				writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
