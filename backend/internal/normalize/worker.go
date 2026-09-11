@@ -360,6 +360,38 @@ func (w *NormalizeWorker) IsIdleNow() bool {
 	return w.isIdle()
 }
 
+// WaitForIdle blocks until no conversion is mid-swap, or the timeout expires.
+//
+// Called during shutdown, after the worker's context is cancelled. The dangerous window is
+// between backing up the original and renaming the converted file into place: a process
+// death there leaves the original in the backup tree and the target missing, and the next
+// scan reads that as a deletion — purging the row and tombstoning it to every client.
+//
+// Cancellation alone does not close that window, because the swap is deliberately not
+// interruptible once begun. This just gives it the moment it needs to finish. Bounded, so
+// a stuck worker can never prevent shutdown.
+func (w *NormalizeWorker) WaitForIdle(timeout time.Duration) {
+	if w == nil {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		n := len(w.converting)
+		w.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	w.mu.Lock()
+	n := len(w.converting)
+	w.mu.Unlock()
+	if n > 0 {
+		log.Printf("[normalize] shutdown: %d conversion(s) still mid-swap after waiting — proceeding", n)
+	}
+}
+
 // Stats returns a snapshot for diagnostics. Safe on a nil worker (auto-normalize off).
 func (w *NormalizeWorker) Stats() Stats {
 	if w == nil {

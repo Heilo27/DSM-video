@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"dsvideo/backend/internal/transcode"
 )
@@ -89,9 +90,28 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 	// transcode/hls.go so the two ffmpeg paths schedule consistently.
 	niceArgs := append([]string{"-n", fmt.Sprintf("%d", niceLevel), ffmpegPath}, args...)
 	cmd := exec.CommandContext(ctx, "nice", niceArgs...)
-	// Own process group so ctx-cancel kills the nice wrapper AND the ffmpeg
-	// grandchild, not just the direct child (same reasoning as hls.go).
+	// Own process group, with an explicit group kill on cancellation.
+	//
+	// Note on what this does and does not fix: `nice` EXECs into ffmpeg rather than forking
+	// (verified), so ffmpeg is the direct child and exec.CommandContext's default kill
+	// already reaches it. The real orphan problem was upstream — the worker ran on an
+	// uncancellable context, so nothing ever cancelled this in the first place.
+	//
+	// The group kill is kept as defence in depth: it costs nothing, it matches what hls.go
+	// does, and it stays correct if the wrapper is ever changed to something that does
+	// fork. WaitDelay bounds how long a wedged child can hold shutdown open.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
+			return syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+		return cmd.Process.Kill()
+	}
+	// Don't let a wedged child hold shutdown open past the DSM stop window.
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdout = nil
 
 	runErr := cmd.Run()

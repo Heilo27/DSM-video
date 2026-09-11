@@ -661,6 +661,20 @@ func main() {
 		}
 	}()
 
+	// One cancellable context for every long-lived background worker.
+	//
+	// These all ran on context.Background(), which nothing could cancel — so SIGTERM tore
+	// down the HTTP server and closed the DB while the scanner was mid-transaction and the
+	// normalize worker was mid-ffmpeg. On DSM the process is SIGKILLed 10 seconds later,
+	// so a conversion in progress was orphaned: its ffmpeg outlived the parent and kept
+	// writing a ".<stem>.converting.mp4" that nothing would ever finish or clean up.
+	//
+	// Cancelling this first gives those workers the same grace window the HTTP server gets,
+	// and the normalize worker runs ffmpeg under this context in its own process group, so
+	// cancellation actually kills the child rather than just abandoning it.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
 	// Periodic background scanner — runs every 5 minutes regardless of client activity.
 	// This ensures the DB stays current when files are added/removed via the filesystem,
 	// regardless of whether the iOS app or browser player has made any API calls.
@@ -672,18 +686,23 @@ func main() {
 		if s.scanInProgress.CompareAndSwap(false, true) {
 			go func() {
 				defer s.scanInProgress.Store(false)
-				if err := s.scanAll(context.Background()); err != nil {
+				if err := s.scanAll(bgCtx); err != nil {
 					log.Printf("startup scan failed: %v", err)
 				}
 			}()
 		}
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+			}
 			if s.scanInProgress.CompareAndSwap(false, true) {
 				go func() {
 					defer s.scanInProgress.Store(false)
-					if err := s.scanAll(context.Background()); err != nil {
+					if err := s.scanAll(bgCtx); err != nil {
 						log.Printf("periodic scan failed: %v", err)
 					}
 				}()
@@ -695,7 +714,7 @@ func main() {
 	// reaper. Gated on the worker having been constructed above (auto-normalize on +
 	// ffmpeg/ffprobe found). Both run for the process lifetime on a background context.
 	if s.normalizeWorker != nil {
-		s.normalizeWorker.Start(context.Background())
+		s.normalizeWorker.Start(bgCtx)
 		// Worf P2-5 (TASK-755): the retention reaper deletes everything older than N days
 		// under OriginalsDir. DSVIDEO_ORIGINALS_DIR is user-overridable; if it's empty, a
 		// filesystem root, or a media root (or a parent of one), the reaper would delete the
@@ -705,13 +724,14 @@ func main() {
 		if reason := validateOriginalsDir(cfg.OriginalsDir, cfg.MoviesPath, cfg.TVPath, cfg.HomePath); reason != "" {
 			log.Printf("[normalize] retention reaper DISABLED — unsafe originals dir %q: %s", cfg.OriginalsDir, reason)
 		} else {
-			s.normalizeWorker.StartRetentionReaper(context.Background(), cfg.NormalizeRetentionDays)
+			s.normalizeWorker.StartRetentionReaper(bgCtx, cfg.NormalizeRetentionDays)
 		}
 	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// trustedRealIP, NOT chi's middleware.RealIP — see the function for why.
+	r.Use(trustedRealIP)
 	r.Use(redactSensitiveParams) // must run before Logger to prevent token leakage in logs
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -834,10 +854,27 @@ func main() {
 		// cleanly; a long open stream is cut at the deadline, but the client sees a clean
 		// connection close and re-requests the range, which players handle — and with play
 		// sessions now persisted, the session it reconnects to still exists.
+		// Cancel background work FIRST, before draining HTTP.
+		//
+		// The scanner and the normalize worker ran on an uncancellable context, so they
+		// kept working while the server drained and the DB closed underneath them — an
+		// in-flight scan transaction failed against a closing pool, and a conversion's
+		// ffmpeg was orphaned by the SIGKILL that follows 10 seconds later, leaving a
+		// half-written ".<stem>.converting.mp4" behind. Cancelling here gives them the
+		// same drain window the HTTP server gets, and the worker runs ffmpeg under this
+		// context in its own process group, so the child dies with it.
+		bgCancel()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("graceful shutdown timed out: %v (proceeding with teardown)", err)
+		}
+
+		// Give a cancelled conversion a moment to unwind and remove its temp file before
+		// the process exits. Bounded well inside the DSM stop window.
+		if s.normalizeWorker != nil {
+			s.normalizeWorker.WaitForIdle(3 * time.Second)
 		}
 
 		// Explicit teardown, in order. NOT relying on defer: the whole point is that
@@ -5034,6 +5071,73 @@ func allocItemSeqTx(ctx context.Context, tx *sql.Tx, out *int64) error {
 	return tx.QueryRowContext(ctx,
 		`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 	).Scan(out)
+}
+
+// trustedRealIP rewrites RemoteAddr from forwarded headers ONLY when the immediate peer
+// is the local reverse proxy.
+//
+// chi's middleware.RealIP does this unconditionally, and its own doc comment warns that
+// doing so without a trusted proxy in front makes you "very sad". Here it was exploitable:
+//
+//   - The packaged nginx sets X-Forwarded-For to $proxy_add_x_forwarded_for, which APPENDS
+//     to whatever the client sent rather than replacing it. chi then takes the FIRST
+//     entry — the attacker's value.
+//   - chi checks True-Client-IP and X-Real-IP *before* X-Forwarded-For, and the packaged
+//     nginx never sets True-Client-IP at all, so that header passes through untouched.
+//
+// Since the rate limiter keys on RemoteAddr, either header let a caller rotate a fresh
+// bucket per request. Verified against a running server: 14 login attempts with a rotating
+// X-Forwarded-For (and again with True-Client-IP) were never throttled, where 14 from the
+// same real source correctly returned 429 after 10.
+//
+// It also let an attacker fill the limiter's sync.Map with one entry per forged value.
+//
+// The proxy always connects over loopback (nginx proxy_pass 127.0.0.1:8090), so trusting
+// only loopback peers is both correct and tight. A direct-to-port client keeps its real
+// address and cannot influence its own key.
+func trustedRealIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if peerIsLoopback(r.RemoteAddr) {
+			if ip := forwardedClientIP(r); ip != "" {
+				r.RemoteAddr = ip
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// peerIsLoopback reports whether the DIRECT peer is on this machine — i.e. could be the
+// local nginx. Never trust a header from anyone else.
+func peerIsLoopback(remoteAddr string) bool {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// forwardedClientIP extracts the originating client address from a trusted proxy's headers.
+//
+// Prefers X-Real-IP, which the packaged nginx sets to $remote_addr — the single value it
+// observed, not a client-influenced list. X-Forwarded-For is the fallback, and we take the
+// LAST entry rather than the first: with $proxy_add_x_forwarded_for the trusted proxy
+// appends the address it actually saw, so the last hop is the only one it vouched for.
+// True-Client-IP is deliberately ignored — nothing in this deployment sets it.
+func forwardedClientIP(r *http.Request) string {
+	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
+		if ip := net.ParseIP(xrip); ip != nil {
+			return xrip
+		}
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		if ip := net.ParseIP(last); ip != nil {
+			return last
+		}
+	}
+	return ""
 }
 
 func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
