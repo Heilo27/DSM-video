@@ -16,9 +16,19 @@ private struct TopShelfItem: Codable {
 @objc(TopShelfProvider)
 class TopShelfProvider: TVTopShelfContentProvider {
 
-    override func loadTopShelfContent() async -> (any TVTopShelfContent)? {
+    // The COMPLETION-HANDLER overload, not the async one.
+    //
+    // TVTopShelfContent is not Sendable, and every isolation an async override can carry
+    // — inferred @concurrent, @MainActor, or explicit nonisolated — puts an isolation
+    // boundary between the value and its caller, which Swift 6 rejects. The completion
+    // handler crosses no boundary: the system hands us a callback and we invoke it
+    // synchronously with a value we just built. Same work, no concurrency involved.
+    override func loadTopShelfContent(completionHandler: @escaping (((any TVTopShelfContent)?) -> Void)) {
         let items = loadSnapshot()
-        guard !items.isEmpty else { return nil }
+        guard !items.isEmpty else {
+            completionHandler(nil)
+            return
+        }
 
         let shelfItems: [TVTopShelfSectionedItem] = items.compactMap { snapshot in
             guard let deepLink = URL(string: snapshot.deepLinkURL) else { return nil }
@@ -35,7 +45,7 @@ class TopShelfProvider: TVTopShelfContentProvider {
 
         let section = TVTopShelfItemCollection(items: shelfItems)
         section.title = "Just Added"
-        return TVTopShelfSectionedContent(sections: [section])
+        completionHandler(TVTopShelfSectionedContent(sections: [section]))
     }
 
     // MARK: - Private

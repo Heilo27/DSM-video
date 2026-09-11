@@ -109,13 +109,13 @@ final class BonjourDiscovery {
             addr.rawValue.withUnsafeBytes { raw in
               _ = inet_ntop(AF_INET, raw.baseAddress, &buf, socklen_t(INET_ADDRSTRLEN))
             }
-            hostStr = String(cString: buf)
+            hostStr = Self.string(fromNullTerminated: buf)
           case .ipv6(let addr):
             var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
             addr.rawValue.withUnsafeBytes { raw in
               _ = inet_ntop(AF_INET6, raw.baseAddress, &buf, socklen_t(INET6_ADDRSTRLEN))
             }
-            hostStr = String(cString: buf)
+            hostStr = Self.string(fromNullTerminated: buf)
           case .name(let n, _):
             hostStr = n.trimmingCharacters(in: CharacterSet(charactersIn: "."))
           @unknown default:
@@ -134,5 +134,16 @@ final class BonjourDiscovery {
       }
     }
     connection.start(queue: .main)
+  }
+
+  /// Decodes a null-terminated C string buffer without `String(cString:)`.
+  ///
+  /// That initialiser is deprecated: it reads to the first null and the compiler can no
+  /// longer verify the buffer is terminated. `inet_ntop` does terminate its output, so we
+  /// truncate at the null ourselves and decode the prefix — which is exactly what the
+  /// deprecation note prescribes, and is safe even if the buffer were somehow unterminated.
+  private static func string(fromNullTerminated buf: [CChar]) -> String {
+    let bytes = buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    return String(decoding: bytes, as: UTF8.self)
   }
 }

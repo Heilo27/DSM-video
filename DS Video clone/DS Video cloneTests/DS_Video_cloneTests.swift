@@ -4,6 +4,7 @@ import Testing
 
 // MARK: - normalizedBaseURL Tests
 
+@MainActor
 struct NormalizedBaseURLTests {
 
   // MARK: Scheme handling
@@ -104,6 +105,7 @@ struct NormalizedBaseURLTests {
 
 // MARK: - APIClient Tests
 
+@MainActor
 struct APIClientTests {
 
   // MARK: Initialization
@@ -152,6 +154,7 @@ struct APIClientTests {
 
 // MARK: - APIError Tests
 
+@MainActor
 struct APIErrorTests {
 
   @Test func networkErrorMessage() {
@@ -203,6 +206,7 @@ struct APIErrorTests {
 
 // MARK: - APIModels Encoding/Decoding Tests
 
+@MainActor
 struct APIModelsCodingTests {
 
   // MARK: LoginRequest encoding
@@ -854,6 +858,7 @@ struct AppStateTests {
 // path is not injectable from a unit test. What IS testable, and what actually broke, is
 // the platform rule: `.complete` is only ever correct where a lock state exists.
 
+@MainActor
 struct FileProtectionPolicyTests {
 
   /// Pins the rule the bug violated. tvOS has no passcode and no lock state, so a
@@ -893,6 +898,7 @@ struct FileProtectionPolicyTests {
 /// This is the same shape as TASK-834, where error wrapping killed the `.http(401)` auth
 /// branch. Both were invisible to the compiler and to code review. A test is the only
 /// thing that catches it.
+@MainActor
 struct RetryLadderTests {
 
   @Test func retriesTheTransportFailuresTheLadderWasWrittenFor() {
@@ -931,6 +937,7 @@ struct RetryLadderTests {
 /// (its upsert is guarded by `excluded.write_seq > progress.write_seq`). The client
 /// decoded only `ok` and threw that signal away — so the exact failure the field was added
 /// to prevent ("Mark Unwatched appeared to work while changing nothing") stayed live.
+@MainActor
 struct ProgressAppliedTests {
 
   @Test func decodesAppliedFalse() throws {

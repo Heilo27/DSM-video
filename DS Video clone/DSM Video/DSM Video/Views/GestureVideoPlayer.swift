@@ -2447,10 +2447,16 @@ private struct SubtitleAudioPickerView: View {
         .presentationDetents([.medium, .large])
         #endif
         .task {
-            async let subtitle = player.currentItem?.asset.loadMediaSelectionGroup(for: .legible)
-            async let audio = player.currentItem?.asset.loadMediaSelectionGroup(for: .audible)
-            subtitleGroup = try? await subtitle
-            audioGroup = try? await audio
+            // Awaited sequentially rather than with `async let`.
+            //
+            // AVAsset is not Sendable, and `async let` starts a child task — so the two
+            // concurrent forms required the asset to cross an isolation boundary, which
+            // Swift 6 rejects outright. Both loads stay on the main actor here. The cost
+            // is one round trip instead of two in parallel, against a local AVAsset whose
+            // media-selection groups are already parsed; the picker still opens instantly.
+            let asset = player.currentItem?.asset
+            subtitleGroup = try? await asset?.loadMediaSelectionGroup(for: .legible)
+            audioGroup = try? await asset?.loadMediaSelectionGroup(for: .audible)
             currentSelection = player.currentItem?.currentMediaSelection
             isLoading = false
         }

@@ -29,7 +29,17 @@ import os.log
 ///
 /// Thread-safety: entries arrive from URLSession callbacks, actors, and the main thread. All
 /// mutation goes through a serial queue; `entries` snapshots under that queue.
-final class DiagnosticLog: @unchecked Sendable {
+/// `nonisolated` at the type level, not per-member.
+///
+/// The project builds with SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor, which would bind
+/// this class's state to the main actor — but its whole point is to be callable from
+/// anywhere a failure happens: an `actor`, a URLSession callback, a detached task. It
+/// already serialises every mutation through its own private DispatchQueue and is
+/// declared @unchecked Sendable on that basis, so main-actor isolation buys nothing and
+/// costs reachability. Marking the type nonisolated states that contract once instead of
+/// sprinkling `nonisolated` on each member (several of which were already marked, which
+/// is why only the unmarked ones warned).
+nonisolated final class DiagnosticLog: @unchecked Sendable {
   static let shared = DiagnosticLog()
 
   /// One line in the log.
