@@ -1,5 +1,6 @@
 import AVKit
 import Combine
+import Network
 import SwiftUI
 import os.log
 
@@ -1453,6 +1454,47 @@ struct GestureVideoPlayer: View {
 
     // MARK: - Player Controls
 
+    /// Peak bitrate ceiling for links the OS reports as constrained, or nil for no cap.
+    ///
+    /// This is a SMOOTHNESS floor, not a quality policy: on Wi-Fi or a healthy cellular
+    /// link it returns nil so AVPlayer streams the file at full quality. It only engages
+    /// where the alternative is stalling — Low Data Mode, or metered cellular.
+    ///
+    /// Deliberately not tied to the Video Quality setting: that setting only affects
+    /// server-side transcoding, and this library is almost entirely direct-play, so a
+    /// resolution cap cannot be honoured without forcing a software transcode on a NAS
+    /// with no hardware encoder.
+    ///
+    /// Reads a STARTED monitor: `NWPathMonitor.currentPath` on an unstarted monitor
+    /// reports `.unsatisfied` with both flags false (verified), so querying it directly
+    /// would silently always mean "no cap" — failing safe, but by accident rather than
+    /// by measurement. Started, briefly awaited, and cancelled.
+    nonisolated static func constrainedBitrateCap() async -> Double? {
+        let monitor = NWPathMonitor()
+        let path: NWPath = await withCheckedContinuation { cont in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            @Sendable func finish(_ p: NWPath) {
+                let shouldResume = resumed.withLock { already -> Bool in
+                    if already { return false }
+                    already = true
+                    return true
+                }
+                if shouldResume { cont.resume(returning: p) }
+            }
+            monitor.pathUpdateHandler = { finish($0) }
+            monitor.start(queue: DispatchQueue(label: "com.dsm.playerPathProbe"))
+            // Don't let a silent monitor stall playback start.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                finish(monitor.currentPath)
+            }
+        }
+        monitor.cancel()
+        guard path.status == .satisfied else { return nil }
+        if path.isConstrained { return 3_000_000 }   // Low Data Mode — user asked to economise
+        if path.isExpensive { return 8_000_000 }     // Cellular — ample for 1080p h264
+        return nil                                   // Wi-Fi / wired — no ceiling
+    }
+
     private func setupPlayer() {
         // C1: If a player already exists (e.g. the view re-appeared because PiP
         // is restoring to full screen), don't rebuild it — that would tear down
@@ -1487,11 +1529,40 @@ struct GestureVideoPlayer: View {
         let playerItem = AVPlayerItem(asset: asset)
         // TASK-739: apply the user's subtitle appearance (size / color / background).
         applySubtitleStyle(to: playerItem)
+
+        // Buffer deeply instead of dropping resolution.
+        //
+        // Nothing here was configured before: the default forward buffer is small, tuned
+        // for fast-seeking catalogue apps rather than watch-a-film-end-to-end. Streaming a
+        // direct-play file from a home NAS over WAN is the opposite case — the user picks
+        // one title and watches it through, so trading memory for a much larger read-ahead
+        // is nearly free and is what actually prevents dropouts.
+        //
+        // 60s forward buffer. AVPlayer treats this as an upper bound and will happily hold
+        // less on a fast link; on a lossy one it rides out a stall that a default-sized
+        // buffer would not. Deliberately NOT capping resolution — the library is 99.9%
+        // direct-play h264, so a cap cannot be honoured without forcing a software
+        // transcode on a NAS with no hardware encoder, and 480p on an iPad is a worse
+        // outcome than a brief rebuffer.
+        playerItem.preferredForwardBufferDuration = 60
         let newPlayer = AVPlayer(playerItem: playerItem)
         // Let AVPlayer wait and rebuffer automatically when bandwidth is insufficient.
         // This allows the player to pause internally, accumulate buffer, then resume
         // on its own when the connection recovers — no user action required.
         newPlayer.automaticallyWaitsToMinimizeStalling = true
+
+        // Bitrate ceiling ONLY where the OS says the link genuinely can't take it.
+        //
+        // `isConstrained` is Low Data Mode; `isExpensive` is cellular/personal hotspot.
+        // On an unconstrained link this stays 0 (= unlimited) so quality is never
+        // silently reduced on Wi-Fi or a good LTE connection. This is a floor to keep
+        // playback smooth when there is no alternative, not a quality policy.
+        // Applied asynchronously so measuring the link never delays first frame. The
+        // player is already constructed and loading; the ceiling lands a moment later.
+        Task { [weak newPlayer] in
+            guard let cap = await Self.constrainedBitrateCap() else { return }
+            await MainActor.run { newPlayer?.currentItem?.preferredPeakBitRate = cap }
+        }
         player = newPlayer
 
         // A mid-stream failure on an HLS feed does NOT transition playerItem.status to

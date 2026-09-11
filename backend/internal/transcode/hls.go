@@ -129,10 +129,10 @@ type SubtitleTrack struct {
 
 // HLSSession represents an active transcoding session.
 type HLSSession struct {
-	SessionID          string
-	VideoPath          string
-	OutputDir          string
-	Mode               PlaybackMode
+	SessionID string
+	VideoPath string
+	OutputDir string
+	Mode      PlaybackMode
 	// Source video codec, used to decide whether the hvc1 relabel applies on a copy.
 	VideoCodec         string
 	MaxHeight          int
@@ -869,6 +869,19 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 				"-threads", fmt.Sprintf("%d", g.config.Threads),
 				"-pix_fmt", "yuv420p",
 			)
+			// Force a keyframe on every segment boundary.
+			//
+			// ffmpeg can only cut a segment AT a keyframe. libx264 defaults to a 250-frame
+			// GOP, so at 24fps "-hls_time 6" silently produced 10.4-SECOND segments — measured
+			// against these exact args, not assumed. AVPlayer buffers several segments before
+			// it starts, so that inflated startup latency by roughly 2.5x on a NAS transcoding
+			// at about realtime. Startup is the most-felt metric in the pipeline.
+			//
+			// -force_key_frames is expressed in TIME, so it is correct at any source framerate
+			// and needs no fps probe. sc_threshold=0 stops scene detection inserting extra
+			// keyframes that would fragment segments further. Encode paths only: on a stream
+			// copy the GOP comes from the source and cannot be forced.
+			args = append(args, gopArgs(segmentSecondsOrDefault(g.config.SegmentSeconds))...)
 		}
 	default:
 		args = append(args, "-c:v", "copy")
@@ -896,6 +909,15 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 		"-f", "hls",
 		"-hls_time", fmt.Sprintf("%d", segDur),
 		"-hls_list_size", "0",
+		// Declare the stream SEEKABLE FROM ZERO while still publishing incrementally.
+		//
+		// Without this the playlist carries no EXT-X-PLAYLIST-TYPE and no EXT-X-ENDLIST
+		// until ffmpeg finishes — per the HLS spec that is a LIVE playlist, so AVPlayer
+		// applies live-edge behaviour and refuses to seek outside the published window.
+		// "event" is the right middle ground: segments appear as they are written, and
+		// the player knows it may seek anywhere already published. ("vod" was tried once
+		// and reverted because it makes the web UI wait for the entire transcode.)
+		"-hls_playlist_type", "event",
 		"-hls_segment_type", "fmp4",
 		"-hls_fmp4_init_filename", filepath.Base(initPath),
 		"-hls_segment_filename", segmentPath,
@@ -1160,4 +1182,27 @@ func (g *HLSGenerator) AllSessions() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// segmentSecondsOrDefault mirrors the inline fallback used when building HLS args.
+func segmentSecondsOrDefault(v int) int {
+	if v <= 0 {
+		return 6
+	}
+	return v
+}
+
+// gopArgs returns encoder flags that put a keyframe exactly on every segment boundary.
+//
+// Without them ffmpeg cuts at whatever keyframes the encoder happened to emit — libx264's
+// default 250-frame GOP — so the requested -hls_time is silently ignored and segments come
+// out far longer than asked for. Expressed in TIME rather than frames so it holds at any
+// source framerate without probing fps first.
+func gopArgs(segmentSeconds int) []string {
+	return []string{
+		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", segmentSeconds),
+		// Belt and braces: keep the encoder's own GOP decisions from drifting between
+		// forced keyframes, and stop scene-change detection adding unplanned ones.
+		"-sc_threshold", "0",
+	}
 }
