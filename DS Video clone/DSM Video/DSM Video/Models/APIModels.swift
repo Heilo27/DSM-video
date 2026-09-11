@@ -270,6 +270,13 @@ struct PlaybackInfo: Decodable {
   /// than 0.3.5 only embed the id inside streamUrl/hlsMasterUrl, so the client falls back
   /// to parsing it from those (see PlaybackInfo.resolvedSessionID).
   let sessionId: String?
+  /// Where this transcode BEGINS in the source, in seconds.
+  ///
+  /// The HLS playlist's own timeline always starts at 0, so when a session was started
+  /// mid-file (via `?start=`) every position must be offset by this to get real media
+  /// time. 0 or absent means the transcode starts at the beginning — the normal case, and
+  /// what older servers always did.
+  let startSeconds: Double?
   let streamUrl: URL?
   let hlsMasterUrl: URL?
   let resumePositionSeconds: Int

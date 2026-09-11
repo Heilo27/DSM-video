@@ -85,7 +85,15 @@ func Decide(probe *transcode.ProbeResult, ext string) Action {
 		container = strings.TrimPrefix(strings.ToLower(ext), ".")
 	}
 
-	switch transcode.DecidePlayback(probe.VideoCodec, probe.AudioCodec, container) {
+	// DecidePlaybackWithTag, not DecidePlayback.
+	//
+	// Playback decides with the tag; this decided without it, so the two disagreed on
+	// exactly one class of file: HEVC carrying the hev1 FourCC. Normalize said
+	// "DirectPlay → ActionSkip" and excluded them permanently, while playback said
+	// "RemuxOnly" — so those files paid a remux on EVERY play, forever, on a NAS with no
+	// hardware encoder. Auto-normalize exists precisely so playback never has to work.
+	// Using the same tagged decision lets them be fixed once, overnight.
+	switch transcode.DecidePlaybackWithTag(probe.VideoCodec, probe.AudioCodec, container, probe.VideoCodecTag) {
 	case transcode.DirectPlay:
 		return ActionSkip
 	case transcode.RemuxOnly:

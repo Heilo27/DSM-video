@@ -177,7 +177,12 @@ struct APIClient {
     return try await requestWithRetry(path: "/api/v1/items/\(enc)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self, timeoutInterval: 15)
   }
 
-  func playback(id: String, quality: String = "auto", subtitleOffset: Double = 0) async throws -> PlaybackInfo {
+  /// - Parameter startSeconds: where a TRANSCODE should begin in the source. Ignored by
+  ///   the server for direct play and remux, which are byte-range seekable already. The
+  ///   returned playlist's timeline still starts at 0, so add `PlaybackInfo.startSeconds`
+  ///   to any position reported back to the user.
+  func playback(id: String, quality: String = "auto", subtitleOffset: Double = 0,
+                startSeconds: Double = 0) async throws -> PlaybackInfo {
     let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items/\(enc)/playback"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
@@ -185,6 +190,7 @@ struct APIClient {
     var queryItems: [URLQueryItem] = []
     if quality != "auto" { queryItems.append(URLQueryItem(name: "quality", value: quality)) }
     if subtitleOffset != 0 { queryItems.append(URLQueryItem(name: "subtitleOffset", value: String(format: "%.3f", subtitleOffset))) }
+    if startSeconds > 0 { queryItems.append(URLQueryItem(name: "start", value: String(format: "%.3f", startSeconds))) }
     if !queryItems.isEmpty { comps.queryItems = queryItems }
     guard let url = comps.url else { throw APIError.invalidURL }
     return try await request(url: url, method: "GET", body: Optional<Int>.none, response: PlaybackInfo.self, timeoutInterval: 15)

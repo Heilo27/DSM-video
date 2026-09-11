@@ -1330,6 +1330,12 @@ private struct PlayerSheet: View {
   // position, and (b) an immediate dismiss after recovery still flushes progress
   // instead of being suppressed by the 0/0 guard.
   @State private var resumeOverrideSeconds: Int = 0
+  /// Seconds between the HLS playlist's timeline and real media time.
+  ///
+  /// Non-zero only when the server started this transcode mid-file at our request; the
+  /// playlist always starts at 0 regardless, so every position reported by the player must
+  /// have this added before it is stored or displayed.
+  @State private var playlistTimeOffset: Double = 0
   @State private var resumeOverrideDuration: Int = 0
 
   // Autoplay next episode
@@ -1388,8 +1394,15 @@ private struct PlayerSheet: View {
             dismiss()
           },
           onProgressUpdate: { position, duration in
-            let positionInt = Int(position)
-            let durationInt = Int(duration)
+            // Map PLAYLIST time back to MEDIA time.
+            //
+            // When the server starts a transcode mid-file (?start=), the resulting HLS
+            // timeline still begins at 0 — so the player reports 0 at the moment playback
+            // begins 45 minutes into the film. Recording that verbatim would overwrite a
+            // good resume point with a near-zero one and report a finished film as
+            // unwatched. Everything downstream of this closure deals in media time.
+            let positionInt = Int(position) + Int(playlistTimeOffset)
+            let durationInt = Int(duration) + Int(playlistTimeOffset)
             guard durationInt > 0 else { return }
             lastKnownDuration = durationInt
 
@@ -1661,6 +1674,10 @@ private struct PlayerSheet: View {
     // Same reason as the two above (TASK-401): a live position left over from a previous
     // item or a previous attempt must not be written against this one.
     livePosition = 0
+    // Same reason again: only the streaming path sets this, so a retry that falls through
+    // to a downloaded file (or demo) would otherwise keep the PREVIOUS attempt's offset
+    // and shift every recorded position by it.
+    playlistTimeOffset = 0
     isOffline = false
 
     // TASK-719: if a failure-recovery snapshot exists, seed the trackers so an
@@ -1698,7 +1715,21 @@ private struct PlayerSheet: View {
 
     // Fall back to streaming
     do {
-      let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
+      // Ask the server to BEGIN the transcode at the position we intend to resume to.
+      //
+      // Transcodes start at zero and progress at roughly realtime, so resuming 45 minutes
+      // into a film used to seek into a region the playlist did not contain yet — the
+      // player simply stalled. Starting the transcode there instead means the stream opens
+      // exactly where the user wants it, with no seek at all. Ignored by the server for
+      // direct play and remux (already byte-range seekable), so this costs nothing for the
+      // ~99% of this library that direct-plays.
+      //
+      // Only the retry / subtitle-restart paths know a position before the request; a cold
+      // open learns it from the response and is handled by the normal resume path below.
+      let requestedStart = forceFromBeginning ? 0 : Double(resumeOverrideSeconds)
+      let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap,
+                                                 subtitleOffset: subtitleOffset,
+                                                 startSeconds: requestedStart)
       await releaseActiveSession()
       activeSessionID = info.resolvedSessionID
       let url = info.streamUrl ?? info.hlsMasterUrl
@@ -1706,9 +1737,17 @@ private struct PlayerSheet: View {
         error = "No playable URL."
         return
       }
-      resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
-        positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
-        durationSeconds: info.durationSeconds ?? 0))
+      // If the server started the transcode at our requested offset, the stream already
+      // BEGINS there — seeking again would jump an extra `startSeconds` into the film.
+      let serverStart = info.startSeconds ?? 0
+      playlistTimeOffset = serverStart
+      if serverStart > 0 {
+        resumePosition = 0
+      } else {
+        resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+          positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
+          durationSeconds: info.durationSeconds ?? 0))
+      }
       resumeOverrideSeconds = 0
       resumeOverrideDuration = 0
       chapters = info.chapters ?? []

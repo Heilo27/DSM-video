@@ -1263,6 +1263,16 @@ CREATE TABLE IF NOT EXISTS watchlist (
 	}
 	migrations := []colMigration{
 		{"video_codec", "ALTER TABLE items ADD COLUMN video_codec TEXT"},
+		// FourCC of the video sample entry ("hvc1" / "hev1" / "avc1").
+		//
+		// Apple requires hvc1 for HEVC: with hev1 the parameter sets live in-band and
+		// AVPlayer renders BLACK with working audio and no error. DecidePlaybackWithTag
+		// exists to catch that, but the tag was probed and never stored — so the cached
+		// path (every item after the first scan) called the UNTAGGED DecidePlayback and the
+		// guard never fired for any real item. NULL here means "not yet re-probed", which
+		// hevcTagIsAppleCompatible treats as compatible — the same assumption the code
+		// already makes for probes that report no tag.
+		{"video_codec_tag", "ALTER TABLE items ADD COLUMN video_codec_tag TEXT"},
 		{"audio_codec", "ALTER TABLE items ADD COLUMN audio_codec TEXT"},
 		{"container", "ALTER TABLE items ADD COLUMN container TEXT"},
 		{"needs_transcode", "ALTER TABLE items ADD COLUMN needs_transcode BOOLEAN DEFAULT FALSE"},
@@ -1325,6 +1335,34 @@ CREATE TABLE IF NOT EXISTS watchlist (
 			// The dimension check identifies rows the FULL prober handled; rows that only
 			// got the extension-guess fallback are left unstamped and get one proper
 			// probe, which is the intended behaviour.
+
+			// Force ONE re-probe of HEVC rows so the newly-added tag gets populated.
+			//
+			// Existing rows have video_codec_tag NULL, and the scanner skips re-probing
+			// anything whose file identity is unchanged — so without this the column would
+			// stay empty forever and the hev1 guard would remain exactly as dead as it was
+			// before the column existed. Clearing probed_at is the established way to
+			// demand a re-probe (the block below does the inverse).
+			//
+			// Scoped to HEVC deliberately: it is the only codec whose FourCC changes the
+			// playback decision, and re-probing a whole library on a 4-core NAS is the
+			// kind of thundering scan this codebase has fought before. On the library this
+			// was written against that is ~100 files, not ~5,000.
+			//
+			// Ordering note: this sets probed_at = NULL and the block below sets it
+			// non-NULL, but they cannot fight. Each runs only in the pass where ITS OWN
+			// column was just added, and a given column is added exactly once.
+			if m.column == "video_codec_tag" {
+				res, bErr := db.Exec(
+					`UPDATE items SET probed_at = NULL
+					 WHERE video_codec = 'hevc' AND video_codec_tag IS NULL`)
+				if bErr != nil {
+					log.Printf("[migrate] video_codec_tag re-probe scheduling failed: %v", bErr)
+				} else if n, _ := res.RowsAffected(); n > 0 {
+					log.Printf("[migrate] scheduled %d HEVC rows for one re-probe to capture the codec tag", n)
+				}
+			}
+
 			if m.column == "probed_at" {
 				res, bErr := db.Exec(
 					`UPDATE items SET probed_at = ?
@@ -3368,7 +3406,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 	// Query item with codec info
 	var path string
-	var videoCodec, audioCodec, container sql.NullString
+	var videoCodec, videoCodecTag, audioCodec, container sql.NullString
 	var needsTranscode sql.NullBool
 	// durationSeconds is the authoritative full runtime from the scan-time probe. We
 	// return it in the playback response so the client can show a correct scrubber
@@ -3378,9 +3416,9 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// this value instead of playerItem.duration when it's larger.
 	var itemDuration sql.NullInt64
 	err := s.db.QueryRow(
-		"SELECT path, video_codec, audio_codec, container, needs_transcode, duration_seconds FROM items WHERE id = ?",
+		"SELECT path, video_codec, video_codec_tag, audio_codec, container, needs_transcode, duration_seconds FROM items WHERE id = ?",
 		itemID,
-	).Scan(&path, &videoCodec, &audioCodec, &container, &needsTranscode, &itemDuration)
+	).Scan(&path, &videoCodec, &videoCodecTag, &audioCodec, &container, &needsTranscode, &itemDuration)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "not_found")
@@ -3430,7 +3468,14 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 	if videoCodec.Valid && audioCodec.Valid && container.Valid {
 		// Use stored codec info
-		playbackMode = transcode.DecidePlayback(videoCodec.String, audioCodec.String, container.String)
+		// DecidePlaybackWithTag, not DecidePlayback.
+		//
+		// This is the CACHED path — every item after its first scan — so it is the branch
+		// that decides playback for essentially the whole library. Calling the untagged
+		// variant here meant the hev1 guard (decision.go) never fired for any real item:
+		// HEVC files with the hev1 FourCC were declared DirectPlay and played as audio
+		// with a BLACK PICTURE and no error. The tag is now persisted, so use it.
+		playbackMode = transcode.DecidePlaybackWithTag(videoCodec.String, audioCodec.String, container.String, videoCodecTag.String)
 
 		// Stale-metadata guard: a wrong FullTranscode decision is catastrophic on this
 		// software-only NAS — re-encoding an already-H.264 file runs slower than realtime,
@@ -3470,6 +3515,29 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 				// Update the database with probe results
 				go s.updateCodecInfo(itemID, pr)
 			}
+		}
+	}
+
+	// ?start= — where a TRANSCODE should begin, in seconds.
+	//
+	// Transcodes always started at zero, so seeking or resuming past the point ffmpeg had
+	// reached left the player with nothing to seek to: the playlist genuinely did not
+	// contain that time, and playback stalled. The client now asks for a session that
+	// starts near the position it wants. Ignored for direct play and remux, which are
+	// byte-range seekable already.
+	startSeconds := 0.0
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("start"), 64); err == nil {
+		// Reject non-finite and negative input; clamp to the item's runtime so a bad value
+		// cannot start ffmpeg past the end of the file.
+		if !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 {
+			startSeconds = v
+		}
+	}
+	// Never start past the end: leave at least a few seconds of media, or the session
+	// produces an empty playlist and the client sees "resource unavailable".
+	if itemDuration.Valid && itemDuration.Int64 > 0 {
+		if limit := float64(itemDuration.Int64) - 10; startSeconds > limit {
+			startSeconds = math.Max(0, limit)
 		}
 	}
 
@@ -3581,7 +3649,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 		// Start HLS transcoding session
 		if s.hlsGenerator != nil {
-			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode, maxHeight, subtitleTracks)
+			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode, maxHeight, subtitleTracks, startSeconds)
 			if err != nil {
 				log.Printf("Failed to start transcode session: %v", err)
 				writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
@@ -3710,7 +3778,11 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"kind": "hls",
 		// See the direct branch above: clients need this to release the session.
-		"sessionId":             sessionID,
+		"sessionId": sessionID,
+		// Where this transcode begins in the source. The playlist's own timeline starts at
+		// 0 regardless, so a client that asked for ?start= must add this to every position
+		// it reports or displays. 0 for a transcode that starts at the beginning.
+		"startSeconds":          startSeconds,
 		"hlsMasterUrl":          baseURL + "/api/v1/playback/" + sessionID + "/master.m3u8",
 		"subtitles":             subtitleInfo,
 		"audioTracks":           []any{},
@@ -4220,9 +4292,9 @@ func (s *Server) updateCodecInfo(itemID string, probe *transcode.ProbeResult) {
 	}
 	seq := s.incrementSeq("item_seq")
 	_, err := s.db.Exec(
-		`UPDATE items SET video_codec = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
+		`UPDATE items SET video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
 		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
-		probe.VideoCodec, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
+		probe.VideoCodec, probe.VideoCodecTag, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
 		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
 	)
 	if err != nil {
@@ -4276,9 +4348,9 @@ func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.
 	// Same-path conversion (or re-key fallback): repoint path + codec on the existing id.
 	seq := s.incrementSeq("item_seq")
 	_, err := s.db.Exec(
-		`UPDATE items SET path = ?, video_codec = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
+		`UPDATE items SET path = ?, video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
 		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
-		cleanPath, probe.VideoCodec, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
+		cleanPath, probe.VideoCodec, probe.VideoCodecTag, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
 		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
 	)
 	if err != nil {
@@ -6453,6 +6525,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		// unchanged, these are reused verbatim instead of re-probing.
 		probed         bool
 		videoCodec     sql.NullString
+		videoCodecTag  sql.NullString
 		audioCodec     sql.NullString
 		container      sql.NullString
 		needsTranscode sql.NullBool
@@ -6519,16 +6592,16 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 	// duration short so concurrent HTTP readers are not blocked during a full scan.
 	const batchSize = 50
 	type pendingRow struct {
-		id, libraryID, typ, title, addedAt     string
-		year, duration                         sql.NullInt64
-		videoCodec, audioCodec, container      sql.NullString
-		needsTranscode                         sql.NullBool
-		path                                   string
-		parsed                                 metadata.ParsedFilename
-		showFolderID                           sql.NullString
-		videoWidth, videoHeight, audioChannels sql.NullInt64
-		sizeBytes                              sql.NullInt64
-		probedAt                               sql.NullString
+		id, libraryID, typ, title, addedAt               string
+		year, duration                                   sql.NullInt64
+		videoCodec, videoCodecTag, audioCodec, container sql.NullString
+		needsTranscode                                   sql.NullBool
+		path                                             string
+		parsed                                           metadata.ParsedFilename
+		showFolderID                                     sql.NullString
+		videoWidth, videoHeight, audioChannels           sql.NullInt64
+		sizeBytes                                        sql.NullInt64
+		probedAt                                         sql.NullString
 	}
 	var batch []pendingRow
 
@@ -6557,8 +6630,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
 			res, err := tx.Exec(
-				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes, probed_at)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, video_codec_tag, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes, probed_at)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT(id) DO UPDATE SET
 				   library_id=excluded.library_id,
 				   type=excluded.type,
@@ -6566,6 +6639,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				   added_at=excluded.added_at,
 				   updated_at=excluded.updated_at,
 				   video_codec=COALESCE(excluded.video_codec, items.video_codec),
+				   video_codec_tag=COALESCE(excluded.video_codec_tag, items.video_codec_tag),
 				   audio_codec=COALESCE(excluded.audio_codec, items.audio_codec),
 				   container=COALESCE(excluded.container, items.container),
 				   needs_transcode=COALESCE(excluded.needs_transcode, items.needs_transcode),
@@ -6585,6 +6659,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				    OR items.added_at IS NOT excluded.added_at
 				    OR items.duration_seconds IS NOT COALESCE(excluded.duration_seconds, items.duration_seconds)
 				    OR items.video_codec IS NOT COALESCE(excluded.video_codec, items.video_codec)
+				    OR items.video_codec_tag IS NOT COALESCE(excluded.video_codec_tag, items.video_codec_tag)
 				    OR items.audio_codec IS NOT COALESCE(excluded.audio_codec, items.audio_codec)
 				    OR items.container IS NOT COALESCE(excluded.container, items.container)
 				    OR items.needs_transcode IS NOT COALESCE(excluded.needs_transcode, items.needs_transcode)
@@ -6596,7 +6671,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
 				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
-				row.videoCodec, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
+				row.videoCodec, row.videoCodecTag, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
 				row.videoWidth, row.videoHeight, row.audioChannels, row.sizeBytes, row.probedAt,
 			)
 			if err != nil {
@@ -6704,7 +6779,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			title = titleFromFilename(d.Name())
 		}
 
-		var videoCodec, audioCodec, container sql.NullString
+		var videoCodec, videoCodecTag, audioCodec, container sql.NullString
 		var duration sql.NullInt64
 		var needsTranscode sql.NullBool
 		var videoWidth, videoHeight, audioChannels sql.NullInt64
@@ -6726,6 +6801,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			// Carry the existing marker forward untouched.
 			probedAt = prevState.probedAt
 			videoCodec = prevState.videoCodec
+			videoCodecTag = prevState.videoCodecTag
 			audioCodec = prevState.audioCodec
 			container = prevState.container
 			needsTranscode = prevState.needsTranscode
@@ -6751,6 +6827,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			}
 			if probeErr == nil && probe != nil {
 				videoCodec = sql.NullString{String: probe.VideoCodec, Valid: true}
+				// The FourCC that decides hvc1-vs-hev1. Probed all along; never stored until now.
+				videoCodecTag = sql.NullString{String: probe.VideoCodecTag, Valid: true}
 				audioCodec = sql.NullString{String: probe.AudioCodec, Valid: true}
 				container = sql.NullString{String: probe.Container, Valid: true}
 				needsTranscode = sql.NullBool{Bool: probe.NeedsTranscode, Valid: true}
@@ -6813,7 +6891,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		batch = append(batch, pendingRow{
 			id: id, libraryID: libraryID, typ: typ, title: title, addedAt: addedAt,
 			year: year, duration: duration, path: path, parsed: parsed,
-			videoCodec: videoCodec, audioCodec: audioCodec, container: container,
+			videoCodec: videoCodec, videoCodecTag: videoCodecTag, audioCodec: audioCodec, container: container,
 			needsTranscode: needsTranscode, showFolderID: showFolderID,
 			videoWidth: videoWidth, videoHeight: videoHeight, audioChannels: audioChannels,
 			sizeBytes: sql.NullInt64{Int64: info.Size(), Valid: true},

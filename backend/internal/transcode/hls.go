@@ -134,10 +134,18 @@ type HLSSession struct {
 	OutputDir string
 	Mode      PlaybackMode
 	// Source video codec, used to decide whether the hvc1 relabel applies on a copy.
-	VideoCodec         string
-	MaxHeight          int
-	UseABR             bool // true when multi-variant ABR ladder is active
-	SubtitleTracks     []SubtitleTrack
+	VideoCodec     string
+	MaxHeight      int
+	UseABR         bool // true when multi-variant ABR ladder is active
+	SubtitleTracks []SubtitleTrack
+	// StartSeconds is where this transcode BEGINS in the source, in seconds.
+	//
+	// Transcodes used to always start at byte zero, so a client seeking (or resuming)
+	// past the point ffmpeg had reached had nothing to seek to: the playlist simply did
+	// not contain that time yet, and the player stalled. Passing it as an INPUT seek
+	// (-ss before -i) makes ffmpeg jump there almost instantly instead of decoding
+	// everything before it.
+	StartSeconds       float64
 	StartedAt          time.Time
 	CompletedAt        *time.Time
 	LastAccess         time.Time
@@ -266,7 +274,13 @@ func (g *HLSGenerator) vaapiDevicePresent() bool {
 // It returns immediately and generates HLS segments in the background.
 // maxHeight caps the output resolution (0 = no cap; only applies to FullTranscode).
 // subtitles lists external subtitle files to convert and embed as HLS renditions.
-func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode, maxHeight int, subtitles []SubtitleTrack) (*HLSSession, error) {
+// StartSession begins (or returns) a transcode session.
+//
+// startSeconds offsets where the transcode BEGINS in the source. 0 is the historical
+// behaviour — start at the beginning. A non-zero value makes the resulting playlist cover
+// [startSeconds, end] with its own timeline starting at 0, so callers must offset any
+// position they report to a player by the same amount.
+func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath string, mode PlaybackMode, maxHeight int, subtitles []SubtitleTrack, startSeconds float64) (*HLSSession, error) {
 	g.mu.Lock()
 
 	// Check if session already exists (re-open of the same title). Do this BEFORE
@@ -374,6 +388,7 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		MaxHeight:      maxHeight,
 		UseABR:         useABR,
 		SubtitleTracks: subtitles,
+		StartSeconds:   startSeconds,
 		StartedAt:      time.Now(),
 		LastAccess:     time.Now(),
 		cancel:         cancel,
@@ -751,6 +766,13 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 	// HW init flags (e.g. VAAPI device) must precede -i, so build a prefix.
 	useHW := session.Mode == FullTranscode && g.hwEncoder != "" && !session.forceSoftware
 	var pre []string
+	// INPUT seek: -ss BEFORE -i. ffmpeg jumps to the nearest keyframe at or before the
+	// offset without decoding the preceding hours, which is what makes starting a
+	// transcode mid-film viable at all. (After -i it would be an output seek: decode
+	// everything and discard — the very cost this avoids.)
+	if session.StartSeconds > 0 {
+		pre = append(pre, "-ss", fmt.Sprintf("%.3f", session.StartSeconds))
+	}
 	if useHW && g.hwEncoder == "vaapi" {
 		pre = append(pre,
 			"-vaapi_device", g.config.VAAPIDevice,
