@@ -962,3 +962,190 @@ struct ProgressAppliedTests {
     #expect(resp.applied == nil)
   }
 }
+
+// MARK: - Shared classification (consolidation pass, 2026-09-11)
+
+/// `PlaybackProgress.watchState` is the single definition of "unwatched / in progress /
+/// watched" for episode scanning.
+///
+/// The iOS and tvOS resume scans each wrote the same fraction math and the same two
+/// threshold comparisons out by hand. That is exactly how `startedThreshold` drifted —
+/// 0.05 in the rail SQL and home-rail computation, still 0.02 in the show page — so for a
+/// 45-minute episode watched between 54s and 135s the show page offered to resume an
+/// episode the home rail said had never been started. Both scans now call this.
+@MainActor
+struct WatchStateTests {
+
+  @Test func nothingWatchedIsUnwatched() {
+    #expect(PlaybackProgress.watchState(positionSeconds: 0, durationSeconds: 2700) == .unwatched)
+  }
+
+  /// Below `startedThreshold` is an accidental tap, not a resume point.
+  @Test func belowStartedThresholdIsUnwatched() {
+    // 5% of 2700s is 135s; 100s is under it.
+    #expect(PlaybackProgress.watchState(positionSeconds: 100, durationSeconds: 2700) == .unwatched)
+  }
+
+  @Test func pastStartedThresholdIsInProgress() {
+    // 200s of 2700s ≈ 7.4%, comfortably past 5%.
+    #expect(PlaybackProgress.watchState(positionSeconds: 200, durationSeconds: 2700) == .inProgress)
+  }
+
+  @Test func pastWatchedThresholdIsWatched() {
+    // 96% of 2700s.
+    #expect(PlaybackProgress.watchState(positionSeconds: 2600, durationSeconds: 2700) == .watched)
+  }
+
+  /// An unknown duration yields no meaningful ratio; never classify it as progress.
+  @Test func zeroDurationIsUnwatched() {
+    #expect(PlaybackProgress.watchState(positionSeconds: 500, durationSeconds: 0) == .unwatched)
+  }
+
+  /// The boundaries are the thing that drifted, so pin them explicitly rather than
+  /// trusting a value in the middle of a band.
+  @Test func boundariesFollowTheSharedThresholds() {
+    let dur = 1000
+    let atStarted = Int(PlaybackProgress.startedThreshold * Double(dur))      // exactly 5%
+    let atWatched = Int(PlaybackProgress.watchedThreshold * Double(dur))      // exactly 95%
+
+    // `startedThreshold` is INCLUSIVE, matching the rail SQL in LocalStore. The show-page
+    // scans used a strict `>` while the rail used `>=`, so an item at exactly 5.000%
+    // showed up in one and not the other. Pinned so the two cannot diverge again.
+    #expect(PlaybackProgress.watchState(positionSeconds: atStarted, durationSeconds: dur) == .inProgress)
+    #expect(PlaybackProgress.watchState(positionSeconds: atStarted - 1, durationSeconds: dur) == .unwatched)
+
+    // `watchedThreshold` is inclusive — exactly 95% counts as watched.
+    #expect(PlaybackProgress.watchState(positionSeconds: atWatched, durationSeconds: dur) == .watched)
+    #expect(PlaybackProgress.watchState(positionSeconds: atWatched - 1, durationSeconds: dur) == .inProgress)
+  }
+
+  /// The three states must partition the space: every input lands in exactly one, and
+  /// nothing falls through a gap between the thresholds.
+  @Test func everyPositionClassifiesExactlyOnce() {
+    let dur = 2700
+    for pos in stride(from: 0, through: dur, by: 37) {
+      let state = PlaybackProgress.watchState(positionSeconds: pos, durationSeconds: dur)
+      let frac = Double(pos) / Double(dur)
+      switch state {
+      case .unwatched:
+        #expect(frac < PlaybackProgress.startedThreshold)
+      case .inProgress:
+        #expect(frac >= PlaybackProgress.startedThreshold)
+        #expect(frac < PlaybackProgress.watchedThreshold)
+      case .watched:
+        #expect(frac >= PlaybackProgress.watchedThreshold)
+      }
+    }
+  }
+}
+
+/// The subtitle-appearance UserDefaults keys are declared once in `SubtitleStyle` —
+/// whose own doc comment says they exist "so both the player and the settings UI can
+/// share the keys and defaults". They did not: the three key strings were re-typed as raw
+/// literals in nine places across MainView, TVMainView and GestureVideoPlayer, and the
+/// constants had zero callers. A typo in any copy fails silently — the setting simply
+/// stops applying.
+@MainActor
+struct SubtitleStyleKeyTests {
+
+  @Test func keysMatchTheirPersistedNames() {
+    // These exact strings are already on users' devices; changing one silently discards
+    // that user's saved preference, so they are pinned.
+    #expect(SubtitleStyle.scaleKey == "dsReel.subtitleScale")
+    #expect(SubtitleStyle.textColorKey == "dsReel.subtitleTextColor")
+    #expect(SubtitleStyle.backgroundOpacityKey == "dsReel.subtitleBackgroundOpacity")
+  }
+
+  @Test func keysAreDistinct() {
+    let keys = Set([SubtitleStyle.scaleKey, SubtitleStyle.textColorKey, SubtitleStyle.backgroundOpacityKey])
+    #expect(keys.count == 3)
+  }
+}
+
+/// Season expand/collapse is remembered per show.
+///
+/// Previously every visit re-derived expansion from scratch, so someone watching season 6
+/// collapsed 1–5 and expanded 6 on *every* visit and the app forgot immediately. The rule
+/// also existed twice — once per platform, written out separately — which is how the iOS
+/// copy drifted into expanding every season at once and firing one episode request per
+/// season on a long show.
+@MainActor
+struct SeasonExpansionStoreTests {
+
+  private func freshShowID() -> String { "show_\(UUID().uuidString)" }
+
+  /// With no stored choice, exactly ONE season opens — never all of them, because each
+  /// expanded season fires its own episode request.
+  @Test func defaultExpandsOnlyTheLowestSeason() {
+    let set = SeasonExpansionStore.defaultExpandedSet(allSeasons: [1, 2, 3, 6], highlightSeason: nil)
+    #expect(set == [1])
+  }
+
+  /// A resume point wins over "lowest" — that is the season the user is actually in.
+  @Test func defaultPrefersTheHighlightedSeason() {
+    let set = SeasonExpansionStore.defaultExpandedSet(allSeasons: [1, 2, 3, 6], highlightSeason: 6)
+    #expect(set == [6])
+  }
+
+  /// A highlight for a season the show doesn't have must not open nothing.
+  @Test func defaultFallsBackWhenHighlightIsUnknown() {
+    let set = SeasonExpansionStore.defaultExpandedSet(allSeasons: [1, 2], highlightSeason: 99)
+    #expect(set == [1])
+  }
+
+  @Test func choiceSurvivesAndOverridesTheDefault() {
+    let id = freshShowID()
+    defer { SeasonExpansionStore.clear(showID: id) }
+    let seasons = [1, 2, 3, 6]
+
+    // Default opens season 1.
+    #expect(SeasonExpansionStore.isExpanded(season: 1, showID: id, allSeasons: seasons, highlightSeason: nil))
+    #expect(!SeasonExpansionStore.isExpanded(season: 6, showID: id, allSeasons: seasons, highlightSeason: nil))
+
+    // The user opens 6 and closes 1 — the case that prompted this.
+    SeasonExpansionStore.setExpanded(true, season: 6, showID: id, allSeasons: seasons, highlightSeason: nil)
+    SeasonExpansionStore.setExpanded(false, season: 1, showID: id, allSeasons: seasons, highlightSeason: nil)
+
+    #expect(SeasonExpansionStore.isExpanded(season: 6, showID: id, allSeasons: seasons, highlightSeason: nil))
+    #expect(!SeasonExpansionStore.isExpanded(season: 1, showID: id, allSeasons: seasons, highlightSeason: nil))
+
+    // And a later resume point must NOT quietly re-open season 1 over their choice.
+    #expect(!SeasonExpansionStore.isExpanded(season: 1, showID: id, allSeasons: seasons, highlightSeason: 1))
+  }
+
+  /// Toggling one season must not disturb the others.
+  @Test func togglingOneSeasonPreservesTheRest() {
+    let id = freshShowID()
+    defer { SeasonExpansionStore.clear(showID: id) }
+    let seasons = [1, 2, 3]
+
+    // First change seeds from the default (season 1 open), then adds 3.
+    SeasonExpansionStore.setExpanded(true, season: 3, showID: id, allSeasons: seasons, highlightSeason: nil)
+    #expect(SeasonExpansionStore.isExpanded(season: 1, showID: id, allSeasons: seasons, highlightSeason: nil))
+    #expect(SeasonExpansionStore.isExpanded(season: 3, showID: id, allSeasons: seasons, highlightSeason: nil))
+    #expect(!SeasonExpansionStore.isExpanded(season: 2, showID: id, allSeasons: seasons, highlightSeason: nil))
+  }
+
+  /// "I collapsed everything" is a real choice and must not be re-read as "no opinion".
+  @Test func collapsingEverythingIsHonoured() {
+    let id = freshShowID()
+    defer { SeasonExpansionStore.clear(showID: id) }
+    let seasons = [1, 2]
+
+    SeasonExpansionStore.setExpanded(false, season: 1, showID: id, allSeasons: seasons, highlightSeason: nil)
+    #expect(SeasonExpansionStore.storedSelection(showID: id) == [])
+    #expect(!SeasonExpansionStore.isExpanded(season: 1, showID: id, allSeasons: seasons, highlightSeason: nil))
+    #expect(!SeasonExpansionStore.isExpanded(season: 2, showID: id, allSeasons: seasons, highlightSeason: nil))
+  }
+
+  /// Two shows must never share expansion state.
+  @Test func showsAreIndependent() {
+    let a = freshShowID(), b = freshShowID()
+    defer { SeasonExpansionStore.clear(showID: a); SeasonExpansionStore.clear(showID: b) }
+    let seasons = [1, 2]
+
+    SeasonExpansionStore.setExpanded(true, season: 2, showID: a, allSeasons: seasons, highlightSeason: nil)
+    #expect(SeasonExpansionStore.isExpanded(season: 2, showID: a, allSeasons: seasons, highlightSeason: nil))
+    #expect(!SeasonExpansionStore.isExpanded(season: 2, showID: b, allSeasons: seasons, highlightSeason: nil))
+  }
+}

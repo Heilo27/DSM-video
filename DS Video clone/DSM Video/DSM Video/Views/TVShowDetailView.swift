@@ -322,8 +322,8 @@ private struct TVShowDetailSplitView: View {
         // Early exit: if this season has an in-progress episode, no need to scan further
         let hasInProgress = resp.items.contains { ep in
           guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
-          let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          return frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold
+          return PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
+                                             durationSeconds: prog.durationSeconds) == .inProgress
         }
         if hasInProgress { break }
       } catch is CancellationError {
@@ -346,9 +346,15 @@ private struct TVShowDetailSplitView: View {
 
     for entry in results {
       for ep in entry.episodes {
+        // Classification lives in PlaybackProgress.watchState so this scan and the iOS one
+        // cannot disagree about what "started" or "watched" means. They previously wrote
+        // the same fraction math out by hand — which is how the startedThreshold drifted
+        // (0.05 here, 0.02 there) and the show page offered to resume an episode the home
+        // rail said had never been started.
         if let prog = ep.progress, prog.durationSeconds > 0 {
-          let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          if frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold {
+          let state = PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
+                                                  durationSeconds: prog.durationSeconds)
+          if state == .inProgress {
             // Track the *latest* in-progress episode (overwrite as we walk forward)
             inProgressEp = ep
             inProgressSeason = entry.season
@@ -356,7 +362,7 @@ private struct TVShowDetailSplitView: View {
             // the next unwatched episode after the in-progress block is what matters
             firstUnwatchedEp = nil
             firstUnwatchedSeason = nil
-          } else if frac >= PlaybackProgress.watchedThreshold {
+          } else if state == .watched {
             // TASK-657: Fully watched — advance the firstUnwatched cursor past this ep.
             // Without this, a show where S1 is 100% done kept pointing firstUnwatched
             // at S1E1 (or nowhere) rather than S2E1.
@@ -386,6 +392,19 @@ private struct TVShowDetailSplitView: View {
     if let ep = firstUnwatchedEp, let s = firstUnwatchedSeason {
       resolvedHighlightEpisodeID = ep.id
       resolvedHighlightSeason = s
+      return
+    }
+
+    // Fallback: everything watched (or no progress data) — offer S1·E1.
+    //
+    // DRIFT FIX. The iOS twin has always had this; tvOS did not, so on Apple TV a
+    // fully-watched show resolved no target at all and the page offered nothing to play.
+    // Same algorithm, same comments, one branch missing — the exact failure mode that
+    // comes from writing a routine twice instead of once.
+    if let first = results.first(where: { !$0.episodes.isEmpty }),
+       let ep = first.episodes.first {
+      resolvedHighlightEpisodeID = ep.id
+      resolvedHighlightSeason = first.season
     }
   }
 }
@@ -421,10 +440,15 @@ private struct TVSeasonSection: View {
     self.allSeasons = allSeasons
     self.highlightEpisodeID = highlightEpisodeID
     self.highlightSeason = highlightSeason
-    // Open the season that has the highlight; if no highlight, auto-expand the lowest season number
-    let lowestSeasonNumber = allSeasons.min(by: { $0.seasonNumber < $1.seasonNumber })?.seasonNumber ?? 1
-    self._isExpanded = State(initialValue: highlightSeason == season.seasonNumber
-      || (highlightSeason == nil && season.seasonNumber == lowestSeasonNumber))
+    // Expansion comes from SeasonExpansionStore — the user's remembered choice when they
+    // have made one, the default rule otherwise. Shared with iOS so the two cannot drift
+    // apart again (the iOS copy of this rule once expanded EVERY season, firing one
+    // request per season on a long show).
+    self._isExpanded = State(initialValue: SeasonExpansionStore.isExpanded(
+      season: season.seasonNumber,
+      showID: show.id,
+      allSeasons: allSeasons.map(\.seasonNumber),
+      highlightSeason: highlightSeason))
   }
 
   var body: some View {
@@ -434,6 +458,14 @@ private struct TVSeasonSection: View {
         withAnimation(.easeInOut(duration: 0.2)) {
           isExpanded.toggle()
         }
+        // Persist the choice. An expansion the user made explicitly should outlive the
+        // screen — previously every visit re-derived it, so watching season 6 meant
+        // collapsing 1-5 and expanding 6 again on every single visit.
+        SeasonExpansionStore.setExpanded(isExpanded,
+                                         season: season.seasonNumber,
+                                         showID: show.id,
+                                         allSeasons: allSeasons.map(\.seasonNumber),
+                                         highlightSeason: highlightSeason)
       } label: {
         HStack(spacing: 12) {
           Text("Season \(season.seasonNumber)")
@@ -533,6 +565,14 @@ private struct TVSeasonSection: View {
     // effectiveHighlightSeason updates after the async resolve, expands the correct
     // season, and collapses the lowest-season fallback that was opened by default.
     .onChange(of: highlightSeason) { _, newHighlight in
+      // A remembered choice outranks the resume-point correction entirely.
+      //
+      // This handler exists to fix up the DEFAULT after resolveResumePoint lands async. If
+      // the user has expanded or collapsed seasons on this show themselves, there is no
+      // default left to fix — re-deriving here would silently undo their choice a second
+      // or two after they made it, which is the exact behaviour that made season handling
+      // feel broken.
+      if SeasonExpansionStore.storedSelection(showID: show.id) != nil { return }
       withAnimation(.easeInOut(duration: 0.2)) {
         if newHighlight == season.seasonNumber {
           isExpanded = true
@@ -1233,8 +1273,8 @@ private struct TVShowDetailScrollView: View {
           results.append((s, resp.items))
           let hasInProgress = resp.items.contains { ep in
             guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
-            let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-            return frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold
+            return PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
+                                             durationSeconds: prog.durationSeconds) == .inProgress
           }
           if hasInProgress { break }
         } catch is CancellationError {
@@ -1258,12 +1298,14 @@ private struct TVShowDetailScrollView: View {
 
     for entry in results {
       for (i, ep) in entry.episodes.enumerated() {
+        // Same shared classifier as the tvOS scan above — see PlaybackProgress.watchState.
         if let prog = ep.progress, prog.durationSeconds > 0 {
-          let frac = Double(prog.positionSeconds) / Double(prog.durationSeconds)
-          if frac > PlaybackProgress.startedThreshold && frac < PlaybackProgress.watchedThreshold {
+          let state = PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
+                                                  durationSeconds: prog.durationSeconds)
+          if state == .inProgress {
             inProgress = (entry.season, entry.episodes, i)
             firstUnwatched = nil
-          } else if frac >= PlaybackProgress.watchedThreshold {
+          } else if state == .watched {
             firstUnwatched = nil
           }
         } else if firstUnwatched == nil {
@@ -1319,23 +1361,32 @@ private struct iOSSeasonSection: View {
     self.highlightEpisodeID = highlightEpisodeID
     self.highlightSeason = highlightSeason
     self.allSeasons = allSeasons
-    // Auto-expand the season containing the highlighted episode; with no highlight,
-    // expand only the LOWEST season.
+    // Same shared rule as the tvOS section — see SeasonExpansionStore.
     //
-    // This previously read `highlightSeason == nil || highlightSeason == season.seasonNumber`,
-    // so in the normal no-highlight case every season initialised expanded and each one's
-    // .task fired its own episode request — opening a 20-season show meant 20 simultaneous
-    // fetches, and the `guard isExpanded` deferral below could never do its job. The tvOS
-    // initialiser already had the correct form (TASK-704/667); the fix never reached iOS.
-    let lowestSeasonNumber = allSeasons.min(by: { $0.seasonNumber < $1.seasonNumber })?.seasonNumber ?? 1
-    self._isExpanded = State(initialValue: highlightSeason == season.seasonNumber
-      || (highlightSeason == nil && season.seasonNumber == lowestSeasonNumber))
+    // This initialiser previously read `highlightSeason == nil || highlightSeason ==
+    // season.seasonNumber`, so with no highlight EVERY season started expanded and each
+    // one's .task fired its own episode request: 20 simultaneous fetches on a 20-season
+    // show. tvOS had the correct form and the fix never reached here — which is precisely
+    // why the rule now has exactly one definition rather than two.
+    self._isExpanded = State(initialValue: SeasonExpansionStore.isExpanded(
+      season: season.seasonNumber,
+      showID: show.id,
+      allSeasons: allSeasons.map(\.seasonNumber),
+      highlightSeason: highlightSeason))
   }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       Button {
         withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+        // Persist the choice. An expansion the user made explicitly should outlive the
+        // screen — previously every visit re-derived it, so watching season 6 meant
+        // collapsing 1-5 and expanding 6 again on every single visit.
+        SeasonExpansionStore.setExpanded(isExpanded,
+                                         season: season.seasonNumber,
+                                         showID: show.id,
+                                         allSeasons: allSeasons.map(\.seasonNumber),
+                                         highlightSeason: highlightSeason)
       } label: {
         HStack {
           Text("Season \(season.seasonNumber)")

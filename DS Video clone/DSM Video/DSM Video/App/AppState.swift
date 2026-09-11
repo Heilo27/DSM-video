@@ -1299,7 +1299,15 @@ final class AppState {
           // shared rule so the rails agree with what playback will actually resume.
           guard !PlaybackProgress.isFinished(
             positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds) else { return false }
-          return Double(p.positionSeconds) / Double(p.durationSeconds) >= 0.05
+          // The "genuinely started" test, from the shared classifier.
+          //
+          // This was a raw `>= 0.05` written out one line below the isFinished call above —
+          // the same rule in two forms, in adjacent lines. startedThreshold's own doc
+          // comment records what that costs: it was 0.05 here and still 0.02 in the show
+          // page, so for a 45-minute episode watched between 54s and 135s the show page
+          // offered to resume an episode this rail said had never been started.
+          return PlaybackProgress.watchState(
+            positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds) != .unwatched
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(10))

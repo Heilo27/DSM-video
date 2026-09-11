@@ -973,9 +973,9 @@ private struct TVSettingsView: View {
   // The in-player control is two focus steps deep behind a 2.5s auto-hide; a user who
   // set 2× by accident previously had no way to discover or undo it.
   @AppStorage("dsReel.playbackRate") private var playbackRate: Double = 1.0
-  @AppStorage("dsReel.subtitleScale") private var subtitleScale: Double = 1.0
-  @AppStorage("dsReel.subtitleTextColor") private var subtitleTextColor: String = "#FFFFFF"
-  @AppStorage("dsReel.subtitleBackgroundOpacity") private var subtitleBackgroundOpacity: Double = 0.0
+  @AppStorage(SubtitleStyle.scaleKey) private var subtitleScale: Double = 1.0
+  @AppStorage(SubtitleStyle.textColorKey) private var subtitleTextColor: String = "#FFFFFF"
+  @AppStorage(SubtitleStyle.backgroundOpacityKey) private var subtitleBackgroundOpacity: Double = 0.0
   // Theme selection (Classic / Nitrate). Shared key with the app entry and iOS Settings.
   @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
 

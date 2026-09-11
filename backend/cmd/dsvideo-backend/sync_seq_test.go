@@ -8,38 +8,29 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// schema mirrors the columns the scan upsert touches. Kept minimal on purpose —
-// these tests are about change_seq accounting, not the full item shape.
+// The schema must carry EVERY column itemUpsertSQL touches — that is the point.
+//
+// This file used to define its own cut-down copy of the upsert (10 of 21 columns, 7 of 22
+// WHERE clauses) alongside a matching cut-down schema, with a comment claiming it was
+// "kept in sync with flushBatch". It was not, and the drift was invisible: the copy was
+// missing every codec and probe column, so the test guarding the runaway-sequence outage
+// could not see the half of the statement most likely to cause it.
+//
+// Both now come from production. Add a column to itemUpsertSQL without adding it here and
+// these tests fail immediately with "no such column" — which is the alarm that was missing.
 const testSchema = `
 CREATE TABLE items(
   id TEXT PRIMARY KEY, library_id TEXT, type TEXT, title TEXT, year INT,
   path TEXT, duration_seconds INT, added_at TEXT, updated_at TEXT,
-  video_codec TEXT, audio_codec TEXT, container TEXT, needs_transcode BOOL,
-  change_seq INT, show_folder_id TEXT, video_width INT, video_height INT,
-  audio_channels INT, tmdb_id INT);
+  video_codec TEXT, video_codec_tag TEXT, audio_codec TEXT, container TEXT,
+  needs_transcode BOOL, change_seq INT, show_folder_id TEXT,
+  video_width INT, video_height INT, audio_channels INT,
+  size_bytes INT, probed_at TEXT, tmdb_id INT);
 CREATE TABLE sync_state(key TEXT PRIMARY KEY, value INT);
 INSERT INTO sync_state VALUES('item_seq', 0);
 `
 
-// upsertSQL is the scan's item upsert, including the WHERE guard that makes an
-// unchanged row a no-op. Kept in sync with flushBatch in main.go.
-const upsertSQL = `
-INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, change_seq)
-VALUES(?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET
-  library_id=excluded.library_id, type=excluded.type, path=excluded.path,
-  added_at=excluded.added_at, updated_at=excluded.updated_at,
-  duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
-  title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
-  year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
-  change_seq=excluded.change_seq
-WHERE items.library_id IS NOT excluded.library_id
-   OR items.type IS NOT excluded.type
-   OR items.path IS NOT excluded.path
-   OR items.added_at IS NOT excluded.added_at
-   OR items.duration_seconds IS NOT COALESCE(excluded.duration_seconds, items.duration_seconds)
-   OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
-   OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`
+// The upsert itself is itemUpsertSQL from main.go — not a copy. See testSchema above.
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -64,8 +55,13 @@ func scanOnce(t *testing.T, db *sql.DB, id, path, title string) {
 	).Scan(&seq); err != nil {
 		t.Fatalf("alloc seq: %v", err)
 	}
-	res, err := db.Exec(upsertSQL,
-		id, "lib_movies", "video", title, 1995, path, nil, "2026-01-01", "now", seq)
+	// Parameter order follows itemUpsertSQL exactly; a reordering there breaks here loudly
+	// rather than silently writing the wrong column.
+	res, err := db.Exec(itemUpsertSQL,
+		id, "lib_movies", "video", title, 1995, path, nil, "2026-01-01", "now",
+		nil, nil, nil, nil, nil, // video_codec, video_codec_tag, audio_codec, container, needs_transcode
+		seq,
+		nil, nil, nil, nil, nil, nil) // show_folder_id, video_width, video_height, audio_channels, size_bytes, probed_at
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}

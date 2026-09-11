@@ -1708,19 +1708,19 @@ struct GestureVideoPlayer: View {
         var attrs: [String: Any] = [:]
 
         // Font scale relative to the video frame height (1.0 = system default ~5%).
-        let scale = d.double(forKey: "dsReel.subtitleScale")
+        let scale = d.double(forKey: SubtitleStyle.scaleKey)
         if scale > 0 && abs(scale - 1.0) > 0.001 {
             attrs[kCMTextMarkupAttribute_RelativeFontSize as String] = 5.0 * scale
         }
 
         // Foreground text color.
-        if let hex = d.string(forKey: "dsReel.subtitleTextColor"),
+        if let hex = d.string(forKey: SubtitleStyle.textColorKey),
            let rgb = SubtitleStyle.rgb(fromHex: hex) {
             attrs[kCMTextMarkupAttribute_ForegroundColorARGB as String] = [1.0, rgb.r, rgb.g, rgb.b]
         }
 
         // Background box opacity (0 = none, 1 = solid black box).
-        let bgOpacity = d.double(forKey: "dsReel.subtitleBackgroundOpacity")
+        let bgOpacity = d.double(forKey: SubtitleStyle.backgroundOpacityKey)
         if bgOpacity > 0.001 {
             attrs[kCMTextMarkupAttribute_BackgroundColorARGB as String] = [bgOpacity, 0.0, 0.0, 0.0]
         }

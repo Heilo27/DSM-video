@@ -55,6 +55,37 @@ nonisolated enum PlaybackProgress {
         return (durationSeconds - positionSeconds) < finishedRemainingSeconds
     }
 
+    /// How an episode counts when scanning a show for its resume point.
+    enum WatchState {
+        /// No progress recorded, or below the "genuinely started" threshold.
+        case unwatched
+        /// Started and not yet finished — this episode resumes ITSELF.
+        case inProgress
+        /// Past the watched threshold; the viewer has moved on.
+        case watched
+    }
+
+    /// Classifies one episode's progress.
+    ///
+    /// The fraction math and both threshold comparisons were written out by hand in the iOS
+    /// and tvOS resume scans — the same three lines, twice. That duplication is precisely
+    /// how the 0.05-vs-0.02 mismatch documented on startedThreshold above happened: one copy
+    /// was updated and the other was not, so the show page offered to resume an episode the
+    /// home rail said had never been started. Single definition, so it cannot drift again.
+    static func watchState(positionSeconds: Int, durationSeconds: Int) -> WatchState {
+        guard durationSeconds > 0 else { return .unwatched }
+        let frac = Double(positionSeconds) / Double(durationSeconds)
+        if frac >= watchedThreshold { return .watched }
+        // INCLUSIVE at startedThreshold, matching the rail SQL in LocalStore
+        // (`ratio >= startedThreshold`). The show-page scans used a strict `>` while the
+        // rail used `>=`, so an item sitting at exactly 5.000% appeared in one place and
+        // not the other — a one-item disagreement nobody would ever reproduce on purpose,
+        // and precisely the kind of thing two copies of a rule drift into. The rail is the
+        // authority for "is this in Continue Watching", so its boundary wins.
+        if frac >= startedThreshold { return .inProgress }
+        return .unwatched
+    }
+
     /// The position playback should actually start from: the saved position, or 0 once the
     /// item counts as finished. Use at every resume site so server-supplied, downloaded, and
     /// locally-stored positions all obey the same rule.

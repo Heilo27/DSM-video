@@ -5140,6 +5140,60 @@ func forwardedClientIP(r *http.Request) string {
 	return ""
 }
 
+// itemUpsertSQL is THE item upsert. Single definition, deliberately.
+//
+// sync_seq_test.go used to carry its own hand-maintained copy with a comment saying it was
+// "kept in sync with flushBatch" — it was not: the copy had 10 of the 21 columns and 7 of
+// the 22 drift-detection WHERE clauses, missing every codec and probe column.
+//
+// That matters more here than almost anywhere else in the codebase. The WHERE clause is
+// what makes an unchanged row a NO-OP; if a column is added to the SET list and not to the
+// WHERE, every scan rewrites every row, bumps change_seq, and pushes a full delta to every
+// client forever. That is the 110-million-sequence / 17.5TB-of-reads outage this code
+// already survived once — and the test written to guard it was blind to the half of the
+// statement most likely to cause it. Sharing the constant means the test now exercises the
+// real statement, and a new column that forgets its WHERE clause fails the test loudly.
+const itemUpsertSQL = `INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, video_codec_tag, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes, probed_at)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT(id) DO UPDATE SET
+				   library_id=excluded.library_id,
+				   type=excluded.type,
+				   path=excluded.path,
+				   added_at=excluded.added_at,
+				   updated_at=excluded.updated_at,
+				   video_codec=COALESCE(excluded.video_codec, items.video_codec),
+				   video_codec_tag=COALESCE(excluded.video_codec_tag, items.video_codec_tag),
+				   audio_codec=COALESCE(excluded.audio_codec, items.audio_codec),
+				   container=COALESCE(excluded.container, items.container),
+				   needs_transcode=COALESCE(excluded.needs_transcode, items.needs_transcode),
+				   duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
+				   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
+				   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
+				   show_folder_id=COALESCE(excluded.show_folder_id, items.show_folder_id),
+				   video_width=COALESCE(excluded.video_width, items.video_width),
+				   video_height=COALESCE(excluded.video_height, items.video_height),
+				   audio_channels=COALESCE(excluded.audio_channels, items.audio_channels),
+				   size_bytes=COALESCE(excluded.size_bytes, items.size_bytes),
+				   probed_at=COALESCE(excluded.probed_at, items.probed_at),
+				   change_seq=excluded.change_seq
+				 WHERE items.library_id IS NOT excluded.library_id
+				    OR items.type IS NOT excluded.type
+				    OR items.path IS NOT excluded.path
+				    OR items.added_at IS NOT excluded.added_at
+				    OR items.duration_seconds IS NOT COALESCE(excluded.duration_seconds, items.duration_seconds)
+				    OR items.video_codec IS NOT COALESCE(excluded.video_codec, items.video_codec)
+				    OR items.video_codec_tag IS NOT COALESCE(excluded.video_codec_tag, items.video_codec_tag)
+				    OR items.audio_codec IS NOT COALESCE(excluded.audio_codec, items.audio_codec)
+				    OR items.container IS NOT COALESCE(excluded.container, items.container)
+				    OR items.needs_transcode IS NOT COALESCE(excluded.needs_transcode, items.needs_transcode)
+				    OR items.show_folder_id IS NOT COALESCE(excluded.show_folder_id, items.show_folder_id)
+				    OR items.video_width IS NOT COALESCE(excluded.video_width, items.video_width)
+				    OR items.video_height IS NOT COALESCE(excluded.video_height, items.video_height)
+				    OR items.audio_channels IS NOT COALESCE(excluded.audio_channels, items.audio_channels)
+				    OR items.size_bytes IS NOT COALESCE(excluded.size_bytes, items.size_bytes)
+				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
+				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`
+
 func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
@@ -6843,46 +6897,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
 			).Scan(&seq)
 			res, err := tx.Exec(
-				`INSERT INTO items(id, library_id, type, title, year, path, duration_seconds, added_at, updated_at, video_codec, video_codec_tag, audio_codec, container, needs_transcode, change_seq, show_folder_id, video_width, video_height, audio_channels, size_bytes, probed_at)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-				 ON CONFLICT(id) DO UPDATE SET
-				   library_id=excluded.library_id,
-				   type=excluded.type,
-				   path=excluded.path,
-				   added_at=excluded.added_at,
-				   updated_at=excluded.updated_at,
-				   video_codec=COALESCE(excluded.video_codec, items.video_codec),
-				   video_codec_tag=COALESCE(excluded.video_codec_tag, items.video_codec_tag),
-				   audio_codec=COALESCE(excluded.audio_codec, items.audio_codec),
-				   container=COALESCE(excluded.container, items.container),
-				   needs_transcode=COALESCE(excluded.needs_transcode, items.needs_transcode),
-				   duration_seconds=COALESCE(excluded.duration_seconds, items.duration_seconds),
-				   title=CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END,
-				   year=CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END,
-				   show_folder_id=COALESCE(excluded.show_folder_id, items.show_folder_id),
-				   video_width=COALESCE(excluded.video_width, items.video_width),
-				   video_height=COALESCE(excluded.video_height, items.video_height),
-				   audio_channels=COALESCE(excluded.audio_channels, items.audio_channels),
-				   size_bytes=COALESCE(excluded.size_bytes, items.size_bytes),
-				   probed_at=COALESCE(excluded.probed_at, items.probed_at),
-				   change_seq=excluded.change_seq
-				 WHERE items.library_id IS NOT excluded.library_id
-				    OR items.type IS NOT excluded.type
-				    OR items.path IS NOT excluded.path
-				    OR items.added_at IS NOT excluded.added_at
-				    OR items.duration_seconds IS NOT COALESCE(excluded.duration_seconds, items.duration_seconds)
-				    OR items.video_codec IS NOT COALESCE(excluded.video_codec, items.video_codec)
-				    OR items.video_codec_tag IS NOT COALESCE(excluded.video_codec_tag, items.video_codec_tag)
-				    OR items.audio_codec IS NOT COALESCE(excluded.audio_codec, items.audio_codec)
-				    OR items.container IS NOT COALESCE(excluded.container, items.container)
-				    OR items.needs_transcode IS NOT COALESCE(excluded.needs_transcode, items.needs_transcode)
-				    OR items.show_folder_id IS NOT COALESCE(excluded.show_folder_id, items.show_folder_id)
-				    OR items.video_width IS NOT COALESCE(excluded.video_width, items.video_width)
-				    OR items.video_height IS NOT COALESCE(excluded.video_height, items.video_height)
-				    OR items.audio_channels IS NOT COALESCE(excluded.audio_channels, items.audio_channels)
-				    OR items.size_bytes IS NOT COALESCE(excluded.size_bytes, items.size_bytes)
-				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
-				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`,
+				itemUpsertSQL,
 				row.id, row.libraryID, row.typ, row.title, row.year, row.path, row.duration, row.addedAt, now,
 				row.videoCodec, row.videoCodecTag, row.audioCodec, row.container, row.needsTranscode, seq, row.showFolderID,
 				row.videoWidth, row.videoHeight, row.audioChannels, row.sizeBytes, row.probedAt,
