@@ -75,8 +75,15 @@ struct HomeHero: View {
             .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
             .fixedSize(horizontal: false, vertical: true)
 
+          // Reserve the row's space inside the link, but render the real controls in
+          // the overlay below. A Button nested inside a NavigationLink's label is
+          // unreliable on iOS — the link swallows the tap — which is half the reason
+          // the Watchlist button did nothing. Keeping the spacer here means the text
+          // block's layout is byte-identical to before.
           buttonRow
             .padding(.top, 4)
+            .hidden()
+            .accessibilityHidden(true)
 
           if featured.count > 1 { dots }
         }
@@ -90,11 +97,26 @@ struct HomeHero: View {
       .ignoresSafeArea(edges: .top)
     }
     .buttonStyle(.plain)
-    .accessibilityElement(children: .combine)
+    // `.combine` flattens descendants into one element — which also made both buttons
+    // unreachable to VoiceOver. `.contain` keeps the link tappable as a unit while
+    // leaving the overlaid controls as their own focusable elements.
+    .accessibilityElement(children: .contain)
     .accessibilityLabel("Featured: \(current.title)")
     .accessibilityHint("Opens details")
+    // The real, tappable controls: outside the NavigationLink so their actions run.
+    .overlay(alignment: .bottomLeading) {
+      buttonRow
+        .padding(.horizontal, 20)
+        .padding(.bottom, heroButtonBottomInset)
+    }
     .onAppear { startRotation() }
     .onDisappear { rotationTask?.cancel() }
+  }
+
+  /// Bottom inset that lands the overlaid button row exactly where the hidden spacer
+  /// row sits inside the link (18pt bottom padding + the dots row when it renders).
+  private var heroButtonBottomInset: CGFloat {
+    featured.count > 1 ? 18 + 16 : 18
   }
 
   // MARK: Pieces
@@ -170,18 +192,42 @@ struct HomeHero: View {
     .buttonStyle(.plain)
   }
 
+  /// True when the featured item is already on the watchlist.
+  private var isInWatchlist: Bool {
+    appState.watchlistItems.contains { $0.id == current.id }
+  }
+
   // Watchlist — outlined glass.
+  //
+  // This was a bare `Label` with no action: it rendered as a button, sat inside
+  // heroBody's NavigationLink, and so a tap fell through to the link and opened the
+  // detail screen instead. Two identical-looking buttons where only Play did what it
+  // said. It is now a real Button, and reflects membership rather than always showing
+  // "+ Watchlist" for an item already on the list.
   private var watchlistButton: some View {
-    Label("Watchlist", systemImage: "plus")
-      .font(.subheadline.weight(.semibold))
-      .foregroundStyle(Color.dsTextPrimary)
-      .lineLimit(nil)
-      .fixedSize(horizontal: false, vertical: true)
-      .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil)
-      .padding(.horizontal, 18)
-      .padding(.vertical, 11)
-      .background(.ultraThinMaterial, in: Capsule())
-      .overlay(Capsule().stroke(Color.dsBorderStrong, lineWidth: 1))
+    Button {
+      let item = current
+      Haptics.play(.light)
+      Task { await appState.toggleWatchlist(item: item) }
+    } label: {
+      Label(isInWatchlist ? "In Watchlist" : "Watchlist",
+            systemImage: isInWatchlist ? "checkmark" : "plus")
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Color.dsTextPrimary)
+        .lineLimit(nil)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 11)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.dsBorderStrong, lineWidth: 1))
+    }
+    .buttonStyle(.plain)
+    .disabled(appState.isDemoMode)
+    .accessibilityLabel(isInWatchlist ? "Remove from Watchlist" : "Add to Watchlist")
+    .accessibilityHint(isInWatchlist
+                       ? "Removes \(current.title) from your watchlist"
+                       : "Adds \(current.title) to your watchlist")
   }
 
   private var dots: some View {

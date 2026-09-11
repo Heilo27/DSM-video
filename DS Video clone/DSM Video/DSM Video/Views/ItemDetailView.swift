@@ -53,7 +53,10 @@ struct ItemDetailView: View {
   /// showing content it could not deliver, then failing on tap. Downloaded titles play
   /// from disk and stay enabled.
   private var playUnavailableOffline: Bool {
-    appState.serverUnreachable && !isDownloaded
+    // isOffline as well as serverUnreachable: in airplane mode before any request has
+    // actually failed, only isOffline is set — so Play stayed enabled on a non-downloaded
+    // item and dead-ended on the playback-failed panel instead of being disabled up front.
+    (appState.serverUnreachable || appState.isOffline) && !isDownloaded
   }
 
   private var downloadProgress: Double {
@@ -237,6 +240,14 @@ struct ItemDetailView: View {
       .onAppear { viewHeight = geo.size.height }
       .onChange(of: geo.size.height) { _, h in viewHeight = h }
     }
+    // DELIBERATE, and load-bearing — do not "optimise" this away.
+    //
+    // After a fullScreenCover dismisses, SwiftUI corrupts the horizontal offset of
+    // ScrollView content: everything shifts left and the leading edge clips (the original
+    // report showed "MacGyver" rendering as "Gyver"). Changing the identity forces a
+    // layout rebuild that resets the geometry. Yes, it rebuilds the subtree on every Play
+    // — that is the cost of the fix. The explanatory comment was lost in a later refactor,
+    // which is how this came back as a suspected bug; see 3c45fc3.
     .id(showPlayer)
     .background(Color.black.ignoresSafeArea())
     .privacySensitive()
@@ -1061,6 +1072,12 @@ struct ItemDetailView: View {
     do {
       // Get playback info to get the video URL
       let info = try await appState.api.playback(id: itemID)
+      // This request opens a server-side playback session purely to learn the URL; the
+      // download itself doesn't use it. Release it immediately instead of leaving an
+      // ffmpeg transcode and temp dir pinned until the idle reaper runs.
+      if let sid = info.resolvedSessionID {
+        await appState.api.stopPlayback(sessionID: sid)
+      }
       guard let videoURL = info.streamUrl ?? info.hlsMasterUrl else {
         self.downloadError = "No playable URL available for download."
         return
@@ -1277,6 +1294,11 @@ private struct PlayerSheet: View {
   var onGoToShow: (() -> Void)? = nil
 
   @State private var playbackURL: URL?
+  /// Server playback session backing `playbackURL`, so it can be released when the sheet
+  /// closes or when a re-fetch supersedes it. Nothing released these before: each play,
+  /// each retry, and every subtitle-offset nudge opened a fresh transcode that lived on
+  /// until the server's idle reaper.
+  @State private var activeSessionID: String?
   @State private var error: String?
   @State private var resumePosition: Double = 0
   // Full runtime handed to the player so its scrubber is correct even while the HLS
@@ -1507,6 +1529,15 @@ private struct PlayerSheet: View {
       countdownTask = nil
       subtitleOffsetRestartTask?.cancel()
       subtitleOffsetRestartTask = nil
+      // Release the server's transcode session now that playback is over. Detached from
+      // this view's lifetime on purpose: onDisappear is synchronous and the view is going
+      // away, so the request must outlive it. Best-effort — the idle reaper remains the
+      // backstop if the app is killed before this lands.
+      if let sid = activeSessionID {
+        activeSessionID = nil
+        let api = appState.api
+        Task.detached { await api.stopPlayback(sessionID: sid) }
+      }
     }
     .onChange(of: scenePhase) { _, newPhase in
       // TASK-270: flush pending progress when app goes to background so force-kill
@@ -1610,6 +1641,18 @@ private struct PlayerSheet: View {
     #endif
   }
 
+  /// Releases the currently-tracked playback session, if any.
+  ///
+  /// Called before adopting a new one so a retry or a subtitle-offset restart doesn't
+  /// strand the previous transcode. Awaited (unlike the teardown path) because the view
+  /// is staying alive and a few hundred milliseconds before the replacement stream starts
+  /// is cheaper than a stranded ffmpeg process on the NAS.
+  private func releaseActiveSession() async {
+    guard let sid = activeSessionID else { return }
+    activeSessionID = nil
+    await appState.api.stopPlayback(sessionID: sid)
+  }
+
   private func start() async {
     // Reset state for retry — ensures stale duration/position from a prior attempt
     // can't suppress the final progress write on the next dismiss (TASK-401).
@@ -1656,6 +1699,8 @@ private struct PlayerSheet: View {
     // Fall back to streaming
     do {
       let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
+      await releaseActiveSession()
+      activeSessionID = info.resolvedSessionID
       let url = info.streamUrl ?? info.hlsMasterUrl
       guard let url else {
         error = "No playable URL."
@@ -1690,6 +1735,8 @@ private struct PlayerSheet: View {
       if appState.serverUnreachable, await appState.reconnect() {
         do {
           let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
+          await releaseActiveSession()
+          activeSessionID = info.resolvedSessionID
           let url = info.streamUrl ?? info.hlsMasterUrl
           guard let url else { self.error = "No playable URL."; return }
           resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(

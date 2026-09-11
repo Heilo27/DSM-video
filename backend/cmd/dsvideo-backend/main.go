@@ -3689,7 +3689,12 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 
 	if ps.Kind == "direct" || ps.Kind == "remux" {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"kind":                  "direct",
+			"kind": "direct",
+			// Emitted as its own field so clients can RELEASE the session when playback
+			// ends (POST /playback/{id}/stop). It was previously only discoverable by
+			// string-parsing streamUrl/hlsMasterUrl, so no client ever released one and
+			// every play leaked a session until the idle reaper caught it.
+			"sessionId":             sessionID,
 			"streamUrl":             baseURL + "/api/v1/playback/" + sessionID + "/stream",
 			"subtitles":             subtitleInfo,
 			"audioTracks":           []any{},
@@ -3703,7 +3708,9 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"kind":                  "hls",
+		"kind": "hls",
+		// See the direct branch above: clients need this to release the session.
+		"sessionId":             sessionID,
 		"hlsMasterUrl":          baseURL + "/api/v1/playback/" + sessionID + "/master.m3u8",
 		"subtitles":             subtitleInfo,
 		"audioTracks":           []any{},

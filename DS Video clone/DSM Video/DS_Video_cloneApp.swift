@@ -115,6 +115,7 @@ struct DS_Video_cloneApp: App {
                     // correct and matches the lifetimes involved.
                     let state = appState
                     DownloadManager.shared.tokenProvider = { state.sessionToken }
+                    DownloadManager.shared.usesTunnelCookieProvider = { state.api.usesTunnelCookie }
                 }
                 .onChange(of: themeIDRaw) { _, _ in
                     ThemeHolder.shared.current = activeTheme

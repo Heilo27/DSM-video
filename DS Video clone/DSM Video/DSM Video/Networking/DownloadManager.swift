@@ -118,6 +118,14 @@ final class DownloadManager: NSObject {
   /// reported to the user as "check your connection". Set by the app at launch.
   var tokenProvider: (() -> String?)?
 
+  /// Whether the current server connection is a QuickConnect relay needing the
+  /// `Cookie: type=tunnel` header.
+  ///
+  /// Downloads were the ONLY auth path that omitted this — APIClient and all three
+  /// AuthenticatedImage paths send it — so over a relay both the video download and its
+  /// poster fetch were the only requests missing a header the server expects.
+  var usesTunnelCookieProvider: (() -> Bool)?
+
   override private init() {
     // TASK-738: default downloads to Wi-Fi only unless the user opts into cellular.
     UserDefaults.standard.register(defaults: ["dsReel.downloadsWifiOnly": true])
@@ -159,6 +167,9 @@ final class DownloadManager: NSObject {
     // For the REST API backend, attach the Bearer token as a header.
     if !videoURL.absoluteString.contains("_sid="), let token {
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    if usesTunnelCookieProvider?() == true {
+      request.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
     }
     // TASK-738: honour the "Download over Wi-Fi only" preference (default on) at the
     // request level — works without recreating the background session. Defaults to
@@ -713,8 +724,12 @@ final class DownloadManager: NSObject {
 
     Task {
       var req = URLRequest(url: posterURL)
-      if let tok = info.token {
+      // info.token is nil after a relaunch (never persisted) — fall back to a live one.
+      if let tok = info.token ?? tokenProvider?() {
         req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+      }
+      if usesTunnelCookieProvider?() == true {
+        req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
 
       do {

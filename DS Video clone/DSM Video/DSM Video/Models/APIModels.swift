@@ -271,6 +271,12 @@ struct Chapter: Decodable, Sendable {
 
 struct PlaybackInfo: Decodable {
   let kind: String
+  /// Server-side playback session id. Needed to RELEASE the session when playback ends
+  /// (POST /playback/{id}/stop) — without it, every play held an ffmpeg transcode and its
+  /// temp directory until the server's idle reaper caught it. Optional: servers older
+  /// than 0.3.5 only embed the id inside streamUrl/hlsMasterUrl, so the client falls back
+  /// to parsing it from those (see PlaybackInfo.resolvedSessionID).
+  let sessionId: String?
   let streamUrl: URL?
   let hlsMasterUrl: URL?
   let resumePositionSeconds: Int
@@ -288,6 +294,20 @@ struct PlaybackInfo: Decodable {
   // "full vs forced vs image" semantics AVFoundation can't infer, plus which single
   // forced track should auto-enable (translation of foreign scenes).
   let subtitles: [Subtitle]?
+
+  /// The session id, falling back to parsing it out of the stream URL for older servers.
+  ///
+  /// Both URL shapes are `/api/v1/playback/{sessionId}/...`, so the id is the path
+  /// component immediately after "playback".
+  var resolvedSessionID: String? {
+    if let sessionId, !sessionId.isEmpty { return sessionId }
+    guard let url = hlsMasterUrl ?? streamUrl else { return nil }
+    let parts = url.pathComponents
+    guard let idx = parts.firstIndex(of: "playback"), parts.index(after: idx) < parts.endIndex else {
+      return nil
+    }
+    return parts[parts.index(after: idx)]
+  }
 }
 
 /// A single subtitle track as described by the frozen `/playback subtitles[]` contract

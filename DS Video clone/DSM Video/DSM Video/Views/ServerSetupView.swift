@@ -142,6 +142,15 @@ struct SetupConnectScreen: View {
         .preferredColorScheme(.dark)
     }
     .onAppear(perform: prefill)
+    // Surface a reason set BEFORE this screen appeared.
+    //
+    // appState.loginError is written when a session expires mid-use, when a launch-time
+    // token check fails, and when the background reconnect gives up — but connectError
+    // (the only thing this view renders) was assigned solely inside connect(). So every
+    // one of those paths dropped the user here with no explanation at all: the app simply
+    // returned to the connect screen. Adopt it on appear, and on change while visible.
+    .onAppear { adoptPendingLoginError() }
+    .onChange(of: appState.loginError) { _, _ in adoptPendingLoginError() }
     .onDisappear { discovery.stopScan() }
   }
 
@@ -409,6 +418,16 @@ struct SetupConnectScreen: View {
     if !isReturningUser {
       discovery.startScan()
     }
+  }
+
+  /// Adopts a login error raised elsewhere (session expiry, launch token check, the
+  /// background reconnect giving up) so this screen can explain why the user is here.
+  ///
+  /// Skipped while a connect attempt is in flight — that path owns connectError and sets
+  /// it from the same source anyway.
+  private func adoptPendingLoginError() {
+    guard !isConnecting, let err = appState.loginError, !err.isEmpty else { return }
+    connectError = friendlyError(err)
   }
 
   private func connect() async {

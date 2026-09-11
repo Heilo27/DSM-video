@@ -25,8 +25,16 @@ private nonisolated(unsafe) let homeRailsFormatter: ISO8601DateFormatter = {
 @MainActor
 @Observable
 final class AppState {
-  @ObservationIgnored
-  @AppStorage("dsReel.qualityCap") var qualityCap: String = "auto"
+  /// Transcode quality cap, bound to a Picker on both platforms.
+  ///
+  /// Was `@ObservationIgnored @AppStorage`, which is a contradiction here: @Observable
+  /// cannot see through @AppStorage, and @ObservationIgnored explicitly opts the property
+  /// OUT of change tracking — so mutating it emitted no observation event and the Picker
+  /// would not re-render when the value changed from anywhere but itself. Its seven
+  /// sibling settings all use this observed-property + didSet form; this was the outlier.
+  var qualityCap: String {
+    didSet { UserDefaults.standard.set(qualityCap, forKey: Keys.qualityCap) }
+  }
 
   /// Non-routable placeholder used when the stored URL is empty or malformed at init time.
   /// Uses HTTPS so ATS doesn't block it; requests fail silently since 0.0.0.0 is unreachable.
@@ -42,6 +50,7 @@ final class AppState {
     static let keychainService = "com.heiloprojects.dsreel"
     static let keychainAccount = "savedPassword"
     static let keychainAccountToken = "sessionToken"
+    static let qualityCap = "dsReel.qualityCap"
   }
 
   var baseURL: String {
@@ -172,6 +181,7 @@ final class AppState {
     let storedRememberMe = d.object(forKey: Keys.rememberMe) as? Bool ?? true
     let storedDefaultPort = d.object(forKey: Keys.defaultPort) as? Int ?? 5000
 
+    qualityCap = d.string(forKey: Keys.qualityCap) ?? "auto"
     baseURL = storedBaseURL
     lanAddress = d.string(forKey: Keys.lanAddress) ?? ""
     wanAddress = d.string(forKey: Keys.wanAddress) ?? ""
@@ -724,6 +734,15 @@ final class AppState {
   /// Does NOT auto-logout on network errors — the user should stay logged in
   /// and resume automatically when connectivity returns.
   func handleConnectionFailure(_ error: Error) {
+    // Cancellation is NOT a connection failure. Navigating away from a view cancels its
+    // .task, and the resulting URLError(-999)/CancellationError was being classified as
+    // serverUnreachable — so backing out of a library on a slow link flipped the global
+    // offline banner on a perfectly healthy connection. Handled once here rather than at
+    // each of the ~12 call sites.
+    if error is CancellationError { return }
+    if let urlErr = error as? URLError, urlErr.code == .cancelled { return }
+    if case .connection(.cancelled)? = error as? APIError { return }
+
     if let apiErr = error as? APIError {
       switch apiErr {
       // isAuthFailure, not `.http(401)`: the backend sends a JSON body with every error,
@@ -732,11 +751,13 @@ final class AppState {
       // left the user on an authenticated-looking UI with empty rails and no way back to
       // the login screen.
       case _ where apiErr.isAuthFailure:
-        // Token expired or rejected — must re-authenticate
-        Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-        sessionToken = nil
-        watchlistItems = []  // prevent stale watchlist briefly visible on the login screen
-        loginError = "Your session expired. Please sign in again."
+        // Try to recover silently before dumping the user to the login screen.
+        //
+        // refreshToken() existed but its ONLY caller was a once-per-launch check gated on
+        // "expires in under 24h", so any 401 outside that window tore the session down
+        // even though the server would have happily issued a new token. attemptSilentReauth
+        // does the teardown itself if recovery fails.
+        attemptSilentReauth()
       case .network:
         serverUnreachable = true
       default:
@@ -762,6 +783,45 @@ final class AppState {
         break
       }
     }
+  }
+
+  /// In-flight silent re-auth, so a burst of concurrent 401s triggers ONE attempt.
+  private var silentReauthTask: Task<Void, Never>?
+
+  /// Attempts to recover an expired session without user interaction, and only tears the
+  /// session down if that fails.
+  ///
+  /// Several requests typically fail together when a token expires; without the task
+  /// guard each would fire its own refresh, and the losers would clobber the winner's
+  /// fresh token. Teardown is deferred until recovery has actually been ruled out, which
+  /// is what stops a recoverable expiry from bouncing the user to the login screen.
+  private func attemptSilentReauth() {
+    guard silentReauthTask == nil else { return }
+    // Nothing to refresh with, and no password to fall back on — tear down now.
+    guard sessionToken != nil, !isDemoMode else {
+      failSession()
+      return
+    }
+    silentReauthTask = Task { @MainActor in
+      defer { silentReauthTask = nil }
+      await refreshSession()
+      // refreshSession() falls back to login() when a password is saved. If either
+      // worked we now hold a live token and the user never saw an interruption.
+      if sessionToken == nil {
+        failSession()
+      } else {
+        dlog.info(.auth, "silent re-auth recovered the session after a 401")
+        loginError = nil
+      }
+    }
+  }
+
+  /// Clears credentials and routes the user to the connect screen with a stated reason.
+  private func failSession() {
+    Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+    sessionToken = nil
+    watchlistItems = []  // prevent stale watchlist briefly visible on the login screen
+    loginError = "Your session expired. Please sign in again."
   }
 
   /// Turns a pairing failure into a message that names the ACTUAL cause.

@@ -9,6 +9,9 @@ struct MainView: View {
   @Environment(AppState.self) private var appState
   let layout: Layout
 
+  /// Set when a dsvideo:// deep link arrives; drives the detail sheet.
+  @State private var deepLinkItem: DeepLinkTarget?
+
   var body: some View {
     // TASK-884: the offline banner is an OVERLAY on the content, not a ZStack sibling.
     //
@@ -62,7 +65,39 @@ struct MainView: View {
       OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
         .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
     }
+    // Deep links (dsvideo://item/{id}) — iOS side.
+    //
+    // The URL scheme is registered for the iOS target in Info.plist and the app parses
+    // it into appState.pendingDeepLinkItemID, but the ONLY reader was TVMainView. On
+    // iPhone/iPad every shared or bookmarked link was accepted and silently dropped on
+    // Home. Presented as a sheet rather than pushed, because the root is a TabView on
+    // iPhone and a NavigationSplitView on iPad — a sheet lands correctly from both and
+    // from any selected tab.
+    .sheet(item: $deepLinkItem) { target in
+      NavigationStack {
+        // No title is carried in the URL; the real one replaces this as soon as the
+        // detail request lands.
+        ItemDetailView(itemID: target.id, fallbackTitle: "Loading…")
+      }
+    }
+    .onChange(of: appState.pendingDeepLinkItemID) { _, newID in
+      guard let id = newID else { return }
+      deepLinkItem = DeepLinkTarget(id: id)
+      appState.pendingDeepLinkItemID = nil
+    }
+    // .onChange observes only SUBSEQUENT changes. A cold launch from a link sets the ID
+    // before this view exists, so without this the very case deep links are FOR is the
+    // one that fails. Same defect the tvOS side had.
+    .task {
+      if let id = appState.pendingDeepLinkItemID {
+        deepLinkItem = DeepLinkTarget(id: id)
+        appState.pendingDeepLinkItemID = nil
+      }
+    }
   }
+
+  /// Identifiable wrapper so `.sheet(item:)` can drive presentation off the item id.
+  private struct DeepLinkTarget: Identifiable { let id: String }
 }
 
 // MARK: - iPad Split View

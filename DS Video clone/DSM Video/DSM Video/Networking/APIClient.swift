@@ -210,6 +210,25 @@ struct APIClient {
     return resp.applied ?? true
   }
 
+  /// Releases a server playback session, freeing its transcode and temp directory now
+  /// rather than waiting on the idle reaper.
+  ///
+  /// Best-effort and idempotent by design — the session id is its own credential, so this
+  /// is unauthenticated, and a failure here must never surface to the user or block
+  /// teardown. Every play previously leaked a session because nothing called it.
+  func stopPlayback(sessionID: String, timeoutInterval: TimeInterval = 5) async {
+    let enc = sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionID
+    guard let url = URL(string: "/api/v1/playback/\(enc)/stop", relativeTo: baseURL) else { return }
+    // Issued directly rather than through request(): the endpoint answers 204 with an
+    // EMPTY body, which no Decodable can parse. Going through the generic path would
+    // always throw a decode error on an operation that in fact succeeded.
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.timeoutInterval = timeoutInterval
+    if usesTunnelCookie { req.setValue("type=tunnel", forHTTPHeaderField: "Cookie") }
+    _ = try? await URLSession.shared.data(for: req)
+  }
+
   func progressBatch(ids: [String]) async throws -> ProgressBatchResponse {
     guard !ids.isEmpty else { return ProgressBatchResponse(progress: [:]) }
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/progress"), resolvingAgainstBaseURL: false) else {

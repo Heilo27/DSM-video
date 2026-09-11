@@ -1319,8 +1319,17 @@ private struct iOSSeasonSection: View {
     self.highlightEpisodeID = highlightEpisodeID
     self.highlightSeason = highlightSeason
     self.allSeasons = allSeasons
-    // Auto-expand the season that contains the highlighted episode
-    self._isExpanded = State(initialValue: highlightSeason == nil || highlightSeason == season.seasonNumber)
+    // Auto-expand the season containing the highlighted episode; with no highlight,
+    // expand only the LOWEST season.
+    //
+    // This previously read `highlightSeason == nil || highlightSeason == season.seasonNumber`,
+    // so in the normal no-highlight case every season initialised expanded and each one's
+    // .task fired its own episode request — opening a 20-season show meant 20 simultaneous
+    // fetches, and the `guard isExpanded` deferral below could never do its job. The tvOS
+    // initialiser already had the correct form (TASK-704/667); the fix never reached iOS.
+    let lowestSeasonNumber = allSeasons.min(by: { $0.seasonNumber < $1.seasonNumber })?.seasonNumber ?? 1
+    self._isExpanded = State(initialValue: highlightSeason == season.seasonNumber
+      || (highlightSeason == nil && season.seasonNumber == lowestSeasonNumber))
   }
 
   var body: some View {

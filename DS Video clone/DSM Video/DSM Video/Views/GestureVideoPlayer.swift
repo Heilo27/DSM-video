@@ -1700,14 +1700,19 @@ struct GestureVideoPlayer: View {
         center.skipBackwardCommand.removeTarget(nil)
         center.changePlaybackPositionCommand.removeTarget(nil)
 
+        // `[self]` on a struct View captures a SNAPSHOT, so `isPlaying` inside these
+        // closures is frozen at whatever it was when setupNowPlaying() ran — a lock-screen
+        // Play after the user had paused in-app tested a stale flag and did nothing.
+        // The player's own rate is the live source of truth (the same reasoning
+        // updateNowPlayingPlayback() already documents for the Now Playing rate).
         center.playCommand.isEnabled = true
         center.playCommand.addTarget { [self] _ in
-            if !isPlaying { togglePlayPause() }
+            if (player?.rate ?? 0) == 0 { togglePlayPause() }
             return .success
         }
         center.pauseCommand.isEnabled = true
         center.pauseCommand.addTarget { [self] _ in
-            if isPlaying { togglePlayPause() }
+            if (player?.rate ?? 0) != 0 { togglePlayPause() }
             return .success
         }
         center.togglePlayPauseCommand.isEnabled = true
