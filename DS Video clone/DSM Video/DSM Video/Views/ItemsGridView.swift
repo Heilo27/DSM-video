@@ -40,7 +40,6 @@ struct ItemsGridView: View {
     // value to the default so the chip bar always shows an active selection.
     return stored == .all ? .addedNewest : stored
   }()
-  @State private var searchText: String = ""
   @State private var showSearchSheet: Bool = false
   // Genre filtering. Applied SERVER-side: filtering locally would only cover pages already
   // loaded, so on a 500-item library the filter would look right while missing most results.
@@ -48,10 +47,10 @@ struct ItemsGridView: View {
   @State private var selectedGenres: Set<String> = []
   @State private var genreMode: APIClient.GenreMode = .any
 
-  private var displayedItems: [ItemSummary] {
-    guard !searchText.isEmpty else { return sortedItems }
-    return sortedItems.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
-  }
+  // `searchText` state lived here with a filter over it, but nothing ever assigned it —
+  // per-library search is a separate sheet that owns its own state and navigates
+  // directly. The filter was a pass-through and its "No results" branch unreachable.
+  private var displayedItems: [ItemSummary] { sortedItems }
 
   private func sorted(_ list: [ItemSummary], by option: SortOption) -> [ItemSummary] {
     switch option {
@@ -98,18 +97,10 @@ struct ItemsGridView: View {
         let gridSpacing: CGFloat = 12
         let gridPadding: CGFloat = horizontalSizeClass == .regular ? 20 : 12
         #endif
-        // TASK-803: pick ONE empty state — an active search shows "No Results",
-        // otherwise a genuinely empty library shows "No Videos". Previously both
-        // could render stacked above an empty grid.
-        if displayedItems.isEmpty && !searchText.isEmpty {
-          DSContentUnavailable(
-            title: "No Results",
-            systemImage: "magnifyingglass",
-            description: "No videos match \"\(searchText)\""
-          )
-          .foregroundStyle(.white)
-          .padding(.top, 60)
-        } else if items.isEmpty && !isLoading && error == nil {
+        // TASK-803 also had a "No Results" branch for an in-grid search filter here.
+        // That filter never existed (see displayedItems) so the branch was unreachable;
+        // search is a sheet that navigates rather than filtering this grid.
+        if items.isEmpty && !isLoading && error == nil {
           DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
         }
         LazyVGrid(columns: columns, spacing: gridSpacing) {
@@ -134,7 +125,10 @@ struct ItemsGridView: View {
             } label: {
               ItemPosterCell(item: item)
             }
-            .buttonStyle(.plain)
+            // dsPressable() == .plain + the Cinematic theme's press-scale (a no-op on
+            // flat themes). The style existed but had zero call sites, so the theme's
+            // press feedback never rendered anywhere.
+            .dsPressable()
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(itemAccessibilityLabel(item))
             .accessibilityHint("Opens video details")

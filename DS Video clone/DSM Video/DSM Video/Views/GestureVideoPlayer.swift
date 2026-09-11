@@ -101,12 +101,9 @@ struct GestureVideoPlayer: View {
     @State private var scrubTime: Double = 0
     @State private var scrubStartTime: Double = 0
     @State private var showScrubPreview: Bool = false
-    // TASK-663: tvOS interactive scrub. D-pad left/right moves a preview position
-    // (scrubTime) without seeking; the seek commits once after a brief idle or on
-    // Select. Consecutive presses within the window accelerate the step.
-    @State private var scrubCommitTask: Task<Void, Never>?
-    @State private var lastScrubPressAt: Date = .distantPast
-    @State private var scrubStepRepeat: Int = 0
+    // TASK-663 originally added a deferred tvOS scrub here (d-pad moved a preview
+    // position, the seek committed after an idle). That design was replaced by the
+    // direct 15s skip in handleTVMoveCommand; its state and commit function are gone.
 
     // TASK: coalesced seeking. AVPlayer cancels an in-flight seek when a new one
     // arrives; with ±2s tolerance on transcoded HLS, rapid skip-button taps each
@@ -167,7 +164,6 @@ struct GestureVideoPlayer: View {
     private let skipBackwardSeconds: Double = 15
     // TASK-734: d-pad left/right seek step on tvOS. Kept symmetric and small for
     // fine-scrubbing; named so it sits alongside the skip-button constants.
-    private let tvDpadSeekSeconds: Double = 10
 
     enum SkipDirection {
         case backward, forward
@@ -1448,18 +1444,11 @@ struct GestureVideoPlayer: View {
     }
 
     // Commit the previewed scrub position to an actual seek and exit scrub mode.
-    private func commitTVScrub() {
-        scrubCommitTask?.cancel()
-        scrubCommitTask = nil
-        guard isScrubbing else { return }
-        let target = scrubTime
-        seek(to: target, tight: true)
-        currentTime = target
-        isScrubbing = false
-        scrubStepRepeat = 0
-        withAnimation(.easeInOut(duration: 0.2)) { showScrubPreview = false }
-        scheduleHideControls()
-    }
+    // commitTVScrub() lived here. It was dead twice over: nothing called it (its only
+    // caller was removed — see the note at the d-pad handler), and every isScrubbing
+    // write is inside #if os(iOS), so its `guard isScrubbing` could never pass on tvOS
+    // anyway. Removed with its state cluster (scrubCommitTask / lastScrubPressAt /
+    // scrubStepRepeat), none of which any live code wrote.
     #endif
 
     // MARK: - Player Controls
@@ -1799,8 +1788,6 @@ struct GestureVideoPlayer: View {
         skipHideTask?.cancel()
         controlsHideTask?.cancel()
         #if os(tvOS)
-        scrubCommitTask?.cancel()  // TASK-663: don't fire a deferred seek post-teardown
-        scrubCommitTask = nil
         #endif
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)

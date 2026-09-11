@@ -1217,10 +1217,6 @@ final class AppState {
     homeContinueWatching.isEmpty && homeJustAdded.isEmpty && homeRecentlyWatched.isEmpty
   }
 
-  var homeFirstMovieLibrary: Library? {
-    homeLibraries.first(where: { $0.kind == "movie" || $0.kind == "movies" }) ?? homeLibraries.first
-  }
-
   var homeFirstTVLibrary: Library? {
     homeLibraries.first(where: { $0.kind == "tv" })
   }
@@ -1871,10 +1867,9 @@ final class AppState {
     homeLog.info("flushPendingProgress: uploaded \(uploaded) row(s), dropped \(dropped) permanently-rejected row(s)")
   }
 
-  // homeRefreshProgress kept for backwards compat with any view that calls it
-  func homeRefreshProgress() async {
-    await runHeartbeat()
-  }
+  // homeRefreshProgress() lived here, "kept for backwards compat with any view that calls
+  // it". No view did — and both LibrariesView and TVMainView carry comments explaining
+  // why they deliberately call refreshProgressFromLocal directly instead.
 
   // MARK: - Watchlist
 

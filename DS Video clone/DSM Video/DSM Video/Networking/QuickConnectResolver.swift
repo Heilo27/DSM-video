@@ -106,23 +106,9 @@ enum QuickConnectResolver {
     return candidates
   }
 
-  /// Compatibility shim — returns URL strings for callers that don't need relay.
-  static func resolve(id: String) async throws -> [String] {
-    return try await resolveCandidates(id: id).map { $0.url.absoluteString }
-  }
-
-  /// Returns a single WAN address for the QuickConnect sheet — one result, no picker.
-  /// Picks the WAN (non-LAN) IP with the requested scheme. Falls back to any matching scheme.
-  static func resolveWAN(id: String, useHTTPS: Bool) async throws -> String? {
-    let all = try await resolve(id: id)
-    let scheme = useHTTPS ? "https" : "http"
-    let wan = all.first { url in
-      guard url.hasPrefix(scheme), let host = URL(string: url)?.host else { return false }
-      return !host.hasPrefix("192.168.") && !host.hasPrefix("10.") &&
-             !host.hasPrefix("172.") && host != "localhost" && host != "127.0.0.1"
-    }
-    return wan ?? all.first(where: { $0.hasPrefix(scheme) })
-  }
+  // resolve(id:) and resolveWAN(id:useHTTPS:) lived here — a dead pair. resolveWAN had no
+  // callers, and resolve(id:) had none but resolveWAN. Live code uses resolveCandidates()
+  // above, which preserves the relay/tunnel information both of these threw away.
 
   // MARK: Private
 

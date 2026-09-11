@@ -101,15 +101,8 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
 }
 
 extension ItemSummary {
-  nonisolated var withoutProgress: ItemSummary {
-    ItemSummary(id: id, type: type, title: title, year: year,
-                durationSeconds: durationSeconds, addedAt: addedAt,
-                rating: rating, posterImageId: posterImageId,
-                backdropImageId: backdropImageId, progress: nil,
-                showName: showName, showFolderId: showFolderId,
-                seasonNumber: seasonNumber, episodeNumber: episodeNumber,
-                libraryId: libraryId, changeSeq: changeSeq)
-  }
+  // `withoutProgress` lived here; its only caller was HomeCache.save(), removed with the
+  // rest of that superseded cache.
 
   nonisolated func withPosterImageId(_ newId: String) -> ItemSummary {
     ItemSummary(id: id, type: type, title: title, year: year,

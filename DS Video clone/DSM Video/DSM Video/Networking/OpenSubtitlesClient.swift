@@ -1,8 +1,19 @@
 import Foundation
 
+// OPT-IN AND INCOMPLETE — read this before relying on it.
+//
 // Set this to your OpenSubtitles.com API key to enable subtitle search and download.
 // Get a free key at https://www.opensubtitles.com/consumers
-// Leave empty to disable the feature (search button will show a "not configured" message).
+// Leave empty to disable the feature: the search button is gated on this constant being
+// non-empty (GestureVideoPlayer), so in any build shipped with it empty the entire
+// feature — client, results sheet, download handler — is unreachable by construction.
+//
+// Even with a key, this is only HALF a feature: search and download work, but the
+// downloaded .srt is written to disk and never loaded into the player, and the UI says
+// so. Finishing it means feeding the file to AVPlayer as an external subtitle track.
+//
+// Kept rather than deleted because it is a real, documented opt-in that a user can turn
+// on by pasting a key — but do not mistake it for working subtitle support.
 let OpenSubtitlesAPIKey = ""
 
 // BCP-47 language code for subtitle search. "en" = English.

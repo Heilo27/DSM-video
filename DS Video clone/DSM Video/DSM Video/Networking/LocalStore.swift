@@ -775,18 +775,9 @@ actor LocalStore {
     return SyncCursors(itemSeq: itemSeq, progressSeq: progressSeq)
   }
 
-  func setSyncCursors(_ cursors: SyncCursors) {
-    guard let db else { return }
-    var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES(?,?)", -1, &stmt, nil) == SQLITE_OK else { return }
-    defer { sqlite3_finalize(stmt) }
-    for (key, val) in [("item_seq", cursors.itemSeq), ("progress_seq", cursors.progressSeq)] {
-      sqlite3_reset(stmt)
-      sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
-      sqlite3_bind_int64(stmt, 2, Int64(val))
-      sqlite3_step(stmt)
-    }
-  }
+  // setSyncCursors(_:) lived here — zero callers, superseded by the individual
+  // setItemSeq / setProgressSeq writers below, which report failure instead of
+  // silently dropping the cursor.
 
   /// Persist the delta-sync watermark. Failures are LOUD, not silent.
   ///

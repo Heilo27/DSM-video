@@ -70,13 +70,12 @@ struct TVShowsView: View {
     return TVShowSortOption(rawValue: raw) ?? .recentlyWatched
   }()
   @State private var sortedShows: [TVShow] = []
-  @State private var searchText: String = ""
   @State private var showSearchSheet: Bool = false
 
-  private var displayedShows: [TVShow] {
-    guard !searchText.isEmpty else { return sortedShows }
-    return sortedShows.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
-  }
+  // A `searchText` filter lived here but nothing ever assigned it — per-library search
+  // is a sheet that owns its own state and navigates directly, so this never filtered
+  // and the "No Results" branches over it were unreachable.
+  private var displayedShows: [TVShow] { sortedShows }
 
   #if os(tvOS)
   private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 28)] }
@@ -174,67 +173,52 @@ struct TVShowsView: View {
         #endif
       } else {
         #if os(tvOS)
-        if displayedShows.isEmpty && !searchText.isEmpty {
-          DSContentUnavailable(
-            title: "No Results",
-            systemImage: "magnifyingglass",
-            description: "No shows match \"\(searchText)\""
-          )
-          .foregroundStyle(.white)
-          .padding(.top, 60)
-        } else {
-          LazyVGrid(columns: columns, spacing: 44) {
-            // Key on gridID (id + title), NOT id: two distinct shows can share one
-            // folder and therefore an `id` (e.g. both Daredevils under Daredevil/),
-            // which would collapse the duplicate cells and blank one. Matches the iOS
-            // branch; detail navigation still uses show.id for the API lookup.
-            ForEach(displayedShows, id: \.gridID) { show in
-              NavigationLink {
-                TVShowDetailView(show: show, library: library)
-              } label: {
-                TVShowPosterCell(show: show)
-              }
-              .buttonStyle(.card)
-              .id(show.gridID)
-              .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")\(show.seasonCount.map { ", \($0) season\($0 == 1 ? "" : "s")" } ?? "")")
-              .accessibilityHint("Opens show details")
+        // (an unreachable "No Results" branch wrapped this grid — see displayedShows)
+        LazyVGrid(columns: columns, spacing: 44) {
+          // Key on gridID (id + title), NOT id: two distinct shows can share one
+          // folder and therefore an `id` (e.g. both Daredevils under Daredevil/),
+          // which would collapse the duplicate cells and blank one. Matches the iOS
+          // branch; detail navigation still uses show.id for the API lookup.
+          ForEach(displayedShows, id: \.gridID) { show in
+            NavigationLink {
+              TVShowDetailView(show: show, library: library)
+            } label: {
+              TVShowPosterCell(show: show)
             }
+            .buttonStyle(.card)
+            .id(show.gridID)
+            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")\(show.seasonCount.map { ", \($0) season\($0 == 1 ? "" : "s")" } ?? "")")
+            .accessibilityHint("Opens show details")
           }
-          .privacySensitive()
-          .padding(.horizontal, 60)
-          .padding(.vertical, 48)
         }
+        .privacySensitive()
+        .padding(.horizontal, 60)
+        .padding(.vertical, 48)
         #else
-        if displayedShows.isEmpty && !searchText.isEmpty {
-          DSContentUnavailable(
-            title: "No Results",
-            systemImage: "magnifyingglass",
-            description: "No shows match \"\(searchText)\""
-          )
-          .foregroundStyle(.white)
-          .padding(.top, 60)
-        } else {
-          LazyVGrid(columns: columns, spacing: 12) {
-            // Key on gridID (id + title), NOT id: two distinct shows can share a
-            // folder and therefore an `id` (e.g. both Daredevils under Daredevil/).
-            // A grid keyed on the duplicate id collapses those cells and one renders
-            // black depending on scroll position — the "Daredevil blanks when too much
-            // in view" bug. gridID makes each show a distinct cell; detail navigation
-            // still uses show.id for the seasons/episodes API lookup.
-            ForEach(displayedShows, id: \.gridID) { show in
-              NavigationLink {
-                TVShowDetailView(show: show, library: library)
-              } label: {
-                TVShowPosterCell(show: show)
-              }
-              .buttonStyle(.plain)
-              .id(show.gridID)
-              .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
-              .accessibilityHint("Opens show details")
+        // (an unreachable "No Results" branch wrapped this grid — see displayedShows)
+        LazyVGrid(columns: columns, spacing: 12) {
+          // Key on gridID (id + title), NOT id: two distinct shows can share a
+          // folder and therefore an `id` (e.g. both Daredevils under Daredevil/).
+          // A grid keyed on the duplicate id collapses those cells and one renders
+          // black depending on scroll position — the "Daredevil blanks when too much
+          // in view" bug. gridID makes each show a distinct cell; detail navigation
+          // still uses show.id for the seasons/episodes API lookup.
+          ForEach(displayedShows, id: \.gridID) { show in
+            NavigationLink {
+              TVShowDetailView(show: show, library: library)
+            } label: {
+              TVShowPosterCell(show: show)
             }
+            // dsPressable() == .plain + the Cinematic theme's press-scale (a no-op on flat
+            // themes). The style existed with zero call sites, so the theme's press
+            // feedback never rendered anywhere.
+            .dsPressable()
+            .id(show.gridID)
+            .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
+            .accessibilityHint("Opens show details")
           }
-          .padding(horizontalSizeClass == .regular ? 20 : 12)
         }
+        .padding(horizontalSizeClass == .regular ? 20 : 12)
         #endif
       }
     }

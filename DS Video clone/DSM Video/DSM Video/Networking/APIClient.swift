@@ -229,21 +229,10 @@ struct APIClient {
     _ = try? await URLSession.shared.data(for: req)
   }
 
-  func progressBatch(ids: [String]) async throws -> ProgressBatchResponse {
-    guard !ids.isEmpty else { return ProgressBatchResponse(progress: [:]) }
-    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/progress"), resolvingAgainstBaseURL: false) else {
-      throw APIError.invalidURL
-    }
-    comps.queryItems = [URLQueryItem(name: "ids", value: ids.joined(separator: ","))]
-    guard let url = comps.url else { throw APIError.invalidURL }
-    // Short timeout: progress data is non-critical. Fail fast so cached content
-    // shows immediately rather than blocking for the default 60-second timeout.
-    return try await request(url: url, method: "GET", body: Optional<Int>.none,
-                             response: ProgressBatchResponse.self, timeoutInterval: 8)
-  }
+  // progressBatch(ids:) lived here — superseded by progressAll (one request instead of
+  // N chunked ones) and left with zero callers. Its own doc comment already said
+  // "Prefer progressAll".
 
-  /// Fetches all progress rows for the authenticated user in a single request.
-  /// Prefer this over progressBatch for home-screen refresh — avoids N×chunked requests.
   func progressAll() async throws -> ProgressBatchResponse {
     try await request(path: "/api/v1/progress/all", method: "GET", body: Optional<Int>.none,
                       response: ProgressBatchResponse.self, timeoutInterval: 15)
@@ -431,13 +420,9 @@ struct APIClient {
                           body: Optional<Int>.none, response: EmptyDecodable.self)
   }
 
-  func isInWatchlist(id: String) async throws -> Bool {
-    struct Resp: Decodable { let inWatchlist: Bool }
-    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-    let resp = try await request(path: "/api/v1/watchlist/\(enc)", method: "GET",
-                                 body: Optional<Int>.none, response: Resp.self)
-    return resp.inWatchlist
-  }
+  // isInWatchlist(id:) lived here — zero callers. Watchlist membership is derived
+  // from the already-loaded AppState.watchlistItems, so a per-item round trip was
+  // never needed.
 
   // MARK: - core
 
