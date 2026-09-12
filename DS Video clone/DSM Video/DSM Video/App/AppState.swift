@@ -184,6 +184,13 @@ final class AppState {
   }
 
   init() {
+    #if DEBUG
+    // Must run BEFORE any stored value is read below, or this launch would load the state it
+    // is supposed to be clearing.
+    if AppState.isUITestResetLaunch {
+      AppState.resetPersistedStateForUITests()
+    }
+    #endif
     let d = UserDefaults.standard
     // Empty means "not configured yet" — the setup screen prompts for an address.
     //
@@ -279,6 +286,29 @@ final class AppState {
   static var isUITestDemoLaunch: Bool {
     ProcessInfo.processInfo.arguments.contains("-UITestDemoMode")
       || ProcessInfo.processInfo.environment["UITEST_DEMO"] == "1"
+  }
+
+  /// UI-TEST RESET HOOK: clears the app's own persisted defaults so every test starts from a
+  /// known state. Without it a saved address or theme leaks between tests and a failure
+  /// becomes unreproducible — the kind of flakiness that gets a suite disabled rather than
+  /// fixed, at which point it protects nothing.
+  ///
+  /// Scoped deliberately: only keys this app owns (the `dsReel.` prefix), never the whole
+  /// domain, and DEBUG-only behind an explicit launch argument.
+  static var isUITestResetLaunch: Bool {
+    ProcessInfo.processInfo.arguments.contains("-UITestResetState")
+  }
+
+  private static func resetPersistedStateForUITests() {
+    let d = UserDefaults.standard
+    for key in d.dictionaryRepresentation().keys where key.hasPrefix("dsReel.") {
+      d.removeObject(forKey: key)
+    }
+    // The credentials live in the Keychain, not in defaults, so clear them explicitly —
+    // otherwise an unconfigured-launch test inherits a real saved password and takes the
+    // returning-user path instead of the first-run path it means to exercise.
+    deleteFromKeychain(account: Keys.keychainAccount)
+    deleteFromKeychain(account: Keys.keychainAccountToken)
   }
 
   /// Synchronously enters demo mode at launch — same content path as the

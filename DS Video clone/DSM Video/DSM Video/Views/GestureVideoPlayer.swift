@@ -491,6 +491,10 @@ struct GestureVideoPlayer: View {
 
             errorContent(err: err)
         }
+        // Identified so a test can assert the overlay appeared AND that its controls still
+        // work. The original defect was an overlay that rendered correctly while every one of
+        // its buttons was inert — visible, plausible, and a dead end.
+        .accessibilityIdentifier(A11y.Player.errorOverlay)
         // Swipe down to leave, matching the dismissal gesture users expect from a
         // full-screen player. Belt-and-braces next to the Dismiss button.
         #if os(iOS)
@@ -530,6 +534,7 @@ struct GestureVideoPlayer: View {
                         playerError = nil
                         onPlaybackFailed?()
                     }
+                    .accessibilityIdentifier(A11y.Player.errorRetryButton)
                     .font(.headline)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 24)
@@ -542,6 +547,7 @@ struct GestureVideoPlayer: View {
                     #endif
                     onDismiss?()
                 }
+                .accessibilityIdentifier(A11y.Player.errorDismissButton)
                 .font(.headline)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 24)

@@ -39,6 +39,17 @@
                ReferencedContainer = "container:DSM Video.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "F4468F152F0EDAAD008B87E6"
+               BuildableName = "DSM VideoUITests.xctest"
+               BlueprintName = "DSM VideoUITests"
+               ReferencedContainer = "container:DSM Video.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

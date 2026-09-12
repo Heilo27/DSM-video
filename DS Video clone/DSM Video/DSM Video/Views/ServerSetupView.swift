@@ -280,6 +280,7 @@ struct SetupConnectScreen: View {
           // NAME — "192.168.1.50 or mynas.synology.me" — on the app's most critical screen.
           .accessibilityLabel("Server address")
           .accessibilityHint("Your NAS IP address, hostname, QuickConnect ID, or Tailscale address")
+          .accessibilityIdentifier(A11y.Setup.addressField)
       }
       .padding(.horizontal, 16)
       .frame(minHeight: 52)
@@ -306,6 +307,7 @@ struct SetupConnectScreen: View {
           .submitLabel(.next)
           .focused($focusedField, equals: .username)
           .onSubmit { focusedField = .password }
+          .accessibilityIdentifier(A11y.Setup.usernameField)
       }
       .padding(.horizontal, 16)
       .frame(minHeight: 52)
@@ -328,6 +330,7 @@ struct SetupConnectScreen: View {
         .textContentType(.password)
         .submitLabel(.go)
         .focused($focusedField, equals: .password)
+        .accessibilityIdentifier(A11y.Setup.passwordField)
         .onSubmit { if canConnect { Task { await connect() } } }
 
         Button {
@@ -362,6 +365,12 @@ struct SetupConnectScreen: View {
     .padding(14)
     .background(Color.dsError.opacity(0.08))
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    // The identifier is on the container and the message is exposed as its a11y value, so a
+    // test can assert WHAT the error says — the project rule is that error text must name the
+    // real cause, and a test that only checks "an error appeared" cannot catch a wrong one.
+    .accessibilityElement(children: .combine)
+    .accessibilityIdentifier(A11y.Setup.errorText)
+    .accessibilityValue(message)
   }
 
   private var connectButton: some View {
@@ -384,6 +393,7 @@ struct SetupConnectScreen: View {
     .buttonStyle(.plain)
     .disabled(!canConnect || isConnecting)
     .accessibilityLabel(isConnecting ? "Connecting, please wait" : "Connect")
+    .accessibilityIdentifier(A11y.Setup.connectButton)
   }
 
   // MARK: Behaviour

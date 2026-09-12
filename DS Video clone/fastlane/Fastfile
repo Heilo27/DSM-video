@@ -165,6 +165,45 @@ platform :ios do
     end
   end
 
+  # Run the full test suite — unit AND UI — on a simulator.
+  #
+  # The UI suite is not optional garnish. Until 2026-09-11 the UI-test target was Xcode's
+  # untouched template (two stubs asserting nothing) AND its TEST_TARGET_NAME still pointed at
+  # "DS Video clone", a target renamed long ago — so it could not have run even if asked. Two
+  # P0s shipped through that hole: every download wrote a 22-byte HTTP error body to disk as
+  # the .mp4 and marked the item downloaded, and the player's error screen rendered perfectly
+  # with Retry, Dismiss and swipe all inert. Both are caught by tapping a control and asserting
+  # an outcome.
+  #
+  # `device:` is overridable because the simulator lineup changes with every Xcode release and a
+  # hardcoded name turns into a confusing "device not found" a year later.
+  lane :test do |options|
+    device = options[:device] || "iPhone 17"
+    only_ui = options[:ui_only]
+    suites = only_ui ? ["DSM VideoUITests"] : ["DSM VideoTests", "DSM VideoUITests"]
+
+    suites.each do |suite|
+      UI.message("── running #{suite} on #{device} ──")
+      scan(
+        project: XCODEPROJ,
+        scheme: IOS_SCHEME,
+        device: device,
+        only_testing: [suite],
+        clean: false,
+        # The run must FAIL the lane. A test gate that reports and continues is decoration.
+        fail_build: true
+      )
+    end
+    UI.success("All suites passed on #{device}.")
+  end
+
+  # Guard the tvOS focus invariant. Kept separate from `test` because it is a static check that
+  # needs no simulator, and because the bug it guards has now recurred FIVE times — most
+  # recently in ItemDetailView, a view the script did not originally cover.
+  lane :check_focus do
+    sh("bash '#{File.expand_path("../../scripts/check-tvos-focus.sh", __dir__)}'")
+  end
+
 end
 
 # ──────────────────────────────────────────────────────

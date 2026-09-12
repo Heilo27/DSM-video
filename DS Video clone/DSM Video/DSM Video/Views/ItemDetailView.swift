@@ -503,6 +503,11 @@ struct ItemDetailView: View {
               .font(.footnote)
               .foregroundStyle(Color.dsError)
               .frame(maxWidth: .infinity, alignment: .leading)
+              // Identified with the message as its a11y value so a test can assert the text
+              // names the REAL cause. A failed fetch previously reported itself as an
+              // unsupported format, sending users off to re-encode healthy files.
+              .accessibilityIdentifier(A11y.Detail.downloadError)
+              .accessibilityValue(dlErr)
           }
           #endif
 
@@ -566,6 +571,7 @@ struct ItemDetailView: View {
             #if os(tvOS)
             .focused($focusedAction, equals: .nextEpisode)
             #endif
+            .accessibilityIdentifier(A11y.Detail.nextEpisodeButton)
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
           } else if isLastOfSeason {
@@ -915,6 +921,7 @@ struct ItemDetailView: View {
     .disabled(isStartingDownload && !isDownloading)
     .accessibilityLabel(isStartingDownload ? "Starting download" : (isDownloaded ? "Remove download" : (isDownloading ? "Cancel download" : "Download")))
     .accessibilityValue(isDownloading && downloadProgress > 0 && downloadProgress < 1 ? "\(Int(downloadProgress * 100)) percent downloaded" : "")
+    .accessibilityIdentifier(A11y.Detail.downloadButton)
   }
 
   // MARK: - Watchlist Icon Button
