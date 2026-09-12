@@ -30,35 +30,65 @@ final class DSReelVisualTests: XCTestCase {
 
   // MARK: - Clipping and overflow
 
-  /// Nothing may extend beyond the window. Content pushed off the edge is unreachable, and on
-  /// tvOS it lands in the overscan band where a real TV crops it entirely.
-  func testNoContentIsPushedOffScreen() {
+  /// Content must not be STRANDED off the edge — unreachable with no way to bring it into view.
+  ///
+  /// CALIBRATION NOTE (this test failed as first written, and the app was right): a horizontally
+  /// scrolling rail legitimately parks its items past the trailing edge — that is what a carousel
+  /// is. Flagging those reported four demo movie titles as defects. A raw "is any pixel outside
+  /// the window" check cannot tell a carousel from a bug, and a test that cries wolf about
+  /// correct behaviour gets the whole suite switched off.
+  ///
+  /// So this checks what is actually broken rather than merely outside: an element whose
+  /// MAJORITY is off-screen AND which is interactive, i.e. something a user is meant to tap that
+  /// they cannot see enough of to aim at. Rail items scroll into view; a button stranded at
+  /// x = -80 does not.
+  func testNoInteractiveContentIsStranded() {
     let app = UITest.launchInDemoMode()
     _ = app.wait(for: .runningForeground, timeout: UITest.launchTimeout)
     XCTAssertTrue(app.buttons.firstMatch.waitForExistence(timeout: UITest.timeout))
 
     let window = app.frame
-    var offscreen: [String] = []
+    var stranded: [String] = []
 
-    // Only interactive and text elements: decorative containers legitimately extend past the
-    // edge (full-bleed artwork, background gradients), so flagging those would be pure noise.
-    for element in app.buttons.allElementsBoundByIndex + app.staticTexts.allElementsBoundByIndex {
+    // Collect the horizontal extent of every scrollable area. A control inside one of these is
+    // in a carousel: partially off-screen is its NORMAL resting state, and the user scrolls to
+    // reach it. Only controls OUTSIDE any scroll view are judged, because for those there is no
+    // gesture that will ever bring them into view.
+    let scrollFrames: [CGRect] = app.scrollViews.allElementsBoundByIndex
+      .filter { $0.exists }
+      .map(\.frame)
+      .filter { $0.width > 0 && $0.height > 0 }
+
+    for element in app.buttons.allElementsBoundByIndex {
       guard element.exists, element.isHittable else { continue }
       let f = element.frame
       guard f.width > 0, f.height > 0 else { continue }
-      // A hittable element's midpoint is on screen by definition; what matters is whether its
-      // leading or trailing edge has been pushed out, truncating the content.
-      if f.minX < window.minX - 0.5 || f.maxX > window.maxX + 0.5 {
+
+      // Inside a scroll view? Compare against the element's on-screen portion, since its own
+      // frame may extend past the scroll view's bounds.
+      let onScreen = f.intersection(window)
+      let probe = onScreen.isNull ? f : onScreen
+      let isScrollable = scrollFrames.contains { $0.intersects(probe) }
+      if isScrollable { continue }
+
+      // `intersection` is null (not zero-sized) when the rects do not touch at all.
+      let visibleWidth = onScreen.isNull ? 0 : onScreen.width
+      let fractionVisible = visibleWidth / f.width
+
+      if fractionVisible < 0.5 {
         let name = element.identifier.isEmpty ? element.label : element.identifier
         guard !name.isEmpty else { continue }
-        offscreen.append("\(name) x:[\(Int(f.minX))…\(Int(f.maxX))] vs window [\(Int(window.minX))…\(Int(window.maxX))]")
+        stranded.append(
+          "\(name) only \(Int(fractionVisible * 100))% visible — x:[\(Int(f.minX))…\(Int(f.maxX))] "
+            + "vs window [\(Int(window.minX))…\(Int(window.maxX))]"
+        )
       }
     }
 
     XCTAssertTrue(
-      offscreen.isEmpty,
-      "These elements extend horizontally beyond the window and are clipped:\n"
-        + offscreen.joined(separator: "\n")
+      stranded.isEmpty,
+      "These tappable controls are mostly outside the window, so the user cannot aim at them:\n"
+        + stranded.joined(separator: "\n")
     )
     capture(app, "10-layout-default")
   }

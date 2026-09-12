@@ -562,6 +562,14 @@ struct LibraryHomeView: View {
         ToolbarItem(placement: .topBarTrailing) {
           NavigationLink { SearchView(isEmbedded: true) } label: {
             Image(systemName: "magnifyingglass")
+              // An unframed toolbar image measured 37x36 — under Apple's 44pt minimum, so the
+              // tap was missable in exactly the corner where a thumb is least accurate. The
+              // Cinematic overlay below already framed itself to 44; this one did not.
+              // A toolbar caps item HEIGHT, so .frame alone cannot reach 44pt vertically —
+              // growing the glyph raises the intrinsic height too.
+              .font(.system(size: 20, weight: .semibold))
+              .frame(minWidth: 44, minHeight: 44)
+              .contentShape(Rectangle())
           }
           .accessibilityLabel("Search")
           .accessibilityHint("Search all movies and TV shows")

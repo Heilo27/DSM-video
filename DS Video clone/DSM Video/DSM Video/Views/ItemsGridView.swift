@@ -183,6 +183,13 @@ struct ItemsGridView: View {
       ToolbarItem(placement: .topBarTrailing) {
         Button { showSearchSheet = true } label: {
           Image(systemName: "magnifyingglass")
+              // Tap target. A toolbar caps its item's HEIGHT, so .frame alone cannot reach
+              // 44pt vertically (it widened 37->56 and stayed 36 tall). Growing the glyph
+              // raises the intrinsic height, and contentShape makes the padded area tappable
+              // rather than just the symbol's own bounds.
+              .font(.system(size: 20, weight: .semibold))
+              .frame(minWidth: 44, minHeight: 44)
+              .contentShape(Rectangle())
         }
         .accessibilityLabel("Search \(library.title)")
       }

@@ -67,6 +67,13 @@ struct DiagnosticLogView: View {
       ToolbarItem(placement: .topBarTrailing) {
         ShareLink(item: DiagnosticLog.shared.exportText()) {
           Image(systemName: "square.and.arrow.up")
+              // Tap target. A toolbar caps its item's HEIGHT, so .frame alone cannot reach
+              // 44pt vertically (it widened 37->56 and stayed 36 tall). Growing the glyph
+              // raises the intrinsic height, and contentShape makes the padded area tappable
+              // rather than just the symbol's own bounds.
+              .font(.system(size: 20, weight: .semibold))
+              .frame(minWidth: 44, minHeight: 44)
+              .contentShape(Rectangle())
         }
       }
     }
