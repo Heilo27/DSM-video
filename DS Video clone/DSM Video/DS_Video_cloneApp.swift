@@ -116,6 +116,17 @@ struct DS_Video_cloneApp: App {
                     let state = appState
                     DownloadManager.shared.tokenProvider = { state.sessionToken }
                     DownloadManager.shared.usesTunnelCookieProvider = { state.api.usesTunnelCookie }
+                    // A download's URL is session-scoped (/playback/{id}/stream), so the
+                    // session must be released only when the transfer ends — and a restart
+                    // must open a fresh one rather than reuse a dead URL.
+                    DownloadManager.shared.releaseSessionProvider = { sessionID in
+                        Task { await state.api.stopPlayback(sessionID: sessionID) }
+                    }
+                    DownloadManager.shared.urlResolver = { itemID in
+                        guard let info = try? await state.api.playback(id: itemID),
+                              let url = info.streamUrl else { return nil }
+                        return (url: url, sessionID: info.resolvedSessionID)
+                    }
                 }
                 .onChange(of: themeIDRaw) { _, _ in
                     ThemeHolder.shared.current = activeTheme

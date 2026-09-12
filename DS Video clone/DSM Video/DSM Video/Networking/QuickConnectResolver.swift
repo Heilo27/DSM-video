@@ -57,10 +57,21 @@ enum QuickConnectResolver {
     if httpsPort == nil { httpsPort = 5001 }
     if httpPort  == nil { httpPort  = 5000 }
 
+    // LAN candidates are built as plain `http://`, and login() POSTs the NAS password to each
+    // in turn — so anything that lands in this array receives the user's credentials in
+    // cleartext. The addresses come from the QuickConnect response, i.e. off the network, so
+    // they are untrusted input: a response naming a PUBLIC address would harvest the password.
+    // Admit only real private ranges. This is the same predicate the app already uses to
+    // decide http-vs-https in five other places.
     var lanIPs: [String] = []
     if let interfaces = server["interface"] as? [[String: Any]] {
       for iface in interfaces {
-        if let ip = iface["ip"] as? String, !ip.isEmpty { lanIPs.append(ip) }
+        guard let ip = iface["ip"] as? String, !ip.isEmpty else { continue }
+        guard AppState.isPrivateLANAddress(ip) else {
+          qcLog.warning("QuickConnect advertised non-private LAN address \(ip, privacy: .public) — refusing to send credentials over cleartext HTTP to it")
+          continue
+        }
+        lanIPs.append(ip)
       }
     }
 

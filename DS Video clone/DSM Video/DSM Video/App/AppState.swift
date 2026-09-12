@@ -107,11 +107,19 @@ final class AppState {
   /// Used to skip the setup wizard and go straight to the credentials screen.
   var isReturningUser: Bool {
     let addr = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    // The legacy "http://localhost:5000" default is still treated as "not configured" so a
+    // user upgrading from a build that persisted it is not mistaken for a returning user.
     return !addr.isEmpty && addr != "http://localhost:5000" && !savedPassword.isEmpty
   }
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
+
+  /// Set when the on-disk store could not be opened, so local persistence is dead and the
+  /// server write is the only copy of a watch position. Surfaced as a banner; nil when healthy.
+  var localStoreUnavailableMessage: String?
+  /// Warn once per launch, not once per progress tick.
+  private var hasWarnedStoreUnavailable = false
   // FIX-16: Guard flag so concurrent reconnect() calls don't race.
   var isReconnecting: Bool = false
   /// Guards flushPendingProgress against concurrent entry (runDeltaSync awaits it while
@@ -163,9 +171,12 @@ final class AppState {
     // preference. Apply the same LAN guard as buildCandidates() (TASK-779) so a bare
     // private IP is never forced to https:// — bare-IP TLS has no valid cert and fails.
     let effectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
-    guard let url = normalizedBaseURL(baseURL, forceHTTPS: effectiveHTTPS, defaultPort: defaultPort) else {
-      return
-    }
+    // An unconfigured or malformed address yields no URL. Still rebuild the client — on the
+    // non-routable placeholder — so that a token set before an address (QuickConnect resolves
+    // the address later) is not silently dropped. Requests against the placeholder fail
+    // harmlessly; a client holding a stale token while `sessionToken` says otherwise does not.
+    let url = normalizedBaseURL(baseURL, forceHTTPS: effectiveHTTPS, defaultPort: defaultPort)
+      ?? Self.fallbackURL
     api = APIClient(
       baseURL: url,
       token: sessionToken
@@ -174,7 +185,14 @@ final class AppState {
 
   init() {
     let d = UserDefaults.standard
-    let storedBaseURL = d.string(forKey: Keys.baseURL) ?? "http://localhost:5000"
+    // Empty means "not configured yet" — the setup screen prompts for an address.
+    //
+    // This used to default to "http://localhost:5000", which SHIPPED prefilled on the tvOS
+    // sign-in screen. On an Apple TV localhost is the Apple TV itself, so the default could
+    // never work, and it also poisoned pairing (the code exchange POSTed to localhost and
+    // 403'd). normalizedBaseURL already maps an empty value to the non-routable placeholder,
+    // so nothing downstream needs a sentinel address.
+    let storedBaseURL = d.string(forKey: Keys.baseURL) ?? ""
     // useHTTPS defaults to false — port 5000 is plain HTTP; login() auto-detects
     // and persists the correct scheme from whichever candidate wins.
     let storedUseHTTPS = d.object(forKey: Keys.useHTTPS) as? Bool ?? false
@@ -1764,10 +1782,28 @@ final class AppState {
     await LocalStore.shared.upsertSingleProgress(
       itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
 
+    // If the store could not be opened, the write above was a silent no-op and the outbox
+    // has nothing to replay — so the server write is the ONLY copy. Surface the degraded
+    // state once rather than letting positions vanish while the UI looks healthy.
+    if await LocalStore.shared.isUnavailable, !hasWarnedStoreUnavailable {
+      hasWarnedStoreUnavailable = true
+      localStoreUnavailableMessage = await LocalStore.shared.unavailableReason
+      homeLog.error("recordProgress: LocalStore unavailable — progress depends on the server write alone")
+    }
+
     do {
-      try await api.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      let applied = try await api.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      // TASK-891: honour the server's `applied` flag, which the API documents as "callers
+      // must not treat a 200 alone as saved". Both outcomes clear the pending flag, but for
+      // different reasons, and the log must not claim a save that did not happen:
+      //  - applied:true  → stored. Synced.
+      //  - applied:false → a NEWER write superseded this one. This value is stale, so
+      //    requeueing it would later overwrite fresher progress. Clear it, don't retry it.
       await LocalStore.shared.markProgressSynced(
         itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      if !applied {
+        homeLog.info("recordProgress: server superseded the write for \(itemId) — a newer position already won")
+      }
     } catch {
       // Stays flagged pending — flushPendingProgress() will retry on the next foreground,
       // reconnect, or sync pass. Not data loss: the local write above already landed.
@@ -1837,13 +1873,24 @@ final class AppState {
     homeLog.info("flushPendingProgress: \(pending.count) queued progress row(s) to upload")
     var uploaded = 0
     var dropped = 0
+    // Rows the server accepted but DISCARDED as superseded by a newer write. Cleared from
+    // the outbox like an upload, but counted apart so the log never overstates what landed.
+    var superseded = 0
     for row in pending {
       do {
-        try await api.setProgress(
+        let applied = try await api.setProgress(
           id: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+        // TASK-891: only clear the pending flag when the server actually STORED the write.
+        // An applied:false means a newer write superseded this one — the row is obsolete, so
+        // clearing it is correct, but count it separately from a real upload so the log
+        // doesn't claim progress that never landed.
         await LocalStore.shared.markProgressSynced(
           itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
-        uploaded += 1
+        if applied {
+          uploaded += 1
+        } else {
+          superseded += 1
+        }
       } catch {
         // A PERMANENT rejection must not block the queue behind it.
         //
@@ -1872,7 +1919,7 @@ final class AppState {
         return
       }
     }
-    homeLog.info("flushPendingProgress: uploaded \(uploaded) row(s), dropped \(dropped) permanently-rejected row(s)")
+    homeLog.info("flushPendingProgress: uploaded \(uploaded) row(s), \(superseded) superseded, dropped \(dropped) permanently-rejected row(s)")
   }
 
   // homeRefreshProgress() lived here, "kept for backwards compat with any view that calls

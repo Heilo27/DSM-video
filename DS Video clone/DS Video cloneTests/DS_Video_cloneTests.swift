@@ -162,14 +162,53 @@ struct APIErrorTests {
     #expect(error.userMessage == "Network error.")
   }
 
+  /// HTTP failures name a CAUSE the user can act on, never a bare wire status.
+  /// "Server error (403)." told the user nothing and leaked the status code; these assert the
+  /// replacement text and, more importantly, that the raw code is not the whole message.
   @Test func httpErrorMessage() {
     let error = APIError.http(404)
-    #expect(error.userMessage == "Server error (404).")
+    #expect(error.userMessage == "The server couldn't find that item. It may have been moved or removed.")
+    #expect(!error.userMessage.contains("Server error"))
   }
 
   @Test func httpErrorMessage500() {
     let error = APIError.http(500)
-    #expect(error.userMessage == "Server error (500).")
+    #expect(error.userMessage == "The server had a problem handling that. Try again shortly.")
+  }
+
+  @Test func authFailureTellsTheUserToSignInAgain() {
+    #expect(APIError.http(401).userMessage == "Your session expired. Sign in again.")
+    #expect(APIError.http(403).userMessage == "Your session expired. Sign in again.")
+  }
+
+  /// An unmapped status still reports the code, but framed as a rejection rather than as the
+  /// app's own failure.
+  @Test func unmappedHTTPStatusStillNamesTheCode() {
+    #expect(APIError.http(418).userMessage == "The server rejected the request (418).")
+  }
+
+  /// A decode failure must NEVER read as a connectivity problem: the request succeeded and the
+  /// server is healthy. Reporting "could not connect" sent users to debug their network while
+  /// the real cause was a version mismatch. This is the regression guard for that.
+  @Test func decodeErrorDoesNotBlameTheNetwork() {
+    let error = APIError.decode(detail: "items.total: expected Int")
+    let msg = error.userMessage
+    #expect(!msg.localizedCaseInsensitiveContains("connect"))
+    #expect(!msg.localizedCaseInsensitiveContains("unreachable"))
+    #expect(!msg.localizedCaseInsensitiveContains("network"))
+    #expect(msg.localizedCaseInsensitiveContains("version"))
+  }
+
+  /// A decode failure means the server WAS reached — it answered, we just couldn't parse it.
+  /// The login flow branches on this, so getting it backwards shows the wrong recovery advice.
+  @Test func decodeErrorCountsAsServerReached() {
+    #expect(APIError.decode(detail: "x").serverReached)
+  }
+
+  /// A decode failure is not permanent: updating the server or app fixes it, so a queued
+  /// write must stay queued rather than being dropped from the outbox.
+  @Test func decodeErrorIsNotAPermanentRejection() {
+    #expect(!APIError.decode(detail: "x").isPermanentRejection)
   }
 
   /// Known server codes map to friendly, actionable text — NOT the raw underscore fallback.
@@ -467,9 +506,12 @@ struct APIModelsCodingTests {
 @MainActor
 struct AppStateTests {
 
+  /// A fresh install has NO server address. It used to default to "http://localhost:5000",
+  /// which shipped prefilled on the tvOS sign-in screen where localhost is the Apple TV
+  /// itself — an address that can never work. Empty is the correct "not configured" state.
   @Test func defaultInitialization() {
     let state = AppState()
-    #expect(!state.baseURL.isEmpty)
+    #expect(state.baseURL != "http://localhost:5000")
     #expect(state.isLoggingIn == false)
     #expect(state.loginError == nil)
     #expect(state.pairingCode == nil)

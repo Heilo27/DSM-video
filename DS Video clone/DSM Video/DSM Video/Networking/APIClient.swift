@@ -590,8 +590,12 @@ struct APIClient {
       // the server was healthy, and the screen renders empty. ItemsResponse.total silently
       // breaking Watchlist on every platform was exactly this. Name the field and the
       // expected type so the mismatch is diagnosable from a photo alone.
-      dlog.error(.decode, "\(endpoint) → \(Self.describe(decodeError)) [\(T.self)]")
-      throw decodeError
+      let detail = Self.describe(decodeError)
+      dlog.error(.decode, "\(endpoint) → \(detail) [\(T.self)]")
+      // Wrap rather than rethrow raw. Every consumer tests `error as? APIError`, so an
+      // unwrapped DecodingError silently became "Could not connect to server." — reporting a
+      // healthy server as unreachable, which is exactly the quiet failure described above.
+      throw APIError.decode(detail: detail)
     }
   }
 
@@ -633,6 +637,14 @@ enum APIError: Error {
   // The server is currently converting this title to a smooth-playback format
   // (auto-normalize). Not a failure — an informational, transient state.
   case converting
+  /// The request SUCCEEDED and the server is healthy — we could not parse what it sent.
+  ///
+  /// Previously a DecodingError was rethrown unwrapped, so every consumer's
+  /// `(error as? APIError)?.userMessage ?? "Could not connect to server."` fell through to
+  /// the fallback and told the user their server was unreachable while it was answering
+  /// normally. That is the opposite of the truth and sends them to debug their network
+  /// instead of reporting a version mismatch. `detail` names the offending field.
+  case decode(detail: String)
 
   var userMessage: String {
     switch self {
@@ -656,7 +668,26 @@ enum APIError: Error {
       }
     case .converting:
       return "This video is being prepared for smooth playback. Check back in a few minutes."
-    case .http(let code): return "Server error (\(code))."
+    case .decode:
+      // Deliberately does not mention the network: the server answered. Name the real cause
+      // and the action that can actually help.
+      return "The server sent something this app couldn't read. It may be running a different "
+        + "version — update DSVideoServer and the app, then try again."
+    case .http(let code):
+      // Name the cause, not the wire status. A raw "Server error (403)" tells the user
+      // nothing they can act on.
+      switch code {
+      case 401, 403:
+        return "Your session expired. Sign in again."
+      case 404:
+        return "The server couldn't find that item. It may have been moved or removed."
+      case 429:
+        return "Too many requests at once. Wait a moment and try again."
+      case 500...599:
+        return "The server had a problem handling that. Try again shortly."
+      default:
+        return "The server rejected the request (\(code))."
+      }
     case .server(let msg, _):
       // Map known server error codes to friendly, actionable text.
       switch msg {
@@ -807,7 +838,9 @@ enum APIError: Error {
   /// login flow surfaces a real auth error instead of a generic "couldn't find".
   var serverReached: Bool {
     switch self {
-    case .server, .http, .converting: return true
+    // .decode means the request completed and the server sent a body we could not parse —
+    // the most definitively "reached" failure there is.
+    case .server, .http, .converting, .decode: return true
     case .network, .invalidURL, .connection: return false
     }
   }

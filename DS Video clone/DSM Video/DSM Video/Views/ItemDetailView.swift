@@ -260,7 +260,12 @@ struct ItemDetailView: View {
 
   #if os(tvOS)
   @FocusState private var focusedAction: ActionButton?
-  enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched }
+  // `nextEpisode` is a member because the Next Episode button is rendered on tvOS and must
+  // therefore be focusable: `.buttonStyle(.plain)` removes the system focus ring, so a button
+  // that is not bound here is visible and permanently unreachable by the Siri Remote. That
+  // exact omission has now shipped five times in this project — if you add a tvOS button to
+  // this view, add its case here too, and scripts/check-tvos-focus.sh will hold you to it.
+  enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched, nextEpisode }
 
   private var tvPlayButton: some View {
     let focused = focusedAction == .play
@@ -544,10 +549,23 @@ struct ItemDetailView: View {
               .padding(.vertical, 10)
               .frame(maxWidth: .infinity, minHeight: 52)
               #endif
+              #if os(tvOS)
+              // .plain removes the system focus ring, so focus must be drawn explicitly —
+              // otherwise the button is visible, focusable and indistinguishable from an
+              // unfocused one, which reads to the user as "this control does nothing".
+              .background(focusedAction == .nextEpisode ? Color.dsAccent : Color.dsSurfaceHigh)
+              .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
+              .scaleEffect(focusedAction == .nextEpisode ? 1.03 : 1.0)
+              .animation(.easeInOut(duration: 0.15), value: focusedAction)
+              #else
               .background(Color.dsSurfaceHigh)
               .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
+              #endif
             }
             .buttonStyle(.plain)
+            #if os(tvOS)
+            .focused($focusedAction, equals: .nextEpisode)
+            #endif
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
           } else if isLastOfSeason {
@@ -1072,14 +1090,21 @@ struct ItemDetailView: View {
     do {
       // Get playback info to get the video URL
       let info = try await appState.api.playback(id: itemID)
-      // This request opens a server-side playback session purely to learn the URL; the
-      // download itself doesn't use it. Release it immediately instead of leaving an
-      // ffmpeg transcode and temp dir pinned until the idle reaper runs.
-      if let sid = info.resolvedSessionID {
-        await appState.api.stopPlayback(sessionID: sid)
-      }
-      guard let videoURL = info.streamUrl ?? info.hlsMasterUrl else {
-        self.downloadError = "No playable URL available for download."
+      // The download URL is session-scoped (`/playback/{id}/stream`), so the session must
+      // outlive the transfer. This used to stop it right here, on the premise that "the
+      // download itself doesn't use it" — which was false, and made every download 404.
+      // Ownership of the release now belongs to DownloadManager, which knows when the
+      // transfer actually ends (success, failure, or cancel).
+      //
+      // Prefer streamUrl: it serves the original file. hlsMasterUrl is a PLAYLIST, so
+      // downloading it would save a few hundred bytes of m3u8 text as the .mp4.
+      guard let videoURL = info.streamUrl else {
+        self.downloadError = info.hlsMasterUrl != nil
+          ? "This video has to be converted to play, so it can't be downloaded yet."
+          : "No playable URL available for download."
+        if let sid = info.resolvedSessionID {
+          await appState.api.stopPlayback(sessionID: sid)
+        }
         return
       }
 
@@ -1096,7 +1121,8 @@ struct ItemDetailView: View {
         videoURL: videoURL,
         posterURL: posterURL,
         token: appState.sessionToken,
-        durationSeconds: detail?.durationSeconds ?? 0
+        durationSeconds: detail?.durationSeconds ?? 0,
+        playbackSessionID: info.resolvedSessionID
       )
     } catch {
       let message = (error as? APIError)?.userMessage

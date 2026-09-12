@@ -126,6 +126,28 @@ final class DownloadManager: NSObject {
   /// poster fetch were the only requests missing a header the server expects.
   var usesTunnelCookieProvider: (() -> Bool)?
 
+  /// Releases a server playback session once a download has finished with it.
+  ///
+  /// A download's URL is `/api/v1/playback/{sessionID}/stream` — the session IS the URL, so
+  /// the session must outlive the transfer. The caller used to release it immediately after
+  /// reading the URL (on the false premise that "the download itself doesn't use it"), which
+  /// made every subsequent GET 404. Ownership of the release now sits here, where the end of
+  /// the transfer is actually known. Set by the app at launch.
+  var releaseSessionProvider: ((String) -> Void)?
+
+  /// Playback session backing each in-flight download, so it can be released on completion,
+  /// failure, or cancellation — exactly once, whichever path ends the transfer.
+  private var downloadSessionIDs: [String: String] = [:]
+
+  /// Opens a NEW playback session for an item and returns its stream URL plus session id.
+  ///
+  /// Required because a download URL is session-scoped (`/playback/{id}/stream`): a stored
+  /// URL is dead the moment its session ends, which it always has by the time a paused or
+  /// failed download is restarted — after a relaunch, or after the transfer that released it.
+  /// Restarting from the stored URL therefore 404s, so resume and retry re-resolve instead.
+  /// Set by the app at launch.
+  var urlResolver: ((String) async -> (url: URL, sessionID: String?)?)?
+
   override private init() {
     // TASK-738: default downloads to Wi-Fi only unless the user opts into cellular.
     UserDefaults.standard.register(defaults: ["dsReel.downloadsWifiOnly": true])
@@ -153,10 +175,19 @@ final class DownloadManager: NSObject {
     videoURL: URL,
     posterURL: URL?,
     token: String?,
-    durationSeconds: Int = 0
+    durationSeconds: Int = 0,
+    playbackSessionID: String? = nil
   ) {
-    guard activeDownloads[itemId] == nil else { return }
-    guard !isDownloaded(itemId: itemId) else { return }
+    guard activeDownloads[itemId] == nil else {
+      // Already downloading — the caller's freshly-opened session is redundant, so release
+      // it now rather than leaving an ffmpeg transcode pinned until the idle reaper runs.
+      if let playbackSessionID { releaseSessionProvider?(playbackSessionID) }
+      return
+    }
+    guard !isDownloaded(itemId: itemId) else {
+      if let playbackSessionID { releaseSessionProvider?(playbackSessionID) }
+      return
+    }
 
     // Clear any prior failure record — this itemId is being (re)started.
     failedDownloads.removeValue(forKey: itemId)
@@ -178,6 +209,7 @@ final class DownloadManager: NSObject {
 
     let task = backgroundSession.downloadTask(with: request)
     downloadTasks[task] = itemId
+    if let playbackSessionID { downloadSessionIDs[itemId] = playbackSessionID }
     pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: token, videoURL: videoURL)
 
     let download = ActiveDownload(id: itemId, title: title, progress: 0, task: task)
@@ -282,16 +314,16 @@ final class DownloadManager: NSObject {
   /// permanent failure (e.g. disk full) — retrying the network can't fix that.
   func retryFailedDownload(itemId: String) {
     guard let failure = failedDownloads[itemId], !failure.isPermanent,
-          let videoURL = failure.videoURL else { return }
+          failure.videoURL != nil else { return }
     failedDownloads.removeValue(forKey: itemId)
-    startDownload(
+    // Re-resolve rather than reusing failure.videoURL: that URL is session-scoped and its
+    // session is already released (the failure path releases it), so a retry against the
+    // stored URL would 404 every time.
+    restartWithFreshURL(
       itemId: itemId,
-      title: failure.title,
-      year: failure.year,
-      videoURL: videoURL,
-      posterURL: failure.posterURL,
-      token: failure.token,
-      durationSeconds: failure.durationSeconds
+      info: (title: failure.title, year: failure.year, posterURL: failure.posterURL,
+             durationSeconds: failure.durationSeconds, token: failure.token,
+             videoURL: failure.videoURL)
     )
   }
 
@@ -346,22 +378,13 @@ final class DownloadManager: NSObject {
       pausedDownloads.removeValue(forKey: itemId)
       removePersistedResumeData(for: itemId)
       task.resume()
-    } else if let videoURL = info.videoURL {
-      // Resume data was lost (e.g. app was force-quit), but we have the original URL.
-      // Clear paused state and restart from the beginning.
+    } else if info.videoURL != nil {
+      // Resume data was lost (e.g. app was force-quit). Restart from the beginning — but
+      // re-resolve the URL first: the stored one is session-scoped and its session is long
+      // gone, so reusing it would 404 and write an error body as the movie.
       pendingDownloadInfo.removeValue(forKey: itemId)
       removePersistedResumeData(for: itemId)
-      // Prefer a freshly-supplied token: info.token is nil after a relaunch because the
-      // credential is deliberately not persisted.
-      startDownload(
-        itemId: itemId,
-        title: info.title,
-        year: info.year,
-        videoURL: videoURL,
-        posterURL: info.posterURL,
-        token: info.token ?? tokenProvider?(),
-        durationSeconds: info.durationSeconds
-      )
+      restartWithFreshURL(itemId: itemId, info: info)
     } else {
       // Neither resume data nor video URL available — cannot resume.
       // Surface it: clearing state silently made the row vanish on tap with no
@@ -397,7 +420,7 @@ final class DownloadManager: NSObject {
       do {
         try udData.write(to: fileURL, options: .atomic)
         try FileManager.default.setAttributes(
-          [.protectionKey: FileProtectionType.complete],
+          [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
           ofItemAtPath: fileURL.path
         )
         UserDefaults.standard.removeObject(forKey: storageKey) // only remove after successful write
@@ -511,7 +534,7 @@ final class DownloadManager: NSObject {
     guard let data = try? JSONEncoder().encode(store) else { return }
     try? data.write(to: fileURL, options: .atomic)
     try? FileManager.default.setAttributes(
-      [.protectionKey: FileProtectionType.complete],
+      [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
       ofItemAtPath: fileURL.path
     )
   }
@@ -626,9 +649,10 @@ final class DownloadManager: NSObject {
       log.error("saveDownloadedItems: write failed — \(error.localizedDescription)")
       return
     }
-    // Apply complete file protection to the metadata file
+    // See applyFileProtection in LocalStore: .complete would make this unwritable while
+    // the device is locked, which is precisely when background playback updates it.
     try? FileManager.default.setAttributes(
-      [.protectionKey: FileProtectionType.complete],
+      [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
       ofItemAtPath: fileURL.path
     )
   }
@@ -676,9 +700,12 @@ final class DownloadManager: NSObject {
       return
     }
 
-    // Apply complete file protection so the video is inaccessible when the device is locked.
+    // Encrypted at rest, but readable once the device has been unlocked since boot.
+    // NOT .complete: background audio is on by default, so a locked device playing a
+    // downloaded file must still be able to READ it — and the metadata beside it must
+    // still be WRITABLE to record the resume position.
     try? fm.setAttributes(
-      [.protectionKey: FileProtectionType.complete],
+      [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
       ofItemAtPath: videoPath.path
     )
 
@@ -744,7 +771,7 @@ final class DownloadManager: NSObject {
 
         try data.write(to: posterDestination, options: .atomic)
         try? FileManager.default.setAttributes(
-          [.protectionKey: FileProtectionType.complete],
+          [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
           ofItemAtPath: posterDestination.path
         )
 
@@ -783,6 +810,21 @@ extension DownloadManager: URLSessionDownloadDelegate {
   nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
     // URLSession calls delegates on the OperationQueue supplied at init (a background queue, NOT main).
     // We must hop to @MainActor for all state mutations — hence the Task { @MainActor in } pattern.
+    // URLSession calls this delegate for ANY completed response, including a 4xx/5xx — it
+    // only reports `error` for transport failures. Without a status check the error BODY
+    // gets written to disk as the movie: a 22-byte `{"error":"not_found"}` stored as
+    // {itemId}.mp4 and marked "downloaded", so offline playback fails on a file the UI
+    // swears is present. Read the status BEFORE copying anything.
+    let httpStatus = (downloadTask.response as? HTTPURLResponse)?.statusCode
+    if let httpStatus, !(200...299).contains(httpStatus) {
+      Task { @MainActor in
+        guard let itemId = downloadTasks[downloadTask] else { return }
+        downloadTasks.removeValue(forKey: downloadTask)
+        recordHTTPFailure(itemId: itemId, status: httpStatus)
+      }
+      return
+    }
+
     // The temp file at `location` is only valid for the duration of this synchronous call.
     // Copy it before returning so we have a stable path for the move in completeDownload.
     let stableCopy = FileManager.default.temporaryDirectory
@@ -799,8 +841,100 @@ extension DownloadManager: URLSessionDownloadDelegate {
       }
       downloadTasks.removeValue(forKey: downloadTask)
       lastProgressUpdate.removeValue(forKey: itemId)
+      // The transfer is done with the session's stream URL — release it now instead of
+      // leaving the transcode and its temp dir pinned until the server's idle reaper runs.
+      releasePlaybackSession(for: itemId)
       completeDownload(itemId: itemId, tempURL: stableCopy)
     }
+  }
+
+  /// Re-resolve a fresh playback session for an item, then start the download against it.
+  ///
+  /// Used by resume-after-relaunch and by retry. Both previously reused the stored URL, whose
+  /// session no longer exists — the request 404s, and before the status check below landed,
+  /// the 404 body was written to disk as the movie.
+  private func restartWithFreshURL(
+    itemId: String,
+    info: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?, videoURL: URL?)
+  ) {
+    guard let urlResolver else {
+      // No resolver wired (should not happen in the app; possible in tests). Surface it
+      // rather than starting a download that is guaranteed to fail.
+      failedDownloads[itemId] = FailedDownload(
+        id: itemId, title: info.title, videoURL: info.videoURL,
+        posterURL: info.posterURL, token: nil, year: info.year,
+        durationSeconds: info.durationSeconds, isPermanent: false,
+        message: "This download can't be restarted right now. Try again."
+      )
+      return
+    }
+    Task { @MainActor in
+      guard let resolved = await urlResolver(itemId) else {
+        failedDownloads[itemId] = FailedDownload(
+          id: itemId, title: info.title, videoURL: info.videoURL,
+          posterURL: info.posterURL, token: nil, year: info.year,
+          durationSeconds: info.durationSeconds, isPermanent: false,
+          message: "Couldn't reach the server to restart this download. Try again."
+        )
+        return
+      }
+      startDownload(
+        itemId: itemId,
+        title: info.title,
+        year: info.year,
+        videoURL: resolved.url,
+        posterURL: info.posterURL,
+        // info.token is nil after a relaunch — the credential is deliberately not persisted.
+        token: info.token ?? tokenProvider?(),
+        durationSeconds: info.durationSeconds,
+        playbackSessionID: resolved.sessionID
+      )
+    }
+  }
+
+  /// Release the playback session backing a download, exactly once. Safe to call from every
+  /// terminal path (success, HTTP failure, transport failure, cancel) — the entry is removed
+  /// as it is read, so a second call is a no-op.
+  private func releasePlaybackSession(for itemId: String) {
+    guard let sessionID = downloadSessionIDs.removeValue(forKey: itemId) else { return }
+    releaseSessionProvider?(sessionID)
+  }
+
+  /// Surface an HTTP-level download failure through the same path as a transport failure,
+  /// so the Downloads list shows a real "failed — retry" row instead of a bogus success.
+  ///
+  /// The message names the actual cause. A 401/403 means the session died, which a retry
+  /// with the same dead token cannot fix by itself — but re-resolving on retry can, so it
+  /// is not marked permanent. A 404 means the stream URL no longer resolves, which is what
+  /// happens when the playback session backing it was already released.
+  private func recordHTTPFailure(itemId: String, status: Int) {
+    releasePlaybackSession(for: itemId)
+    activeDownloads.removeValue(forKey: itemId)
+    downloadProgress.removeValue(forKey: itemId)
+    lastProgressUpdate.removeValue(forKey: itemId)
+
+    let message: String
+    switch status {
+    case 401, 403:
+      message = "Your session expired. Sign in again, then retry the download."
+    case 404, 410:
+      message = "The server couldn't provide this video. Try the download again."
+    case 500...599:
+      message = "The server had a problem preparing this video. Try again shortly."
+    default:
+      message = "The download failed (HTTP \(status)). Try again."
+    }
+
+    if let info = pendingDownloadInfo[itemId] {
+      failedDownloads[itemId] = FailedDownload(
+        id: itemId, title: info.title, videoURL: info.videoURL,
+        posterURL: info.posterURL, token: info.token, year: info.year,
+        durationSeconds: info.durationSeconds, isPermanent: false,
+        message: message
+      )
+      pendingDownloadInfo.removeValue(forKey: itemId)
+    }
+    log.error("download \(itemId) failed with HTTP \(status) — no file written")
   }
 
   nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -833,6 +967,11 @@ extension DownloadManager: URLSessionDownloadDelegate {
           persistResumeData(data, for: itemId)
           persistPausedMeta(for: itemId)
         }
+        // This task is no longer transferring, so release the playback session either way.
+        // A server session cannot be held across a relaunch regardless, so keeping it for a
+        // paused download buys nothing and pins an ffmpeg transcode. Both resume and retry
+        // re-resolve a fresh session URL before restarting (see urlResolver).
+        releasePlaybackSession(for: itemId)
         // Always clean up active state on any error/cancellation
         activeDownloads.removeValue(forKey: itemId)
         downloadProgress.removeValue(forKey: itemId)

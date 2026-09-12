@@ -417,7 +417,14 @@ struct GestureVideoPlayer: View {
             }
 
             // Gesture overlay
+            //
+            // Disabled while the error overlay is up. This layer is a full-frame Color.clear
+            // with .contentShape(Rectangle()) and tap/drag gestures, and it is
+            // .accessibilityHidden(true) — so when it ate the taps meant for Retry and
+            // Dismiss, the error screen became an inescapable dead end whose accessibility
+            // tree looked completely normal. The only way out was force-backgrounding the app.
             gestureOverlay(geometry: geometry)
+                .allowsHitTesting(playerError == nil)
 
             #if os(tvOS)
             // Zero-size focus sink: holds focus when controls are hidden so Select
@@ -434,8 +441,10 @@ struct GestureVideoPlayer: View {
             // Controls overlay
             controlsOverlay(geometry: geometry)
                 .opacity(showControls ? 1 : 0)
-                .allowsHitTesting(controlsInteractive)
-                .accessibilityHidden(!showControls)
+                // Also suppressed on the error screen: a transport control behind the error
+                // overlay must not absorb a tap aimed at Retry or Dismiss.
+                .allowsHitTesting(controlsInteractive && playerError == nil)
+                .accessibilityHidden(!showControls || playerError != nil)
 
             // Scrub preview
             if showScrubPreview {
@@ -469,6 +478,35 @@ struct GestureVideoPlayer: View {
 
     @ViewBuilder
     private func errorOverlay(err: String) -> some View {
+        // An opaque, hit-testing scrim under the content. Two jobs: it makes the error
+        // legible over a half-drawn frame, and it claims every tap that is NOT on a button
+        // so nothing behind this overlay can steal one. Without it the screen became a dead
+        // end — Retry, Dismiss and swipe all inert, with no way out but force-quitting.
+        ZStack {
+            Color.black.opacity(0.92)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { /* swallow: keeps stray taps off the layers below */ }
+                .accessibilityHidden(true)
+
+            errorContent(err: err)
+        }
+        // Swipe down to leave, matching the dismissal gesture users expect from a
+        // full-screen player. Belt-and-braces next to the Dismiss button.
+        #if os(iOS)
+        .gesture(
+            DragGesture(minimumDistance: 40)
+                .onEnded { value in
+                    guard value.translation.height > 60 else { return }
+                    unlockOrientation()
+                    onDismiss?()
+                }
+        )
+        #endif
+    }
+
+    @ViewBuilder
+    private func errorContent(err: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 44))

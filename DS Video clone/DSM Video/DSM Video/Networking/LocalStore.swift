@@ -35,6 +35,27 @@ actor LocalStore {
 
   private var db: OpaquePointer?
   private var isReady: Bool = false
+
+  /// Why the store could not be opened, if it could not. Non-nil means every read returns
+  /// empty and every write is discarded — the caller is NOT persisting anything.
+  ///
+  /// Exists because the failure was previously invisible: `isReady` was set even when
+  /// `setup()` threw, so callers saw a healthy store that silently dropped their writes.
+  private var setupFailure: Error?
+
+  /// True when the on-disk store could not be opened and local persistence is dead.
+  /// Callers that own user-visible state should surface this rather than pretend a write
+  /// landed — a resume position that silently fails to save reads to the user as data loss.
+  var isUnavailable: Bool {
+    setupFailure != nil || db == nil
+  }
+
+  /// Human-readable reason the store is unavailable, for a user-facing banner.
+  var unavailableReason: String? {
+    guard isUnavailable else { return nil }
+    return "Your watch history can't be saved on this device right now. Playback still works, "
+      + "and positions you set will sync to the server when it's reachable."
+  }
   private var readyContinuations: [CheckedContinuation<Void, Never>] = []
   private let log = Logger(subsystem: "com.dsm.dsvideo", category: "LocalStore")
   // Shared formatter — ISO8601DateFormatter is expensive to allocate; reuse per instance (TASK-427).
@@ -61,10 +82,29 @@ actor LocalStore {
     }.value
     do {
       try setup(jsonCacheData: jsonCacheData)
+      setupFailure = nil
     } catch {
-      log.error("LocalStore.setup failed: \(error.localizedDescription)")
+      // A failed open leaves `db` nil, which turns every write path in this file into a
+      // silent no-op via its `guard let db` — including upsertSingleProgress, the resume
+      // position writer. Nothing downstream can detect that: the outbox only replays rows
+      // that reached SQLite, so a lost write is lost for good and reads as a server bug.
+      //
+      // Retry once before giving up. The most common causes are transient — the file was
+      // briefly unreadable under data protection, or a stale WAL from a jetsam kill — and
+      // both clear on a second open.
+      log.error("LocalStore.setup failed: \(error.localizedDescription) — retrying once")
+      do {
+        try setup(jsonCacheData: jsonCacheData)
+        setupFailure = nil
+        log.info("LocalStore.setup succeeded on retry")
+      } catch {
+        setupFailure = error
+        log.error("LocalStore.setup failed again: \(error.localizedDescription) — store is UNAVAILABLE, local writes will not persist")
+      }
     }
-    // Signal all callers that are waiting on ensureReady().
+    // Signal all callers that are waiting on ensureReady(). This is set even on failure:
+    // it means "startup finished", not "the store works" — otherwise every caller awaiting
+    // ensureReady() would hang forever. Ask `isUnavailable` for health.
     isReady = true
     for cont in readyContinuations { cont.resume() }
     readyContinuations.removeAll()
@@ -134,8 +174,18 @@ actor LocalStore {
     #if os(iOS)
     let fm = FileManager.default
     guard fm.fileExists(atPath: url.path) else { return }
+    // .completeUntilFirstUserAuthentication, NOT .complete.
+    //
+    // .complete makes the file unwritable whenever the device is locked. Background audio
+    // is ON by default, so the normal case — phone locked in a pocket, audio playing — is
+    // exactly when the resume position needs saving and exactly when the write silently
+    // failed. Every position for the whole locked interval was lost, with no log.
+    //
+    // This class keeps the data encrypted at rest (unreadable until the first unlock after
+    // boot) while staying writable for the rest of the session. The tvOS branch below
+    // already had to undo .complete for the same underlying reason.
     try? fm.setAttributes(
-      [.protectionKey: FileProtectionType.complete],
+      [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
       ofItemAtPath: url.path
     )
     #endif
