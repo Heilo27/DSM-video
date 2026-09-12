@@ -1810,7 +1810,9 @@ func (s *Server) webAPITVShowGetInfo(w http.ResponseWriter, r *http.Request, ses
 	}
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + folderName + "/"
+	// escapeLike + ESCAPE, which this plane omitted entirely: a folder name holding a
+	// literal '_' or '%' matched sibling folders and reported their episodes as this show's.
+	folderPrefix := tvRoot + escapeLike(folderName) + "/"
 
 	// Get show metadata
 	var year sql.NullInt64
@@ -1818,7 +1820,7 @@ func (s *Server) webAPITVShowGetInfo(w http.ResponseWriter, r *http.Request, ses
 	var overview, genres, showNameDB sql.NullString
 	s.db.QueryRow(`
 		SELECT MAX(year), MAX(rating), MAX(overview), MAX(genres), MAX(show_name)
-		FROM items WHERE (path LIKE ? OR show_name = ?) AND library_id = 'lib_tv'`,
+		FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`,
 		folderPrefix+"%", folderName).Scan(&year, &ratingVal, &overview, &genres, &showNameDB)
 
 	displayName := folderName
@@ -1898,12 +1900,12 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 	var rows *sql.Rows
 	var err error
 	if folderName != "" {
-		folderPrefix := tvRoot + folderName + "/"
+		folderPrefix := tvRoot + escapeLike(folderName) + "/"
 		rows, err = s.db.Query(`
 			SELECT id, title, season_number, episode_number, episode_title,
 			       duration_seconds, year, rating, poster_path, show_name
 			FROM items
-			WHERE (path LIKE ? OR show_name = ?) AND library_id = 'lib_tv'
+			WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'
 			ORDER BY COALESCE(season_number, 0), COALESCE(episode_number, 0)
 			LIMIT ? OFFSET ?`,
 			folderPrefix+"%", folderName, limit, offset)
@@ -1985,8 +1987,10 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 	// Count total
 	var total int
 	if folderName != "" {
-		folderPrefix := tvRoot + folderName + "/"
-		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE (path LIKE ? OR show_name = ?) AND library_id = 'lib_tv'",
+		// Same escaping as the row query above — a COUNT that disagrees with the rows it is
+		// supposed to describe is its own bug.
+		folderPrefix := tvRoot + escapeLike(folderName) + "/"
+		s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`,
 			folderPrefix+"%", folderName).Scan(&total)
 	} else {
 		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE library_id = 'lib_tv'").Scan(&total)

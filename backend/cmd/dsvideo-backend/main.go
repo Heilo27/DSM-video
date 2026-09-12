@@ -2493,10 +2493,10 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 			} else {
 				where += " AND "
 			}
-			// Match items whose path contains the folder as a directory component
-			// Escape SQL LIKE wildcards in user-supplied folder name
-			escapedFolder := strings.ReplaceAll(folder, "%", "\\%")
-			escapedFolder = strings.ReplaceAll(escapedFolder, "_", "\\_")
+			// Match items whose path contains the folder as a directory component.
+			// escapeLike, not an open-coded copy — this site also MISSED the backslash,
+			// so a folder name containing one escaped the wrong thing.
+			escapedFolder := escapeLike(folder)
 			where += "i.path LIKE ? ESCAPE '\\'"
 			args = append(args, "%/"+escapedFolder+"/%")
 		}
@@ -2538,8 +2538,11 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 			}
 			var preds []string
 			for _, g := range wanted {
-				preds = append(preds, "(','||IFNULL(i.genres,'')||',') LIKE ?")
-				args = append(args, "%,"+g+",%")
+				// escapeLike + ESCAPE: genre is a USER query param, so an unescaped '%'
+				// here matched every item carrying any genre at all — the same defect as
+				// handleSearch, one parameter over.
+				preds = append(preds, "(','||IFNULL(i.genres,'')||',') LIKE ? ESCAPE '\\'")
+				args = append(args, "%,"+escapeLike(g)+",%")
 			}
 			clause := "(" + strings.Join(preds, joiner) + ")"
 			if where == "" {
@@ -2658,11 +2661,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := userFromCtx(r.Context())
-	pattern := "%" + q + "%"
+	// ESCAPED. q is END-USER text, and % and _ are LIKE metacharacters: searching "%"
+	// returned the ENTIRE library and "50% Off" silently over-matched. Six other LIKE
+	// sites already escaped; this — the only one taking user input — did not. The
+	// ESCAPE clause must appear on BOTH queries below: if the COUNT and the row query
+	// disagree, the reported total contradicts the rows actually returned.
+	pattern := "%" + escapeLike(q) + "%"
 
 	var total int
 	if err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM items i WHERE LOWER(i.title) LIKE LOWER(?)",
+		`SELECT COUNT(*) FROM items i WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`,
 		pattern,
 	).Scan(&total); err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -2676,7 +2684,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		        p.position_seconds, p.duration_seconds, p.updated_at
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
-		 WHERE LOWER(i.title) LIKE LOWER(?)
+		 WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'
 		 ORDER BY i.title ASC, i.id ASC
 		 LIMIT ? OFFSET ?`,
 		u.ID, pattern, limit, offset,
@@ -3126,12 +3134,16 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 
 	u := userFromCtx(r.Context())
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + showName + "/"
 
-	// Match items by folder path only — show_name is not unique across folders
-	// (e.g. two folders named "MacGyver 1985" and "MacGyver" can both have show_name="MacGyver")
-	matchWhere := "path LIKE ?"
-	matchArgs := []any{folderPrefix + "%"}
+	// Match by folder PATH, never by the show_name column — show_name is not unique across
+	// folders ("MacGyver 1985" and "MacGyver" can both carry show_name="MacGyver"), so a
+	// show_name predicate would merge two genuinely different shows. resolveShowFolders gets
+	// the merge right from the other direction: it expands this folder id into the group the
+	// LIST counted, so the detail's episode count matches the header. This also gains the
+	// ESCAPE clause it was missing — a folder containing a literal '_' or '%' previously
+	// over-matched and pulled in a sibling show's episodes.
+	folders := s.resolveShowFolders(showName, tvRoot)
+	matchWhere, matchArgs := showFolderWhere(folders, tvRoot)
 
 	// Get show-level metadata from first episode with data
 	var year sql.NullInt64
@@ -5190,6 +5202,25 @@ const itemUpsertSQL = `INSERT INTO items(id, library_id, type, title, year, path
 				    OR items.title IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.title ELSE items.title END)
 				    OR items.year IS NOT (CASE WHEN items.tmdb_id IS NULL THEN excluded.year ELSE items.year END)`
 
+// escapeLike escapes the SQL LIKE metacharacters in s so the result matches LITERALLY.
+//
+// One definition, because there were seven — six sites open-coded this same three-line
+// dance and the SEVENTH, handleSearch, forgot it entirely. That was the only one taking
+// END-USER text: searching "%" returned the whole library, and "50% Off" silently
+// over-matched. Every caller must pair this with an explicit `ESCAPE '\'` clause; without
+// it SQLite treats the backslashes as literal characters and the match gets WORSE, not
+// better.
+//
+// Order matters. The backslash goes first: escaping % or _ first would insert backslashes
+// that the later backslash pass would then double, turning \% into \\% — a literal
+// backslash followed by the wildcard, which is not what anyone meant.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
+}
+
 // showFolderFromPath derives a TV show's on-disk folder name from an episode path.
 //
 // One definition, because there were six — and they disagreed. The SCANNER required a real
@@ -5228,6 +5259,87 @@ func showGroupKey(folderName string, showName sql.NullString) string {
 		return strings.ToLower(showName.String)
 	}
 	return folderName
+}
+
+// showGroupFolders groups episode (path, show_name) pairs into shows and returns, for each
+// FOLDER name, every folder that belongs to the same show. A single-folder show maps to a
+// one-element slice containing only itself.
+//
+// This closes the other half of the merge. Commit ba1160c merged the GROUPING in
+// handleTVShowsList but not the IDENTITY: the emitted "id" stayed info.folderName —
+// whichever of the group's folders happened to be scanned first — so the detail request
+// made with that id resolved exactly ONE folder. The list header said "24 episodes" and the
+// episode list showed 12. Grouping without an identity that round-trips just moves the bug
+// one request downstream.
+//
+// Pure and rows-in/map-out on purpose, so the merge rule can be tested without a database.
+func showGroupFolders(paths []string, showNames []sql.NullString, tvRoot string) map[string][]string {
+	groupFolders := map[string][]string{} // group key → folders, in first-seen order
+	folderGroup := map[string]string{}    // folder → group key
+	for i, path := range paths {
+		var sn sql.NullString
+		if i < len(showNames) {
+			sn = showNames[i]
+		}
+		folderName := showFolderFromPath(path, tvRoot)
+		if folderName == "" {
+			continue
+		}
+		key := showGroupKey(folderName, sn)
+		if _, seen := folderGroup[folderName]; !seen {
+			folderGroup[folderName] = key
+			groupFolders[key] = append(groupFolders[key], folderName)
+		}
+	}
+	out := make(map[string][]string, len(folderGroup))
+	for folder, key := range folderGroup {
+		out[folder] = groupFolders[key]
+	}
+	return out
+}
+
+// resolveShowFolders expands a show id (a folder name, as emitted by the list endpoints)
+// into every folder belonging to the same show, so a detail request sees the same episodes
+// the list counted. Returns a one-element slice containing showID itself when the library
+// has no sibling folder — the overwhelmingly common case — which is what keeps the
+// single-folder behaviour byte-identical.
+func (s *Server) resolveShowFolders(showID, tvRoot string) []string {
+	rows, err := s.db.Query(`SELECT path, show_name FROM items WHERE library_id = 'lib_tv'`)
+	if err != nil {
+		return []string{showID}
+	}
+	defer rows.Close()
+	var paths []string
+	var names []sql.NullString
+	for rows.Next() {
+		var p string
+		var n sql.NullString
+		if rows.Scan(&p, &n) != nil {
+			continue
+		}
+		paths = append(paths, p)
+		names = append(names, n)
+	}
+	if folders, ok := showGroupFolders(paths, names, tvRoot)[showID]; ok && len(folders) > 0 {
+		return folders
+	}
+	return []string{showID}
+}
+
+// showFolderWhere builds `(path LIKE ? ESCAPE '\' OR path LIKE ? ESCAPE '\' ...)` covering
+// every folder in a show group, plus the matching args. Always parenthesised so callers can
+// AND further predicates onto it without the OR chain swallowing them.
+func showFolderWhere(folders []string, tvRoot string) (string, []any) {
+	preds := make([]string, 0, len(folders))
+	args := make([]any, 0, len(folders))
+	for _, f := range folders {
+		preds = append(preds, `path LIKE ? ESCAPE '\'`)
+		args = append(args, tvRoot+escapeLike(f)+"/%")
+	}
+	if len(preds) == 0 {
+		return "0", nil
+	}
+	return "(" + strings.Join(preds, " OR ") + ")", args
 }
 
 func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
@@ -5604,9 +5716,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 			if tvRoot == "" {
 				continue
 			}
-			esc := strings.ReplaceAll(folder, `\`, `\\`)
-			esc = strings.ReplaceAll(esc, "%", `\%`)
-			esc = strings.ReplaceAll(esc, "_", `\_`)
+			esc := escapeLike(folder)
 			var epID string
 			s.db.QueryRow(
 				`SELECT id FROM items WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv' AND poster_path IS NOT NULL AND poster_path != '' LIMIT 1`,
@@ -7816,9 +7926,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Escape SQL LIKE wildcards so a showID containing '%' or '_' doesn't match unintended rows.
-	escapedShowID := strings.ReplaceAll(showID, `\`, `\\`)
-	escapedShowID = strings.ReplaceAll(escapedShowID, "%", `\%`)
-	escapedShowID = strings.ReplaceAll(escapedShowID, "_", `\_`)
+	escapedShowID := escapeLike(showID)
 
 	var body struct {
 		TMDbID int `json:"tmdbId"`
@@ -8207,6 +8315,13 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		maxChangeSeq int64  // max change_seq across episodes — used as image cache-buster
 	}
 
+	// folder → merged group key. lastWatched was keyed by the BARE folder name while the
+	// show itself is keyed by showGroupKey, so watching an episode in the group's SECOND
+	// folder never touched the merged show's lastWatchedAt and a show watched last night
+	// sorted to the bottom of Recently Watched. Same key on both sides or it desynchronises
+	// again.
+	folderToGroup := map[string]string{}
+
 	showMap := map[string]*showInfo{}
 	showOrder := []string{}
 
@@ -8228,6 +8343,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		mapKey := showGroupKey(folderName, showName)
+		folderToGroup[folderName] = mapKey
 
 		info, exists := showMap[mapKey]
 		if !exists {
@@ -8260,7 +8376,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 
 	// Build per-show lastWatchedAt from progress table when a user is authenticated.
 	// Single query: find MAX(updated_at) for each item path under the TV root for this user.
-	showLastWatched := map[string]string{} // folderName → ISO8601 timestamp
+	showLastWatched := map[string]string{} // merged group key → ISO8601 timestamp
 	if u.ID != "" {
 		progressRows, pErr := s.db.Query(`
 			SELECT i.path, MAX(p.updated_at)
@@ -8282,8 +8398,14 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				folder := parts[0]
-				if existing, ok := showLastWatched[folder]; !ok || maxUpdated.String > existing {
-					showLastWatched[folder] = maxUpdated.String
+				// Fold onto the MERGED key, not the folder, so every folder in a split
+				// show contributes to the one show's lastWatchedAt.
+				groupKey, known := folderToGroup[folder]
+				if !known {
+					continue
+				}
+				if existing, ok := showLastWatched[groupKey]; !ok || maxUpdated.String > existing {
+					showLastWatched[groupKey] = maxUpdated.String
 				}
 			}
 		}
@@ -8299,6 +8421,13 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	shows := make([]map[string]any, 0, len(sortedKeys))
 	for _, key := range sortedKeys {
 		info := showMap[key]
+		// id stays the FOLDER name, deliberately. The merged group key is the lowercased
+		// TMDb show name, which differs from the folder for nearly every matched show — so
+		// emitting it would invalidate every persisted id in the wild (watchlist, Top Shelf,
+		// dsvideo://item/{id} deep links) to fix a bug that only affects split shows. The
+		// correct fix is on the READ side instead: resolveShowFolders expands this folder id
+		// back to the whole group, so the detail request returns the same episodes the count
+		// above reports. Single-folder shows — the overwhelming majority — see no id churn.
 		show := map[string]any{
 			"id":              info.folderName,
 			"title":           info.displayName,
@@ -8313,7 +8442,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		if info.firstID != "" {
 			show["posterImageId"] = info.firstID
 		}
-		if ts, ok := showLastWatched[info.folderName]; ok && ts != "" {
+		if ts, ok := showLastWatched[key]; ok && ts != "" {
 			show["lastWatchedAt"] = ts
 		}
 		if info.newestAdded != "" {
@@ -8345,20 +8474,21 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_show_id")
 		return
 	}
-	escapedID := strings.ReplaceAll(showID, `\`, `\\`)
-	escapedID = strings.ReplaceAll(escapedID, "%", `\%`)
-	escapedID = strings.ReplaceAll(escapedID, "_", `\_`)
-
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + escapedID + "/"
 
-	querySeasons := func(where string, arg any) ([]map[string]any, error) {
+	// EVERY folder in the group, not just the one named by showID. A show split across
+	// differently-named folders is one show in the list; resolving a single folder here made
+	// the detail disagree with the header it came from.
+	folders := s.resolveShowFolders(showID, tvRoot)
+	folderWhere, folderArgs := showFolderWhere(folders, tvRoot)
+
+	querySeasons := func(where string, args ...any) ([]map[string]any, error) {
 		r, e := s.db.Query(`
 			SELECT COALESCE(season_number, 1), COUNT(*)
 			FROM items
 			WHERE `+where+` AND library_id = 'lib_tv'
 			GROUP BY COALESCE(season_number, 1)
-			ORDER BY COALESCE(season_number, 1)`, arg)
+			ORDER BY COALESCE(season_number, 1)`, args...)
 		if e != nil {
 			return nil, e
 		}
@@ -8373,7 +8503,7 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 		return out, nil
 	}
 
-	seasons, err := querySeasons(`path LIKE ? ESCAPE '\'`, folderPrefix+"%")
+	seasons, err := querySeasons(folderWhere, folderArgs...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -8409,21 +8539,21 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_show_id")
 		return
 	}
-	escapedID := strings.ReplaceAll(showID, `\`, `\\`)
-	escapedID = strings.ReplaceAll(escapedID, "%", `\%`)
-	escapedID = strings.ReplaceAll(escapedID, "_", `\_`)
-
 	seasonStr := r.URL.Query().Get("season")
 	u := userFromCtx(r.Context())
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	folderPrefix := tvRoot + escapedID + "/"
 
-	baseWhere := `path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`
-	baseArgs := []any{folderPrefix + "%"}
+	// EVERY folder in the group — see resolveShowFolders. Matching the single folder named
+	// by showID made this list show 12 episodes under a header that said 24.
+	folders := s.resolveShowFolders(showID, tvRoot)
+	folderWhere, folderArgs := showFolderWhere(folders, tvRoot)
 
-	// Check if the path-based match returns any rows; if not, fall back to show_name
-	// (handles the case where showID is the TMDb display name rather than the folder name).
+	baseWhere := folderWhere + " AND library_id = 'lib_tv'"
+	baseArgs := folderArgs
+
+	// Fall back to show_name when no path matches — showID may be a TMDb display name
+	// rather than a folder (hand-built deep links do this).
 	var matchCount int
 	s.db.QueryRow("SELECT COUNT(*) FROM items WHERE "+baseWhere, baseArgs...).Scan(&matchCount)
 	if matchCount == 0 {
