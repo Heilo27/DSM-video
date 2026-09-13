@@ -44,14 +44,15 @@ destructive test asserts on identity; these do.
 - [x] `docs/frd/` now contains a real spec — FRD-000 (Ryan's mission, authoritative) and
       FRD-001 (blind reconstruction, 142 requirements tagged STATED/INFERRED)
 - [x] Before/after census recorded
-- [ ] **Mutation gate in CI — NOT DONE.** See below.
+- [x] **Mutation gate committed** — `scripts/mutation-gate.py`, `fastlane mutation_gate`,
+      `fastlane preflight`. Exit 0 only when every mutation is KILLED; verified on both paths.
 
 ## What is NOT done, stated plainly
 
-1. **The mutation gate is not in CI.** The harness is a scratch script
-   (`scratchpad/mutate.py`), not a committed, runnable gate. Until it is, nothing stops these nine
-   from silently becoming survivors again. This is the single most important remaining task — the
-   retrofit's value decays without it.
+1. **The gate is committed but not wired to an automatic trigger.** `fastlane mutation_gate` and
+   `fastlane preflight` exist and work, but nothing runs them unattended — there is no CI service on
+   this project. It must be invoked before a release. That is a real gap: a gate nobody runs is a
+   report.
 2. **Two B5/conditional-assertion violations remain** in the pre-existing suite:
    `DS_Video_cloneTests.swift:696` and `:791` wrap `#expect` inside `if let first = …`, so the
    assertions are conditionally executed. A preceding `!isEmpty` saves them today. Disposition was
