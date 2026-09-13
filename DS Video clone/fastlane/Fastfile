@@ -204,6 +204,26 @@ platform :ios do
     sh("bash '#{File.expand_path("../../scripts/check-tvos-focus.sh", __dir__)}'")
   end
 
+  # Prove the suite can FAIL. Breaks one behavior at a time and checks that a test notices.
+  #
+  # Why this is a gate and not a report: on 2026-09-12 a retrofit found 9 of 13 mutations
+  # surviving a GREEN 105-test suite — 87% of the destructive surface unprotected, including
+  # the two P0s fixed the day before. A suite that has never been proven capable of going red
+  # tells you nothing. See docs/retrofit/R6-final.md.
+  #
+  # Slow by nature (~30s per mutation, 13 mutations). Run it before a release, not per commit.
+  lane :mutation_gate do
+    sh("python3 '#{File.expand_path("../../scripts/mutation-gate.py", __dir__)}'")
+  end
+
+  # Everything that must hold before an upload: focus guard, full suite, mutation gate.
+  lane :preflight do
+    check_focus
+    test
+    mutation_gate
+    UI.success("Preflight passed — focus guard, suites, and mutation gate all green.")
+  end
+
 end
 
 # ──────────────────────────────────────────────────────
