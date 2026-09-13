@@ -127,3 +127,31 @@ xcrun simctl boot <udid>
 A single full-pass invocation is still the right interface for `fastlane preflight`; it just needs a
 healthy machine and may need one resume. This is a property of the host, not of the suite — worth
 knowing before reading a TIMEOUT as a coverage gap.
+
+### Root cause found (same session)
+
+The degradation was not mysterious and not the gate's fault. The host was saturated:
+
+- **load average 18.3 / 67.4 / 58.4**
+- **248 accumulated `CoreSimulator` processes**
+- **disk 95% full**
+
+A large part of that was self-inflicted: this session had accumulated ~7.7 GB of derived-data
+directories across 17 separate `-derivedDataPath` targets, and every killed `xcodebuild` leaked
+simulator processes.
+
+After `killall -9 com.apple.CoreSimulator.CoreSimulatorService` (248 → 12 processes) and removing the
+stale derived-data trees (7.7 GB → 1.4 GB), load fell to 3.9 / 4.9 and both outstanding mutations
+returned real verdicts:
+
+| Mutation | Result |
+|---|---|
+| M2-priv | **KILLED** — first attempt timed out, the committed retry booted a fresh simulator and got the verdict |
+| M2-reach | **KILLED** (33s) |
+
+**Final: 13 of 13 mutations KILLED, zero survivors.** The retry added in d104179 is what turned
+`M2-priv` from a false gate failure into a real kill, which is the case it was written for.
+
+**Operational lesson:** reuse ONE derived-data path across runs rather than a fresh one per
+invocation, and kill `CoreSimulatorService` between long batches. Disk pressure and leaked simulator
+processes present as mutation timeouts, which look like test gaps and are not.
