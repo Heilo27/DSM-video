@@ -148,7 +148,20 @@ final class DownloadManager: NSObject {
   /// Set by the app at launch.
   var urlResolver: ((String) async -> (url: URL, sessionID: String?)?)?
 
+  /// Overrides the container that `downloadsDirectory()` and `downloadsMetadataFileURL`
+  /// resolve against. `nil` means the real app container, which is what `shared` uses.
+  ///
+  /// TEST SEAM (R4 gap closure). `DownloadManager` is a `@MainActor` singleton whose
+  /// bookkeeping lives at one fixed path (`<AppSupport>/downloads.json`) with its media in
+  /// `<Documents>/Downloads`. Every test that deletes a download, writes a resume position,
+  /// or purges on sign-out would otherwise contend for those two paths — order dependent,
+  /// and destructive against a real device's library. Injecting a root directory gives each
+  /// test its own container. Production is untouched: `shared` passes nothing and both path
+  /// accessors fall back to exactly the URLs they computed before.
+  private let containerOverride: URL?
+
   override private init() {
+    self.containerOverride = nil
     // TASK-738: default downloads to Wi-Fi only unless the user opts into cellular.
     UserDefaults.standard.register(defaults: ["dsReel.downloadsWifiOnly": true])
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
@@ -164,6 +177,19 @@ final class DownloadManager: NSObject {
     // The real background session, with self as delegate now that super.init() has run.
     backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
     loadPersistedResumeData()
+  }
+
+  /// TEST SEAM (R4). A manager whose bookkeeping and media live under `container` instead of
+  /// the app's own directories, so each test owns its state.
+  ///
+  /// Uses an EPHEMERAL session, not a second background session: two live background
+  /// sessions sharing `com.heiloprojects.dsreel.downloads` is undefined behaviour (see the
+  /// comment in `init()`), and this instance never starts a transfer — the tests exercise the
+  /// bookkeeping and the response gate, both of which are independent of the session.
+  init(containerForTesting container: URL) {
+    self.containerOverride = container
+    backgroundSession = URLSession(configuration: .ephemeral)
+    super.init()
   }
 
   // MARK: - Public API
@@ -626,7 +652,9 @@ final class DownloadManager: NSObject {
   /// URL for the downloads metadata JSON file in Application Support.
   /// This is the canonical storage location; UserDefaults is only consulted for migration.
   private var downloadsMetadataFileURL: URL {
-    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    // containerOverride is nil in production (R4 test seam) — same <AppSupport>/downloads.json.
+    let appSupport = containerOverride
+      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     return appSupport.appendingPathComponent("downloads.json")
   }
 
@@ -659,7 +687,8 @@ final class DownloadManager: NSObject {
 
   private func downloadsDirectory() -> URL {
     let fm = FileManager.default
-    let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    // containerOverride is nil in production (R4 test seam) — same <Documents>/Downloads.
+    let docs = containerOverride ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
     var dir = docs.appendingPathComponent("Downloads", isDirectory: true)
     try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
     // Exclude downloaded videos (multi-GB) and resume-data blobs from iCloud/iTunes
@@ -807,6 +836,27 @@ final class DownloadManager: NSObject {
 // MARK: - URLSessionDownloadDelegate
 
 extension DownloadManager: URLSessionDownloadDelegate {
+
+  /// Whether a finished transfer's HTTP status means the bytes on disk are the MEDIA and may
+  /// be kept, as opposed to an error body that must be discarded.
+  ///
+  /// TASK-887 (1.3.6 P0): `URLSession` reports `didFinishDownloadingTo` for ANY completed
+  /// response, 4xx and 5xx included — `error` is only set for transport failures. Without
+  /// this check a 22-byte `{"error":"not_found"}` was moved to `{itemId}.mp4` and marked
+  /// downloaded, so offline playback failed on a file the UI insisted was present.
+  ///
+  /// Extracted from the delegate method purely so the decision is directly testable — the
+  /// delegate takes a live `URLSessionDownloadTask`, which cannot be constructed with a
+  /// chosen status in a unit test. Behaviour is identical to the inline check it replaced.
+  ///
+  /// A `nil` status means the response was not an `HTTPURLResponse` at all (e.g. a `file://`
+  /// transfer), which has no status to reject on — accepted, matching the original
+  /// `if let httpStatus` shape.
+  nonisolated static func shouldAcceptResponse(status: Int?) -> Bool {
+    guard let status else { return true }
+    return (200...299).contains(status)
+  }
+
   nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
     // URLSession calls delegates on the OperationQueue supplied at init (a background queue, NOT main).
     // We must hop to @MainActor for all state mutations — hence the Task { @MainActor in } pattern.
@@ -816,7 +866,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
     // {itemId}.mp4 and marked "downloaded", so offline playback fails on a file the UI
     // swears is present. Read the status BEFORE copying anything.
     let httpStatus = (downloadTask.response as? HTTPURLResponse)?.statusCode
-    if let httpStatus, !(200...299).contains(httpStatus) {
+    if !DownloadManager.shouldAcceptResponse(status: httpStatus), let httpStatus {
       Task { @MainActor in
         guard let itemId = downloadTasks[downloadTask] else { return }
         downloadTasks.removeValue(forKey: downloadTask)

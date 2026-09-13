@@ -65,7 +65,42 @@ actor LocalStore {
     return f
   }()
 
-  private init() {}
+  /// Overrides where the SQLite file lives. `nil` means the production location
+  /// (`<Documents>/dsreel.db`), which is what `shared` uses.
+  ///
+  /// TEST SEAM (R4 gap closure). `LocalStore` is an actor singleton writing to one fixed
+  /// path in the app container, so any test exercising a write, a delete, or the
+  /// unavailable-store path would share that one file with every other test — order
+  /// dependent, and a `clearAll` test would wipe the developer's own library on a device
+  /// run. Injecting the URL gives each test its own temp database; production behaviour is
+  /// unchanged because `shared` passes nothing and `openDatabase()` falls back to the exact
+  /// same Documents path it always computed.
+  ///
+  /// Deliberately NOT `#if DEBUG`: the shipping code path must be the code path under test.
+  private let databaseURLOverride: URL?
+
+  private init(databaseURLOverride: URL? = nil) {
+    self.databaseURLOverride = databaseURLOverride
+  }
+
+  /// TEST SEAM (R4). Builds a store backed by `url` instead of the app container, and
+  /// completes setup before returning so callers need no `ensureReady()` dance.
+  /// Pass a URL inside a per-test temp directory.
+  static func makeForTesting(databaseURL: URL) async -> LocalStore {
+    let store = LocalStore(databaseURLOverride: databaseURL)
+    await store.setupLogged()
+    return store
+  }
+
+  /// TEST SEAM (R4). A store whose open is guaranteed to FAIL, for exercising the
+  /// unavailable-store detection that `isUnavailable` exists to provide. The URL points
+  /// into a directory that does not exist, which is what a real failed open looks like.
+  static func makeUnopenableForTesting() async -> LocalStore {
+    let dead = URL(fileURLWithPath: "/dev/null/definitely-not-a-directory/dsreel.db")
+    let store = LocalStore(databaseURLOverride: dead)
+    await store.setupLogged()
+    return store
+  }
 
   // Called once at startup. Using a separate async method avoids the actor-isolation
   // restriction on calling isolated methods from a synchronous init.
@@ -73,8 +108,12 @@ actor LocalStore {
   func setupLogged() async {
     // Read the legacy JSON cache file off-actor before acquiring the actor for setup
     // so the blocking Data(contentsOf:) call doesn't hold the actor thread (TASK-506).
+    // A store with an injected URL (R4 test seam) is not the app's store and must not adopt
+    // — or delete — the app container's legacy cache file.
+    let usesProductionLocation = databaseURLOverride == nil
     let jsonCacheData: (url: URL, data: Data)? = await Task.detached(priority: .utility) {
-      guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+      guard usesProductionLocation,
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
       let jsonURL = docs.appendingPathComponent("dsReel-homeCache.json")
       guard FileManager.default.fileExists(atPath: jsonURL.path),
             let data = try? Data(contentsOf: jsonURL) else { return nil }
@@ -129,12 +168,27 @@ actor LocalStore {
   // MARK: - Schema
 
   private func openDatabase() throws {
-    guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-      throw LocalStoreError.cannotLocateDocuments
+    // databaseURLOverride is nil in production (see its declaration — R4 test seam), so this
+    // resolves to the same <Documents>/dsreel.db it always has.
+    let dbURL: URL
+    let docs: URL
+    if let override = databaseURLOverride {
+      dbURL = override
+      docs = override.deletingLastPathComponent()
+    } else {
+      guard let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        throw LocalStoreError.cannotLocateDocuments
+      }
+      docs = d
+      dbURL = d.appendingPathComponent("dsreel.db")
     }
-    let dbURL = docs.appendingPathComponent("dsreel.db")
     if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
-      throw LocalStoreError.openFailed(String(cString: sqlite3_errmsg(db)))
+      // Release the half-open handle. sqlite3_open allocates one even on failure, and
+      // leaving it non-nil means the `guard let db` at the head of every write path does
+      // NOT short-circuit on a dead store, contrary to this file's own comments.
+      sqlite3_close(db)
+      db = nil
+      throw LocalStoreError.openFailed("open failed at \(dbURL.path)")
     }
     // WAL mode for concurrent reads during writes
     exec("PRAGMA journal_mode=WAL")

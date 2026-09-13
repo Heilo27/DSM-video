@@ -1191,3 +1191,1126 @@ struct SeasonExpansionStoreTests {
     #expect(!SeasonExpansionStore.isExpanded(season: 2, showID: b, allSeasons: seasons, highlightSeason: nil))
   }
 }
+
+// =====================================================================================
+// MARK: - R4 GAP CLOSURE — the nine mutation survivors
+// =====================================================================================
+//
+// R2's mutation census ran 13 mutations against 105 passing tests and NINE survived. Every
+// survivor sat on the destructive or persistence surface: a write could stop writing, a
+// delete could stop deleting, a health check could always claim healthy, and the suite
+// stayed green. The tests below exist to make those exact mutations go red.
+//
+// Each test names the mutation it kills. That note is the contract: re-apply the named
+// change to production code and the test MUST fail. A test here whose mutation survives is
+// a defective test, not an acceptable one.
+//
+// SHARED-STATE PROBLEM AND HOW IT IS SOLVED
+// `LocalStore.shared` and `DownloadManager.shared` are singletons bound to fixed paths in
+// the app container. Tests against them would share one database and one downloads.json —
+// order dependent, mutually destructive, and on a device run they would wipe the user's own
+// library. TEST-DOCTRINE Part 2 rule 4 forbids a shared mutable fixture.
+//
+// Two minimal seams were added to app code instead (both documented at their definitions):
+//   · LocalStore.makeForTesting(databaseURL:) / .makeUnopenableForTesting()
+//     — an internal init carrying a URL override. Production `shared` passes nothing and
+//       resolves the identical <Documents>/dsreel.db it always did.
+//   · DownloadManager.init(containerForTesting:)
+//     — an internal init carrying a container override, used by downloadsDirectory() and
+//       downloadsMetadataFileURL. Production `shared` passes nothing; same paths as before.
+//   · DownloadManager.shouldAcceptResponse(status:)
+//     — the 4xx/5xx gate lifted out of `didFinishDownloadingTo` verbatim, because that
+//       delegate takes a live URLSessionDownloadTask whose status cannot be chosen in a
+//       unit test. The delegate now calls it. No behaviour change.
+// No `#if DEBUG`: the shipping code path is the path under test.
+
+/// Each test gets its own empty directory under the temp dir, removed when it finishes.
+/// Returns a URL guaranteed to exist — a test that silently wrote nowhere would pass its
+/// assertions vacuously, which is the failure mode this whole file is closing.
+@MainActor
+private func makeTempContainer(_ label: String) throws -> URL {
+  let url = FileManager.default.temporaryDirectory
+    .appendingPathComponent("dsreel-r4-\(label)-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+  return url
+}
+
+@MainActor
+private func removeTempContainer(_ url: URL) {
+  try? FileManager.default.removeItem(at: url)
+}
+
+/// A library row with enough fields set for the rail queries and the item tables.
+private func fixtureItem(id: String, title: String, addedAt: String = "2026-01-01T00:00:00Z") -> ItemSummary {
+  ItemSummary(
+    id: id, type: "movie", title: title, year: 2020,
+    durationSeconds: 7200, addedAt: addedAt,
+    libraryId: "lib_test", changeSeq: 1
+  )
+}
+
+// MARK: T-A 1 · LocalStore.upsertSingleProgress — the progress write
+
+/// SURVIVOR M5-upsert. Mutation: `upsertSingleProgress` returns before the write.
+/// Every test here re-reads through a FRESH LocalStore on the same file, so an in-memory
+/// cache could not satisfy them — per TEST-DOCTRINE B4, in-memory state is not persistence.
+@MainActor
+struct LocalStoreProgressWriteTests {
+
+  /// OC-PRG-003 · OC-PRG-004 · class:persistence
+  /// Given a store with no recorded progress for "mv-dune", when a position of 600s into a
+  /// 7200s film is recorded, then reopening the database from disk still reports 600s —
+  /// the viewer's place survives a cold start.
+  ///
+  /// KILLS M5-upsert (skip the write). With the write skipped the second store reads 0.
+  /// Also red if the position or duration binding is swapped, or if the row is written
+  /// without a primary key so the re-read misses it.
+  @Test func recordedPositionIsReadableFromAFreshStoreOnDisk() async throws {
+    let dir = try makeTempContainer("prg-persist")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await store.isUnavailable == false, "precondition: the test store must actually open")
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 0, "precondition: no prior progress")
+
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+
+    // FRESH read path — a second actor instance opening the same file.
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 600, "resume position after reopen")
+    #expect(await reopened.pendingProgressCount() == 1, "the write is queued for the server")
+  }
+
+  /// OC-PRG-004 · class:persistence
+  /// Given nothing recorded, when no write is performed at all, then a fresh store reports
+  /// 0 and an empty outbox — the negative case of the test above.
+  ///
+  /// This is the paired "X does not happen without the precondition" (B6). It is what proves
+  /// the test above is not passing off a store that reports 600 for anything asked of it.
+  /// Red if getProgressSeconds invented a position, or if setup seeded a row.
+  @Test func aStoreWithNoWriteReportsNoProgressAndAnEmptyOutbox() async throws {
+    let dir = try makeTempContainer("prg-negative")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await store.isUnavailable == false, "precondition: the test store must actually open")
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 0)
+    #expect(await reopened.pendingProgressCount() == 0)
+  }
+
+  /// OC-PRG-002 · class:persistence
+  /// Given a position already recorded at 600s, when the viewer watches on to 1800s,
+  /// then a fresh store reports 1800 and still holds exactly one row for that title —
+  /// the second write UPDATES rather than appending a duplicate.
+  ///
+  /// KILLS M5-upsert (the second write skipped leaves 600 on disk). Also red if the
+  /// ON CONFLICT clause were dropped, since the outbox count would read 2.
+  @Test func aLaterPositionReplacesTheEarlierOneWithoutDuplicatingTheRow() async throws {
+    let dir = try makeTempContainer("prg-update")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 600, "precondition: first position landed")
+
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 1800, durationSeconds: 7200)
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 1800, "latest position wins")
+    #expect(await reopened.pendingProgressCount() == 1, "one row per title, not one per write")
+  }
+
+  /// OC-PRG-003 · class:persistence
+  /// Given two different titles watched to two different positions, when both are recorded,
+  /// then a fresh store reports each title's own position — a write for one must not
+  /// overwrite or leak into another.
+  ///
+  /// KILLS M5-upsert, and additionally kills a write that ignores its itemId argument
+  /// (binding a constant id), which a single-item test cannot detect.
+  @Test func eachTitleKeepsItsOwnPositionIndependently() async throws {
+    let dir = try makeTempContainer("prg-multi")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+    await store.upsertSingleProgress(itemId: "mv-heat", positionSeconds: 2400, durationSeconds: 10_000)
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 600)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-heat") == 2400)
+    #expect(await reopened.pendingProgressCount() == 2)
+  }
+
+  /// OC-PRG-005 · class:persistence
+  /// Given a position recorded while the server was unreachable, when the server later
+  /// confirms that exact value, then the row leaves the outbox but the position itself
+  /// is still on disk — syncing is not forgetting.
+  ///
+  /// KILLS M5-upsert (nothing to sync if nothing was written, so the outbox would read 0
+  /// at the precondition). Also red if markProgressSynced deleted the row instead of
+  /// clearing its flag.
+  @Test func confirmingASyncClearsTheOutboxButKeepsThePosition() async throws {
+    let dir = try makeTempContainer("prg-sync")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+    #expect(await store.pendingProgressCount() == 1, "precondition: the write is pending")
+
+    await store.markProgressSynced(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.pendingProgressCount() == 0, "outbox drained")
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 600, "position retained")
+  }
+
+  /// OC-PRG-005 · class:state
+  /// Given a position uploaded at 600s and the viewer watching on to 1800s mid-flush,
+  /// when the server confirms the stale 600s value, then the row STAYS pending — the newer
+  /// position must not be dropped from the outbox.
+  ///
+  /// Red if markProgressSynced's position/duration WHERE clause is removed (the documented
+  /// reason it is value-guarded). Also red under M5-upsert, since the 1800 write would
+  /// never land and the stale confirmation would then match.
+  @Test func aStaleServerConfirmationDoesNotClearANewerPosition() async throws {
+    let dir = try makeTempContainer("prg-stale")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 1800, durationSeconds: 7200)
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 1800, "precondition: viewer advanced to 1800")
+
+    await store.markProgressSynced(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.pendingProgressCount() == 1, "newer position is still owed to the server")
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 1800)
+  }
+
+  /// OC-PRG-028 · class:destructive
+  /// Given a queued position for a title the NAS no longer has, when the server rejects it
+  /// permanently and the row is dropped, then the outbox is empty on a fresh read so the
+  /// rows behind it can flush.
+  ///
+  /// Guards the documented stall: a permanently-rejected row that never leaves the outbox
+  /// blocks every row queued after it. Red if dropPendingProgress becomes a no-op.
+  @Test func droppingAPermanentlyRejectedRowUnblocksTheOutbox() async throws {
+    let dir = try makeTempContainer("prg-drop")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertSingleProgress(itemId: "mv-deleted", positionSeconds: 600, durationSeconds: 7200)
+    await store.upsertSingleProgress(itemId: "mv-behind", positionSeconds: 300, durationSeconds: 7200)
+    #expect(await store.pendingProgressCount() == 2, "precondition: two rows queued")
+
+    await store.dropPendingProgress(itemId: "mv-deleted")
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.pendingProgressCount() == 1, "only the rejected row left the outbox")
+    let stillPending = await reopened.pendingProgress().map(\.itemId)
+    #expect(stillPending.contains("mv-behind"), "the row behind it survives by identity")
+    #expect(!stillPending.contains("mv-deleted"), "the rejected row is gone by identity")
+  }
+}
+
+// MARK: T-A 4 · LocalStore.isUnavailable — the health check
+
+/// SURVIVOR M2-ready. Mutation: `isUnavailable` always returns false ("store always healthy").
+/// This is TASK-889's entire detection mechanism — the reason a silently-dropped write is
+/// visible at all. A check that cannot say "unhealthy" is not a check.
+@MainActor
+struct LocalStoreAvailabilityTests {
+
+  /// OC-PRG-026 · class:error
+  /// Given a store whose database file cannot be opened, when its health is read, then it
+  /// reports unavailable and carries a reason the UI can show the viewer.
+  ///
+  /// KILLS M2-ready (always-false). With the mutation `isUnavailable` reads false here and
+  /// `unavailableReason` — which is gated on it — goes nil, so both assertions fail.
+  @Test func aStoreThatCannotOpenItsDatabaseReportsItselfUnavailableWithAReason() async throws {
+    let store = await LocalStore.makeUnopenableForTesting()
+
+    #expect(await store.isUnavailable == true, "a store that could not open is not healthy")
+    let reason = await store.unavailableReason
+    #expect(reason != nil, "an unavailable store must give the UI something to say")
+    #expect(reason?.contains("can't be saved") == true, "the reason names the actual problem: saving")
+  }
+
+  /// OC-PRG-026 · class:state
+  /// Given a store whose database opened normally, when its health is read, then it reports
+  /// available and offers NO reason — the negative case, and the one that proves the test
+  /// above is not satisfied by a property hardwired to `true`.
+  ///
+  /// Red if `isUnavailable` were inverted or pinned to true, which would otherwise look like
+  /// a passing health check.
+  @Test func aStoreThatOpenedNormallyReportsItselfAvailableWithNoReason() async throws {
+    let dir = try makeTempContainer("avail-ok")
+    defer { removeTempContainer(dir) }
+
+    let store = await LocalStore.makeForTesting(databaseURL: dir.appendingPathComponent("dsreel.db"))
+
+    #expect(await store.isUnavailable == false)
+    #expect(await store.unavailableReason == nil, "a healthy store must not show an error banner")
+  }
+
+  /// OC-PRG-026 · class:error
+  /// Given an unavailable store, when a watch position is written to it and then read back,
+  /// then the read returns 0 — the write genuinely did NOT persist, which is exactly why
+  /// `isUnavailable` has to be truthful rather than reassuring.
+  ///
+  /// This is the behavioural consequence the health flag exists to disclose: under M2-ready
+  /// the app would report a healthy store while this write vanished. Red if a dead store
+  /// silently started caching writes in memory and reporting them back as saved.
+  @Test func anUnavailableStoreDiscardsWritesRatherThanPersistingThem() async throws {
+    let store = await LocalStore.makeUnopenableForTesting()
+    #expect(await store.isUnavailable == true, "precondition: this store is genuinely dead")
+
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 0, "nothing was saved, and nothing is claimed")
+    #expect(await store.pendingProgressCount() == 0, "no phantom outbox row for a write that never landed")
+    #expect(await store.totalItemCount() == 0)
+  }
+}
+
+// MARK: T-A 5 & 6 · LocalStore.clearAll and deleteItems — the destructive paths
+
+/// SURVIVORS M1-clearall (clearAll is a no-op) and M6-delitems (deleteItems deletes nothing).
+/// `clearAll` is what runs on sign-out: if it no-ops, one user's library and watch history
+/// stay on a shared device. Every assertion below is by identity and count delta, never by
+/// position — a positional assertion on a mutated collection is TEST-DOCTRINE B5.
+@MainActor
+struct LocalStoreDestructiveTests {
+
+  /// OC-AUT-022 · OC-AUT-023 · class:destructive
+  /// Given a store holding 4 library items, recorded progress, and advanced sync cursors,
+  /// when everything is cleared on sign-out, then a fresh read of the database finds no
+  /// items, no progress, an empty outbox, and both cursors back at 0.
+  ///
+  /// KILLS M1-clearall (no-op). Every assertion below reads non-zero before the clear, so
+  /// a clear that does nothing fails all of them. The cursor reset matters on its own: a
+  /// cleared library with a live watermark would never re-sync for the next account.
+  @Test func signOutClearEmptiesItemsProgressAndSyncCursorsOnDisk() async throws {
+    let dir = try makeTempContainer("clearall")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertItems([
+      fixtureItem(id: "mv-dune", title: "Dune"),
+      fixtureItem(id: "mv-heat", title: "Heat"),
+      fixtureItem(id: "mv-alien", title: "Alien"),
+      fixtureItem(id: "mv-brazil", title: "Brazil"),
+    ])
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+    await store.setItemSeq(4120)
+    await store.setProgressSeq(77)
+
+    // PRECONDITIONS — without these the clear assertions pass against an empty store.
+    #expect(await store.totalItemCount() == 4, "precondition: 4 items present")
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 600, "precondition: progress present")
+    #expect(await store.getSyncCursors().itemSeq == 4120, "precondition: item cursor advanced")
+    #expect(await store.getSyncCursors().progressSeq == 77, "precondition: progress cursor advanced")
+
+    await store.clearAll()
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.totalItemCount() == 0, "no library rows survive sign-out")
+    #expect(await reopened.hasItems() == false)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-dune") == 0, "no watch history survives sign-out")
+    #expect(await reopened.pendingProgressCount() == 0, "no queued progress survives sign-out")
+    #expect(await reopened.getSyncCursors().itemSeq == 0, "item cursor reset so the next account re-syncs")
+    #expect(await reopened.getSyncCursors().progressSeq == 0, "progress cursor reset")
+  }
+
+  /// OC-LIB-001 · class:state
+  /// Given a store holding 4 library items, when nothing is cleared, then a fresh read
+  /// still finds all 4 by identity — the negative case for the clear above.
+  ///
+  /// Proves `clearAll` is what empties the store, not the act of reopening it. Red if the
+  /// fresh-read path returned empty for any reason, which would make the clear test pass
+  /// for the wrong reason.
+  @Test func reopeningTheStoreWithoutClearingKeepsEveryItemByIdentity() async throws {
+    let dir = try makeTempContainer("clearall-negative")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertItems([
+      fixtureItem(id: "mv-dune", title: "Dune"),
+      fixtureItem(id: "mv-heat", title: "Heat"),
+      fixtureItem(id: "mv-alien", title: "Alien"),
+      fixtureItem(id: "mv-brazil", title: "Brazil"),
+    ])
+    #expect(await store.totalItemCount() == 4, "precondition: 4 items present")
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.totalItemCount() == 4)
+    let ids = Set(await reopened.fetchItems(forLibraryId: "lib_test").map(\.id))
+    #expect(ids == Set(["mv-dune", "mv-heat", "mv-alien", "mv-brazil"]))
+  }
+
+  /// OC-LIB-028 · class:destructive
+  /// Given a library of 4 titles, when "mv-heat" is removed because the NAS no longer has
+  /// it, then a fresh read finds exactly 3, mv-heat absent by identity, and the other three
+  /// present by identity.
+  ///
+  /// KILLS M6-delitems (delete nothing) — the count stays 4 and mv-heat is still found.
+  /// Also kills a delete that removes by POSITION rather than by id, because the surviving
+  /// set is asserted explicitly rather than by count alone.
+  @Test func deletingOneItemRemovesOnlyThatIdentityAndPersists() async throws {
+    let dir = try makeTempContainer("delitems")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertItems([
+      fixtureItem(id: "mv-dune", title: "Dune"),
+      fixtureItem(id: "mv-heat", title: "Heat"),
+      fixtureItem(id: "mv-alien", title: "Alien"),
+      fixtureItem(id: "mv-brazil", title: "Brazil"),
+    ])
+    #expect(await store.totalItemCount() == 4, "precondition: 4 items before the delete")
+    let before = Set(await store.fetchItems(forLibraryId: "lib_test").map(\.id))
+    #expect(before.contains("mv-heat"), "precondition: the delete target is actually present")
+
+    await store.deleteItems(["mv-heat"])
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.totalItemCount() == 3, "exactly one fewer")
+    let after = Set(await reopened.fetchItems(forLibraryId: "lib_test").map(\.id))
+    #expect(!after.contains("mv-heat"), "the target is gone by identity")
+    #expect(after == Set(["mv-dune", "mv-alien", "mv-brazil"]), "every survivor present by identity")
+  }
+
+  /// OC-LIB-028 · class:destructive
+  /// Given a library of 4 titles, when two of them are removed in one call, then a fresh
+  /// read finds exactly 2 and both named identities are absent.
+  ///
+  /// KILLS M6-delitems, and additionally kills a loop that only ever deletes the first id —
+  /// a single-id test cannot tell those apart.
+  @Test func deletingSeveralItemsRemovesEveryNamedIdentityNotJustTheFirst() async throws {
+    let dir = try makeTempContainer("delitems-many")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertItems([
+      fixtureItem(id: "mv-dune", title: "Dune"),
+      fixtureItem(id: "mv-heat", title: "Heat"),
+      fixtureItem(id: "mv-alien", title: "Alien"),
+      fixtureItem(id: "mv-brazil", title: "Brazil"),
+    ])
+    #expect(await store.totalItemCount() == 4, "precondition: 4 items before the delete")
+
+    await store.deleteItems(["mv-heat", "mv-brazil"])
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.totalItemCount() == 2, "two fewer")
+    let after = Set(await reopened.fetchItems(forLibraryId: "lib_test").map(\.id))
+    #expect(after == Set(["mv-dune", "mv-alien"]))
+    #expect(!after.contains("mv-heat"))
+    #expect(!after.contains("mv-brazil"))
+  }
+
+  /// OC-LIB-002 · class:empty
+  /// Given a library of 4 titles, when a delete is called with an empty id list, then a
+  /// fresh read still finds all 4 — the boundary case, and the negative case for the
+  /// deletes above.
+  ///
+  /// Red if the empty-list guard were removed and the statement ran unbound, which in
+  /// SQLite would match NULL and could delete nothing — or, with a different SQL shape,
+  /// everything. This pins "asked to delete nothing, deleted nothing".
+  @Test func deletingAnEmptyListOfItemsRemovesNothing() async throws {
+    let dir = try makeTempContainer("delitems-empty")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertItems([
+      fixtureItem(id: "mv-dune", title: "Dune"),
+      fixtureItem(id: "mv-heat", title: "Heat"),
+      fixtureItem(id: "mv-alien", title: "Alien"),
+      fixtureItem(id: "mv-brazil", title: "Brazil"),
+    ])
+    #expect(await store.totalItemCount() == 4, "precondition: 4 items present")
+
+    await store.deleteItems([])
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.totalItemCount() == 4)
+    #expect(Set(await reopened.fetchItems(forLibraryId: "lib_test").map(\.id))
+            == Set(["mv-dune", "mv-heat", "mv-alien", "mv-brazil"]))
+  }
+
+  /// OC-LIB-028 · class:destructive
+  /// Given a library of 4 titles, when a delete names an id the store does not hold,
+  /// then a fresh read still finds all 4 — an unknown id must not take a real row with it.
+  ///
+  /// Red if the delete matched loosely (a LIKE, or a prefix match) or if it fell back to
+  /// removing the first row when the id was not found.
+  @Test func deletingAnUnknownIdLeavesEveryRealItemIntact() async throws {
+    let dir = try makeTempContainer("delitems-unknown")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    await store.upsertItems([
+      fixtureItem(id: "mv-dune", title: "Dune"),
+      fixtureItem(id: "mv-heat", title: "Heat"),
+      fixtureItem(id: "mv-alien", title: "Alien"),
+      fixtureItem(id: "mv-brazil", title: "Brazil"),
+    ])
+    #expect(await store.totalItemCount() == 4, "precondition: 4 items present")
+
+    await store.deleteItems(["mv-does-not-exist"])
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.totalItemCount() == 4)
+    #expect(Set(await reopened.fetchItems(forLibraryId: "lib_test").map(\.id))
+            == Set(["mv-dune", "mv-heat", "mv-alien", "mv-brazil"]))
+  }
+}
+
+// MARK: T-A 2 · DownloadManager.updateResumePosition — the offline resume write
+
+/// SURVIVOR M5-resume. Mutation: `updateResumePosition` skips the write to downloads.json.
+/// This is the offline half of the 1.3.6 P0 (TASK-889): a viewer watching a downloaded film
+/// with no NAS in reach has nowhere else for their place to live.
+@MainActor
+struct DownloadResumePositionTests {
+
+  /// Writes a downloads.json into `container` holding the given entries, and creates the
+  /// backing video files so `getDownloadedItems()` does not filter them out as missing.
+  /// Returns nothing — callers assert the precondition through the manager itself, so a
+  /// fixture that failed to arrange is caught rather than assumed.
+  private func seedDownloads(_ items: [DownloadedItem], in container: URL) throws {
+    let downloadsDir = container.appendingPathComponent("Downloads", isDirectory: true)
+    try FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
+    for item in items {
+      try Data("fake-mp4-bytes".utf8)
+        .write(to: downloadsDir.appendingPathComponent(item.videoPath))
+    }
+    let data = try JSONEncoder().encode(items)
+    try data.write(to: container.appendingPathComponent("downloads.json"), options: .atomic)
+  }
+
+  private func entry(id: String, title: String, resume: Int = 0) -> DownloadedItem {
+    DownloadedItem(
+      id: id, title: title, year: 2020,
+      videoPath: "\(id).mp4", posterPath: nil,
+      fileSize: 15, downloadedAt: Date(timeIntervalSince1970: 1_700_000_000),
+      resumePositionSeconds: resume, durationSeconds: 7200
+    )
+  }
+
+  /// OC-DWN-020 · OC-OFF-015 · class:persistence
+  /// Given a downloaded film at position 0, when the viewer stops 900s in while offline,
+  /// then a cold-started manager reading downloads.json from disk reports 900 — their place
+  /// offline survives a relaunch.
+  ///
+  /// KILLS M5-resume (skip the write). The second manager is a separate instance with its
+  /// own empty cache, so it can only answer 900 by reading the file: per B4, the in-memory
+  /// value the first manager holds is not persistence.
+  @Test func anOfflineResumePositionIsReadableFromDiskAfterARelaunch() async throws {
+    let container = try makeTempContainer("dl-resume")
+    defer { removeTempContainer(container) }
+    try seedDownloads([entry(id: "mv-dune", title: "Dune")], in: container)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItem(itemId: "mv-dune")?.resumePositionSeconds == 0,
+            "precondition: the seeded entry starts at 0")
+
+    manager.updateResumePosition(itemId: "mv-dune", positionSeconds: 900)
+
+    // FRESH read path — a new manager over the same container, no shared cache.
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItem(itemId: "mv-dune")?.resumePositionSeconds == 900,
+            "offline resume position after a cold start")
+  }
+
+  /// OC-DWN-020 · class:persistence
+  /// Given a downloaded film at position 0, when no position is ever written, then a
+  /// cold-started manager still reports 0 — the negative case.
+  ///
+  /// Proves the 900 above came from the write and not from the fixture or the decoder.
+  /// Red if `resumePositionSeconds` decoded to something other than what was stored.
+  @Test func aDownloadNeverPlayedReportsNoResumePositionAfterARelaunch() async throws {
+    let container = try makeTempContainer("dl-resume-negative")
+    defer { removeTempContainer(container) }
+    try seedDownloads([entry(id: "mv-dune", title: "Dune")], in: container)
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItem(itemId: "mv-dune")?.resumePositionSeconds == 0)
+  }
+
+  /// OC-DWN-020 · class:state
+  /// Given three downloaded films with "mv-heat" at 120s, when the viewer's position in
+  /// mv-heat advances to 1500s, then a cold-started manager reports 1500 for mv-heat and
+  /// still 0 for both neighbours — a resume write must land on one title only.
+  ///
+  /// KILLS M5-resume, and additionally kills a write that ignores its itemId and stamps
+  /// the first entry (or every entry) — which the single-item test above cannot detect.
+  @Test func aResumeWriteTouchesOnlyItsOwnTitleAndLeavesNeighboursAtZero() async throws {
+    let container = try makeTempContainer("dl-resume-multi")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat", resume: 120),
+      entry(id: "mv-alien", title: "Alien"),
+    ], in: container)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItem(itemId: "mv-heat")?.resumePositionSeconds == 120,
+            "precondition: mv-heat starts at 120")
+
+    manager.updateResumePosition(itemId: "mv-heat", positionSeconds: 1500)
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItem(itemId: "mv-heat")?.resumePositionSeconds == 1500)
+    #expect(relaunched.getDownloadedItem(itemId: "mv-dune")?.resumePositionSeconds == 0,
+            "a neighbour's position must not move")
+    #expect(relaunched.getDownloadedItem(itemId: "mv-alien")?.resumePositionSeconds == 0)
+    #expect(relaunched.getDownloadedItems().count == 3, "and no entry is lost by the write")
+  }
+
+  /// OC-DWN-020 · class:empty
+  /// Given a downloads list holding only "mv-dune", when a resume position is written for a
+  /// title that is not downloaded, then a cold-started manager finds mv-dune untouched at 0
+  /// and no entry invented for the unknown title.
+  ///
+  /// Red if the unknown-id guard were removed and the write appended a bogus entry, or
+  /// stamped the position onto whatever entry happened to be first.
+  @Test func aResumeWriteForATitleThatIsNotDownloadedChangesNothing() async throws {
+    let container = try makeTempContainer("dl-resume-unknown")
+    defer { removeTempContainer(container) }
+    try seedDownloads([entry(id: "mv-dune", title: "Dune")], in: container)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItems().count == 1, "precondition: exactly one download")
+
+    manager.updateResumePosition(itemId: "mv-not-downloaded", positionSeconds: 1500)
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItems().count == 1, "no entry invented")
+    #expect(relaunched.getDownloadedItem(itemId: "mv-dune")?.resumePositionSeconds == 0,
+            "the real entry is untouched")
+    #expect(relaunched.getDownloadedItem(itemId: "mv-not-downloaded") == nil)
+  }
+
+  /// OC-DWN-007 · class:persistence
+  /// Given a downloaded film whose metadata stores a bare filename, when a resume position
+  /// is written, then the file on disk still stores a bare filename — not the absolute path
+  /// the read path resolves to.
+  ///
+  /// The documented invariant: `updateResumePosition` reads raw JSON precisely so it does
+  /// not write resolved absolute paths back. Red if it were reimplemented over
+  /// `getDownloadedItems()`, which would bake a container path into the file and strand
+  /// every download the next time the app's container id changes.
+  @Test func aResumeWriteDoesNotRewriteStoredPathsAsAbsolute() async throws {
+    let container = try makeTempContainer("dl-resume-paths")
+    defer { removeTempContainer(container) }
+    try seedDownloads([entry(id: "mv-dune", title: "Dune")], in: container)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItems().count == 1, "precondition: exactly one download")
+
+    manager.updateResumePosition(itemId: "mv-dune", positionSeconds: 900)
+
+    let raw = try Data(contentsOf: container.appendingPathComponent("downloads.json"))
+    let stored = try JSONDecoder().decode([DownloadedItem].self, from: raw)
+    #expect(stored.count == 1)
+    #expect(stored.first(where: { $0.id == "mv-dune" })?.videoPath == "mv-dune.mp4",
+            "stored path stays a bare filename")
+    #expect(stored.first(where: { $0.id == "mv-dune" })?.resumePositionSeconds == 900)
+  }
+}
+
+// MARK: T-A 3 · DownloadManager HTTP status gate — the 1.3.6 P0 (TASK-887)
+
+/// SURVIVOR M2-httpfail. Mutation: invert the `!(200...299)` check in
+/// `didFinishDownloadingTo`, so an error body is kept as the movie and a real download is
+/// thrown away.
+///
+/// URLSession reports `didFinishDownloadingTo` for ANY completed response — 4xx and 5xx
+/// included, since `error` is only set for transport failures. Before the gate landed, a
+/// 22-byte `{"error":"not_found"}` was moved to `{itemId}.mp4` and marked downloaded, so
+/// offline playback failed on a file the UI swore was present.
+///
+/// The decision is tested through `shouldAcceptResponse(status:)`, the pure function the
+/// delegate now calls. The delegate method itself takes a live `URLSessionDownloadTask`
+/// whose status cannot be chosen from a test; extracting the predicate changed no behaviour.
+@MainActor
+struct DownloadResponseGateTests {
+
+  /// OC-DWN-018 · class:error
+  /// Given a finished transfer whose response was 404, when the gate is asked whether to
+  /// keep the bytes, then it says no — a not-found body must never become the .mp4.
+  ///
+  /// KILLS M2-httpfail directly: inverting the range check makes this return true.
+  @Test func aNotFoundResponseIsRejectedSoItsBodyIsNeverStoredAsTheVideo() {
+    #expect(DownloadManager.shouldAcceptResponse(status: 404) == false)
+  }
+
+  /// OC-DWN-006 · class:error
+  /// Given a finished transfer, when the response status is any 4xx or 5xx the NAS can
+  /// realistically return, then the gate rejects every one of them.
+  ///
+  /// Each status is written as a literal with its expected verdict as a literal — no
+  /// re-derivation from the production range (B2). 401/403 matter specifically: an expired
+  /// session is the most common cause, and its body is JSON, not video. 206 is here as the
+  /// partial-content case a range request legitimately returns and must be kept.
+  @Test func everyErrorStatusIsRejectedAndEverySuccessStatusIsAccepted() {
+    #expect(DownloadManager.shouldAcceptResponse(status: 400) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 401) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 403) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 404) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 410) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 500) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 502) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 503) == false)
+
+    #expect(DownloadManager.shouldAcceptResponse(status: 200) == true)
+    #expect(DownloadManager.shouldAcceptResponse(status: 206) == true)
+  }
+
+  /// OC-DWN-018 · class:boundary
+  /// Given the accepted range is 200 through 299, when each edge and each neighbour just
+  /// outside it is checked, then 199 and 300 are rejected while 200 and 299 are accepted.
+  ///
+  /// Kills an off-by-one on either end (`200...299` widened to `199...300`, or narrowed to
+  /// `201...298`). A redirect at 300 is not a delivered file; keeping its body would store
+  /// an HTML redirect page as the movie.
+  @Test func theAcceptedStatusRangeIsExactlyTwoHundredThroughTwoNinetyNine() {
+    #expect(DownloadManager.shouldAcceptResponse(status: 199) == false)
+    #expect(DownloadManager.shouldAcceptResponse(status: 200) == true)
+    #expect(DownloadManager.shouldAcceptResponse(status: 299) == true)
+    #expect(DownloadManager.shouldAcceptResponse(status: 300) == false)
+  }
+
+  /// OC-DWN-008 · class:state
+  /// Given a transfer with no HTTP response at all — a `file://` URL has none — when the
+  /// gate is asked, then it accepts, because there is no status to reject on.
+  ///
+  /// This is the negative case for the rejections above: the gate must reject on a BAD
+  /// status, not on the absence of one. Red if the guard were changed to treat a missing
+  /// status as a failure, which would discard every legitimate non-HTTP transfer.
+  @Test func aTransferWithNoHTTPStatusIsAcceptedRatherThanDiscarded() {
+    #expect(DownloadManager.shouldAcceptResponse(status: nil) == true)
+  }
+}
+
+// MARK: T-A 7 · DownloadManager.deleteDownload — removing a download
+
+/// SURVIVOR M1-delete-dl. Mutation: `deleteDownload` does nothing. A delete that silently
+/// no-ops leaves multi-GB files on disk while the UI reports them gone, and the viewer's
+/// freed space never returns.
+@MainActor
+struct DownloadDeleteTests {
+
+  private func seedDownloads(_ items: [DownloadedItem], in container: URL) throws {
+    let downloadsDir = container.appendingPathComponent("Downloads", isDirectory: true)
+    try FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
+    for item in items {
+      try Data("fake-mp4-bytes".utf8)
+        .write(to: downloadsDir.appendingPathComponent(item.videoPath))
+    }
+    try JSONEncoder().encode(items)
+      .write(to: container.appendingPathComponent("downloads.json"), options: .atomic)
+  }
+
+  private func entry(id: String, title: String) -> DownloadedItem {
+    DownloadedItem(
+      id: id, title: title, year: 2020,
+      videoPath: "\(id).mp4", posterPath: nil,
+      fileSize: 15, downloadedAt: Date(timeIntervalSince1970: 1_700_000_000),
+      resumePositionSeconds: 0, durationSeconds: 7200
+    )
+  }
+
+  /// OC-DWN-009 · OC-DWN-010 · OC-DWN-023 · class:destructive
+  /// Given four completed downloads, when the viewer deletes "mv-heat", then a
+  /// cold-started manager lists exactly three, mv-heat is absent by identity, the other
+  /// three are present by identity, and mv-heat's bytes are gone from disk while theirs
+  /// remain.
+  ///
+  /// KILLS M1-delete-dl (no-op): the count stays 4, mv-heat is still listed, and its file
+  /// is still on disk. Also kills a delete that removes by POSITION — the surviving set is
+  /// asserted explicitly, never via `.first` or `[0]` (B5). The on-disk file check is what
+  /// makes "reclaims space" (OC-DWN-010) a real assertion rather than a bookkeeping one.
+  @Test func deletingOneDownloadRemovesOnlyItsEntryAndItsBytes() async throws {
+    let container = try makeTempContainer("dl-delete")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat"),
+      entry(id: "mv-alien", title: "Alien"),
+      entry(id: "mv-brazil", title: "Brazil"),
+    ], in: container)
+    let downloadsDir = container.appendingPathComponent("Downloads", isDirectory: true)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItems().count == 4, "precondition: 4 downloads present")
+    #expect(manager.isDownloaded(itemId: "mv-heat"), "precondition: the delete target is present")
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-heat.mp4").path),
+            "precondition: the target's bytes are on disk")
+
+    manager.deleteDownload(itemId: "mv-heat")
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItems().count == 3, "exactly one fewer entry")
+    let ids = Set(relaunched.getDownloadedItems().map(\.id))
+    #expect(!ids.contains("mv-heat"), "the target is gone by identity")
+    #expect(ids == Set(["mv-dune", "mv-alien", "mv-brazil"]), "every survivor present by identity")
+    #expect(relaunched.isDownloaded(itemId: "mv-heat") == false)
+
+    #expect(!FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-heat.mp4").path),
+            "the deleted title's bytes are reclaimed")
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-dune.mp4").path),
+            "a neighbour's bytes are untouched")
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-alien.mp4").path))
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-brazil.mp4").path))
+  }
+
+  /// OC-DWN-009 · class:state
+  /// Given four completed downloads, when nothing is deleted, then a cold-started manager
+  /// still lists all four by identity with every file on disk — the negative case.
+  ///
+  /// Proves the delete test's empty result comes from the delete, not from a read path that
+  /// happens to drop entries (it legitimately drops entries whose files are missing, which
+  /// is exactly why this has to be pinned separately).
+  @Test func relaunchingWithoutDeletingKeepsEveryDownloadByIdentity() async throws {
+    let container = try makeTempContainer("dl-delete-negative")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat"),
+      entry(id: "mv-alien", title: "Alien"),
+      entry(id: "mv-brazil", title: "Brazil"),
+    ], in: container)
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItems().count == 4)
+    #expect(Set(relaunched.getDownloadedItems().map(\.id))
+            == Set(["mv-dune", "mv-heat", "mv-alien", "mv-brazil"]))
+  }
+
+  /// OC-DWN-009 · class:empty
+  /// Given two completed downloads, when a delete names a title that is not downloaded,
+  /// then a cold-started manager still lists both by identity with both files on disk.
+  ///
+  /// Red if the `firstIndex(where:)` guard were dropped so an unknown id fell through to
+  /// removing some other row — the classic destructive-path off-by-one.
+  @Test func deletingATitleThatIsNotDownloadedRemovesNothing() async throws {
+    let container = try makeTempContainer("dl-delete-unknown")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat"),
+    ], in: container)
+    let downloadsDir = container.appendingPathComponent("Downloads", isDirectory: true)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItems().count == 2, "precondition: 2 downloads present")
+
+    manager.deleteDownload(itemId: "mv-not-downloaded")
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItems().count == 2)
+    #expect(Set(relaunched.getDownloadedItems().map(\.id)) == Set(["mv-dune", "mv-heat"]))
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-dune.mp4").path))
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-heat.mp4").path))
+  }
+
+  /// OC-DWN-009 · class:boundary
+  /// Given exactly one completed download, when it is deleted, then a cold-started manager
+  /// lists none and its bytes are gone — the count-of-one boundary, where an off-by-one in
+  /// the index arithmetic shows up.
+  ///
+  /// KILLS M1-delete-dl. Also red if the delete refused to act on the last remaining entry.
+  @Test func deletingTheOnlyDownloadLeavesAnEmptyListAndNoBytes() async throws {
+    let container = try makeTempContainer("dl-delete-last")
+    defer { removeTempContainer(container) }
+    try seedDownloads([entry(id: "mv-dune", title: "Dune")], in: container)
+    let downloadsDir = container.appendingPathComponent("Downloads", isDirectory: true)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItems().count == 1, "precondition: exactly one download")
+
+    manager.deleteDownload(itemId: "mv-dune")
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItems().count == 0)
+    #expect(relaunched.isDownloaded(itemId: "mv-dune") == false)
+    #expect(!FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-dune.mp4").path))
+  }
+
+  /// OC-DWN-026 · class:destructive
+  /// Given three completed downloads, when sign-out purges every download, then a
+  /// cold-started manager lists none and not one of the three files remains on disk.
+  ///
+  /// OC-DWN-026 forbids partial removal specifically: orphaned bytes with no entry, or
+  /// entries pointing at missing files, are both failures. Red if `clearAll` no-ops, and red
+  /// if it clears bookkeeping while leaving the media — the case the file checks catch.
+  @Test func signOutPurgeRemovesEveryDownloadEntryAndEveryFile() async throws {
+    let container = try makeTempContainer("dl-clearall")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat"),
+      entry(id: "mv-alien", title: "Alien"),
+    ], in: container)
+    let downloadsDir = container.appendingPathComponent("Downloads", isDirectory: true)
+
+    let manager = DownloadManager(containerForTesting: container)
+    #expect(manager.getDownloadedItems().count == 3, "precondition: 3 downloads present")
+    #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-heat.mp4").path),
+            "precondition: the files are on disk")
+
+    manager.clearAll()
+
+    let relaunched = DownloadManager(containerForTesting: container)
+    #expect(relaunched.getDownloadedItems().count == 0, "no entry survives sign-out")
+    #expect(relaunched.isDownloaded(itemId: "mv-dune") == false)
+    #expect(relaunched.isDownloaded(itemId: "mv-heat") == false)
+    #expect(relaunched.isDownloaded(itemId: "mv-alien") == false)
+    #expect(!FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-dune.mp4").path),
+            "no orphaned bytes survive sign-out")
+    #expect(!FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-heat.mp4").path))
+    #expect(!FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-alien.mp4").path))
+  }
+}
+
+// MARK: T-B 8 · PlaybackProgress.isFinished — resume vs restart
+
+/// SURVIVOR M3-finish. Mutation: `isFinished` always returns false.
+/// `WatchStateTests` already exists and passes, but it exercises `watchState`, which has its
+/// own threshold logic — it never asks `isFinished` for a verdict, which is why the mutation
+/// lived. Every expected value below is a hand-computed literal; no threshold constant
+/// appears on the expected side (B2).
+@MainActor
+struct IsFinishedTests {
+
+  /// OC-PLY-037 · class:state
+  /// Given a 7200s film stopped at 7000s, when the resume point is computed, then the item
+  /// counts as finished and playback starts at 0 — nobody wants to be dropped into the
+  /// closing credits of a film they already finished.
+  ///
+  /// KILLS M3-finish (always-false): `isFinished` would read false and `resumable` would
+  /// return 7000. 7000/7200 = 97.2%, past the 95% cutoff; 200s remain, so the percentage
+  /// rule is what decides this one.
+  @Test func aFilmWatchedPastNinetyFivePercentIsFinishedAndRestartsFromZero() {
+    #expect(PlaybackProgress.isFinished(positionSeconds: 7000, durationSeconds: 7200) == true)
+    #expect(PlaybackProgress.resumable(positionSeconds: 7000, durationSeconds: 7200) == 0)
+  }
+
+  /// OC-PRG-001 · class:state
+  /// Given the same 7200s film stopped at 3600s, when the resume point is computed, then
+  /// the item is NOT finished and playback resumes at 3600 — the negative case, and the one
+  /// that proves the test above is not satisfied by a function pinned to `true`.
+  ///
+  /// Red if `isFinished` were inverted or always-true, which would restart every
+  /// half-watched film from the beginning.
+  @Test func aFilmWatchedHalfwayIsNotFinishedAndResumesWhereItStopped() {
+    #expect(PlaybackProgress.isFinished(positionSeconds: 3600, durationSeconds: 7200) == false)
+    #expect(PlaybackProgress.resumable(positionSeconds: 3600, durationSeconds: 7200) == 3600)
+  }
+
+  /// OC-PLY-037 · class:boundary
+  /// Given a 10800s (3h) film with 60s left, when the resume point is computed, then it
+  /// counts as finished even though only 99.4% is watched — the absolute
+  /// seconds-remaining rule, which the percentage rule alone would miss.
+  ///
+  /// KILLS M3-finish. 10740/10800 = 99.44%, which is also past 95%, so to isolate the time
+  /// rule the companion below uses a position the percentage rule does NOT catch.
+  @Test func aLongFilmInsideItsFinalMinuteIsFinished() {
+    #expect(PlaybackProgress.isFinished(positionSeconds: 10_740, durationSeconds: 10_800) == true)
+    #expect(PlaybackProgress.resumable(positionSeconds: 10_740, durationSeconds: 10_800) == 0)
+  }
+
+  /// OC-PLY-037 · class:boundary
+  /// Given a 100000s item stopped with 80s left, when the resume point is computed, then it
+  /// counts as finished on the time rule ALONE — 99.92% is past 95% too, so to prove the
+  /// time clause carries its own weight the pair below straddles it at a fixed percentage.
+  ///
+  /// Kills the removal of the `(duration - position) < 90` clause: at 89s remaining of
+  /// 100000s the item is finished, at 91s remaining it is not, and the percentage is
+  /// indistinguishable (99.911% vs 99.909%) — only the seconds rule can tell them apart.
+  @Test func theSecondsRemainingRuleDecidesIndependentlyOfPercentage() {
+    // 89s remaining — inside the 90s cap, finished.
+    #expect(PlaybackProgress.isFinished(positionSeconds: 99_911, durationSeconds: 100_000) == true)
+    // 91s remaining — outside the cap. At 99.909% this is ALSO past 95%, so the percentage
+    // rule still calls it finished. That is correct behaviour and is asserted as such; the
+    // pair above/below the cap is pinned at a percentage the ratio rule does not catch.
+    #expect(PlaybackProgress.isFinished(positionSeconds: 99_909, durationSeconds: 100_000) == true)
+
+    // Isolating the cap: 1000s item, 89s remaining = 91.1% watched, UNDER the 95% ratio.
+    // Only the seconds rule can call this finished.
+    #expect(PlaybackProgress.isFinished(positionSeconds: 911, durationSeconds: 1000) == true)
+    // 91s remaining = 90.9% watched, under 95% and outside the 90s cap — not finished.
+    #expect(PlaybackProgress.isFinished(positionSeconds: 909, durationSeconds: 1000) == false)
+    #expect(PlaybackProgress.resumable(positionSeconds: 909, durationSeconds: 1000) == 909)
+  }
+
+  /// OC-PLY-037 · class:boundary
+  /// Given a 10000s film, when the position sits exactly at 95% and one second either side
+  /// of it, then 95% exactly is NOT finished (the rule is a strict `>`), 9501s is, and
+  /// 9499s is not.
+  ///
+  /// Kills `>` widened to `>=` on the ratio. Expected values are literals computed by hand:
+  /// 95% of 10000 is 9500. Picked so the 90s-remaining clause cannot interfere — 500s and
+  /// 499s remain, both well outside it.
+  @Test func theWatchedRatioBoundaryIsStrictlyGreaterThanNinetyFivePercent() {
+    #expect(PlaybackProgress.isFinished(positionSeconds: 9500, durationSeconds: 10_000) == false)
+    #expect(PlaybackProgress.isFinished(positionSeconds: 9501, durationSeconds: 10_000) == true)
+    #expect(PlaybackProgress.isFinished(positionSeconds: 9499, durationSeconds: 10_000) == false)
+  }
+
+  /// OC-PLY-022 · class:empty
+  /// Given a position with no known duration, or a duration with no position, when the
+  /// resume point is computed, then the item is never treated as finished — an unknown
+  /// duration makes no ratio meaningful, and resuming at a stale position beats silently
+  /// restarting a partly-watched film.
+  ///
+  /// Red if either guard were removed: a zero duration would divide by zero, and a
+  /// zero-or-negative position would be judged by the seconds-remaining rule and wrongly
+  /// finish an unstarted item (7200 - 0 = 7200 is not < 90, so that one needs the position
+  /// guard to be safe at short durations — e.g. a 60s clip at position 0).
+  @Test func anUnknownDurationOrUnstartedItemIsNeverFinished() {
+    #expect(PlaybackProgress.isFinished(positionSeconds: 500, durationSeconds: 0) == false)
+    #expect(PlaybackProgress.isFinished(positionSeconds: 0, durationSeconds: 7200) == false)
+    #expect(PlaybackProgress.isFinished(positionSeconds: 0, durationSeconds: 0) == false)
+    // A 60-second clip never opened: 60 - 0 = 60 is inside the 90s cap, so without the
+    // position guard this would report "finished" for something never played.
+    #expect(PlaybackProgress.isFinished(positionSeconds: 0, durationSeconds: 60) == false)
+    #expect(PlaybackProgress.resumable(positionSeconds: 500, durationSeconds: 0) == 500)
+  }
+
+  /// OC-PRG-003 · class:persistence
+  /// Given a finished position and an unfinished position both written to the store, when
+  /// each is read back from a FRESH database, then the finished title reports 0 and the
+  /// unfinished one reports its real position.
+  ///
+  /// KILLS M3-finish through the persistence path, which is where it actually bites:
+  /// `getProgressSeconds` routes through `isFinished` so that the resume seek, the
+  /// Start Over button and the progress rings agree. With the mutation the finished title
+  /// reads 7000 and would resume into its own credits.
+  @Test func aFinishedPositionReadsAsZeroFromTheStoreWhileAnUnfinishedOneDoesNot() async throws {
+    let dir = try makeTempContainer("isfinished-store")
+    defer { removeTempContainer(dir) }
+    let dbURL = dir.appendingPathComponent("dsreel.db")
+
+    let store = await LocalStore.makeForTesting(databaseURL: dbURL)
+    // 7000 of 7200 = 97.2%, finished. 3600 of 7200 = 50%, not finished.
+    await store.upsertSingleProgress(itemId: "mv-finished", positionSeconds: 7000, durationSeconds: 7200)
+    await store.upsertSingleProgress(itemId: "mv-midway", positionSeconds: 3600, durationSeconds: 7200)
+    #expect(await store.pendingProgressCount() == 2, "precondition: both rows were written")
+
+    let reopened = await LocalStore.makeForTesting(databaseURL: dbURL)
+    #expect(await reopened.getProgressSeconds(itemId: "mv-finished") == 0,
+            "a finished film starts over, not at its credits")
+    #expect(await reopened.getProgressSeconds(itemId: "mv-midway") == 3600,
+            "a half-watched film still resumes")
+  }
+}
+
+// MARK: T-B 9 · APIError.isPermanentRejection — the outbox drop decision
+
+/// SURVIVOR M2-perm. Mutation: `isPermanentRejection` returns false for every status.
+/// This gates whether the progress outbox DROPS a row or retries it forever. Under the
+/// mutation a deleted movie's queued progress is retried indefinitely and blocks every row
+/// behind it — the documented stall. Inverted the other way, a transient 500 or a dropped
+/// connection would silently discard the viewer's watch position.
+@MainActor
+struct PermanentRejectionTests {
+
+  /// OC-PRG-028 · class:error
+  /// Given queued progress for a title the NAS has deleted, when the upload comes back 404,
+  /// then the failure is judged permanent so the row can leave the outbox.
+  ///
+  /// KILLS M2-perm (always-false): the row would be retried forever and block the queue.
+  @Test func aNotFoundIsPermanentSoTheRowCanLeaveTheOutbox() {
+    #expect(APIError.http(404).isPermanentRejection == true)
+  }
+
+  /// OC-PRG-028 · class:error
+  /// Given a queued progress upload, when it is rejected with each status the server uses
+  /// for "this will never be accepted", then every one is judged permanent.
+  ///
+  /// 400 invalid payload, 404 item gone, 410 gone for good, 422 unprocessable. Each status
+  /// and its verdict are literals — the production list is not re-derived (B2).
+  @Test func everyPermanentRejectionStatusIsJudgedPermanent() {
+    #expect(APIError.http(400).isPermanentRejection == true)
+    #expect(APIError.http(404).isPermanentRejection == true)
+    #expect(APIError.http(410).isPermanentRejection == true)
+    #expect(APIError.http(422).isPermanentRejection == true)
+  }
+
+  /// OC-PRG-005 · class:error
+  /// Given a queued progress upload, when it fails for a reason that could succeed later,
+  /// then it is NOT judged permanent and the row stays in the outbox.
+  ///
+  /// The negative case, and the one that stops the function being pinned to `true`: a 500,
+  /// a 503, an expired session (401) or a lost connection must all be retried. Dropping any
+  /// of them silently loses the viewer's place — the exact loss OC-PRG-005 forbids.
+  @Test func transientAndAuthFailuresAreNotPermanentSoTheRowIsRetried() {
+    #expect(APIError.http(500).isPermanentRejection == false)
+    #expect(APIError.http(502).isPermanentRejection == false)
+    #expect(APIError.http(503).isPermanentRejection == false)
+    #expect(APIError.http(401).isPermanentRejection == false, "an expired session is re-authable, not permanent")
+    #expect(APIError.http(403).isPermanentRejection == false)
+    #expect(APIError.http(429).isPermanentRejection == false, "rate limiting is the definition of 'try later'")
+    #expect(APIError.network.isPermanentRejection == false)
+    #expect(APIError.connection(.cannotFindHost).isPermanentRejection == false)
+    #expect(APIError.invalidURL.isPermanentRejection == false)
+  }
+
+  /// OC-PRG-028 · class:error
+  /// Given a server error carrying a machine-readable reason, when that reason names a
+  /// missing or invalid item, then it is judged permanent even without a permanent status
+  /// code — the server reports some of these as 200-with-an-error-body.
+  ///
+  /// KILLS M2-perm. Also red if the message list were matched case-sensitively against a
+  /// different spelling, or if the status check short-circuited the message check.
+  @Test func aServerErrorNamingAMissingItemIsPermanentEvenWithoutAPermanentStatus() {
+    #expect(APIError.server("not_found", status: 200).isPermanentRejection == true)
+    #expect(APIError.server("item_not_found", status: 200).isPermanentRejection == true)
+    #expect(APIError.server("invalid_progress", status: 200).isPermanentRejection == true)
+  }
+
+  /// OC-PRG-005 · class:error
+  /// Given a server error whose reason is transient or unrecognised, when the drop decision
+  /// is made, then it is NOT permanent — an unknown reason must default to retry, because
+  /// the cost of a wrong "permanent" is a lost watch position.
+  ///
+  /// The negative case for the message matching above. Red if the default arm returned true,
+  /// or if the message match were loosened to a substring (which "server_not_found_yet"
+  /// would then trip).
+  @Test func aServerErrorWithATransientOrUnknownReasonIsRetriedNotDropped() {
+    #expect(APIError.server("temporarily_unavailable", status: 503).isPermanentRejection == false)
+    #expect(APIError.server("db_locked", status: 500).isPermanentRejection == false)
+    #expect(APIError.server("", status: 500).isPermanentRejection == false)
+    #expect(APIError.server("something_nobody_has_seen", status: 200).isPermanentRejection == false)
+  }
+
+  /// OC-PRG-028 · class:error
+  /// Given a server error carrying BOTH a permanent status and a transient-looking reason,
+  /// when the decision is made, then the status wins and the row is dropped.
+  ///
+  /// Pins the precedence: the status check runs first and returns early. Red if the two
+  /// checks were reordered so a non-matching message could veto a 404.
+  @Test func aPermanentStatusDecidesEvenWhenTheReasonTextIsUnrecognised() {
+    #expect(APIError.server("some_unrecognised_reason", status: 404).isPermanentRejection == true)
+    #expect(APIError.server("some_unrecognised_reason", status: 410).isPermanentRejection == true)
+  }
+}
