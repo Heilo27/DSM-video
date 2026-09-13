@@ -184,6 +184,17 @@ def main():
             continue
         t0 = time.time()
         passed, tail = run_suite()
+        # A TIMEOUT here is nearly always xcodebuild hanging on simulator acquisition (idle,
+        # 0% CPU, no booted device) rather than anything about the mutation. Failing the gate
+        # on that would make it flaky, and a flaky gate gets switched off — which costs more
+        # than the bug it would have caught. Retry once against a freshly booted simulator and
+        # only believe a second timeout.
+        if passed is None:
+            print("     TIMEOUT — retrying once (suspected simulator hang, not a result)", flush=True)
+            subprocess.run(["xcrun", "simctl", "shutdown", "all"], capture_output=True)
+            subprocess.run(["xcrun", "simctl", "boot", SIM], capture_output=True)
+            time.sleep(10)
+            passed, tail = run_suite()
         dt = int(time.time() - t0)
         revert(mutated_path)
         if passed is None:
@@ -208,6 +219,8 @@ def main():
             print(f"  {r['result']}: {r['id']} ({r['symbol']}) — {r['note']}")
         print("\nSURVIVED means no test noticed that behavior breaking. Write the test;")
         print("do NOT weaken the mutation. BUILD_FAILED means a stale anchor — fix the anchor.")
+        print("TIMEOUT (twice) is environmental, not a test gap — check the simulator, then re-run")
+        print("just that id: python3 scripts/mutation-gate.py <id>")
         sys.exit(1)
     print(f"\nGATE PASSED — {len(results)}/{len(results)} mutations killed.")
     sys.exit(0)
