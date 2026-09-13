@@ -93,3 +93,37 @@ comments, and contrary to the mechanism described in TASK-889's ticket. No behav
 `isUnavailable` reports via `setupFailure` rather than via `db == nil`. But the comments described a
 safety mechanism that was not there, and the R4 agent found it only by building a store that genuinely
 fails to open. That is the kind of thing only a real test finds.
+
+
+---
+
+## Addendum — running the gate in practice (observed 2026-09-12)
+
+The gate is correct but the **simulator subsystem degrades over a long sequential run**. A full
+13-mutation pass (~7 minutes of repeated `xcodebuild test`) reliably reaches a state with:
+
+- zero booted simulators
+- ~120 accumulated `CoreSimulator` processes
+- `xcodebuild` sitting at ~0.1% CPU, never returning
+
+Mutations then report TIMEOUT. This is NOT a test result: `M2-priv` and `M2-reach` both timed out in
+the long run and both KILL cleanly in ~29s when run individually. Every verdict in the R6 table was
+obtained in small batches for exactly this reason.
+
+**Mitigation committed** (d104179): a TIMEOUT now shuts down simulators, boots a fresh one, and retries
+once before being believed, and the failure summary states that a repeated TIMEOUT is environmental
+rather than a missing test.
+
+**Recommended usage:** run it in batches of 4-6 ids rather than all 13 at once, and if timeouts appear,
+reset the subsystem before continuing:
+
+```bash
+pkill -f xcodebuild
+xcrun simctl shutdown all
+killall -9 com.apple.CoreSimulator.CoreSimulatorService
+xcrun simctl boot <udid>
+```
+
+A single full-pass invocation is still the right interface for `fastlane preflight`; it just needs a
+healthy machine and may need one resume. This is a property of the host, not of the suite — worth
+knowing before reading a TIMEOUT as a coverage gap.
