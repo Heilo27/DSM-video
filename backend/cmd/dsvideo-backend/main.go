@@ -5224,11 +5224,54 @@ func showFolderFromPath(path, tvRoot string) string {
 // therefore reported a different number of shows depending on which endpoint you asked,
 // and a re-folded series appeared twice in two of the three. Lowercased so folder-case
 // differences cannot split a show.
+//
+// PARTIAL METADATA MUST NOT SPLIT A FOLDER. Metadata lands per EPISODE, so a show is
+// routinely part-matched: Shameless had 134 episodes carrying showName="Shameless" and 6
+// carrying none, all in ONE folder. Keying each episode independently put the 134 under
+// "shameless" and the 6 under the folder — two groups, one show, listed twice. Reported
+// from a real Apple TV with four shows duplicated and a poster on only one of each pair.
+//
+// The caller therefore resolves ONE name for the whole folder first (see
+// resolveFolderShowNames) and passes it for every episode in that folder, including the
+// unmatched ones. This function stays a pure mapping so both halves of a split-folder show
+// still fold together — that cross-folder merge is a deliberate feature, not an accident.
 func showGroupKey(folderName string, showName sql.NullString) string {
 	if showName.Valid && showName.String != "" {
 		return strings.ToLower(showName.String)
 	}
 	return folderName
+}
+
+// resolveFolderShowNames returns folder → the one show name that folder's episodes group by.
+//
+// Metadata is per-episode, so a single folder can contain episodes that matched TMDb and
+// episodes that did not. Grouping each episode on its own showName then splits one folder
+// into two shows. Deciding the name ONCE per folder — the most common non-empty showName in
+// it — keeps every episode of a folder in one group regardless of which ones matched.
+//
+// Most-common rather than first-seen because a folder can hold a stray mismatch: NCIS's
+// folder carries 159 "NCIS" episodes and 8 "NCIS: Sydney", and the majority is the honest
+// answer for the folder as a whole. A folder with no matches at all maps to no name, so
+// showGroupKey falls back to the folder and unmatched content still groups by folder.
+func resolveFolderShowNames(counts map[string]map[string]int) map[string]sql.NullString {
+	resolved := make(map[string]sql.NullString, len(counts))
+	for folder, names := range counts {
+		best, bestN := "", 0
+		for n, c := range names {
+			// Ties broken on the name itself so the result is deterministic — a map
+			// iteration order deciding a show's identity would make the list unstable
+			// between requests.
+			if c > bestN || (c == bestN && n < best) {
+				best, bestN = n, c
+			}
+		}
+		if best != "" {
+			resolved[folder] = sql.NullString{String: best, Valid: true}
+		} else {
+			resolved[folder] = sql.NullString{}
+		}
+	}
+	return resolved
 }
 
 // showGroupFolders groups episode (path, show_name) pairs into shows and returns, for each
@@ -8316,23 +8359,64 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	showMap := map[string]*showInfo{}
 	showOrder := []string{}
 
+	// TWO PASSES, because one folder's identity depends on all of its episodes.
+	//
+	// Metadata is per-episode, so grouping an episode on its own showName splits a
+	// part-matched folder into two shows — 134 matched Shameless episodes under
+	// "shameless" and 6 unmatched under the folder, one show listed twice with a poster
+	// on only one half. The folder's name has to be decided from the whole folder before
+	// any episode is filed, which means buffering rather than streaming.
+	type epRow struct {
+		id, path     string
+		showName     sql.NullString
+		year         sql.NullInt64
+		posterPath   sql.NullString
+		seasonNum    sql.NullInt64
+		addedAt      sql.NullString
+		changeSeq    sql.NullInt64
+		folderName   string
+	}
+	var eps []epRow
+	nameCounts := map[string]map[string]int{}
+
 	for rows.Next() {
-		var id, path string
-		var showName sql.NullString
-		var year sql.NullInt64
-		var posterPath sql.NullString
-		var seasonNum sql.NullInt64
-		var addedAt sql.NullString
-		var changeSeq sql.NullInt64
-
-		if err := rows.Scan(&id, &path, &showName, &year, &posterPath, &seasonNum, &addedAt, &changeSeq); err != nil {
+		var e epRow
+		if err := rows.Scan(&e.id, &e.path, &e.showName, &e.year, &e.posterPath,
+			&e.seasonNum, &e.addedAt, &e.changeSeq); err != nil {
 			continue
 		}
-
-		folderName := showFolderFromPath(path, tvRoot)
-		if folderName == "" {
+		e.folderName = showFolderFromPath(e.path, tvRoot)
+		if e.folderName == "" {
 			continue
 		}
+		if e.showName.Valid && e.showName.String != "" {
+			if nameCounts[e.folderName] == nil {
+				nameCounts[e.folderName] = map[string]int{}
+			}
+			nameCounts[e.folderName][e.showName.String]++
+		} else if nameCounts[e.folderName] == nil {
+			// Register the folder even with no matches, so it resolves to the folder
+			// fallback rather than being absent from the map.
+			nameCounts[e.folderName] = map[string]int{}
+		}
+		eps = append(eps, e)
+	}
+	// Drain before the second pass: this cursor holds a pool connection, and anything
+	// querying inside it deadlocks under load (the defect fixed in 870636b, three times).
+	rows.Close()
+
+	folderNames := resolveFolderShowNames(nameCounts)
+
+	for _, e := range eps {
+		id, path := e.id, e.path
+		year, posterPath := e.year, e.posterPath
+		seasonNum, addedAt, changeSeq := e.seasonNum, e.addedAt, e.changeSeq
+		folderName := e.folderName
+		_ = path
+
+		// The FOLDER's resolved name, not this episode's. An unmatched episode in a
+		// matched folder groups with its siblings instead of forming a second show.
+		showName := folderNames[folderName]
 		mapKey := showGroupKey(folderName, showName)
 		folderToGroup[folderName] = mapKey
 

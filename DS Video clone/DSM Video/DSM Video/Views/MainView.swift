@@ -36,25 +36,51 @@ struct MainView: View {
         // "IBRARIES". This reproduced at DEFAULT Dynamic Type, so it is a plain sizing
         // overflow rather than an accessibility-scaling artifact. Title Case fits, and
         // matches the platform convention for tab items besides.
+        //
+        // A11y.Tab was declared in the registry and applied to NOTHING — five identifiers
+        // no view used, so the tab bar was unaddressable by identifier to both VoiceOver
+        // automation and the UI suite. Found by a layout test that could not locate the bar
+        // to measure against. Same dead-registry shape as TASK-772's unused modifier.
+        //
+        // The identifier goes on the Label INSIDE .tabItem, not on the content view: the
+        // content view's identifier describes the PAGE, and the tab BUTTON is a separate
+        // element the modifier never reaches. Putting it outside compiles, reads as correct,
+        // and leaves the bar exactly as unaddressable as before — which is how the first
+        // attempt at this failed.
         TabView {
           LibraryHomeView()
-            .tabItem { Label("Home", systemImage: "play.rectangle") }
+            .tabItem {
+              Label("Home", systemImage: "play.rectangle")
+                .accessibilityIdentifier(A11y.Tab.home)
+            }
 
           LibrariesView()
-            .tabItem { Label("Libraries", systemImage: "square.grid.2x2") }
+            .tabItem {
+              Label("Libraries", systemImage: "square.grid.2x2")
+                .accessibilityIdentifier(A11y.Tab.libraries)
+            }
 
           // Search is no longer a dedicated tab — it lives as a magnifying-glass
           // toolbar button inside each library view (Movies / TV Shows). Dropping
           // it to 5 tabs keeps Watchlist + Settings at surface level instead of
           // being collapsed into the system "More" tab.
           DownloadsView()
-            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
+            .tabItem {
+              Label("Downloads", systemImage: "arrow.down.circle")
+                .accessibilityIdentifier(A11y.Tab.downloads)
+            }
 
           WatchlistView()
-            .tabItem { Label("Watchlist", systemImage: "bookmark") }
+            .tabItem {
+              Label("Watchlist", systemImage: "bookmark")
+                .accessibilityIdentifier(A11y.Tab.watchlist)
+            }
 
           SettingsView()
-            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tabItem {
+              Label("Settings", systemImage: "gearshape")
+                .accessibilityIdentifier(A11y.Tab.settings)
+            }
         }
         .tint(Color.dsAccent)
       case .split:

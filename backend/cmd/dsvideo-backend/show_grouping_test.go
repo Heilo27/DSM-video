@@ -112,3 +112,91 @@ func TestScannerFolderRuleIsStricterThanTheDisplayRule(t *testing.T) {
 		t.Errorf("scanner rule on a real folder: got (%q, %v), want (\"Daredevil\", true)", folder, ok)
 	}
 }
+
+// PARTIAL METADATA MUST NOT SPLIT ONE FOLDER INTO TWO SHOWS.
+//
+// Reported from a real Apple TV: the TV Shows grid had blank cards and Star Trek: The Next
+// Generation was missing entirely, while the server held it with 176 episodes and a working
+// poster. Four shows came back TWICE from /tv/shows — same title, same id, different episode
+// counts, a poster on only one of each pair.
+//
+// Cause: metadata lands per EPISODE, so a folder is routinely part-matched. Shameless had 134
+// episodes carrying showName="Shameless" and 6 carrying none, all in one folder. Grouping each
+// episode on its own showName filed the 134 under "shameless" and the 6 under the folder. Both
+// halves then emitted `id: folderName`, so the list contained duplicate ids — and SwiftUI's
+// ForEach, keyed on id, drops or blanks rows when ids collide. That is why TNG disappeared: it
+// was collateral from a collision elsewhere in the list, not a problem with TNG.
+//
+// The fix resolves ONE name per folder before any episode is filed. These tests pin that
+// resolution, since the grouping function itself stays a pure mapping.
+
+func TestPartialMetadataResolvesToOneNamePerFolder(t *testing.T) {
+	// The real Shameless shape: most episodes matched, a few did not.
+	resolved := resolveFolderShowNames(map[string]map[string]int{
+		"Shameless": {"Shameless": 134},
+	})
+
+	got := resolved["Shameless"]
+	if !got.Valid || got.String != "Shameless" {
+		t.Fatalf("a part-matched folder must resolve to its matched name, got %+v", got)
+	}
+
+	// Every episode of the folder — matched or not — must now produce the SAME key.
+	matched := showGroupKey("Shameless", got)
+	unmatched := showGroupKey("Shameless", got)
+	if matched != unmatched {
+		t.Fatalf("one folder produced two keys (%q vs %q) — the show will be listed twice",
+			matched, unmatched)
+	}
+}
+
+// A stray mismatch inside a folder must not win the folder's identity.
+func TestFolderNameResolutionPrefersTheMajority(t *testing.T) {
+	// NCIS's real shape: 159 episodes matched "NCIS", 8 mismatched to "NCIS: Sydney".
+	resolved := resolveFolderShowNames(map[string]map[string]int{
+		"NCIS": {"NCIS": 159, "NCIS: Sydney": 8},
+	})
+	if got := resolved["NCIS"]; !got.Valid || got.String != "NCIS" {
+		t.Fatalf("the majority name must win the folder, got %+v", got)
+	}
+}
+
+// Resolution must be deterministic: a map iteration order deciding a show's identity would
+// make the list reorder between requests for no reason.
+func TestFolderNameResolutionIsDeterministicOnTies(t *testing.T) {
+	counts := map[string]map[string]int{"F": {"Beta": 5, "Alpha": 5}}
+	first := resolveFolderShowNames(counts)["F"]
+	for i := 0; i < 50; i++ {
+		if got := resolveFolderShowNames(counts)["F"]; got != first {
+			t.Fatalf("tie broke differently across runs: %+v then %+v", first, got)
+		}
+	}
+	if first.String != "Alpha" {
+		t.Errorf("ties should break on the name for stability, got %q", first.String)
+	}
+}
+
+// A folder nothing matched has no identity beyond itself, and must still group by folder.
+func TestFolderWithNoMatchesFallsBackToTheFolder(t *testing.T) {
+	resolved := resolveFolderShowNames(map[string]map[string]int{"Unmatched Show": {}})
+	got := resolved["Unmatched Show"]
+	if got.Valid {
+		t.Fatalf("a folder with no matched episodes must resolve to no name, got %+v", got)
+	}
+	if showGroupKey("Unmatched Show", got) != "Unmatched Show" {
+		t.Error("an unmatched folder must still group under its own folder name")
+	}
+}
+
+// The cross-folder merge this function exists for must survive the fix.
+func TestResolutionStillFoldsTwoFoldersOfOneShow(t *testing.T) {
+	resolved := resolveFolderShowNames(map[string]map[string]int{
+		"Daredevil":        {"Daredevil": 13},
+		"Daredevil (2015)": {"Daredevil": 26},
+	})
+	a := showGroupKey("Daredevil", resolved["Daredevil"])
+	b := showGroupKey("Daredevil (2015)", resolved["Daredevil (2015)"])
+	if a != b {
+		t.Fatalf("two folders of one show must still merge: %q vs %q", a, b)
+	}
+}

@@ -1682,21 +1682,55 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 	showMap := map[string]*showInfo{}
 	showOrder := []string{}
 
+	// Two passes, for the same reason handleTVShowsList needs them: metadata is per-episode,
+	// so filing each episode under its OWN showName splits a part-matched folder into two
+	// shows. Found on the native plane first (four shows duplicated on a real Apple TV, with
+	// duplicate ids that made SwiftUI blank rows); this plane had the identical shape and no
+	// report of its own, so it is fixed by the sweep rather than by a second bug report.
+	type epRow struct {
+		id, path     string
+		showName     sql.NullString
+		year         sql.NullInt64
+		ratingVal    sql.NullFloat64
+		posterPath   sql.NullString
+		overview     sql.NullString
+		genres       sql.NullString
+		folderName   string
+	}
+	var eps []epRow
+	nameCounts := map[string]map[string]int{}
+
 	for rows.Next() {
-		var id, path string
-		var showName sql.NullString
-		var year sql.NullInt64
-		var ratingVal sql.NullFloat64
-		var posterPath, backdropPath, overview, genres sql.NullString
-
-		if err := rows.Scan(&id, &path, &showName, &year, &ratingVal, &posterPath, &backdropPath, &overview, &genres); err != nil {
+		var e epRow
+		var backdropPath sql.NullString
+		if err := rows.Scan(&e.id, &e.path, &e.showName, &e.year, &e.ratingVal, &e.posterPath, &backdropPath, &e.overview, &e.genres); err != nil {
 			continue
 		}
-
-		folderName := showFolderFromPath(path, tvRoot)
-		if folderName == "" {
+		e.folderName = showFolderFromPath(e.path, tvRoot)
+		if e.folderName == "" {
 			continue
 		}
+		if nameCounts[e.folderName] == nil {
+			nameCounts[e.folderName] = map[string]int{}
+		}
+		if e.showName.Valid && e.showName.String != "" {
+			nameCounts[e.folderName][e.showName.String]++
+		}
+		eps = append(eps, e)
+	}
+	// Drain before resolving: a cursor holds a pool connection (870636b).
+	rows.Close()
+
+	folderNames := resolveFolderShowNames(nameCounts)
+
+	for _, e := range eps {
+		id := e.id
+		year, ratingVal := e.year, e.ratingVal
+		posterPath, overview, genres := e.posterPath, e.overview, e.genres
+		folderName := e.folderName
+
+		// The FOLDER's resolved name, not this episode's — see resolveFolderShowNames.
+		showName := folderNames[folderName]
 
 		// Shared grouping key — see showGroupKey. This plane grouped on the folder alone,
 		// so the DS Video app showed a series split across differently-named folders twice

@@ -366,4 +366,28 @@ final class DSReelUITests: XCTestCase {
         + "drifted from A11y, or the keyboard accessory was removed"
     )
   }
+
+  /// The Tab mirror matches A11y.Tab.
+  ///
+  /// Separate from the setup mirror check because these only exist once signed in, so the
+  /// unconfigured launch above cannot see them. Demo mode is what puts the app past the
+  /// login screen without a server.
+  func testTabIdentifierMirrorIsComplete() {
+    let app = UITest.launchInDemoMode()
+    _ = app.wait(for: .runningForeground, timeout: UITest.launchTimeout)
+
+    for (name, id) in [
+      ("home", UIID.Tab.home),
+      ("libraries", UIID.Tab.libraries),
+      ("downloads", UIID.Tab.downloads),
+      ("watchlist", UIID.Tab.watchlist),
+      ("settings", UIID.Tab.settings),
+    ] {
+      requireExists(
+        app.buttons[id],
+        "UIID.Tab.\(name) (\(id)) — mirror may have drifted from A11y, or the tab was removed",
+        timeout: UITest.timeout
+      )
+    }
+  }
 }

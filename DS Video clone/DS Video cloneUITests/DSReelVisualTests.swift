@@ -236,4 +236,63 @@ final class DSReelVisualTests: XCTestCase {
         + "the tvOS remote follow the accessibility order, so this screen navigates wrong."
     )
   }
+
+  // MARK: - Tab bar occlusion (TASK-884)
+
+  /// Scrolled to the END, no content sits behind the floating tab bar.
+  ///
+  /// TASK-884 reported rail titles clipped by the bar at default size, and at AX5 the whole
+  /// "Recently Watched" HEADER rendered behind it — measured at 118 lit pixels. A fix added a
+  /// Dynamic-Type-scaled `.safeAreaInset`, and the code now carries a comment asserting the
+  /// remaining AX5 report was a false positive: the probe was catching the NEXT rail's header
+  /// passing under translucent glass mid-scroll, which is iOS 26's intended edge-to-edge
+  /// behaviour rather than occlusion.
+  ///
+  /// That reasoning is plausible and it was never verified — it is an argument in a comment
+  /// against a measurement. This settles it by measuring the thing the comment actually
+  /// claims: the inset governs the END of scrollable content, so scroll to the end and assert
+  /// nothing is left underneath. Mid-scroll content passing under glass is explicitly NOT
+  /// asserted, because that is the behaviour the comment says is intended.
+  func testNoContentSitsBehindTheTabBarWhenScrolledToTheEnd() {
+    let sizes = [
+      "UICTContentSizeCategoryLarge",
+      "UICTContentSizeCategoryAccessibilityXXXL",
+    ]
+
+    for size in sizes {
+      let app = UITest.launchInDemoMode(extraArguments: ["-UIPreferredContentSizeCategoryName", size])
+      _ = app.wait(for: .runningForeground, timeout: UITest.launchTimeout)
+
+      // The tab bar's top edge is the occlusion line. Locate it by a real tab rather than by
+      // assuming a height — the bar grows with Dynamic Type, which is the whole difficulty.
+      let homeTab = app.buttons[UIID.Tab.home]
+      guard homeTab.waitForExistence(timeout: UITest.timeout) else {
+        XCTFail("Could not find the Home tab at \(size), so the tab bar's position is unknown.")
+        continue
+      }
+      let barTop = homeTab.frame.minY
+
+      // Scroll to the very end: the inset under test governs the END of content.
+      let scroll = app.scrollViews.firstMatch
+      if scroll.exists {
+        for _ in 0..<8 { scroll.swipeUp() }
+      }
+
+      let short = size.replacingOccurrences(of: "UICTContentSizeCategory", with: "")
+      capture(app, "12-tabbar-occlusion-\(short)")
+
+      // Any labelled text whose BOTTOM is below the bar's top is underneath it.
+      let occluded = app.staticTexts.allElementsBoundByIndex
+        .filter { $0.exists && !$0.label.isEmpty && $0.frame.height > 0 }
+        .filter { $0.frame.maxY > barTop + 1 }
+        .map { "\($0.label) (maxY \(Int($0.frame.maxY)) vs bar top \(Int(barTop)))" }
+
+      XCTAssertTrue(
+        occluded.isEmpty,
+        "At \(size), \(occluded.count) text element(s) sit behind the tab bar after scrolling "
+          + "to the end of the content: \(occluded.joined(separator: ", ")). The bottom inset "
+          + "is not clearing the floating bar."
+      )
+    }
+  }
 }

@@ -38,11 +38,18 @@ enum A11y {
 
   // MARK: - Main navigation
 
+  /// The five tabs in MainView's TabView, in order.
+  ///
+  /// These were declared here and applied to nothing — the tab bar carried no identifiers
+  /// at all, so neither the UI suite nor VoiceOver automation could address it. `shows` was
+  /// also stale: there is no Shows tab. Search moved into each library's toolbar and the
+  /// fifth slot is Watchlist, so the registry was describing a tab bar the app stopped
+  /// having. A registry nobody applies drifts silently, which is how it got here.
   enum Tab {
     static let home = "tab.home"
     static let libraries = "tab.libraries"
-    static let shows = "tab.shows"
     static let downloads = "tab.downloads"
+    static let watchlist = "tab.watchlist"
     static let settings = "tab.settings"
   }
 

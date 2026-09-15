@@ -194,6 +194,14 @@ enum UIID {
     static let keyboardDoneButton = "setup.keyboardDone"
   }
 
+  enum Tab {
+    static let home = "tab.home"
+    static let libraries = "tab.libraries"
+    static let downloads = "tab.downloads"
+    static let watchlist = "tab.watchlist"
+    static let settings = "tab.settings"
+  }
+
   enum Detail {
     static let downloadButton = "detail.download"
     static let downloadError = "detail.downloadError"
