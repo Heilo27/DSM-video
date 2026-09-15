@@ -128,13 +128,17 @@ struct TVShow: Decodable, Identifiable, Hashable {
   let addedAt: String?
   let metadataVersion: Int?
 
-  /// Stable identity for list/grid rendering. `id` is the folder name, which the
-  /// detail view passes to the seasons/episodes endpoints — but two distinct shows
-  /// can share one folder (e.g. "Marvel's Daredevil" and "Daredevil: Born Again"
-  /// both under Daredevil/), giving them the SAME `id`. A LazyVGrid keyed on `id`
-  /// then collapses the duplicate cells and one renders blank depending on scroll
-  /// position. Key the grid on this composite instead so each show is distinct,
-  /// while detail navigation still uses `id` for the API lookup.
+  /// Composite of `id` and `title`.
+  ///
+  /// DO NOT KEY A GRID ON THIS. Kept only because it reads usefully in diagnostics.
+  ///
+  /// It was introduced as a grid key when two distinct shows sharing one folder
+  /// collapsed into a single cell, and it fixed that shape. It does not fix the general
+  /// problem: a part-matched folder produced two entries with the same id AND the same
+  /// title, so this composite collided too, and four shows silently vanished from a real
+  /// Apple TV. Any identity derived from server CONTENT can collide, because the server
+  /// can always send two rows that agree on every field this is built from. Use
+  /// `Identified` instead, whose identity comes from position and therefore cannot.
   var gridID: String { "\(id)\u{001F}\(title)" }
 
   init(id: String, title: String, year: Int?, seasonCount: Int?, episodeCount: Int?,

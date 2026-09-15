@@ -219,7 +219,10 @@ private struct TVShowDetailSplitView: View {
           }
           .padding(.top, 60)
         } else {
-          ForEach(seasons, id: \.seasonNumber) { season in
+          // Keyed on position: two folders merged into one show can both report a
+          // "Season 1", and keying on seasonNumber would render only one of them.
+          ForEach(seasons.identified) { seasonItem in
+            let season = seasonItem.value
             TVSeasonSection(show: show, season: season, library: library,
                             allSeasons: seasons,
                             highlightEpisodeID: effectiveHighlightEpisodeID,
@@ -527,7 +530,10 @@ private struct TVSeasonSection: View {
             .padding(.vertical, 20)
           }
           let seasonIdx = allSeasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
-          ForEach(Array(episodes.enumerated()), id: \.element.id) { index, ep in
+          // Keyed on position, not ep.id. Two rows sharing an id silently HIDE an
+          // episode — the same class that removed whole shows from the grid, one level
+          // down and harder to notice because nobody counts episodes.
+          ForEach(Array(episodes.enumerated()), id: \.offset) { index, ep in
             TVEpisodeNavRow(
               ep: ep,
               isHighlighted: ep.id == highlightEpisodeID,
@@ -1073,7 +1079,10 @@ private struct TVShowDetailScrollView: View {
             .padding(.top, 32)
             .frame(maxWidth: .infinity)
           } else {
-            ForEach(seasons, id: \.seasonNumber) { season in
+            // Keyed on position — see the tvOS branch. Two merged folders can both
+            // report a "Season 1".
+            ForEach(seasons.identified) { seasonItem in
+              let season = seasonItem.value
               // FIX-2: pass allSeasons so EpisodeDetailView can navigate cross-season
               iOSSeasonSection(show: show, season: season, library: library,
                                highlightEpisodeID: highlightEpisodeID,
@@ -1439,7 +1448,9 @@ private struct iOSSeasonSection: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
           }
-          ForEach(Array(episodes.enumerated()), id: \.element.id) { index, ep in
+          // Keyed on position, not ep.id — see the tvOS episode list. A duplicate id
+          // hides an episode without any visible error.
+          ForEach(Array(episodes.enumerated()), id: \.offset) { index, ep in
             let isHighlighted = ep.id == highlightEpisodeID
             // FIX-2: compute season index so EpisodeDetailView can cross seasons
             let seasonIdx = allSeasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0

@@ -269,7 +269,9 @@ private struct TVHomeView: View {
               // truly blank+unfocusable state is the one handled above.
 
               // Per-library rails
-              ForEach(Array(appState.homeLibraries.enumerated()), id: \.element.id) { idx, lib in
+              // Keyed on position, not library.id: a duplicate id silently drops a
+              // whole rail, and the offset is already here (see Identified).
+              ForEach(Array(appState.homeLibraries.enumerated()), id: \.offset) { idx, lib in
                 TVLibraryRail(library: lib, index: idx)
               }
             }

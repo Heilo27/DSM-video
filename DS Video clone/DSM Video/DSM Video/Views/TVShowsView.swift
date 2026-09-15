@@ -175,18 +175,21 @@ struct TVShowsView: View {
         #if os(tvOS)
         // (an unreachable "No Results" branch wrapped this grid — see displayedShows)
         LazyVGrid(columns: columns, spacing: 44) {
-          // Key on gridID (id + title), NOT id: two distinct shows can share one
-          // folder and therefore an `id` (e.g. both Daredevils under Daredevil/),
-          // which would collapse the duplicate cells and blank one. Matches the iOS
-          // branch; detail navigation still uses show.id for the API lookup.
-          ForEach(displayedShows, id: \.gridID) { show in
+          // Keyed on POSITION, never on server content. gridID (id + title) was the
+          // previous answer and it collided too: a part-matched folder emits two
+          // entries agreeing on both fields, and the grid then dropped shows — four
+          // duplicated and Star Trek: The Next Generation gone outright on a real
+          // Apple TV. Any content-derived key can collide; an offset cannot, so the
+          // grid now renders exactly as many cells as it was sent. Detail navigation
+          // still uses show.id for the API lookup.
+          ForEach(displayedShows.identified) { item in
+            let show = item.value
             NavigationLink {
               TVShowDetailView(show: show, library: library)
             } label: {
               TVShowPosterCell(show: show)
             }
             .buttonStyle(.card)
-            .id(show.gridID)
             .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")\(show.seasonCount.map { ", \($0) season\($0 == 1 ? "" : "s")" } ?? "")")
             .accessibilityHint("Opens show details")
           }
@@ -197,13 +200,11 @@ struct TVShowsView: View {
         #else
         // (an unreachable "No Results" branch wrapped this grid — see displayedShows)
         LazyVGrid(columns: columns, spacing: 12) {
-          // Key on gridID (id + title), NOT id: two distinct shows can share a
-          // folder and therefore an `id` (e.g. both Daredevils under Daredevil/).
-          // A grid keyed on the duplicate id collapses those cells and one renders
-          // black depending on scroll position — the "Daredevil blanks when too much
-          // in view" bug. gridID makes each show a distinct cell; detail navigation
-          // still uses show.id for the seasons/episodes API lookup.
-          ForEach(displayedShows, id: \.gridID) { show in
+          // Keyed on POSITION — see the tvOS branch above. gridID collided whenever
+          // two rows agreed on id AND title, which silently removed shows from the
+          // grid. An offset cannot collide, so every show the server sends renders.
+          ForEach(displayedShows.identified) { item in
+            let show = item.value
             NavigationLink {
               TVShowDetailView(show: show, library: library)
             } label: {
@@ -213,7 +214,6 @@ struct TVShowsView: View {
             // themes). The style existed with zero call sites, so the theme's press
             // feedback never rendered anywhere.
             .dsPressable()
-            .id(show.gridID)
             .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
             .accessibilityHint("Opens show details")
           }

@@ -2522,3 +2522,89 @@ struct PermanentRejectionTests {
     #expect(APIError.server("some_unrecognised_reason", status: 410).isPermanentRejection == true)
   }
 }
+
+// MARK: - List identity must never lose an element
+
+/// A list must render every element it was given, even when the server sends duplicates.
+///
+/// SwiftUI's ForEach is keyed on identity and COLLAPSES elements that share a key. So a
+/// duplicate does not appear as a duplicate — it appears as a MISSING row, and often the
+/// row that disappears is a NEIGHBOUR rather than the duplicate itself. Star Trek: The Next
+/// Generation vanished from a real Apple TV that way: the server held all 176 episodes and
+/// a valid poster, and a collision four rows away removed it from the grid.
+///
+/// This had already been patched once, with `gridID` (id + title), after two distinct shows
+/// sharing a folder collapsed into one cell. That patch did not hold: a part-matched folder
+/// emits two rows agreeing on id AND title, so the composite collided too. Every fix of that
+/// shape is a guess about which fields will be unique next time, and the server can always
+/// send two rows that agree on all of them.
+///
+/// `Identified` takes identity from POSITION, which cannot collide by construction. These
+/// tests pin that property against the real data that broke it.
+@Suite("List identity")
+@MainActor
+struct IdentifiedTests {
+
+  private func show(id: String, title: String) -> TVShow {
+    TVShow(id: id, title: title, year: nil, seasonCount: nil, episodeCount: nil,
+           posterImageId: nil, lastWatchedAt: nil, addedAt: nil)
+  }
+
+  /// The exact payload that broke the device: four duplicated shows plus the one that
+  /// disappeared because of them.
+  @Test func everyShowSurvivesDuplicateIDsAndTitles() {
+    let shows = [
+      show(id: "NCIS", title: "NCIS"),
+      show(id: "Shameless", title: "Shameless"),
+      show(id: "NCIS", title: "NCIS"),
+      show(id: "Star Trek The Next Generation", title: "Star Trek: The Next Generation"),
+      show(id: "Shameless", title: "Shameless"),
+    ]
+
+    let rendered = shows.identified
+
+    #expect(rendered.count == shows.count,
+            "A grid keyed on this renders fewer cells than it was given shows — the missing ones vanish with no error anywhere.")
+
+    // Identity must be unique even though id and title both repeat.
+    #expect(Set(rendered.map(\.id)).count == shows.count,
+            "Two elements share an identity, so ForEach will collapse them.")
+
+    // The show that went missing must be present, by value not by count.
+    #expect(rendered.contains { $0.value.title == "Star Trek: The Next Generation" },
+            "The row that disappeared on the device is still absent.")
+
+    // gridID, the previous fix, must be shown to be insufficient — otherwise this test
+    // would pass against the broken version and prove nothing.
+    #expect(Set(shows.map(\.gridID)).count < shows.count,
+            "This payload no longer reproduces the collision, so the test has stopped guarding anything. Pick data where id AND title repeat.")
+  }
+
+  /// Order is preserved: a list that renders everything in the wrong order is its own bug.
+  @Test func orderIsPreserved() {
+    let shows = [show(id: "a", title: "Alpha"),
+                 show(id: "b", title: "Beta"),
+                 show(id: "a", title: "Alpha")]
+    let rendered = shows.identified
+    #expect(rendered.map(\.value.title) == ["Alpha", "Beta", "Alpha"])
+  }
+
+  /// Identity is positional, so it must be exactly the offset — not a hash, not a UUID
+  /// regenerated per access, which would redraw the whole list on every body evaluation.
+  @Test func identityIsTheOffsetAndIsStableAcrossCalls() {
+    let shows = [show(id: "a", title: "A"), show(id: "a", title: "A")]
+    #expect(shows.identified.map(\.id) == [0, 1])
+    #expect(shows.identified.map(\.id) == shows.identified.map(\.id),
+            "Identity changed between calls — the list would redraw on every update.")
+  }
+
+  @Test func emptyAndSingleElementCollectionsBehave() {
+    #expect([TVShow]().identified.isEmpty)
+    #expect(show(id: "x", title: "X").asArray.identified.count == 1)
+  }
+}
+
+@MainActor
+private extension TVShow {
+  var asArray: [TVShow] { [self] }
+}

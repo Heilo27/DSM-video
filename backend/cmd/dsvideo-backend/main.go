@@ -8526,7 +8526,53 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		shows = append(shows, show)
 	}
 
+	shows = dedupeByID(shows, "/tv/shows")
+
 	writeJSON(w, http.StatusOK, map[string]any{"shows": shows})
+}
+
+// dedupeByID enforces the invariant that a list response never contains two rows with the
+// same `id`, and logs loudly when it has to.
+//
+// WHY THIS EXISTS AS A GUARD AND NOT JUST A FIX
+// ---------------------------------------------
+// Duplicate ids are not a cosmetic API wart. Every client keys its rendering on identity,
+// and SwiftUI's ForEach silently COLLAPSES rows that share a key — so a duplicate does not
+// show up as a duplicate, it shows up as a MISSING row, often a neighbouring one. That is
+// how Star Trek: The Next Generation vanished from a real Apple TV while sitting on the
+// server with 176 episodes and a working poster: a collision four rows away ate it.
+//
+// The specific cause (a part-matched folder splitting into two groups) is fixed upstream in
+// resolveFolderShowNames. This is the belt: the grouping code is not the only thing that can
+// produce a collision, a future change can reintroduce one, and the failure is invisible at
+// every layer between here and the screen. Better to drop the extra row and say so than to
+// let a client quietly hide content.
+//
+// Keeps the FIRST occurrence: rows are already sorted for display, so the first is the one
+// the user would expect to see, and the duplicate is by definition the less complete record
+// (the split that produced this always left one half without metadata).
+func dedupeByID(rows []map[string]any, route string) []map[string]any {
+	seen := make(map[string]bool, len(rows))
+	out := rows[:0:0]
+	for _, row := range rows {
+		id, _ := row["id"].(string)
+		if id == "" {
+			// No id at all is its own defect, but dropping the row would hide content —
+			// exactly what this guard exists to prevent. Pass it through and complain.
+			log.Printf("[INVARIANT] %s emitted a row with no id: %v", route, row["title"])
+			out = append(out, row)
+			continue
+		}
+		if seen[id] {
+			log.Printf("[INVARIANT] %s emitted duplicate id %q (title %v) — dropping the "+
+				"later row. A client keyed on id would have hidden a DIFFERENT row instead.",
+				route, id, row["title"])
+			continue
+		}
+		seen[id] = true
+		out = append(out, row)
+	}
+	return out
 }
 
 // handleTVShowSeasons returns season summary for a show:
