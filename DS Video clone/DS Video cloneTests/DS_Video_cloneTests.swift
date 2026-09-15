@@ -2608,3 +2608,131 @@ struct IdentifiedTests {
 private extension TVShow {
   var asArray: [TVShow] { [self] }
 }
+
+// MARK: - Live wire contract
+
+/// The shows list must decode the payload the SERVER ACTUALLY SENDS.
+///
+/// Captured from the live NAS on 2026-09-15, immediately after deploying the show-grouping
+/// and unique-id changes. A model test built from a hand-written fixture only proves the
+/// model agrees with itself; this proves it agrees with the server, which is the thing that
+/// broke when a field changed shape.
+///
+/// Two rows on purpose: one fully populated, and the sparsest row in the library (no poster,
+/// no year, never watched). The sparse one is the real risk — a field that is non-optional in
+/// the model fails the ENTIRE list decode when the server omits it, which is how the watchlist
+/// once rendered empty with six items saved server-side.
+@MainActor
+struct LiveShowsContractTests {
+
+  private static let liveResponse = """
+  {"shows": [
+    {"addedAt": "2026-06-16T10:43:27Z", "episodeCount": 10, "id": "1883",
+     "lastWatchedAt": "2026-09-12T10:45:34Z", "metadataVersion": 5975,
+     "posterImageId": "it_2f766f6c756d6531", "seasonCount": 1, "title": "1883", "year": 2021},
+    {"addedAt": "2023-07-10T20:42:41Z", "episodeCount": 9, "id": "DW Exodus",
+     "lastWatchedAt": null, "metadataVersion": 6783, "posterImageId": null,
+     "seasonCount": 1, "title": "DW Exodus", "year": null}
+  ]}
+  """
+
+  @Test func decodesTheLiveShowsResponse() throws {
+    let resp = try JSONDecoder().decode(
+      TVShowsResponse.self,
+      from: Self.liveResponse.data(using: .utf8)!
+    )
+
+    #expect(resp.shows.count == 2, "a row was dropped decoding the live payload")
+
+    let full = resp.shows[0]
+    #expect(full.id == "1883")
+    #expect(full.title == "1883")
+    #expect(full.year == 2021)
+    #expect(full.episodeCount == 10)
+    #expect(full.seasonCount == 1)
+    #expect(full.posterImageId != nil)
+    #expect(full.lastWatchedAt != nil)
+    #expect(full.metadataVersion == 5975)
+
+    // The sparse row must survive its nulls rather than failing the whole decode.
+    let sparse = resp.shows[1]
+    #expect(sparse.id == "DW Exodus")
+    #expect(sparse.year == nil)
+    #expect(sparse.posterImageId == nil)
+    #expect(sparse.lastWatchedAt == nil)
+    #expect(sparse.episodeCount == 9)
+  }
+
+  /// A qualified id — the form emitted when one folder holds two shows — must decode and
+  /// round-trip untouched. The client treats it as an opaque string and hands it back to the
+  /// seasons/episodes endpoints, so any normalising here would make those shows un-openable.
+  @Test func decodesAQualifiedShowID() throws {
+    let json = """
+    {"shows": [{"id": "Daredevil::daredevil: born again", "title": "Daredevil: Born Again",
+                "year": 2025, "seasonCount": 1, "episodeCount": 9, "posterImageId": null,
+                "lastWatchedAt": null, "addedAt": null, "metadataVersion": 1}]}
+    """
+    let resp = try JSONDecoder().decode(TVShowsResponse.self, from: json.data(using: .utf8)!)
+    #expect(resp.shows.count == 1)
+    #expect(resp.shows[0].id == "Daredevil::daredevil: born again",
+            "the id was altered in transit — the detail request would 404")
+  }
+}
+
+// MARK: - Sync cursor cannot outrun the server
+
+/// A local delta-sync cursor ahead of the server's is a PERMANENT stall, not a hiccup.
+///
+/// Both delta gates in runDeltaSync read `status.seq > cursors.seq`. Once a local cursor
+/// leads, that is false forever: the client stops fetching item deltas, new shows and
+/// episodes never appear again, and nothing reports a problem — progress keeps syncing on
+/// its own cursor, so every log line says the sync succeeded.
+///
+/// Caught from a real device log, not from reading code. iOS held itemSeq 348155 against a
+/// server at 13789, and across the captured window the server advanced 13789 → 13904 — 115
+/// changes the app never fetched while logging "runDeltaSync: done" each time.
+@Suite("Sync cursor clamp")
+struct SyncCursorClampTests {
+
+  /// The exact numbers from the device.
+  @Test func detectsTheRealDeviceStall() {
+    #expect(
+      SyncCursorClamp.isAhead(localItem: 348155, localProgress: 1410,
+                              serverItem: 13789, serverProgress: 49642),
+      "The stall observed on device is not detected, so the client stays wedged."
+    )
+  }
+
+  /// The normal case must NOT trigger — clamping a healthy cursor would re-download the
+  /// library on every sync, which is its own bug (and one this project has already had).
+  @Test func aLaggingCursorIsLeftAlone() {
+    #expect(!SyncCursorClamp.isAhead(localItem: 13000, localProgress: 49000,
+                                     serverItem: 13789, serverProgress: 49642))
+    // Exactly caught up is also normal — the gate is strict `>`, so equality is fine.
+    #expect(!SyncCursorClamp.isAhead(localItem: 13789, localProgress: 49642,
+                                     serverItem: 13789, serverProgress: 49642))
+    // A fresh install.
+    #expect(!SyncCursorClamp.isAhead(localItem: 0, localProgress: 0,
+                                     serverItem: 13789, serverProgress: 49642))
+  }
+
+  /// EITHER cursor being ahead is enough. They gate different fetches, so one stalling its
+  /// own delta stream is a defect whatever the other is doing — and on the device it was
+  /// the item cursor alone while progress was healthily behind.
+  @Test func eitherCursorAloneIsEnough() {
+    #expect(SyncCursorClamp.isAhead(localItem: 999, localProgress: 0,
+                                    serverItem: 10, serverProgress: 500),
+            "item cursor ahead, progress behind — the device's exact shape")
+    #expect(SyncCursorClamp.isAhead(localItem: 0, localProgress: 999,
+                                    serverItem: 10, serverProgress: 500),
+            "progress cursor ahead, item behind")
+  }
+
+  /// Off-by-one in the right direction: one ahead is ahead, one behind is not.
+  @Test func theBoundaryIsExact() {
+    #expect(SyncCursorClamp.isAhead(localItem: 101, localProgress: 0,
+                                    serverItem: 100, serverProgress: 0))
+    #expect(!SyncCursorClamp.isAhead(localItem: 99, localProgress: 0,
+                                     serverItem: 100, serverProgress: 0))
+  }
+}

@@ -1607,8 +1607,37 @@ final class AppState {
     do {
       // Step 1: Get server seq numbers and our local cursors
       let status = try await apiSnapshot.syncStatus()
-      let cursors = await LocalStore.shared.getSyncCursors()
+      var cursors = await LocalStore.shared.getSyncCursors()
       homeLog.info("runDeltaSync: server itemSeq=\(status.itemSeq) local=\(cursors.itemSeq) | server progressSeq=\(status.progressSeq) local=\(cursors.progressSeq)")
+
+      // A local cursor AHEAD of the server's is impossible, and it is a permanent stall.
+      //
+      // Both delta gates below are `status.seq > cursors.seq`. When a local cursor somehow
+      // exceeds the server's, that test is false forever: the app stops fetching item
+      // deltas entirely and new shows and episodes never appear again, while the app keeps
+      // logging healthy syncs. Caught on a real device, where the iOS cursor read 348155
+      // against a server at 13789 and the server advanced 115 changes that were never
+      // fetched. Nothing surfaced — progress kept syncing on its own cursor, so the app
+      // looked alive.
+      //
+      // The cause is a server-side sequence RESET (a rebuilt or restored database restarts
+      // the counter) rather than anything the client did, so the client cannot prevent it —
+      // it can only refuse to be wedged by it. Clamping means the next sync re-fetches from
+      // the clamped point, which is correct: if the server's sequence space was rebuilt,
+      // everything in it is new to us.
+      if SyncCursorClamp.isAhead(local: cursors, server: status) {
+        homeLog.warning("""
+          runDeltaSync: local cursor AHEAD of server           (item \(cursors.itemSeq) > \(status.itemSeq), progress \(cursors.progressSeq) > \(status.progressSeq))           — server sequence was reset; clamping so deltas resume
+          """)
+        dlog.warn(.library, "sync cursor ahead of server — clamping and re-fetching")
+        if cursors.itemSeq > status.itemSeq {
+          await LocalStore.shared.setItemSeq(status.itemSeq)
+        }
+        if cursors.progressSeq > status.progressSeq {
+          await LocalStore.shared.setProgressSeq(status.progressSeq)
+        }
+        cursors = await LocalStore.shared.getSyncCursors()
+      }
 
       // Step 2: Fetch libraries (always fast, small payload)
       let libs = try await apiSnapshot.libraries().libraries

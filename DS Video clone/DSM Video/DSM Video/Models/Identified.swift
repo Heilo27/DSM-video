@@ -67,3 +67,33 @@ nonisolated extension Collection {
     enumerated().map { Identified(offset: $0.offset, value: $0.element) }
   }
 }
+
+/// Decides when a local delta-sync cursor has run ahead of the server's.
+///
+/// A local cursor can only ever LAG the server. When it leads, both delta gates in
+/// runDeltaSync (`status.seq > cursors.seq`) are false forever: the client stops fetching
+/// item deltas entirely, new shows and episodes never appear again, and nothing surfaces —
+/// progress keeps syncing on its own cursor, so the app looks healthy while going stale.
+///
+/// Observed on a real device: iOS held itemSeq 348155 against a server at 13789, and the
+/// server advanced 115 changes that were never fetched.
+///
+/// The cause is server-side: a rebuilt or restored database restarts the sequence counter.
+/// The client cannot prevent that, only refuse to be wedged by it.
+///
+/// Extracted from AppState purely so the rule is testable without a database or a live
+/// server — the predicate is the part that has to be right.
+nonisolated enum SyncCursorClamp {
+  /// True when EITHER cursor leads its server counterpart.
+  ///
+  /// Either alone is enough: the two cursors gate different fetches, so one being ahead
+  /// stalls its own delta stream regardless of the other.
+  static func isAhead(localItem: Int, localProgress: Int, serverItem: Int, serverProgress: Int) -> Bool {
+    localItem > serverItem || localProgress > serverProgress
+  }
+
+  static func isAhead(local: SyncCursors, server: SyncStatusResponse) -> Bool {
+    isAhead(localItem: local.itemSeq, localProgress: local.progressSeq,
+            serverItem: server.itemSeq, serverProgress: server.progressSeq)
+  }
+}

@@ -132,16 +132,22 @@ final class DSReelUITests: XCTestCase {
     requireExists(address, "the server address field", timeout: UITest.launchTimeout)
 
     address.tap()
-    // Must be a PRIVATE address. The app's ATS policy permits cleartext on the local
-    // network only (TASK-777), so a public address over plain http:// is refused by iOS
-    // before any packet is sent — that is an ATS block, not a connection timeout, and it
-    // would test a different error path than this test's name claims. This was previously
-    // 198.51.100.1 (TEST-NET-2) and so never exercised the connectivity path at all.
+    // Must be a PRIVATE address that REFUSES FAST.
     //
-    // 192.168.0.2 is in RFC 1918 space and is the .0 subnet, which is uncommon on real
-    // home networks; combined with a port nothing listens on, the connection is refused
-    // or times out — the real "server unreachable" path.
-    address.typeText("192.168.0.2:65123")
+    // Two constraints, and getting either wrong tests the wrong thing:
+    //
+    //  - Private, because the app's ATS policy permits cleartext on the local network only
+    //    (TASK-777). A public address over plain http:// is refused by iOS before a packet
+    //    is sent, which is an ATS block, not a connection failure. The original
+    //    198.51.100.1 (TEST-NET-2) did exactly that and never reached the network at all.
+    //
+    //  - Fast, because an unrouted LAN address BLACK-HOLES rather than refusing: measured
+    //    at 75s for 192.168.0.2:65123 against this test's 60s budget, so the error never
+    //    arrived and the test failed on a timeout that was its own fault.
+    //
+    // 127.0.0.1 is private, and a closed port there returns ECONNREFUSED immediately
+    // (measured: 0.015s) — the genuine "server unreachable" path, deterministically.
+    address.typeText("127.0.0.1:65123")
 
     let username = app.textFields[UIID.Setup.usernameField]
     requireExists(username, "the username field")
@@ -161,9 +167,27 @@ final class DSReelUITests: XCTestCase {
     requireHittable(connect, "the Connect button")
     connect.tap()
 
-    // Generous: a connection attempt to a black-holed address waits out its timeout.
-    let error = app.otherElements[UIID.Setup.errorText]
-    requireExists(error, "a connection error message", timeout: 60)
+    // 120s, because login is a CASCADE and not a single attempt. buildCandidates() yields
+    // LAN, WAN-direct and relay candidates, tried in order at 2s / 8s / 15s each
+    // (AppState.swift:610-625), and a QuickConnect resolution runs on top of that. Measured
+    // end-to-end at ~75s on the simulator, so a 60s budget failed on the test's own
+    // impatience while the app was behaving exactly as designed.
+    //
+    // Raised deliberately rather than trimmed to fit: the cascade is the feature that makes
+    // leaving the house mid-episode work (FRD-000 M5), and a test must not pressure it into
+    // giving up early.
+    // Queried via descendants, NOT app.otherElements.
+    //
+    // errorRow applies .accessibilityElement(children: .combine), which collapses the HStack
+    // into a single STATIC TEXT (element type 48) rather than an "other" element. Querying
+    // otherElements found nothing and waited out the full budget, so the test failed on its
+    // own wrong query while the app was showing the error correctly the whole time — twice,
+    // once blamed on the address and once on the timeout.
+    //
+    // descendants(matching: .any) is deliberate: the identifier is the contract, the element
+    // TYPE is a SwiftUI implementation detail that changes with modifiers like .combine.
+    let error = app.descendants(matching: .any)[UIID.Setup.errorText]
+    requireExists(error, "a connection error message", timeout: 90)
     capture(app, "02-unreachable-address-error")
 
     let message = (error.value as? String) ?? error.label
@@ -372,9 +396,35 @@ final class DSReelUITests: XCTestCase {
   /// Separate from the setup mirror check because these only exist once signed in, so the
   /// unconfigured launch above cannot see them. Demo mode is what puts the app past the
   /// login screen without a server.
+  ///
+  /// SKIPS THE ASSERTION ON SPLIT LAYOUT, and says so rather than failing. ContentView
+  /// resolves `.split` whenever horizontalSizeClass is .regular (ContentView.swift:33-36),
+  /// and a NavigationSplitView has a SIDEBAR, not a tab bar — so on iPad, and on any device
+  /// the runner reports as regular, these identifiers correctly do not exist. The first
+  /// version asserted them unconditionally and failed for a layout that was behaving
+  /// exactly as designed.
+  ///
+  /// Not an XCTSkip: this suite bans those, because a skip reports success at the moment a
+  /// feature breaks. The sidebar is checked instead, so the test still asserts something on
+  /// every layout.
   func testTabIdentifierMirrorIsComplete() {
     let app = UITest.launchInDemoMode()
     _ = app.wait(for: .runningForeground, timeout: UITest.launchTimeout)
+
+    // Tabs and sidebar are mutually exclusive; find out which this device got.
+    let home = app.buttons[UIID.Tab.home]
+    let isTabLayout = home.waitForExistence(timeout: UITest.timeout)
+
+    guard isTabLayout else {
+      // Split layout. Assert the sidebar is actually there, so a genuinely broken root
+      // still fails rather than quietly taking this branch.
+      XCTAssertTrue(
+        app.cells.firstMatch.waitForExistence(timeout: UITest.timeout)
+          || app.staticTexts["Home"].waitForExistence(timeout: 2),
+        "Neither a tab bar nor a sidebar rendered. The app has no root navigation at all."
+      )
+      return
+    }
 
     for (name, id) in [
       ("home", UIID.Tab.home),
