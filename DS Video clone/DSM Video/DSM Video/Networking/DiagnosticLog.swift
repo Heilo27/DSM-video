@@ -193,7 +193,11 @@ nonisolated final class DiagnosticLog: @unchecked Sendable {
     comps.password = nil
     if let items = comps.queryItems {
       comps.queryItems = items.map { item in
-        let sensitive = ["token", "password", "pass", "auth", "key", "secret"]
+        // `sid` covers Video Station's `_sid`, which is a LIVE session credential carried
+        // in the query string — the one credential this app actually puts in a URL, and
+        // the only one that was missing here. Substring matching is why "_sid" is spelled
+        // "sid": it also catches `sid`, `SynoToken`-adjacent names, and `sessionId`.
+        let sensitive = ["token", "password", "pass", "auth", "key", "secret", "sid"]
         if sensitive.contains(where: { item.name.lowercased().contains($0) }) {
           return URLQueryItem(name: item.name, value: "<redacted>")
         }

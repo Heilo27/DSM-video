@@ -147,6 +147,8 @@ struct GestureVideoPlayer: View {
     @State private var failedToEndObserver: NSObjectProtocol?
     /// Fires just before a downloaded file this player may be reading is unlinked (TASK-903).
     @State private var downloadDeletedObserver: NSObjectProtocol?
+    /// Guards the outputVolume sink against a second registration on PiP re-entry (TASK-897 #6).
+    @State private var didRegisterVolumeObserver = false
     // MARK: ACKNOWLEDGED (TASK-199): Set<AnyCancellable> in @State is a known pattern limitation
     // for struct-based SwiftUI views. The subscriptions established in setupPlayer() are stored
     // here and manually cleared in cleanup(). Moving to @StateObject would require a class wrapper
@@ -1947,6 +1949,11 @@ struct GestureVideoPlayer: View {
         stallObserver = nil
         failedToEndObserver = nil
         downloadDeletedObserver = nil
+        // Must reset alongside the tokens: the subscription it guards lives in
+        // `cancellables`, which is torn down here too. Leaving it true would make the
+        // guard permanent and a re-presented player would have no volume HUD at all —
+        // turning a duplicate-registration bug into a missing-feature one.
+        didRegisterVolumeObserver = false
         player?.pause()
         #if os(iOS)
         // AVAudioSession.setActive can block on the main thread (hang risk). Teardown
@@ -2200,6 +2207,12 @@ struct GestureVideoPlayer: View {
     //            convention is to STAY paused; resuming blasts audio out the speaker.
     private func setupAudioInterruptionObserver() {
         #if os(iOS)
+        // Returning from Picture-in-Picture re-fires .onAppear. setupPlayer() guards its own
+        // re-entry; this did not, so a second registration OVERWROTE interruptionObserver
+        // and the first token was lost — unremovable, still live, and firing into a view
+        // that had moved on. cleanup() can only release the token it can see (TASK-897 #6).
+        guard interruptionObserver == nil else { return }
+
         let center = NotificationCenter.default
         let session = AVAudioSession.sharedInstance()
 
@@ -2251,6 +2264,15 @@ struct GestureVideoPlayer: View {
 
     private func setupVolumeObserver() {
         #if os(iOS)
+        // Same PiP re-entry as setupAudioInterruptionObserver. A second call stacked ANOTHER
+        // outputVolume sink into `cancellables`, so one hardware volume press ran the HUD
+        // handler twice and each sink scheduled its own hide timer, racing each other
+        // (TASK-897 #6). A dedicated flag rather than inspecting `cancellables` — that set
+        // holds every subscription this view makes, so its contents say nothing about
+        // whether THIS one is already registered.
+        guard !didRegisterVolumeObserver else { return }
+        didRegisterVolumeObserver = true
+
         let audioSession = AVAudioSession.sharedInstance()
         activatePlaybackAudioSession()
         // outputVolume is readable immediately without waiting for activation.

@@ -296,11 +296,16 @@ struct ItemDetailView: View {
       }
         .font(.headline.weight(.semibold))
         .foregroundStyle(Color.dsAccentOn)
-        // Fixed 260x54 with no scale factor clipped the label at accessibility text
-        // sizes — on the screen's PRIMARY action.
+        // A fixed 260x54 with no scale factor clipped the label at accessibility sizes,
+        // on the screen's PRIMARY action. minimumScaleFactor alone was not enough: at XXL
+        // the label still needs more than 0.7 of a fixed 260pt, so it kept clipping to a
+        // glyph fragment (TASK-897 #1). The width is now a MINIMUM — the button grows to
+        // fit its label instead of shrinking the label to fit the button — and the height
+        // grows with it so the text is never vertically clipped either.
         .minimumScaleFactor(0.7)
         .lineLimit(1)
-        .frame(width: 260, height: 54)
+        .padding(.horizontal, 20)
+        .frame(minWidth: 260, minHeight: 54)
         .background(Color.dsAccent.brightness(focused ? 0.12 : 0))
         .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
         .scaleEffect(focused ? 1.04 : 1.0)
@@ -470,8 +475,15 @@ struct ItemDetailView: View {
               }
               .font(.headline.weight(.semibold))
               .foregroundStyle(Color.dsAccentOn)
+              // Same clipping as the tvOS button (TASK-897 #1): a hard 44pt height cannot
+              // hold a scaled "Play" at accessibility sizes, so the primary action showed
+              // a cropped glyph. 44 is the HIG minimum, not a maximum — as a minHeight the
+              // button grows with the text instead of cropping it.
+              .minimumScaleFactor(0.7)
+              .lineLimit(1)
+              .padding(.vertical, 8)
               .frame(maxWidth: .infinity)
-              .frame(height: 44)
+              .frame(minHeight: 44)
               .background(Color.dsAccent)
               .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             }

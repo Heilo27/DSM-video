@@ -1109,11 +1109,16 @@ final class AppState {
           // never fires. Detect the address change via reconnect()'s effect on
           // baseURL/api and post .networkDidReconnect ourselves so the listening
           // views (LibrariesView/MainView) reload libraries and streams.
-          let addressBefore = self.api.baseURL.absoluteString
+          let urlBefore = self.api.baseURL
           let switched = await self.reconnect()
-          let addressAfter = self.api.baseURL.absoluteString
-          if switched && addressBefore != addressAfter {
-            homeLog.info("networkMonitor: effective address changed \(addressBefore) → \(addressAfter) — posting networkDidReconnect")
+          let urlAfter = self.api.baseURL
+          if switched && urlBefore.absoluteString != urlAfter.absoluteString {
+            // COMPARED raw — an exact match is the question being asked — but LOGGED
+            // redacted. A base URL can carry a live `_sid=`, since Video Station puts the
+            // session in the query string, and this log exists to be screenshotted and sent
+            // over chat, which makes a token in it a real leak. safeURL was written for
+            // exactly this and had no callers anywhere (TASK-897 #7).
+            homeLog.info("networkMonitor: effective address changed \(DiagnosticLog.safeURL(urlBefore), privacy: .public) → \(DiagnosticLog.safeURL(urlAfter), privacy: .public) — posting networkDidReconnect")
             NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
           }
         }

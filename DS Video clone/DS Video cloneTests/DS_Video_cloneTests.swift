@@ -765,6 +765,28 @@ struct AppStateTests {
     #expect(out.contains("nas.local"))
   }
 
+  /// Video Station's `_sid` is a LIVE session credential carried in the query string —
+  /// the one credential this app genuinely puts in a URL — and it was the only sensitive
+  /// name missing from safeURL's list, so it passed through verbatim (TASK-897 #7).
+  ///
+  /// This matters because the diagnostic log is meant to be PHOTOGRAPHED and sent over
+  /// chat. A session id in that screenshot is a working credential in someone's DMs.
+  @Test func safeURLStripsVideoStationSessionIDs() {
+    let url = URL(string: "http://nas.local:5000/webapi/entry.cgi?api=SYNO.API.Auth&_sid=Xy7bQ2mLp&method=list")!
+    let out = DiagnosticLog.safeURL(url)
+    #expect(!out.contains("Xy7bQ2mLp"), "the live _sid survived redaction: \(out)")
+    // The rest must remain legible — a log that redacts everything diagnoses nothing.
+    #expect(out.contains("nas.local"))
+    #expect(out.contains("SYNO.API.Auth"))
+    #expect(out.contains("method=list"))
+
+    // The bare `sid` spelling too, since the substring rule is what covers both.
+    let bare = URL(string: "https://nas.local/api?sid=Zz9&page=2")!
+    let bareOut = DiagnosticLog.safeURL(bare)
+    #expect(!bareOut.contains("Zz9"))
+    #expect(bareOut.contains("page=2"))
+  }
+
   @Test func urlErrorNamesAreHumanReadable() {
     // A raw code in a photo is useless; every name must be words, not a number.
     #expect(URLError.Code.cannotConnectToHost.diagnosticName == "cannot connect to host")

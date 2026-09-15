@@ -101,7 +101,28 @@ struct ItemsGridView: View {
         // That filter never existed (see displayedItems) so the branch was unreachable;
         // search is a sheet that navigates rather than filtering this grid.
         if items.isEmpty && !isLoading && error == nil {
-          DSContentUnavailable(title: "No Videos", systemImage: "film.stack", description: "This library has no videos yet.")
+          // An active genre filter makes "This library has no videos yet" a false statement
+          // about the LIBRARY — the filter bar above is still showing the chips that caused
+          // the empty result, so the screen contradicted itself and blamed the wrong thing
+          // (TASK-897 #3). Filtering is server-side, so `items` is empty in both cases and
+          // only the filter state can tell them apart.
+          if selectedGenres.isEmpty {
+            DSContentUnavailable(
+              title: "No Videos",
+              systemImage: "film.stack",
+              description: "This library has no videos yet."
+            )
+          } else {
+            DSContentUnavailable(
+              title: "No Matches",
+              systemImage: "line.3.horizontal.decrease.circle",
+              description: selectedGenres.count == 1
+                ? "Nothing in this library matches \(selectedGenres.first ?? ""). Try a different genre."
+                : (genreMode == .all
+                   ? "Nothing matches all \(selectedGenres.count) genres at once. Try switching to Any, or removing one."
+                   : "Nothing in this library matches those genres.")
+            )
+          }
         }
         LazyVGrid(columns: columns, spacing: gridSpacing) {
           #if os(tvOS)
