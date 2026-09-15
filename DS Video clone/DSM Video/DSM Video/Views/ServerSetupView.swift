@@ -136,6 +136,22 @@ struct SetupConnectScreen: View {
       }
       .scrollDismissesKeyboard(.interactively)
     }
+    // The keyboard covers Connect once all three fields are filled, and nothing could
+    // move it: the form is short enough that the ScrollView has no room to scroll the
+    // button clear, and `.scrollDismissesKeyboard(.interactively)` only responds to a
+    // drag the content cannot perform. So Connect RENDERED but could not be TAPPED —
+    // the UI suite's hittability sweep caught it as a dead control (TASK-906). Return
+    // submits from the password field, but only a user who knows that gets in.
+    //
+    // A Done button in the keyboard accessory is the reachable escape, and it belongs
+    // to every field, not just the last one.
+    .toolbar {
+      ToolbarItemGroup(placement: .keyboard) {
+        Spacer()
+        Button("Done") { focusedField = nil }
+          .accessibilityIdentifier(A11y.Setup.keyboardDoneButton)
+      }
+    }
     .navigationBarHidden(true)
     .sheet(isPresented: $showHelp) {
       NavigationStack { ConnectionHelpView() }

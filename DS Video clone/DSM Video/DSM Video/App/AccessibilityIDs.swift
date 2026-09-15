@@ -31,6 +31,9 @@ enum A11y {
     static let connectButton = "setup.connect"
     static let errorText = "setup.error"
     static let revealPasswordButton = "setup.revealPassword"
+    /// Keyboard-accessory Done. The only way to reach Connect once the keyboard is up
+    /// and the form is too short to scroll (TASK-906).
+    static let keyboardDoneButton = "setup.keyboardDone"
   }
 
   // MARK: - Main navigation

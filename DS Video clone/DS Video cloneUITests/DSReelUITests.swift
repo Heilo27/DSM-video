@@ -72,6 +72,54 @@ final class DSReelUITests: XCTestCase {
     )
   }
 
+  /// Connect must be reachable once the form is filled in.
+  ///
+  /// This is the defect's own regression guard, and it is separate on purpose. The
+  /// unreachable-address test now calls dismissKeyboard() to get past this, which is
+  /// correct for what that test is about — but it also means that test would go green
+  /// again even if Connect became untappable a second way. This one asserts the property
+  /// directly: fill every field, and the primary action is reachable by SOME documented
+  /// route. It fails if Done disappears, and it fails if Done stops working.
+  ///
+  /// Original defect (TASK-906): the keyboard covered Connect, the form was too short for
+  /// the ScrollView to scroll it clear, and there was no accessory to dismiss with. The
+  /// button rendered, enabled, and could not be tapped.
+  func testConnectStaysReachableWithTheKeyboardUp() throws {
+    let app = UITest.launchUnconfigured()
+
+    let address = app.textFields[UIID.Setup.addressField]
+    requireExists(address, "the server address field", timeout: UITest.launchTimeout)
+    address.tap()
+    address.typeText("198.51.100.1")
+
+    let username = app.textFields[UIID.Setup.usernameField]
+    requireExists(username, "the username field")
+    username.tap()
+    username.typeText("tester")
+
+    let password = app.secureTextFields[UIID.Setup.passwordField]
+    requireExists(password, "the password field")
+    password.tap()
+    password.typeText("not-a-real-password")
+
+    // The keyboard is now up, focus is in the last field, and the form is complete.
+    let connect = app.buttons[UIID.Setup.connectButton]
+    requireExists(connect, "the Connect button")
+    XCTAssertTrue(
+      connect.isEnabled,
+      "Connect is disabled with every field filled — the form cannot be submitted at all."
+    )
+
+    dismissKeyboard(app)
+
+    XCTAssertTrue(
+      connect.isHittable,
+      "Connect cannot be tapped after filling the form and dismissing the keyboard. The user "
+        + "has entered valid details and has no way to submit them — Return in the password "
+        + "field is the only route left, and nothing on screen says so."
+    )
+  }
+
   /// A wrong address must produce an error that names the REAL cause.
   ///
   /// Standing project rule: user-facing error text maps to the actual problem. Asserting only
@@ -84,9 +132,16 @@ final class DSReelUITests: XCTestCase {
     requireExists(address, "the server address field", timeout: UITest.launchTimeout)
 
     address.tap()
-    // A routable-but-dead address: 198.51.100.0/24 is TEST-NET-2, reserved by RFC 5737 and
-    // guaranteed not to belong to anyone. A bogus hostname would exercise DNS instead.
-    address.typeText("198.51.100.1")
+    // Must be a PRIVATE address. The app's ATS policy permits cleartext on the local
+    // network only (TASK-777), so a public address over plain http:// is refused by iOS
+    // before any packet is sent — that is an ATS block, not a connection timeout, and it
+    // would test a different error path than this test's name claims. This was previously
+    // 198.51.100.1 (TEST-NET-2) and so never exercised the connectivity path at all.
+    //
+    // 192.168.0.2 is in RFC 1918 space and is the .0 subnet, which is uncommon on real
+    // home networks; combined with a port nothing listens on, the connection is refused
+    // or times out — the real "server unreachable" path.
+    address.typeText("192.168.0.2:65123")
 
     let username = app.textFields[UIID.Setup.usernameField]
     requireExists(username, "the username field")
@@ -97,6 +152,10 @@ final class DSReelUITests: XCTestCase {
     requireExists(password, "the password field")
     password.tap()
     password.typeText("not-a-real-password")
+
+    // The keyboard is up over the button after the last field. Use the app's own Done
+    // accessory rather than a coordinate tap — see dismissKeyboard's note.
+    dismissKeyboard(app)
 
     let connect = app.buttons[UIID.Setup.connectButton]
     requireHittable(connect, "the Connect button")
@@ -298,6 +357,13 @@ final class DSReelUITests: XCTestCase {
     requireExists(
       app.buttons[UIID.Setup.connectButton],
       "UIID.Setup.connectButton (\(UIID.Setup.connectButton)) — mirror may have drifted from A11y"
+    )
+    // Only exists while a field has focus, so unlike the others it must be provoked.
+    app.textFields[UIID.Setup.addressField].tap()
+    requireExists(
+      app.buttons[UIID.Setup.keyboardDoneButton],
+      "UIID.Setup.keyboardDoneButton (\(UIID.Setup.keyboardDoneButton)) — mirror may have "
+        + "drifted from A11y, or the keyboard accessory was removed"
     )
   }
 }

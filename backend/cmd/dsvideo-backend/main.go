@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
 	"embed"
@@ -4217,7 +4218,7 @@ func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float
 		return s.cachedEmbeddedSubtitles(itemID, offset)
 	}
 
-	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", sanitizeID(itemID))
+	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", cacheKey(itemID))
 	var tracks []transcode.SubtitleTrack
 	for _, sub := range probeResult.EmbeddedSubs {
 		// Image-based subs (PGS/VobSub) are out of scope: surface them so the client
@@ -4260,7 +4261,7 @@ func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float
 // common play where no live probe ran — we serve what's on disk now and let a
 // background probe populate the rest for next time.
 func (s *Server) cachedEmbeddedSubtitles(itemID string, offset float64) []transcode.SubtitleTrack {
-	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", sanitizeID(itemID))
+	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", cacheKey(itemID))
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return nil
@@ -4315,7 +4316,7 @@ func (s *Server) scheduleEmbeddedSubProbe(itemID, videoPath string, offset float
 		if err != nil || probe == nil || len(probe.EmbeddedSubs) == 0 {
 			return
 		}
-		cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", sanitizeID(itemID))
+		cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", cacheKey(itemID))
 		for _, sub := range probe.EmbeddedSubs {
 			destPath := filepath.Join(cacheDir, fmt.Sprintf("stream_%d.srt", sub.Index))
 			if _, statErr := os.Stat(destPath); statErr == nil {
@@ -4686,7 +4687,7 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 
 // trickplayDir returns the cache directory for an item's scrubbing-preview assets.
 func (s *Server) trickplayDir(itemID string) string {
-	return filepath.Join(s.cfg.TranscodeDir, "trickplay", sanitizeID(itemID))
+	return filepath.Join(s.cfg.TranscodeDir, "trickplay", cacheKey(itemID))
 }
 
 // generateTrickplayOnce runs sprite generation for an item with two guards:
@@ -8259,6 +8260,27 @@ func sanitizeID(s string) string {
 		return '_'
 	}, s)
 	return strings.Trim(s, "_")
+}
+
+// cacheKey returns a fixed-length, filesystem-safe directory name for an item ID.
+//
+// sanitizeID maps characters one-for-one, so it preserves the input's LENGTH. Item IDs
+// are derived from file paths, and a deep enough library produces an ID longer than the
+// 255-byte limit every common filesystem puts on a single name component — so MkdirAll
+// failed with "file name too long" and trickplay/subtitle extraction silently never
+// worked for exactly the items most likely to be in a large collection (TASK-753).
+//
+// A hash is bounded by construction, which is the property that matters here. These
+// directories are a CACHE — the name only has to be stable and collision-free, never
+// readable, and nothing reverses it back to an ID. 128 bits of SHA-256 is far past the
+// point where a collision is a real concern for a per-item cache.
+//
+// Deliberately NOT applied to sanitizeID itself: its other callers ("u_"+sanitizeID(
+// username) and the webapi ID mappings) persist user-visible identity, and rewriting
+// those would orphan existing rows.
+func cacheKey(itemID string) string {
+	sum := sha256.Sum256([]byte(itemID))
+	return hex.EncodeToString(sum[:16])
 }
 
 func randID(prefix string) string {

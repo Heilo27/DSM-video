@@ -663,6 +663,18 @@ enum APIError: Error {
            .serverCertificateHasBadDate, .serverCertificateNotYetValid,
            .serverCertificateHasUnknownRoot:
         return "Secure connection failed. If your server has no HTTPS certificate, turn HTTPS off."
+      case .appTransportSecurityRequiresSecureConnection:
+        // -1022. iOS refused to SEND the request; nothing was ever attempted, so the
+        // address and port are not the problem and telling the user to check them sends
+        // them to debug a server that is very likely fine.
+        //
+        // The app's ATS policy allows cleartext on the local network only (TASK-777), so
+        // this is specifically: plain http:// to a PUBLIC address. Name that, and name the
+        // fix — this is exactly the remote-access case, where the answer is HTTPS or
+        // QuickConnect rather than weakening transport security.
+        return "iOS blocked this connection because it isn't encrypted. Plain http:// is only "
+          + "allowed on your local network — for a server outside it, turn HTTPS on or connect "
+          + "with QuickConnect."
       default:
         return "Couldn't reach the server. Check the address and port."
       }

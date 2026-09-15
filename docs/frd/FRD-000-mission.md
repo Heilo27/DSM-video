@@ -53,6 +53,14 @@ library; neither client invents state the other cannot see.
   failures, not polish items); an error message must name the real cause; an empty screen must
   distinguish "nothing here" from "couldn't load".
 
+**Reachability is part of "works."** A control that renders, is enabled, and cannot be tapped is a
+dead control — the keyboard covering the only way to submit a filled-in form is the same failure as a
+button with an empty action (TASK-906). Every screen that takes text input owes the user a way to
+reach its primary action without knowing a keyboard shortcut.
+
+**"Names the real cause" includes failures that happen before the network.** An OS-level refusal to
+send a request is not an unreachable server, and must not be reported as one (TASK-907).
+
 ### M5 — LAN and WAN, seamlessly, via QuickConnect
 This is the requirement no product surface ever stated, and it is core.
 - Connect on the LAN when home, over WAN when away, using Synology's QuickConnect architecture —

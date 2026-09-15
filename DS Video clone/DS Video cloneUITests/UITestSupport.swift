@@ -95,6 +95,21 @@ extension XCTestCase {
     )
   }
 
+  /// Dismisses the keyboard via the setup screen's Done accessory, if it is up.
+  ///
+  /// Deliberately NOT a tap on empty space: that is a coordinate guess which passes by
+  /// accident when it lands on nothing and fails confusingly when it lands on a control.
+  /// Tapping the app's own documented dismissal affordance also means this helper keeps
+  /// exercising the real escape route a user has (TASK-906) — if Done regresses, the
+  /// tests that rely on it fail, which is the point.
+  ///
+  /// A no-op when the keyboard is already down, so it is safe to call unconditionally.
+  func dismissKeyboard(_ app: XCUIApplication) {
+    let done = app.buttons[UIID.Setup.keyboardDoneButton]
+    guard done.waitForExistence(timeout: 2), done.isHittable else { return }
+    done.tap()
+  }
+
   /// Asserts an element disappears, by identity — never by position.
   func requireDisappears(
     _ element: XCUIElement,
@@ -176,6 +191,7 @@ enum UIID {
     static let passwordField = "setup.password"
     static let connectButton = "setup.connect"
     static let errorText = "setup.error"
+    static let keyboardDoneButton = "setup.keyboardDone"
   }
 
   enum Detail {

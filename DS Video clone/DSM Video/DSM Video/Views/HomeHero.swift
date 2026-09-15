@@ -35,14 +35,29 @@ struct HomeHero: View {
 
   var body: some View {
     // Gate: only the Cinematic theme shows a hero. Everything else keeps the old top-rail layout.
-    if ThemeHolder.shared.current.usesCinematicChrome, !featured.isEmpty {
-      heroBody
+    // The `current` unwrap here is what actually protects the subscript — the isEmpty check
+    // alone did not, because `featured` is COMPUTED and re-derives from `items` on every
+    // access. Between this gate and a read inside heroBody, a refresh that empties `items`
+    // changes the answer, and the old `featured[min(index, count - 1)]` evaluated
+    // `featured[-1]` and crashed (TASK-813).
+    if ThemeHolder.shared.current.usesCinematicChrome, let item = current {
+      heroBody(for: item)
     }
   }
 
-  private var current: ItemSummary { featured[min(index, featured.count - 1)] }
+  /// The featured item at `index`, or nil when there is nothing to feature.
+  ///
+  /// Returns nil rather than clamping to a neighbour so an empty pool cannot produce an
+  /// item. When the pool merely SHRANK below `index` — a rail refresh dropping entries
+  /// while the auto-advance timer sits past the new end — the last item is the right
+  /// answer, and is what the clamp was there for.
+  private var current: ItemSummary? {
+    let pool = featured
+    guard !pool.isEmpty else { return nil }
+    return pool.indices.contains(index) ? pool[index] : pool.last
+  }
 
-  private var heroBody: some View {
+  private func heroBody(for current: ItemSummary) -> some View {
     let theme = ThemeHolder.shared.current
     return NavigationLink {
       ItemDetailView(itemID: current.id, fallbackTitle: current.title)
@@ -80,7 +95,7 @@ struct HomeHero: View {
           // unreliable on iOS — the link swallows the tap — which is half the reason
           // the Watchlist button did nothing. Keeping the spacer here means the text
           // block's layout is byte-identical to before.
-          buttonRow
+          buttonRow(for: current)
             .padding(.top, 4)
             .hidden()
             .accessibilityHidden(true)
@@ -105,7 +120,7 @@ struct HomeHero: View {
     .accessibilityHint("Opens details")
     // The real, tappable controls: outside the NavigationLink so their actions run.
     .overlay(alignment: .bottomLeading) {
-      buttonRow
+      buttonRow(for: current)
         .padding(.horizontal, 20)
         .padding(.bottom, heroButtonBottomInset)
     }
@@ -155,26 +170,26 @@ struct HomeHero: View {
   }
 
   @ViewBuilder
-  private var buttonRow: some View {
+  private func buttonRow(for current: ItemSummary) -> some View {
     // At accessibility text sizes the scaled labels ("Play" / "Watchlist") overflow a
     // side-by-side row and truncate to "P…" / "W…" (TASK-784). Stack vertically and let
     // each button stretch full-width so the labels always render in full. At default
     // sizes the layout is unchanged: glowing red Play + glass Watchlist, side by side.
     if dynamicTypeSize.isAccessibilitySize {
       VStack(alignment: .leading, spacing: 10) {
-        playButton
-        watchlistButton
+        playButton(for: current)
+        watchlistButton(for: current)
       }
     } else {
       HStack(spacing: 10) {
-        playButton
-        watchlistButton
+        playButton(for: current)
+        watchlistButton(for: current)
       }
     }
   }
 
   // Play — filled accent with glow.
-  private var playButton: some View {
+  private func playButton(for current: ItemSummary) -> some View {
     NavigationLink {
       ItemDetailView(itemID: current.id, fallbackTitle: current.title, autoPlay: true)
     } label: {
@@ -192,9 +207,9 @@ struct HomeHero: View {
     .buttonStyle(.plain)
   }
 
-  /// True when the featured item is already on the watchlist.
-  private var isInWatchlist: Bool {
-    appState.watchlistItems.contains { $0.id == current.id }
+  /// True when the given item is already on the watchlist.
+  private func isInWatchlist(_ item: ItemSummary) -> Bool {
+    appState.watchlistItems.contains { $0.id == item.id }
   }
 
   // Watchlist — outlined glass.
@@ -204,11 +219,11 @@ struct HomeHero: View {
   // detail screen instead. Two identical-looking buttons where only Play did what it
   // said. It is now a real Button, and reflects membership rather than always showing
   // "+ Watchlist" for an item already on the list.
-  private var watchlistButton: some View {
-    Button {
-      let item = current
+  private func watchlistButton(for current: ItemSummary) -> some View {
+    let isInWatchlist = isInWatchlist(current)
+    return Button {
       Haptics.play(.light)
-      Task { await appState.toggleWatchlist(item: item) }
+      Task { await appState.toggleWatchlist(item: current) }
     } label: {
       Label(isInWatchlist ? "In Watchlist" : "Watchlist",
             systemImage: isInWatchlist ? "checkmark" : "plus")

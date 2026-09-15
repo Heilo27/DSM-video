@@ -207,6 +207,10 @@ private struct LibraryCard: View {
   @State private var demoAssets: [String] = []
   @State private var itemCount: Int?
   @State private var didLoad = false
+  /// Set when the artwork fetch threw. Distinguishes "failed" from "still loading" —
+  /// which rendered identically before, so a server outage looked like a slow network
+  /// forever and never retried (TASK-815).
+  @State private var loadFailed = false
 
   private var icon: String {
     switch library.kind {
@@ -225,6 +229,15 @@ private struct LibraryCard: View {
     default: noun = n == 1 ? "title" : "titles"
     }
     return "\(n) \(noun)"
+  }
+
+  /// Spoken description of the card, including the artwork-failure state.
+  private var accessibilityDescription: String {
+    if loadFailed {
+      return "\(library.title). Couldn't load contents. Opening the library will try again."
+    }
+    if let countLabel { return "\(library.title), \(countLabel)" }
+    return library.title
   }
 
   var body: some View {
@@ -275,6 +288,12 @@ private struct LibraryCard: View {
     // rendered pixels (text/icons) register taps, so transparent gaps between
     // collage tiles aren't tappable — which made parts of the card dead.
     .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    // One element with a spoken state. The failed case shows a refresh glyph a sighted
+    // user can read; without this, VoiceOver announced only the library name and count
+    // (and on failure there IS no count), so the state was invisible to it (TASK-815).
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(accessibilityDescription)
+    .accessibilityHint("Opens this library")
     // TASK-693/698: redact in app switcher / screen recordings.
     .privacySensitive()
     #if os(iOS)
@@ -344,9 +363,11 @@ private struct LibraryCard: View {
     Rectangle()
       .fill(Color(white: 0.12))
       .overlay(
-        Image(systemName: icon)
+        Image(systemName: loadFailed ? "arrow.clockwise" : icon)
           .font(.system(size: 56, weight: .regular))
-          .foregroundStyle(.white.opacity(0.18))
+          // Brighter when failed: the dim library glyph reads as "loading", and the two
+          // states looked identical before (TASK-815). This is a state, not decoration.
+          .foregroundStyle(.white.opacity(loadFailed ? 0.38 : 0.18))
           .accessibilityHidden(true)
       )
   }
@@ -356,6 +377,8 @@ private struct LibraryCard: View {
   private func loadArtwork() async {
     guard !didLoad else { return }
     didLoad = true
+    // A retry must not keep showing the failed state while it is in flight.
+    loadFailed = false
 
     if appState.isDemoMode {
       let items = library.kind == "tv" ? DemoData.tvItems : DemoData.movieItems
@@ -387,7 +410,13 @@ private struct LibraryCard: View {
       }
     } catch {
       loadLog.warning("LibraryCard: artwork load failed for \(library.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-      // Leave placeholder; card still works as a navigation target.
+      // The card still works as a navigation target, but say so visually and allow another
+      // attempt. Clearing didLoad is what makes the retry possible at all: it is set BEFORE
+      // the await (so concurrent .task invocations don't double-fetch), which also meant a
+      // failure latched permanently — every later appearance hit the `guard !didLoad` and
+      // returned instantly, so the card could never recover without an app restart.
+      loadFailed = true
+      didLoad = false
     }
   }
 }

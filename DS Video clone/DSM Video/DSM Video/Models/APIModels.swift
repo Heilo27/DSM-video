@@ -172,8 +172,14 @@ struct ItemDetail: Decodable, Identifiable {
       let mapperId: String? // Added for backdrop API (uses mapper_id)
     }
 
-    let poster: Ref
-    let backdrop: Ref
+    // Optional for the same reason `images` itself is (TASK-783). Making the envelope
+    // optional only covered a server that omits `images` WHOLE; a server that sends
+    // `{"images": {"poster": {...}}}` with no `backdrop` key still threw keyNotFound and
+    // failed the entire detail decode — the item would not open at all, over a missing
+    // piece of ARTWORK. The bundled Go backend always emits both keys, so this is
+    // unreachable against it; any other DSM-compatible server is where it bites.
+    let poster: Ref?
+    let backdrop: Ref?
   }
 
   let id: String

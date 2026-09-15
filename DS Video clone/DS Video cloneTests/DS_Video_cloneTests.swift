@@ -396,8 +396,46 @@ struct APIModelsCodingTests {
     // omitting the key used to fail the ENTIRE detail decode). Assert through the optional
     // rather than force-unwrapping, so a regression to nil fails this expectation instead
     // of trapping the test run.
-    #expect(detail.images?.poster.id == "poster1")
-    #expect(detail.images?.backdrop.mapperId == "42")
+    #expect(detail.images?.poster?.id == "poster1")
+    #expect(detail.images?.backdrop?.mapperId == "42")
+  }
+
+  /// A PARTIAL images envelope must still decode.
+  ///
+  /// TASK-783 made `images` itself optional, which covered a server omitting the key
+  /// entirely. It did not cover a server that sends `images` with only one of the two
+  /// refs: `poster`/`backdrop` stayed non-optional, so `{"images":{"poster":{...}}}`
+  /// threw keyNotFound and the whole detail failed to decode. The item would not open —
+  /// over missing ARTWORK. Both refs are now optional; this pins each shape.
+  ///
+  /// Three cases, because "it decodes" is not the claim — the claim is that the ref that
+  /// IS present survives while the absent one reads nil.
+  @Test func itemDetailDecodesWithPartialImagesEnvelope() throws {
+    func decode(_ imagesJSON: String) throws -> ItemDetail {
+      let json = """
+      {
+        "id": "m1", "type": "movie", "title": "Inception",
+        "images": \(imagesJSON)
+      }
+      """
+      return try JSONDecoder().decode(ItemDetail.self, from: json.data(using: .utf8)!)
+    }
+
+    // Poster only — backdrop key absent.
+    let posterOnly = try decode(#"{"poster": {"id": "poster1", "mapperId": null}}"#)
+    #expect(posterOnly.images?.poster?.id == "poster1")
+    #expect(posterOnly.images?.backdrop == nil)
+
+    // Backdrop only — poster key absent.
+    let backdropOnly = try decode(#"{"backdrop": {"id": "backdrop1", "mapperId": "42"}}"#)
+    #expect(backdropOnly.images?.backdrop?.id == "backdrop1")
+    #expect(backdropOnly.images?.poster == nil)
+
+    // Envelope present but empty. Decodes; both refs nil.
+    let empty = try decode("{}")
+    #expect(empty.images != nil)
+    #expect(empty.images?.poster == nil)
+    #expect(empty.images?.backdrop == nil)
   }
 
   /// GET /api/v1/watchlist returns ONLY {"items": [...]} — no `total`. ItemsResponse.total
@@ -597,7 +635,8 @@ struct AppStateTests {
     let transportCodes: [URLError.Code] = [
       .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .timedOut,
       .notConnectedToInternet, .networkConnectionLost, .secureConnectionFailed,
-      .serverCertificateUntrusted, .resourceUnavailable
+      .serverCertificateUntrusted, .resourceUnavailable,
+      .appTransportSecurityRequiresSecureConnection
     ]
     for code in transportCodes {
       let msg = APIError.connection(code).userMessage.lowercased()
@@ -624,6 +663,37 @@ struct AppStateTests {
     let msg = APIError.connection(.secureConnectionFailed).userMessage.lowercased()
     #expect(msg.contains("https") || msg.contains("secure"))
     #expect(!msg.contains("password"))
+  }
+
+  /// An ATS block must not be reported as an unreachable server (TASK-907).
+  ///
+  /// Found by the UI suite: connecting to a public address over plain http:// produced
+  /// "Couldn't reach the server. Check the address and port." iOS refused to SEND the
+  /// request — nothing was attempted and the address may be perfectly correct — so that
+  /// message sends the user to debug a healthy server and a correct address.
+  ///
+  /// The distinction is the whole point of the test: the text must name ENCRYPTION as
+  /// the cause, because that is what the user has to change.
+  @Test func atsBlockNamesEncryptionNotTheAddress() {
+    let msg = APIError.connection(.appTransportSecurityRequiresSecureConnection).userMessage.lowercased()
+
+    // Names the real cause.
+    #expect(
+      msg.contains("encrypt") || msg.contains("https") || msg.contains("http://"),
+      "An ATS block must say the connection was refused for being unencrypted. Got: \(msg)"
+    )
+    // Does NOT send the user to re-check a correct address — the failure happened before
+    // any packet was sent, so the address was never in question.
+    #expect(
+      !msg.contains("check the address"),
+      "An ATS block blamed the address, which was never contacted. Got: \(msg)"
+    )
+    // Still a transport failure: it must not implicate credentials.
+    #expect(!msg.contains("password"))
+    #expect(!msg.contains("username"))
+    // And it must not read as a generic unreachable-server message, which is the exact
+    // text this case used to fall through to.
+    #expect(msg != "couldn't reach the server. check the address and port.")
   }
 
   // MARK: - Diagnostic log
