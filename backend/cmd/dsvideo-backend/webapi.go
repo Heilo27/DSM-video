@@ -1937,17 +1937,10 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 			continue
 		}
 
-		// Get watch status
-		p, _ := s.getProgress(session.UserID, id)
-		var watchStatus map[string]any
-		if p != nil {
-			pos, _ := p["positionSeconds"].(int)
-			dur, _ := p["durationSeconds"].(int)
-			watchStatus = map[string]any{
-				"time":       pos,
-				"total_time": dur,
-			}
-		}
+		// TASK-904: watch status is resolved AFTER this cursor closes, in one batch query.
+		// Calling s.getProgress here took a pool connection per row while `rows` held one of
+		// its own — the deadlock shape documented in handleTVShowEpisodes and fixed in
+		// handleShowDetail. Third instance of the same pattern; see the batch below.
 
 		// Stable mapper_id derived from the episode's database ID.
 		mapperID := stableIDWithCollision(id, epIDTaken)
@@ -1973,12 +1966,36 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 		if duration.Valid {
 			ep["duration"] = int(duration.Int64)
 		}
-		if watchStatus != nil {
-			ep["watch_status"] = watchStatus
-		}
 		ep["_internal_id"] = id
 
 		episodes = append(episodes, ep)
+	}
+	// Release the connection before the batch query below (TASK-904).
+	rows.Close()
+
+	// One query for every episode's progress, instead of one per row inside the cursor.
+	episodeIDs := make([]string, 0, len(episodes))
+	for _, ep := range episodes {
+		if id, ok := ep["_internal_id"].(string); ok {
+			episodeIDs = append(episodeIDs, id)
+		}
+	}
+	progressByID := s.getProgressBatch(session.UserID, episodeIDs)
+	for _, ep := range episodes {
+		id, ok := ep["_internal_id"].(string)
+		if !ok {
+			continue
+		}
+		p := progressByID[id]
+		if p == nil {
+			continue
+		}
+		pos, _ := p["positionSeconds"].(int)
+		dur, _ := p["durationSeconds"].(int)
+		ep["watch_status"] = map[string]any{
+			"time":       pos,
+			"total_time": dur,
+		}
 	}
 
 	// Store mappings

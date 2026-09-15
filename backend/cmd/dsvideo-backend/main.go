@@ -3175,6 +3175,26 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	var episodes []episode
 	seasonSet := map[int]bool{}
 
+	// TASK-904: drain the cursor BEFORE querying progress.
+	//
+	// This loop used to call s.getProgress(u.ID, id) per episode while `rows` was still open.
+	// Each call takes a connection from the pool; with the cursor holding one and concurrent
+	// show-detail requests each doing the same, the pool is exhausted and every request blocks
+	// on a connection that only frees when a cursor closes — which it cannot, because the
+	// goroutine draining it is itself waiting for a connection. handleTVShowEpisodes carries a
+	// comment describing exactly this deadlock and was fixed there with getProgressBatch; this
+	// handler kept the original shape. Same outage, different endpoint.
+	//
+	// Scan everything first, close the cursor, then resolve progress in ONE query.
+	type pendingEpisode struct {
+		id         string
+		epTitle    sql.NullString
+		episodeNum sql.NullInt64
+		duration   sql.NullInt64
+		season     int
+	}
+	var pending []pendingEpisode
+
 	for rows.Next() {
 		var id, title string
 		var seasonNum, episodeNum, duration sql.NullInt64
@@ -3184,8 +3204,27 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Get progress for this episode
-		p, _ := s.getProgress(u.ID, id)
+		sn := 1
+		if seasonNum.Valid {
+			sn = int(seasonNum.Int64)
+		}
+		seasonSet[sn] = true
+
+		pending = append(pending, pendingEpisode{
+			id: id, epTitle: epTitle, episodeNum: episodeNum, duration: duration, season: sn,
+		})
+	}
+	// Release the connection before issuing the batch query below.
+	rows.Close()
+
+	episodeIDs := make([]string, 0, len(pending))
+	for _, pe := range pending {
+		episodeIDs = append(episodeIDs, pe.id)
+	}
+	progressByID := s.getProgressBatch(u.ID, episodeIDs)
+
+	for _, pe := range pending {
+		p := progressByID[pe.id]
 
 		watched := false
 		if p != nil {
@@ -3196,23 +3235,17 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		sn := 1
-		if seasonNum.Valid {
-			sn = int(seasonNum.Int64)
-		}
-		seasonSet[sn] = true
-
 		ep := map[string]any{
-			"id":              id,
-			"title":           nullStringToAny(epTitle),
-			"episodeNumber":   nullIntToAny(episodeNum),
-			"seasonNumber":    sn,
-			"durationSeconds": nullIntToAny(duration),
+			"id":              pe.id,
+			"title":           nullStringToAny(pe.epTitle),
+			"episodeNumber":   nullIntToAny(pe.episodeNum),
+			"seasonNumber":    pe.season,
+			"durationSeconds": nullIntToAny(pe.duration),
 			"watched":         watched,
 			"progress":        p,
 		}
 
-		episodes = append(episodes, episode{data: ep, season: sn})
+		episodes = append(episodes, episode{data: ep, season: pe.season})
 	}
 
 	// Build seasons array
