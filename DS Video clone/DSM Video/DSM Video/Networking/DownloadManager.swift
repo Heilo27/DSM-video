@@ -5,6 +5,22 @@ import os.log
 import UIKit
 #endif
 
+extension Notification.Name {
+  /// A downloaded file is about to be removed from disk.
+  ///
+  /// Posted SYNCHRONOUSLY and BEFORE the file is unlinked, so a player currently reading
+  /// that asset can tear down first. AVPlayer holds the file open; deleting it underneath
+  /// presents as a stall or an unhelpful decode error rather than as "this was removed"
+  /// (TASK-903).
+  ///
+  /// userInfo: `itemId` (String). A nil itemId means EVERY download is going (clearAll on
+  /// sign-out) — a listener with any downloaded asset loaded should treat that as its own.
+  ///
+  /// This direction is deliberate: DownloadManager does not know which view is playing
+  /// what, and should not. The player knows its own itemID and decides for itself.
+  static let downloadWillBeDeleted = Notification.Name("dsm.downloadWillBeDeleted")
+}
+
 struct DownloadedItem: Identifiable, Codable {
   let id: String
   let title: String
@@ -290,6 +306,14 @@ final class DownloadManager: NSObject {
 
     let item = items[index]
 
+    // Tell any active player BEFORE the file goes. Synchronous post: the listener tears
+    // the player down inside this call, so by the time removeItem runs nothing holds the
+    // asset open (TASK-903). The deletion itself still proceeds unconditionally — the
+    // purge is correct policy (TASK-807) and must not be skippable by something playing.
+    NotificationCenter.default.post(
+      name: .downloadWillBeDeleted, object: nil, userInfo: ["itemId": itemId]
+    )
+
     // Delete files
     let fm = FileManager.default
     try? fm.removeItem(atPath: item.videoPath)
@@ -319,6 +343,13 @@ final class DownloadManager: NSObject {
     pausedDownloads.removeAll()
     failedDownloads.removeAll()
     pendingDownloadInfo.removeAll()
+
+    // Every download is going. nil itemId means "whatever you have loaded, it is about to
+    // be removed" — posted before any unlink for the same reason deleteDownload does it
+    // (TASK-903). Sign-out still purges regardless of what is playing.
+    NotificationCenter.default.post(
+      name: .downloadWillBeDeleted, object: nil, userInfo: [:]
+    )
 
     let fm = FileManager.default
 

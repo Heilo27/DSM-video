@@ -145,6 +145,10 @@ struct SetupConnectScreen: View {
     //
     // A Done button in the keyboard accessory is the reachable escape, and it belongs
     // to every field, not just the last one.
+    // iOS only: tvOS has no keyboard accessory placement, and no need for one — its
+    // on-screen keyboard is a focus-driven full-screen surface that the remote leaves
+    // deliberately, so a control can never be hidden underneath it.
+    #if os(iOS)
     .toolbar {
       ToolbarItemGroup(placement: .keyboard) {
         Spacer()
@@ -152,6 +156,7 @@ struct SetupConnectScreen: View {
           .accessibilityIdentifier(A11y.Setup.keyboardDoneButton)
       }
     }
+    #endif
     .navigationBarHidden(true)
     .sheet(isPresented: $showHelp) {
       NavigationStack { ConnectionHelpView() }

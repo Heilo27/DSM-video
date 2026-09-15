@@ -18,6 +18,15 @@ struct ItemDetailView: View {
   var episodeNumber: Int? = nil
 
   @State private var detail: ItemDetail?
+
+  /// The name this screen shows for the item, in one place.
+  ///
+  /// `shownTitle` was written out at seventeen call sites, so teaching
+  /// the screen to prefer an episode's real name (TASK-870) meant changing all seventeen,
+  /// and missing one would name the same episode two different things on the same screen.
+  /// One definition; the episode rule lives in ItemDetail.displayTitle.
+  private var shownTitle: String { detail?.displayTitle ?? fallbackTitle }
+
   @State private var isLoading: Bool = false
   @State private var error: String?
   @State private var downloadError: String?
@@ -81,7 +90,7 @@ struct ItemDetailView: View {
       }) {
         PlayerSheet(
           itemID: itemID,
-          title: detail?.title ?? fallbackTitle,
+          title: shownTitle,
           itemYear: detail?.year,
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
@@ -92,7 +101,7 @@ struct ItemDetailView: View {
       }
     #else
     iOSBody
-      .navigationTitle(detail?.title ?? fallbackTitle)
+      .navigationTitle(shownTitle)
       .navigationBarTitleDisplayMode(.inline)
       .toolbarBackground(.visible, for: .navigationBar)
       .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
@@ -111,7 +120,7 @@ struct ItemDetailView: View {
       }) {
         PlayerSheet(
           itemID: itemID,
-          title: detail?.title ?? fallbackTitle,
+          title: shownTitle,
           itemYear: detail?.year,
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
@@ -152,7 +161,7 @@ struct ItemDetailView: View {
         }
       }
       .sheet(isPresented: $showMetadataFixer) {
-        MetadataFixerSheet(itemID: itemID, initialQuery: detail?.title ?? fallbackTitle) {
+        MetadataFixerSheet(itemID: itemID, initialQuery: shownTitle) {
           detail = nil
           Task { await load() }
         }
@@ -304,7 +313,7 @@ struct ItemDetailView: View {
     .prefersDefaultFocus(in: actionNamespace)
     .disabled(playUnavailableOffline)
     .opacity(playUnavailableOffline ? 0.4 : 1)
-    .accessibilityLabel("Play \(detail?.title ?? fallbackTitle)")
+    .accessibilityLabel("Play \(shownTitle)")
     .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
   }
 
@@ -329,7 +338,7 @@ struct ItemDetailView: View {
     .buttonStyle(.plain)
     .focusEffectDisabled()
     .focused($focusedAction, equals: .fromBeginning)
-    .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
+    .accessibilityLabel("Start \(shownTitle) from the beginning")
   }
 
   private var tvWatchlistButton: some View {
@@ -338,7 +347,7 @@ struct ItemDetailView: View {
     return Button {
       guard let d = detail else { return }
       let summary = ItemSummary(
-        id: d.id, type: d.type, title: d.title, year: d.year,
+        id: d.id, type: d.type, title: d.displayTitle, year: d.year,
         durationSeconds: d.durationSeconds, addedAt: "",
         rating: d.rating, posterImageId: d.images?.poster?.id
       )
@@ -412,12 +421,12 @@ struct ItemDetailView: View {
                 return ""
               }()
               (Text(badge).foregroundStyle(Color.dsAccent)
-                + Text("  \(detail?.title ?? fallbackTitle)").foregroundStyle(.white))
+                + Text("  \(shownTitle)").foregroundStyle(.white))
                 .font(.title3.weight(.bold))
                 .lineLimit(1)
-                .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
+                .accessibilityLabel("\(badge), \(shownTitle)")
             } else {
-              Text(detail?.title ?? fallbackTitle)
+              Text(shownTitle)
                 .font(.title3.weight(.bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
@@ -470,7 +479,7 @@ struct ItemDetailView: View {
             .disabled(playUnavailableOffline)
             .opacity(playUnavailableOffline ? 0.4 : 1)
             .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
-            .accessibilityLabel(isDownloaded ? "Play \(detail?.title ?? fallbackTitle), downloaded" : "Play \(detail?.title ?? fallbackTitle)")
+            .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
             .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
 
             if savedPositionSeconds > 0 {
@@ -488,7 +497,7 @@ struct ItemDetailView: View {
                   .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
               }
               .buttonStyle(.plain)
-              .accessibilityLabel("Start \(detail?.title ?? fallbackTitle) from the beginning")
+              .accessibilityLabel("Start \(shownTitle) from the beginning")
             }
 
             downloadIconButton
@@ -612,12 +621,12 @@ struct ItemDetailView: View {
             // two-color treatment (accent badge + white title) without it.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
               Text(badge).foregroundStyle(Color.dsAccent)
-              Text(detail?.title ?? fallbackTitle).foregroundStyle(.white)
+              Text(shownTitle).foregroundStyle(.white)
             }
             .font(.title3.weight(.bold))
             .lineLimit(2)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(badge), \(detail?.title ?? fallbackTitle)")
+            .accessibilityLabel("\(badge), \(shownTitle)")
           }
           #endif
 
@@ -752,7 +761,7 @@ struct ItemDetailView: View {
                     .font(.dsEyebrow)
                     .tracking(2)
                     .foregroundStyle(Color.dsAccent)
-                  Text(detail?.title ?? fallbackTitle)
+                  Text(shownTitle)
                     .font(.dsDisplay)
                     .foregroundStyle(Color.dsTextPrimary)
                     .lineLimit(2)
@@ -794,7 +803,7 @@ struct ItemDetailView: View {
         endPoint: .bottom
       )
       .overlay(alignment: .bottomLeading) {
-        Text(detail?.title ?? fallbackTitle)
+        Text(shownTitle)
           .font(.title2.bold())
           .foregroundStyle(.white.opacity(0.7))
           .padding(24)
@@ -938,7 +947,7 @@ struct ItemDetailView: View {
       let summary = ItemSummary(
         id: d.id,
         type: d.type,
-        title: d.title,
+        title: d.displayTitle,
         year: d.year,
         durationSeconds: d.durationSeconds,
         addedAt: "",
@@ -1123,7 +1132,7 @@ struct ItemDetailView: View {
 
       downloadManager.startDownload(
         itemId: itemID,
-        title: detail?.title ?? fallbackTitle,
+        title: shownTitle,
         year: detail?.year,
         videoURL: videoURL,
         posterURL: posterURL,

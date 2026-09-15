@@ -218,7 +218,14 @@ extension Theme {
     )
 }
 
-// MARK: - Redesign / "Nitrate" (STUB — mirrors Classic until the palette phase)
+// MARK: - Redesign / "Nitrate"
+//
+// The palette below is real and fully distinct from Classic — every one of the 16 tokens
+// differs. This header used to read "(STUB — mirrors Classic until the palette phase)",
+// which stopped being true when the palette landed and then sat here contradicting the
+// code underneath it. A stale marker is worse than none: it reads as a known gap and
+// invites someone to re-do finished work, or to treat a shipped theme as unfinished
+// (TASK-771).
 
 extension Theme {
     static let redesign = Theme(

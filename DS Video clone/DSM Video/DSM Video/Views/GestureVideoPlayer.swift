@@ -145,6 +145,8 @@ struct GestureVideoPlayer: View {
     // of an infinite spinner.
     @State private var stallObserver: NSObjectProtocol?
     @State private var failedToEndObserver: NSObjectProtocol?
+    /// Fires just before a downloaded file this player may be reading is unlinked (TASK-903).
+    @State private var downloadDeletedObserver: NSObjectProtocol?
     // MARK: ACKNOWLEDGED (TASK-199): Set<AnyCancellable> in @State is a known pattern limitation
     // for struct-based SwiftUI views. The subscriptions established in setupPlayer() are stored
     // here and manually cleared in cleanup(). Moving to @StateObject would require a class wrapper
@@ -1634,6 +1636,34 @@ struct GestureVideoPlayer: View {
             }
         }
 
+        // A downloaded file can be deleted while it is playing: swipe-delete in Downloads,
+        // or sign-out, which purges everything (TASK-807). AVPlayer holds the file open, so
+        // unlinking it underneath surfaced as a stall or a decode error that named neither
+        // the cause nor anything the user could act on (TASK-903).
+        //
+        // Posted synchronously before the unlink, so tearing down here means nothing holds
+        // the asset by the time it goes. The deletion is correct policy and is never
+        // blocked — this only makes the consequence truthful.
+        downloadDeletedObserver = NotificationCenter.default.addObserver(
+            forName: .downloadWillBeDeleted,
+            object: nil,
+            queue: .main
+        ) { note in
+            // A missing itemId means every download is going (clearAll). Only react when
+            // this player is actually reading a local file — a stream is unaffected by a
+            // download being removed, and stopping it would be a bug of its own.
+            let deletedID = note.userInfo?["itemId"] as? String
+            guard url.isFileURL, deletedID == nil || deletedID == itemID else { return }
+
+            MainActor.assumeIsolated {
+                player?.pause()
+                player?.replaceCurrentItem(with: nil)
+                isPlaying = false
+                isBuffering = false
+                playerError = "This download was removed, so playback stopped."
+            }
+        }
+
         // Observe playback status
         player?.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
@@ -1908,13 +1938,15 @@ struct GestureVideoPlayer: View {
             player?.removeTimeObserver(observer)
             timeObserver = nil
         }
-        for observer in [interruptionObserver, routeChangeObserver, stallObserver, failedToEndObserver] {
+        for observer in [interruptionObserver, routeChangeObserver, stallObserver,
+                         failedToEndObserver, downloadDeletedObserver] {
             if let observer { NotificationCenter.default.removeObserver(observer) }
         }
         interruptionObserver = nil
         routeChangeObserver = nil
         stallObserver = nil
         failedToEndObserver = nil
+        downloadDeletedObserver = nil
         player?.pause()
         #if os(iOS)
         // AVAudioSession.setActive can block on the main thread (hang risk). Teardown

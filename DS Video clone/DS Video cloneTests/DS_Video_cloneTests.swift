@@ -400,6 +400,47 @@ struct APIModelsCodingTests {
     #expect(detail.images?.backdrop?.mapperId == "42")
   }
 
+  /// An episode shows its real name, not the filename-derived one (TASK-870).
+  ///
+  /// The server emits `episodeTitle` for every episode and NO client decoded it, so the
+  /// detail screen fell back to `title` — which is derived from the filename and reads
+  /// like "Show.S02E04.1080p.WEB-DL". The episode LIST for the same episode already
+  /// preferred episodeTitle server-side, so one episode was named two different things
+  /// in two places in the same app.
+  @Test func episodeDetailPrefersTheRealEpisodeTitle() throws {
+    func decode(_ json: String) throws -> ItemDetail {
+      try JSONDecoder().decode(ItemDetail.self, from: json.data(using: .utf8)!)
+    }
+
+    // The defect's own shape: a filename-derived title alongside a real episode name.
+    let episode = try decode("""
+    {
+      "id": "e1", "type": "episode", "title": "Severance.S02E04.1080p.WEB-DL",
+      "showName": "Severance", "seasonNumber": 2, "episodeNumber": 4,
+      "episodeTitle": "Woe's Hollow"
+    }
+    """)
+    #expect(episode.episodeTitle == "Woe's Hollow")
+    #expect(episode.seasonNumber == 2)
+    #expect(episode.episodeNumber == 4)
+    #expect(episode.showName == "Severance")
+    #expect(episode.displayTitle == "Woe's Hollow")
+    // The raw title is still available — this replaces what is DISPLAYED, not the data.
+    #expect(episode.title == "Severance.S02E04.1080p.WEB-DL")
+
+    // An episode the scanner could not name falls back rather than showing nothing.
+    let unnamed = try decode(#"{"id":"e2","type":"episode","title":"Show.S01E02"}"#)
+    #expect(unnamed.displayTitle == "Show.S01E02")
+
+    // Present but blank is the same as absent — a whitespace-only name must not win.
+    let blank = try decode(#"{"id":"e3","type":"episode","title":"Show.S01E03","episodeTitle":"   "}"#)
+    #expect(blank.displayTitle == "Show.S01E03")
+
+    // A MOVIE must never adopt the rule, even if a server sends the field.
+    let movie = try decode(#"{"id":"m1","type":"movie","title":"Inception","episodeTitle":"Nope"}"#)
+    #expect(movie.displayTitle == "Inception")
+  }
+
   /// A PARTIAL images envelope must still decode.
   ///
   /// TASK-783 made `images` itself optional, which covered a server omitting the key
@@ -2050,6 +2091,81 @@ struct DownloadDeleteTests {
             "a neighbour's bytes are untouched")
     #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-alien.mp4").path))
     #expect(FileManager.default.fileExists(atPath: downloadsDir.appendingPathComponent("mv-brazil.mp4").path))
+  }
+
+  /// class:destructive · TASK-903
+  /// A delete must announce itself BEFORE the bytes go, so a player reading that asset can
+  /// tear down first. AVPlayer holds the file open; unlinking underneath it presented as a
+  /// stall or a decode error naming neither the cause nor anything actionable.
+  ///
+  /// The ORDERING is the whole fix, so the test asserts it directly: at the moment the
+  /// notification is delivered, the file must still exist. A post moved to after the
+  /// unlink would still fire and still carry the right id — and would be useless.
+  @Test func deletingADownloadAnnouncesItselfBeforeRemovingTheFile() async throws {
+    let container = try makeTempContainer("dl-delete-notify")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat"),
+    ], in: container)
+    let heatPath = container.appendingPathComponent("Downloads/mv-heat.mp4").path
+
+    // deleteDownload posts synchronously on the calling thread, and this suite is
+    // @MainActor, so the observer runs before deleteDownload returns. No synchronisation
+    // needed — and if that ever stops being true, #require below fails rather than racing.
+    nonisolated(unsafe) var received: (id: String?, fileStillExisted: Bool)?
+    let token = NotificationCenter.default.addObserver(
+      forName: .downloadWillBeDeleted, object: nil, queue: nil
+    ) { note in
+      received = (
+        id: note.userInfo?["itemId"] as? String,
+        fileStillExisted: FileManager.default.fileExists(atPath: heatPath)
+      )
+    }
+    defer { NotificationCenter.default.removeObserver(token) }
+
+    DownloadManager(containerForTesting: container).deleteDownload(itemId: "mv-heat")
+
+    let got = try #require(received, "deleting a download posted no notification")
+    #expect(got.id == "mv-heat", "the notification must name the item being deleted")
+    #expect(got.fileStillExisted,
+            "the notification fired AFTER the unlink — a player cannot release a file that is already gone, which is the entire point of announcing it")
+    // And the delete still happened: announcing must not become a way to skip it.
+    #expect(!FileManager.default.fileExists(atPath: heatPath))
+  }
+
+  /// class:destructive · TASK-903
+  /// clearAll() is the sign-out purge (TASK-807). It must announce too, with NO itemId —
+  /// meaning "whatever you have loaded is going" — and must still purge everything.
+  @Test func clearAllAnnouncesTheWholePurgeBeforeRemovingFiles() async throws {
+    let container = try makeTempContainer("dl-clearall-notify")
+    defer { removeTempContainer(container) }
+    try seedDownloads([
+      entry(id: "mv-dune", title: "Dune"),
+      entry(id: "mv-heat", title: "Heat"),
+    ], in: container)
+    let dunePath = container.appendingPathComponent("Downloads/mv-dune.mp4").path
+
+    nonisolated(unsafe) var received: (hadKey: Bool, filesStillExisted: Bool)?
+    let token = NotificationCenter.default.addObserver(
+      forName: .downloadWillBeDeleted, object: nil, queue: nil
+    ) { note in
+      received = (
+        hadKey: note.userInfo?["itemId"] != nil,
+        filesStillExisted: FileManager.default.fileExists(atPath: dunePath)
+      )
+    }
+    defer { NotificationCenter.default.removeObserver(token) }
+
+    DownloadManager(containerForTesting: container).clearAll()
+
+    let got = try #require(received, "clearAll posted no notification")
+    #expect(!got.hadKey,
+            "clearAll must omit itemId — a specific id would let a player reading a DIFFERENT download keep a file that is also being purged")
+    #expect(got.filesStillExisted, "the notification fired after files were already removed")
+    // The purge is not negotiable: it exists so a shared device leaves no residue.
+    #expect(!FileManager.default.fileExists(atPath: dunePath))
+    #expect(DownloadManager(containerForTesting: container).getDownloadedItems().isEmpty)
   }
 
   /// OC-DWN-009 · class:state

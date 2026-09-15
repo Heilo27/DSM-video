@@ -207,18 +207,44 @@ struct ItemDetail: Decodable, Identifiable {
   let height: Int?
   let audioChannels: Int?
 
+  // Episode identity. The server emits all four for `type == "episode"` (main.go:2979-2983)
+  // and no client decoded episodeTitle at all (TASK-870) — so the detail screen fell back to
+  // `title`, which is the raw item title derived from the filename, while the episode LIST
+  // for the same episode already preferred episodeTitle server-side (main.go:8682). The same
+  // episode was named two different things in two places.
+  let showName: String?
+  let seasonNumber: Int?
+  let episodeNumber: Int?
+  let episodeTitle: String?
+
   init(id: String, type: String, title: String, originalTitle: String? = nil,
        year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
        rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
        cast: [Person]? = nil, images: Images? = nil, changeSeq: Int? = nil,
        videoCodec: String? = nil, audioCodec: String? = nil, container: String? = nil,
-       width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil) {
+       width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil,
+       showName: String? = nil, seasonNumber: Int? = nil, episodeNumber: Int? = nil,
+       episodeTitle: String? = nil) {
     self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
     self.year = year; self.durationSeconds = durationSeconds; self.contentRating = contentRating
     self.rating = rating; self.summary = summary; self.genres = genres
     self.cast = cast; self.images = images; self.changeSeq = changeSeq
     self.videoCodec = videoCodec; self.audioCodec = audioCodec; self.container = container
     self.width = width; self.height = height; self.audioChannels = audioChannels
+    self.showName = showName; self.seasonNumber = seasonNumber
+    self.episodeNumber = episodeNumber; self.episodeTitle = episodeTitle
+  }
+
+  /// The name to show for this item.
+  ///
+  /// For an episode, the real episode name when the server has one — `title` is
+  /// filename-derived and often reads like "Show.S02E04.1080p". Falls back to `title`
+  /// for everything else, and for an episode the scanner could not name (TASK-870).
+  var displayTitle: String {
+    if type == "episode", let episodeTitle, !episodeTitle.trimmingCharacters(in: .whitespaces).isEmpty {
+      return episodeTitle
+    }
+    return title
   }
 
   // MARK: - Derived format badges
