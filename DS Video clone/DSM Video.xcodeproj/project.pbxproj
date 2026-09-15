@@ -324,7 +324,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2620;
-				LastUpgradeCheck = 2630;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					AA01000000000001000AA00D = {
 						CreatedOnToolsVersion = 26.2;
@@ -532,7 +532,7 @@
 				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
-				TVOS_DEPLOYMENT_TARGET = 16.0;
+				TVOS_DEPLOYMENT_TARGET = "$(RECOMMENDED_TVOS_DEPLOYMENT_TARGET)";
 			};
 			name = Debug;
 		};
@@ -557,7 +557,7 @@
 				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
-				TVOS_DEPLOYMENT_TARGET = 16.0;
+				TVOS_DEPLOYMENT_TARGET = "$(RECOMMENDED_TVOS_DEPLOYMENT_TARGET)";
 			};
 			name = Release;
 		};

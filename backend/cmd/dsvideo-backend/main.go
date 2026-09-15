@@ -3075,6 +3075,11 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	// over-matched and pulled in a sibling show's episodes.
 	folders := s.resolveShowFolders(showName, tvRoot)
 	matchWhere, matchArgs := showFolderWhere(folders, tvRoot)
+	// A qualified id narrows to ONE show inside a folder that holds several.
+	if gw, ga := showGroupWhere(showName); gw != "" {
+		matchWhere += gw
+		matchArgs = append(matchArgs, ga...)
+	}
 
 	// Get show-level metadata from first episode with data
 	var year sql.NullInt64
@@ -5287,18 +5292,34 @@ func resolveFolderShowNames(counts map[string]map[string]int) map[string]sql.Nul
 //
 // Pure and rows-in/map-out on purpose, so the merge rule can be tested without a database.
 func showGroupFolders(paths []string, showNames []sql.NullString, tvRoot string) map[string][]string {
-	groupFolders := map[string][]string{} // group key → folders, in first-seen order
-	folderGroup := map[string]string{}    // folder → group key
+	// Resolve each folder's ONE name first, exactly as the list handlers do. Keying each
+	// episode on its own show_name made this disagree with the list whenever a folder was
+	// part-matched: whichever episode happened to be scanned first decided the folder's
+	// group here, while the list decided it by majority. Two answers to one question is how
+	// the header said "24 episodes" and the episode list showed 12.
+	nameCounts := map[string]map[string]int{}
 	for i, path := range paths {
-		var sn sql.NullString
-		if i < len(showNames) {
-			sn = showNames[i]
-		}
 		folderName := showFolderFromPath(path, tvRoot)
 		if folderName == "" {
 			continue
 		}
-		key := showGroupKey(folderName, sn)
+		if nameCounts[folderName] == nil {
+			nameCounts[folderName] = map[string]int{}
+		}
+		if i < len(showNames) && showNames[i].Valid && showNames[i].String != "" {
+			nameCounts[folderName][showNames[i].String]++
+		}
+	}
+	folderNames := resolveFolderShowNames(nameCounts)
+
+	groupFolders := map[string][]string{} // group key → folders, in first-seen order
+	folderGroup := map[string]string{}    // folder → group key
+	for _, path := range paths {
+		folderName := showFolderFromPath(path, tvRoot)
+		if folderName == "" {
+			continue
+		}
+		key := showGroupKey(folderName, folderNames[folderName])
 		if _, seen := folderGroup[folderName]; !seen {
 			folderGroup[folderName] = key
 			groupFolders[key] = append(groupFolders[key], folderName)
@@ -5311,15 +5332,39 @@ func showGroupFolders(paths []string, showNames []sql.NullString, tvRoot string)
 	return out
 }
 
+// showIDGroupSeparator qualifies a show id when one folder holds more than one show.
+//
+// "::" cannot appear in a folder name on any filesystem this server runs on, and the id is
+// already rejected if it contains "/" or "..", so this is unambiguous to split on. Kept as a
+// constant because the emit side and the resolve side must agree exactly — two spellings of
+// this would make qualified ids un-openable, which is worse than the duplicate it fixes.
+const showIDGroupSeparator = "::"
+
+// splitShowID separates a show id into its folder and its optional group qualifier.
+//
+// A bare folder name (the overwhelming majority, and every id persisted before this existed)
+// returns an empty qualifier, so old ids keep working unchanged.
+func splitShowID(showID string) (folder, groupKey string) {
+	if i := strings.Index(showID, showIDGroupSeparator); i >= 0 {
+		return showID[:i], showID[i+len(showIDGroupSeparator):]
+	}
+	return showID, ""
+}
+
 // resolveShowFolders expands a show id (a folder name, as emitted by the list endpoints)
 // into every folder belonging to the same show, so a detail request sees the same episodes
 // the list counted. Returns a one-element slice containing showID itself when the library
 // has no sibling folder — the overwhelmingly common case — which is what keeps the
 // single-folder behaviour byte-identical.
 func (s *Server) resolveShowFolders(showID, tvRoot string) []string {
+	// A qualified id ("Daredevil::daredevil: born again") names a folder that holds more
+	// than one show. Only the folder half selects paths; the group half narrows WITHIN the
+	// folder and is applied separately — see showGroupWhere.
+	folder, _ := splitShowID(showID)
+
 	rows, err := s.db.Query(`SELECT path, show_name FROM items WHERE library_id = 'lib_tv'`)
 	if err != nil {
-		return []string{showID}
+		return []string{folder}
 	}
 	defer rows.Close()
 	var paths []string
@@ -5333,10 +5378,29 @@ func (s *Server) resolveShowFolders(showID, tvRoot string) []string {
 		paths = append(paths, p)
 		names = append(names, n)
 	}
-	if folders, ok := showGroupFolders(paths, names, tvRoot)[showID]; ok && len(folders) > 0 {
+	if folders, ok := showGroupFolders(paths, names, tvRoot)[folder]; ok && len(folders) > 0 {
 		return folders
 	}
-	return []string{showID}
+	return []string{folder}
+}
+
+// showGroupWhere narrows a folder match down to ONE show when the id is qualified.
+//
+// Returns an empty predicate for a bare folder id, which is the common case and leaves the
+// query byte-identical to what it was. For a qualified id it matches on show_name, because
+// that is the only thing distinguishing two shows that share a folder — the paths cannot.
+//
+// Deliberately paired with a folder predicate rather than used alone: show_name is not
+// unique across the library ("MacGyver 1985" and "MacGyver" can both carry "MacGyver"), so
+// matching on it by itself would merge two genuinely different shows — the exact failure the
+// folder match exists to prevent.
+func showGroupWhere(showID string) (string, []any) {
+	_, groupKey := splitShowID(showID)
+	if groupKey == "" {
+		return "", nil
+	}
+	// The group key is lower(show_name); compare case-insensitively to match.
+	return " AND LOWER(COALESCE(show_name, '')) = ?", []any{groupKey}
 }
 
 // showFolderWhere builds `(path LIKE ? ESCAPE '\' OR path LIKE ? ESCAPE '\' ...)` covering
@@ -8493,9 +8557,39 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(showMap[sortedKeys[i]].displayName) < strings.ToLower(showMap[sortedKeys[j]].displayName)
 	})
 
+	// IDS ARE UNIQUE BY CONSTRUCTION, not by hoping the folder names differ.
+	//
+	// The id was info.folderName, and one folder can legitimately hold TWO shows —
+	// Daredevil/ carries 39 episodes of "Marvel's Daredevil" and 9 of "Daredevil: Born
+	// Again". Both groups then emitted the same id, and a client keyed on id renders one
+	// and silently loses the other (this is how Star Trek: The Next Generation disappeared
+	// from a real Apple TV — a collision elsewhere in the list ate it).
+	//
+	// The folder stays the id whenever it is unambiguous, which is the overwhelming
+	// majority and keeps every persisted id stable. Only a genuinely ambiguous folder gets
+	// a qualified id, and only the extra shows in it — so the first show in Daredevil/ keeps
+	// "Daredevil" and the second becomes "Daredevil::daredevil: born again". The detail
+	// endpoint splits on "::" and matches on the group key, so both resolve correctly.
+	folderUses := map[string]int{}
+	for _, key := range sortedKeys {
+		folderUses[showMap[key].folderName]++
+	}
+
 	shows := make([]map[string]any, 0, len(sortedKeys))
+	emittedFolder := map[string]bool{}
 	for _, key := range sortedKeys {
 		info := showMap[key]
+
+		showID := info.folderName
+		if folderUses[info.folderName] > 1 {
+			// Ambiguous folder. The first group out keeps the bare folder name so the
+			// common id does not churn; the rest are qualified with their group key,
+			// which is unique across the whole library by definition.
+			if emittedFolder[info.folderName] {
+				showID = info.folderName + showIDGroupSeparator + key
+			}
+			emittedFolder[info.folderName] = true
+		}
 		// id stays the FOLDER name, deliberately. The merged group key is the lowercased
 		// TMDb show name, which differs from the folder for nearly every matched show — so
 		// emitting it would invalidate every persisted id in the wild (watchlist, Top Shelf,
@@ -8504,7 +8598,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		// back to the whole group, so the detail request returns the same episodes the count
 		// above reports. Single-folder shows — the overwhelming majority — see no id churn.
 		show := map[string]any{
-			"id":              info.folderName,
+			"id":              showID,
 			"title":           info.displayName,
 			"year":            nullIntToAny(info.year),
 			"seasonCount":     len(info.seasons),
@@ -8602,6 +8696,10 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 	// the detail disagree with the header it came from.
 	folders := s.resolveShowFolders(showID, tvRoot)
 	folderWhere, folderArgs := showFolderWhere(folders, tvRoot)
+	if gw, ga := showGroupWhere(showID); gw != "" {
+		folderWhere += gw
+		folderArgs = append(folderArgs, ga...)
+	}
 
 	querySeasons := func(where string, args ...any) ([]map[string]any, error) {
 		r, e := s.db.Query(`
@@ -8669,6 +8767,10 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	// by showID made this list show 12 episodes under a header that said 24.
 	folders := s.resolveShowFolders(showID, tvRoot)
 	folderWhere, folderArgs := showFolderWhere(folders, tvRoot)
+	if gw, ga := showGroupWhere(showID); gw != "" {
+		folderWhere += gw
+		folderArgs = append(folderArgs, ga...)
+	}
 
 	baseWhere := folderWhere + " AND library_id = 'lib_tv'"
 	baseArgs := folderArgs

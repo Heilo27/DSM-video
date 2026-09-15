@@ -2278,16 +2278,24 @@ struct GestureVideoPlayer: View {
         // outputVolume is readable immediately without waiting for activation.
         volumeLevel = audioSession.outputVolume
 
-        // Show the volume HUD when hardware volume buttons are pressed.
-        // dropFirst() skips the initial emission so the HUD doesn't appear on launch.
+        // TRACK the hardware volume, but do NOT draw our own HUD for it.
+        //
+        // iOS already shows a volume HUD when the hardware buttons are pressed, and this
+        // showed a SECOND one in the middle of the video at the same time — two indicators
+        // for one action, the app's sitting over the picture. Reported from a device.
+        //
+        // The value still has to be read: the drag gesture's HUD displays volumeLevel, and
+        // a hardware press that did not update it would make the next swipe jump from a
+        // stale value. So keep the subscription, drop the presentation.
+        //
+        // The drag gesture is deliberately NOT changed (see the vertical-drag branch): iOS
+        // draws nothing for that, so there our HUD is the only feedback the user gets.
         audioSession.publisher(for: \.outputVolume)
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { newVolume in
                 Task { @MainActor in
                     volumeLevel = newVolume
-                    showVolumeIndicator = true
-                    scheduleHideVolumeIndicator()
                 }
             }
             .store(in: &cancellables)

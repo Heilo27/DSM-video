@@ -80,6 +80,24 @@ struct ItemDetailView: View {
       .onAppear {
         if autoPlay { showPlayer = true }
       }
+      // Put focus on Play EXPLICITLY, rather than trusting prefersDefaultFocus.
+      //
+      // prefersDefaultFocus(in:) is advisory and only applies when tvOS resolves INITIAL
+      // focus for a scope. This screen is pushed into a NavigationStack, so focus is
+      // resolved as the push settles and the engine falls back to picking by geometry —
+      // which handed it to Next Episode, a control for LEAVING the episode you just opened.
+      // Widening the focusScope was not enough on its own; measured on device, Next Episode
+      // still won at 688x130 against Play's 320x84.
+      //
+      // The binding is authoritative where the modifier is a hint, so set it directly.
+      // Deferred to the next runloop turn: assigning during the push is swallowed by the
+      // engine's own resolution, and `autoPlay` skips it entirely because the player is
+      // about to cover this screen anyway.
+      .task(id: itemID) {
+        guard !autoPlay else { return }
+        try? await Task.sleep(for: .milliseconds(120))
+        focusedAction = .play
+      }
       .fullScreenCover(isPresented: $showPlayer, onDismiss: {
         playFromBeginning = false
         loadProgress()
@@ -318,6 +336,10 @@ struct ItemDetailView: View {
     .prefersDefaultFocus(in: actionNamespace)
     .disabled(playUnavailableOffline)
     .opacity(playUnavailableOffline ? 0.4 : 1)
+    // A11y.Detail.playButton existed in the registry and was applied to nothing, so the
+    // primary action could not be addressed by identifier — which is exactly what a test
+    // for "Play holds default focus" needs.
+    .accessibilityIdentifier(A11y.Detail.playButton)
     .accessibilityLabel("Play \(shownTitle)")
     .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
   }
@@ -452,7 +474,6 @@ struct ItemDetailView: View {
               tvWatchlistButton
               tvWatchedButton
             }
-            .focusScope(actionNamespace)
           }
           #else
           // iOS: action buttons row. Play + Start Over FLEX to share the available
@@ -544,22 +565,29 @@ struct ItemDetailView: View {
                   #else
                   .font(.subheadline.weight(.semibold))
                   #endif
-                VStack(alignment: .leading, spacing: 2) {
+                #if os(tvOS)
+                // ONE line on tvOS. Stacking "Next Episode" over the episode title made the
+                // button 122pt tall against Play's 92pt — the secondary action physically
+                // larger than the primary one, and the biggest focus target on the screen.
+                // The two lines say the same thing a single line does at 10 feet.
+                HStack(spacing: 8) {
                   Text("Next Episode")
-                    #if os(tvOS)
-                    .font(.body.weight(.semibold))
-                    #else
                     .font(.subheadline.weight(.semibold))
-                    #endif
                   Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
-                    #if os(tvOS)
                     .font(.subheadline)
-                    #else
-                    .font(.caption)
-                    #endif
                     .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(1)
                 }
+                #else
+                VStack(alignment: .leading, spacing: 2) {
+                  Text("Next Episode")
+                    .font(.subheadline.weight(.semibold))
+                  Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                }
+                #endif
                 Spacer()
                 Image(systemName: "chevron.right")
                   .font(.caption.weight(.semibold))
@@ -567,13 +595,22 @@ struct ItemDetailView: View {
               }
               .foregroundStyle(.white)
               #if os(tvOS)
+              // Secondary action, sized like one. This was maxWidth: .infinity at 64pt tall
+              // — full screen width and TALLER than Play's 54pt — so the control for "skip
+              // to a different episode" dominated the one for "watch this episode". It also
+              // made Next Episode the biggest focus target on screen, which is half of why
+              // it stole default focus.
+              //
+              // Capped rather than hugging its text: the trailing episode title varies in
+              // length, and a button that changes width per episode makes the row jump as
+              // you move through a season.
               .padding(.horizontal, 20)
-              .padding(.vertical, 14)
-              .frame(maxWidth: .infinity, minHeight: 64)
+              .padding(.vertical, 10)
+              .frame(maxWidth: 620, minHeight: 48, alignment: .leading)
               #else
               .padding(.horizontal, 14)
               .padding(.vertical, 10)
-              .frame(maxWidth: .infinity, minHeight: 52)
+              .frame(maxWidth: .infinity, minHeight: 44)
               #endif
               #if os(tvOS)
               // .plain removes the system focus ring, so focus must be drawn explicitly —
@@ -671,6 +708,15 @@ struct ItemDetailView: View {
           #endif
         }
         #if os(tvOS)
+        // The focus scope covers the WHOLE action area, not just the Play/Start Over row.
+        //
+        // prefersDefaultFocus only decides a winner WITHIN its scope, and the scope used to
+        // wrap that row alone — so Next Episode, which sits outside it, was never competing
+        // against Play's preference. The engine then picked by geometry, and Next Episode is
+        // the largest target on screen, so opening any episode landed focus on "go to the
+        // NEXT one" rather than on Play. Scoping the whole panel is what makes the
+        // preference binding below actually mean something.
+        .focusScope(actionNamespace)
         .padding(.horizontal, 60)
         .padding(.top, 20)
         .padding(.bottom, 24)
