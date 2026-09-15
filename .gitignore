@@ -58,3 +58,8 @@ DS Video clone/build-iphone/
 fastlane/report.xml
 DS Video clone/fastlane/report.xml
 backend/dsvideo-backend-new
+
+# Compiled backend binary. Was tracked by accident — .gitignore covered
+# backend/dsvideo-backend but not the cmd/ path, so every `go build` produced
+# a 17MB diff in the working tree (TASK-819 work surfaced it).
+backend/cmd/dsvideo-backend/dsvideo-backend

@@ -2153,10 +2153,10 @@
 
     function renderShowCard(show) {
       return `
-        <div class="video-card" onclick="navigateTo('showDetail', {showName:'${escapeAttr(show.showName)}', folderName:'${escapeAttr(show.folderName || show.showName)}'})">
+        <div class="video-card" onclick="navigateTo('showDetail', {showName:'${escapeAttr(show.title)}', folderName:'${escapeAttr(show.id || show.title)}'})">
           <div class="video-poster">
             ${show.posterImageId
-              ? `<img src="${imageURL(show.posterImageId,'w=342')}" alt="${escapeAttr(show.showName)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+              ? `<img src="${imageURL(show.posterImageId,'w=342')}" alt="${escapeAttr(show.title)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
               : ''}
             <div class="video-poster-placeholder" ${show.posterImageId ? 'style="display:none"' : ''}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2166,7 +2166,7 @@
             </div>
           </div>
           <div class="video-info">
-            <h3 class="video-title">${escapeHtml(show.showName)}</h3>
+            <h3 class="video-title">${escapeHtml(show.title)}</h3>
             <div class="video-meta">
               ${show.year ? `<span class="video-year">${show.year}</span>` : ''}
               <span class="video-year">${show.episodeCount} ep${show.episodeCount !== 1 ? 's' : ''}</span>
@@ -2696,11 +2696,11 @@
             <div class="detail-header">
               <div class="detail-poster">
                 ${posterId
-                  ? `<img src="${imageURL(posterId,'w=342')}" alt="${escapeAttr(data.showName)}" onerror="this.style.display='none'">`
+                  ? `<img src="${imageURL(posterId,'w=342')}" alt="${escapeAttr(data.title)}" onerror="this.style.display='none'">`
                   : `<div class="video-poster-placeholder" style="height:100%"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg></div>`}
               </div>
               <div class="detail-info">
-                <h1 class="detail-title">${escapeHtml(data.showName)}</h1>
+                <h1 class="detail-title">${escapeHtml(data.title)}</h1>
                 <div class="detail-meta">
                   ${data.year ? `<span class="detail-meta-item">${data.year}</span>` : ''}
                   <span class="detail-meta-item">${seasons.length} season${seasons.length !== 1 ? 's' : ''}</span>

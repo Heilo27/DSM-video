@@ -20,6 +20,13 @@
 			remoteGlobalIDString = AA01000000000001000AA00D;
 			remoteInfo = "DSM Video Top Shelf";
 		};
+		AB000000000000000000000B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F4468EF52F0EDAAB008B87E6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D4B6E34DAF9E45D7BB81EBFA;
+			remoteInfo = "DSM Video tvOS";
+		};
 		F4468F0D2F0EDAAD008B87E6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = F4468EF52F0EDAAB008B87E6 /* Project object */;
@@ -56,12 +63,18 @@
 		AA01000000000001000AA004 /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
 		AA01000000000001000AA006 /* DSM Video Top Shelf.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "DSM Video Top Shelf.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA01000000000001000AA007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AB0000000000000000000009 /* DSM Video tvOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM Video tvOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468EFD2F0EDAAB008B87E6 /* DSM Video.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSM Video.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468F0C2F0EDAAD008B87E6 /* DSM VideoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM VideoTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468F162F0EDAAD008B87E6 /* DSM VideoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM VideoUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		AB0000000000000000000008 /* DS Video clone tvOSUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "DS Video clone tvOSUITests";
+			sourceTree = "<group>";
+		};
 		F4468EFF2F0EDAAB008B87E6 /* DSM Video */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "DSM Video";
@@ -95,6 +108,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AB0000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F4468EFA2F0EDAAB008B87E6 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -123,6 +143,7 @@
 			isa = PBXGroup;
 			children = (
 				AA01000000000001000AA004 /* TVServices.framework */,
+				AB0000000000000000000008 /* DS Video clone tvOSUITests */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -156,6 +177,7 @@
 				AA01000000000001000AA006 /* DSM Video Top Shelf.appex */,
 				F4468F0C2F0EDAAD008B87E6 /* DSM VideoTests.xctest */,
 				F4468F162F0EDAAD008B87E6 /* DSM VideoUITests.xctest */,
+				AB0000000000000000000009 /* DSM Video tvOSUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -178,6 +200,29 @@
 			productName = "DSM Video Top Shelf";
 			productReference = AA01000000000001000AA006 /* DSM Video Top Shelf.appex */;
 			productType = "com.apple.product-type.tv-app-extension";
+		};
+		AB0000000000000000000001 /* DSM Video tvOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AB0000000000000000000002 /* Build configuration list for PBXNativeTarget "DSM Video tvOSUITests" */;
+			buildPhases = (
+				AB0000000000000000000005 /* Sources */,
+				AB0000000000000000000006 /* Frameworks */,
+				AB0000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AB000000000000000000000A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				AB0000000000000000000008 /* DS Video clone tvOSUITests */,
+			);
+			name = "DSM Video tvOSUITests";
+			packageProductDependencies = (
+			);
+			productName = "DS Video clone tvOSUITests";
+			productReference = AB0000000000000000000009 /* DSM Video tvOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 		D4B6E34DAF9E45D7BB81EBFA /* DSM Video tvOS */ = {
 			isa = PBXNativeTarget;
@@ -314,6 +359,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				AB0000000000000000000001 /* DSM Video tvOSUITests */,
 				F4468EFC2F0EDAAB008B87E6 /* DSM Video */,
 				D4B6E34DAF9E45D7BB81EBFA /* DSM Video tvOS */,
 				AA01000000000001000AA00D /* DSM Video Top Shelf */,
@@ -324,6 +370,13 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		AB0000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DEEEA52E6297B59F6D633C3F /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -363,6 +416,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AB0000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D54435FB73F24BE1D7C5D569 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -398,6 +458,11 @@
 			isa = PBXTargetDependency;
 			target = AA01000000000001000AA00D /* DSM Video Top Shelf */;
 			targetProxy = AA01000000000001000AA00F /* PBXContainerItemProxy */;
+		};
+		AB000000000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D4B6E34DAF9E45D7BB81EBFA /* DSM Video tvOS */;
+			targetProxy = AB000000000000000000000B /* PBXContainerItemProxy */;
 		};
 		F4468F0E2F0EDAAD008B87E6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -437,8 +502,8 @@
 				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -496,6 +561,46 @@
 			};
 			name = Release;
 		};
+		AB0000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 752QKBCTJR;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.3.6;
+				PRODUCT_BUNDLE_IDENTIFIER = HeiloProjects.DSReel.tvOSUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = "DSM Video tvOS";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Debug;
+		};
+		AB0000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 752QKBCTJR;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.3.6;
+				PRODUCT_BUNDLE_IDENTIFIER = HeiloProjects.DSReel.tvOSUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = "DSM Video tvOS";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Release;
+		};
 		CA08342D612A57993452FA82 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -520,8 +625,8 @@
 				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -533,7 +638,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				COMPILATION_CACHE_ENABLE_CACHING = YES;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -563,6 +667,7 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COMPILATION_CACHE_ENABLE_CACHING = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 752QKBCTJR;
@@ -599,7 +704,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				COMPILATION_CACHE_ENABLE_CACHING = YES;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
@@ -629,6 +733,7 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COMPILATION_CACHE_ENABLE_CACHING = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 752QKBCTJR;
@@ -675,8 +780,8 @@
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -704,8 +809,8 @@
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -813,6 +918,15 @@
 			buildConfigurations = (
 				AA01000000000001000AA010 /* Debug */,
 				AA01000000000001000AA011 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AB0000000000000000000002 /* Build configuration list for PBXNativeTarget "DSM Video tvOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB0000000000000000000003 /* Debug */,
+				AB0000000000000000000004 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

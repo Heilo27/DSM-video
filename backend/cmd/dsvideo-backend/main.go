@@ -180,8 +180,8 @@ type Server struct {
 	pairingCodes map[string]pairingEntry
 
 	// Rate limiter for unauthenticated auth endpoints (login, pairing exchange).
-	// Keyed by remote IP; value is *authRateEntry.
-	authRateMu    sync.Mutex
+	// Keyed by remote IP; value is *authRateEntry. Each entry carries its own mutex —
+	// see authRateEntry for why there is no server-wide lock here any more.
 	authRateLimit sync.Map
 
 	// Cached sync sequence counters (TASK-579). Eliminates the DB SELECT on every
@@ -192,7 +192,20 @@ type Server struct {
 }
 
 // authRateEntry tracks per-IP attempt counts for auth endpoints.
+//
+// The mutex belongs to the entry, not to the server. These entries used to be held in the
+// sync.Map but mutated under one server-wide authRateMu, which is the worst of both worlds:
+// the sync.Map bought nothing (its whole point is lock-free access, and an external lock
+// throws that away) while every login attempt from every IP on the NAS queued behind the
+// same mutex. A brute-force attempt against one address would slow down every other user's
+// login. Locking per entry keeps the counter correct for one IP without letting unrelated
+// IPs contend at all.
+//
+// windowEnd and count are read and written ONLY under mu — including by the reaper, which
+// Ranges the map lock-free but must still take each entry's mutex before looking at its
+// window, or the read races a concurrent attempt extending it.
 type authRateEntry struct {
+	mu        sync.Mutex
 	count     int
 	windowEnd time.Time
 }
@@ -609,10 +622,25 @@ func main() {
 			}
 
 			// Auth rate limit entries — delete entries whose window has expired.
-			// sync.Map Range+Delete is safe without an external mutex.
+			// sync.Map Range+Delete is safe without an external mutex, but windowEnd now
+			// lives under the entry's own lock, so read it there rather than bare: an IP
+			// attempting a login right now may be extending the very field we are testing.
+			//
+			// Deleting an entry mid-window is harmless even if the check and the Delete
+			// straddle a concurrent attempt: the loser simply gets a fresh entry from the
+			// next LoadOrStore, i.e. its window restarts. That costs at most one extra
+			// window's worth of attempts to an attacker who has already had to idle 60
+			// seconds to reach an expired window in the first place.
 			nowT := time.Now()
 			s.authRateLimit.Range(func(k, v any) bool {
-				if entry, ok := v.(*authRateEntry); ok && nowT.After(entry.windowEnd) {
+				entry, ok := v.(*authRateEntry)
+				if !ok {
+					return true
+				}
+				entry.mu.Lock()
+				expired := nowT.After(entry.windowEnd)
+				entry.mu.Unlock()
+				if expired {
 					s.authRateLimit.Delete(k)
 				}
 				return true
@@ -1051,8 +1079,13 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		// player (web/index.html — 22, 7 and 38 references respectively). An audit that greps
 		// only the Swift clients will report them as removable. They are not.
 		//
-		// Genuinely uncalled by every client today: /libraries/summary, /admin/*, /shows,
-		// /shows/{showName} (superseded by /tv/shows), /tmdb/image, /auth/quickconnect/resolve
+		// /shows and /shows/{showName} were listed here as uncalled. They are not: the web
+		// player fetches both (web/index.html). They are superseded by /tv/shows in the sense
+		// that /tv/shows is now the only implementation — /shows delegates to it and
+		// /shows/{showName} emits the same id + title shape — but the routes are live.
+		//
+		// Genuinely uncalled by every client today: /libraries/summary, /admin/*,
+		// /tmdb/image, /auth/quickconnect/resolve
 		// (the app resolves via Synology's service directly), and /playback/{sessionId}/stop
 		// — that last one is worth noting, because transcode sessions are consequently only
 		// reaped by timeout rather than closed when the client stops watching.
@@ -1711,7 +1744,10 @@ func (s *Server) authRateLimitExceeded(r *http.Request) bool {
 	raw, _ := s.authRateLimit.LoadOrStore(ip, &authRateEntry{count: 0, windowEnd: now.Add(windowSeconds * time.Second)})
 	entry := raw.(*authRateEntry)
 
-	s.authRateMu.Lock()
+	// Per-entry lock, not a server-wide one: two different IPs attempting to log in at the
+	// same moment touch two different entries and never contend. Only attempts from the SAME
+	// IP serialise, which is exactly the set that has to agree on one counter.
+	entry.mu.Lock()
 	// If the window has expired, reset it
 	if now.After(entry.windowEnd) {
 		entry.count = 0
@@ -1719,7 +1755,7 @@ func (s *Server) authRateLimitExceeded(r *http.Request) bool {
 	}
 	entry.count++
 	exceeded := entry.count > maxAttempts
-	s.authRateMu.Unlock()
+	entry.mu.Unlock()
 
 	return exceeded
 }
@@ -2986,130 +3022,24 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleShowsList serves the legacy /shows route. It is a thin adapter over
+// handleTVShowsList and emits that handler's shape verbatim — id + title, not the
+// showName + folderName pair this route used to invent.
+//
+// There were two independent show-listing implementations here: /shows grouped and named
+// shows one way, /tv/shows another, and the same library reported different show counts
+// and different display names depending on which one a client happened to call. Every fix
+// to show identity then had to land twice, in two shapes; TASK-900 is on record as having
+// been half-applied for exactly that reason, and handleShowDetail needed the same fix
+// again separately. /tv/shows is the canonical plane — it carries the split-show merge
+// (showGroupKey), seasonCount, lastWatchedAt and metadataVersion that this route never
+// grew — so this one delegates rather than keeping a second definition alive.
+//
+// The route stays because the web player calls it (web/index.html), which the route table
+// above used to deny. Delegating rather than deleting keeps an older cached copy of the
+// player working; the shipped player reads id/title.
 func (s *Server) handleShowsList(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.TVPath == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"shows": []any{}})
-		return
-	}
-	u := userFromCtx(r.Context())
-	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-
-	rows, err := s.db.Query(`
-		SELECT id, path, show_name, year, rating, poster_path, backdrop_path, overview, genres
-		FROM items WHERE library_id = 'lib_tv'`)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
-		return
-	}
-	defer rows.Close()
-
-	type showInfo struct {
-		folderName  string // folder on disk (used as key and for matching)
-		displayName string // TMDb name if available, else folder name
-		year        sql.NullInt64
-		rating      sql.NullFloat64
-		poster      string
-		backdrop    string
-		overview    string
-		genres      string
-		count       int
-		firstID     string // first episode ID with poster
-	}
-
-	// Group by folder name (first directory component relative to TV root)
-	showMap := map[string]*showInfo{}
-	showOrder := []string{}
-
-	for rows.Next() {
-		var id, path string
-		var showName sql.NullString
-		var year sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, overview, genres sql.NullString
-
-		if err := rows.Scan(&id, &path, &showName, &year, &rating, &posterPath, &backdropPath, &overview, &genres); err != nil {
-			continue
-		}
-
-		folderName := showFolderFromPath(path, tvRoot)
-		if folderName == "" {
-			continue
-		}
-
-		// Group on the SHARED key, so a series split across differently-named folders is
-		// one show here too. This handler used to group on the folder alone — under a
-		// comment claiming it did so "for consistency" — while /tv/shows merged on the
-		// TMDb name, so the same library reported a different show count depending on
-		// which endpoint you asked.
-		mapKey := showGroupKey(folderName, showName)
-
-		info, exists := showMap[mapKey]
-		if !exists {
-			info = &showInfo{folderName: folderName, displayName: folderName}
-			showMap[mapKey] = info
-			showOrder = append(showOrder, mapKey)
-		}
-
-		// Prefer TMDb show_name as display name
-		if showName.Valid && showName.String != "" && info.displayName == info.folderName {
-			info.displayName = showName.String
-		}
-
-		info.count++
-		if year.Valid && (!info.year.Valid || year.Int64 < info.year.Int64) {
-			info.year = year
-		}
-		if rating.Valid && (!info.rating.Valid || rating.Float64 > info.rating.Float64) {
-			info.rating = rating
-		}
-		if posterPath.Valid && posterPath.String != "" && info.poster == "" {
-			info.poster = posterPath.String
-			info.firstID = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" && info.backdrop == "" {
-			info.backdrop = backdropPath.String
-		}
-		if overview.Valid && overview.String != "" && info.overview == "" {
-			info.overview = overview.String
-		}
-		if genres.Valid && genres.String != "" && info.genres == "" {
-			info.genres = genres.String
-		}
-	}
-
-	// Sort alphabetically by display name
-	sortedKeys := make([]string, len(showOrder))
-	copy(sortedKeys, showOrder)
-	sort.Slice(sortedKeys, func(i, j int) bool {
-		return strings.ToLower(showMap[sortedKeys[i]].displayName) < strings.ToLower(showMap[sortedKeys[j]].displayName)
-	})
-
-	shows := make([]map[string]any, 0, len(sortedKeys))
-	for _, key := range sortedKeys {
-		info := showMap[key]
-
-		show := map[string]any{
-			"showName":      info.displayName,
-			"folderName":    info.folderName,
-			"year":          nullIntToAny(info.year),
-			"rating":        nullFloatToAny(info.rating),
-			"posterImageId": nil,
-			"overview":      nil,
-			"episodeCount":  info.count,
-		}
-
-		if info.overview != "" {
-			show["overview"] = info.overview
-		}
-		if info.firstID != "" {
-			show["posterImageId"] = info.firstID
-		}
-
-		_ = u // available for future watched count queries
-		shows = append(shows, show)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"shows": shows})
+	s.handleTVShowsList(w, r)
 }
 
 func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
@@ -3337,8 +3267,14 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		displayName = tmdbName.String
 	}
 
+	// id + title, matching the /tv/shows plane. This handler used to emit `showName` and no
+	// id at all, which is how the two show planes drifted: a caller could not carry an
+	// identity from the list into the detail without knowing which endpoint had produced it.
+	// id is the folder name the caller asked for — the same value /tv/shows emits as its id,
+	// deliberately, so a persisted id stays valid across both routes.
 	resp := map[string]any{
-		"showName": displayName,
+		"id":       showName,
+		"title":    displayName,
 		"year":     nullIntToAny(year),
 		"rating":   nullFloatToAny(rating),
 		"summary":  nullStringToAny(overview),

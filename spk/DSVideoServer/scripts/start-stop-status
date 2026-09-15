@@ -75,17 +75,28 @@ start() {
   mkdir -p "${VAR}"
   rotate_log
 
-  # Ensure the live nginx conf matches our package source — DSM may regenerate
-  # it from a stale cache on restarts, service events, or cert renewals.
-  NGINX_SRC="${BASE}/target/nginx/DSVideoServer.conf"
-  NGINX_LIVE="/etc/nginx/conf.d/dsm.pkg-static.DSVideoServer-2059624305.conf"
-  if [ -f "${NGINX_SRC}" ] && [ -f "${NGINX_LIVE}" ]; then
-    if ! cmp -s "${NGINX_SRC}" "${NGINX_LIVE}"; then
-      echo "[${PACKAGE}] nginx conf out of date — syncing and reloading" >> "${LOG}"
-      cp "${NGINX_SRC}" "${NGINX_LIVE}"
-      nginx -s reload 2>/dev/null || true
-    fi
-  fi
+  # NOTE: this script deliberately does NOT touch the live nginx conf.
+  #
+  # It used to cp the package's nginx/DSVideoServer.conf over
+  # /etc/nginx/conf.d/dsm.pkg-static.DSVideoServer-2059624305.conf and reload nginx by
+  # hand, as a "self-heal" against DSM regenerating the conf from a stale cache. Two
+  # mechanisms were managing one file: conf/resource already registers the same conf
+  # declaratively under web-config/nginx-static-config, and DSM's privileged resource
+  # worker injects it on install (see postinst), while INFO's
+  # instuninst_restart_services="nginx" and startstop_restart_services="nginx" make DSM
+  # restart nginx on install/uninstall and on every package start/stop — which is exactly
+  # what the hand-rolled reload was for.
+  #
+  # The cp was also pinned to that -2059624305 suffix, a DSM-internal hash. Nothing
+  # guarantees it survives a repackage or a DSM upgrade: the day it stops matching, the
+  # `[ -f "${NGINX_LIVE}" ]` guard silently turns the whole self-heal into a no-op, and if
+  # it instead matched a conf DSM had legitimately regenerated we would clobber it. A
+  # safety net that fails closed and silently is worse than no safety net, because the
+  # logs keep saying the package started fine.
+  #
+  # If proxy routes ever go missing after a restart again, fix it in
+  # spk/DSVideoServer/nginx/DSVideoServer.conf and reinstall — do not reintroduce a
+  # second writer here.
 
   GO_BINARY="$(find_go_binary || true)"
 
