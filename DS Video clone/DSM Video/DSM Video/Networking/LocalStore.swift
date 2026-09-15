@@ -43,6 +43,84 @@ actor LocalStore {
   /// `setup()` threw, so callers saw a healthy store that silently dropped their writes.
   private var setupFailure: Error?
 
+  /// True when a corrupt database was quarantined and replaced with a fresh one on this
+  /// launch. The store WORKS — it is simply empty, and will refill from the server on the next
+  /// delta sync. Distinct from `isUnavailable`, which means nothing will persist at all.
+  private(set) var didRecoverFromCorruption = false
+
+  /// Asks SQLite directly whether the file is corrupt, rather than inferring it from a failed
+  /// open. `sqlite3_open` is lazy and returns OK against a damaged file; the damage only
+  /// surfaces when a statement touches the pages, which is why the failure appears in migrate()
+  /// and why a plain retry never helps.
+  ///
+  /// Uses `quick_check`, not `integrity_check`: the full check walks every page and can take
+  /// many seconds on a large library, and this runs on the launch path. `quick_check` skips
+  /// the index-content verification but still catches the structural damage that makes a file
+  /// unopenable, which is the case being handled.
+  private func databaseIsCorrupt() -> Bool {
+    var probe: OpaquePointer?
+    let path = resolvedDatabaseURL().path
+    guard sqlite3_open_v2(path, &probe, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let probe else {
+      // Cannot even open it read-only. If the file exists, treat that as corrupt; if it does
+      // not, the failure was something else (a missing directory, a permissions problem) and
+      // quarantining would destroy nothing useful but also fix nothing.
+      if probe != nil { sqlite3_close(probe) }
+      return FileManager.default.fileExists(atPath: path)
+    }
+    defer { sqlite3_close(probe) }
+
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(probe, "PRAGMA quick_check", -1, &stmt, nil) == SQLITE_OK else {
+      return true   // cannot even prepare the check — damaged
+    }
+    defer { sqlite3_finalize(stmt) }
+    guard sqlite3_step(stmt) == SQLITE_ROW,
+          let cText = sqlite3_column_text(stmt, 0) else {
+      return true
+    }
+    let result = String(cString: cText)
+    if result != "ok" {
+      log.error("PRAGMA quick_check reports: \(result)")
+      return true
+    }
+    return false
+  }
+
+  /// Moves the corrupt database and its WAL/SHM sidecars aside, timestamped.
+  ///
+  /// QUARANTINE, never delete. The file may be partially salvageable by hand, it is evidence
+  /// for diagnosing what corrupted it, and deleting user data to recover from a read failure is
+  /// precisely the instinct that causes the losses this whole class of bug is about. The cache
+  /// itself is reconstructible, but that is a reason the REBUILD is safe — not a reason to
+  /// destroy the original.
+  private func quarantineCorruptDatabase() -> Bool {
+    let fm = FileManager.default
+    let dbURL = resolvedDatabaseURL()
+    let stamp = ISO8601DateFormatter().string(from: Date())
+      .replacingOccurrences(of: ":", with: "-")
+    let dir = dbURL.deletingLastPathComponent()
+
+    // The main file must move for the rebuild to get a clean path. The sidecars are
+    // best-effort: a stale -wal left beside a NEW database would be applied to it on open,
+    // which is its own corruption, so they are moved too — but failing to move one is not
+    // fatal, because SQLite discards a WAL whose header does not match the database.
+    let main = dbURL
+    let quarantinedMain = dir.appendingPathComponent("dsreel.corrupt-\(stamp).db")
+    do {
+      try fm.moveItem(at: main, to: quarantinedMain)
+      log.error("quarantined corrupt database to \(quarantinedMain.lastPathComponent)")
+    } catch {
+      log.error("could not quarantine corrupt database: \(error.localizedDescription)")
+      return false
+    }
+    for suffix in ["-wal", "-shm"] {
+      let side = dir.appendingPathComponent("dsreel.db\(suffix)")
+      guard fm.fileExists(atPath: side.path) else { continue }
+      try? fm.moveItem(at: side, to: dir.appendingPathComponent("dsreel.corrupt-\(stamp).db\(suffix)"))
+    }
+    return true
+  }
+
   /// True when the on-disk store could not be opened and local persistence is dead.
   /// Callers that own user-visible state should surface this rather than pretend a write
   /// landed — a resume position that silently fails to save reads to the user as data loss.
@@ -55,6 +133,17 @@ actor LocalStore {
     guard isUnavailable else { return nil }
     return "Your watch history can't be saved on this device right now. Playback still works, "
       + "and positions you set will sync to the server when it's reachable."
+  }
+
+  /// What to tell the user after a corruption recovery, or nil if none happened.
+  ///
+  /// Deliberately separate from `unavailableReason`: the store WORKS after a recovery, it is
+  /// just empty. Reporting that as "can't be saved" would be false, and the user would not
+  /// understand why their library repopulates a moment later.
+  var recoveryNotice: String? {
+    guard didRecoverFromCorruption else { return nil }
+    return "This device's offline library was damaged and has been rebuilt. "
+      + "Your videos will reappear as they sync from your server."
   }
   private var readyContinuations: [CheckedContinuation<Void, Never>] = []
   private let log = Logger(subsystem: "com.dsm.dsvideo", category: "LocalStore")
@@ -123,22 +212,55 @@ actor LocalStore {
       try setup(jsonCacheData: jsonCacheData)
       setupFailure = nil
     } catch {
-      // A failed open leaves `db` nil, which turns every write path in this file into a
-      // silent no-op via its `guard let db` — including upsertSingleProgress, the resume
-      // position writer. Nothing downstream can detect that: the outbox only replays rows
-      // that reached SQLite, so a lost write is lost for good and reads as a server bug.
+      // A failed setup leaves the store unusable: every write path here short-circuits and the
+      // outbox can only replay rows that reached SQLite, so a lost write is lost for good and
+      // reads to the user as a server bug.
       //
-      // Retry once before giving up. The most common causes are transient — the file was
-      // briefly unreadable under data protection, or a stale WAL from a jetsam kill — and
-      // both clear on a second open.
+      // (Note for the next reader: an earlier comment here claimed a failed open leaves `db`
+      // nil and that `guard let db` therefore short-circuits. That is NOT true —
+      // `sqlite3_open` leaves a NON-NIL handle even when it fails, and the open is lazy, so
+      // the real failure surfaces later in migrate(). `isUnavailable` is authoritative because
+      // it consults `setupFailure`, not because the handle is nil.)
+      //
+      // Retry once. The common causes ARE transient — the file briefly unreadable under data
+      // protection, a stale WAL after a jetsam kill — and clear on a second open.
       log.error("LocalStore.setup failed: \(error.localizedDescription) — retrying once")
       do {
         try setup(jsonCacheData: jsonCacheData)
         setupFailure = nil
         log.info("LocalStore.setup succeeded on retry")
       } catch {
-        setupFailure = error
-        log.error("LocalStore.setup failed again: \(error.localizedDescription) — store is UNAVAILABLE, local writes will not persist")
+        // TASK-902: a second identical failure is not transient. The most likely cause is a
+        // corrupt database file, and retrying re-opens THE SAME corrupt file forever — the
+        // store stays dead for the life of the install, and the only user remedy is deleting
+        // the app, which also destroys every download.
+        //
+        // So: ask SQLite whether the file is actually corrupt, and if it is, move it aside and
+        // build a fresh one. This cache is fully reconstructible from the server by delta sync,
+        // so an empty store is a RECOVERABLE state; a permanently dead one is not.
+        log.error("LocalStore.setup failed again: \(error.localizedDescription) — checking for corruption")
+        if databaseIsCorrupt() {
+          if quarantineCorruptDatabase() {
+            do {
+              // Fresh file, fresh schema. jsonCacheData is deliberately NOT replayed here:
+              // the legacy cache was already consumed (or absent) on the first attempt, and
+              // re-importing it into a rebuilt store risks resurrecting stale rows.
+              try setup(jsonCacheData: nil)
+              setupFailure = nil
+              didRecoverFromCorruption = true
+              log.info("LocalStore recovered: corrupt database quarantined, fresh store created")
+            } catch {
+              setupFailure = error
+              log.error("LocalStore: rebuild after quarantine FAILED — \(error.localizedDescription)")
+            }
+          } else {
+            setupFailure = error
+            log.error("LocalStore: database is corrupt but could not be quarantined — store is UNAVAILABLE")
+          }
+        } else {
+          setupFailure = error
+          log.error("LocalStore.setup failed twice, not corruption — store is UNAVAILABLE, local writes will not persist")
+        }
       }
     }
     // Signal all callers that are waiting on ensureReady(). This is set even on failure:
@@ -167,21 +289,31 @@ actor LocalStore {
 
   // MARK: - Schema
 
-  private func openDatabase() throws {
-    // databaseURLOverride is nil in production (see its declaration — R4 test seam), so this
-    // resolves to the same <Documents>/dsreel.db it always has.
-    let dbURL: URL
-    let docs: URL
-    if let override = databaseURLOverride {
-      dbURL = override
-      docs = override.deletingLastPathComponent()
-    } else {
-      guard let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-        throw LocalStoreError.cannotLocateDocuments
-      }
-      docs = d
-      dbURL = d.appendingPathComponent("dsreel.db")
+  /// Where the SQLite file lives. ONE definition, because the corruption probe and the
+  /// quarantine both need the same answer as the open — a second copy of this logic that
+  /// drifted would have the recovery path moving a different file than the one that failed.
+  ///
+  /// `databaseURLOverride` is nil in production (see its declaration — R4 test seam), so this
+  /// resolves to the same `<Documents>/dsreel.db` it always has.
+  ///
+  /// Returns the Documents fallback path even when Documents cannot be located; `openDatabase`
+  /// still throws in that case, and a probe against a path that does not exist correctly
+  /// reports "not corrupt".
+  private func resolvedDatabaseURL() -> URL {
+    if let override = databaseURLOverride { return override }
+    guard let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+      return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("dsreel.db")
     }
+    return d.appendingPathComponent("dsreel.db")
+  }
+
+  private func openDatabase() throws {
+    if databaseURLOverride == nil,
+       FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first == nil {
+      throw LocalStoreError.cannotLocateDocuments
+    }
+    let dbURL = resolvedDatabaseURL()
+    let docs = dbURL.deletingLastPathComponent()
     if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
       // Release the half-open handle. sqlite3_open allocates one even on failure, and
       // leaving it non-nil means the `guard let db` at the head of every write path does

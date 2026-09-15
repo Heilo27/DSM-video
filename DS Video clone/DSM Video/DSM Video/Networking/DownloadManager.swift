@@ -62,6 +62,19 @@ struct ActiveDownload: Identifiable {
   let task: URLSessionDownloadTask
 }
 
+/// The three states the downloads manifest can be in, kept distinct on purpose.
+///
+/// `absent` and `unreadable` used to collapse into the same `[]`, which is how a corrupt file
+/// became a destroyed library: the empty result was written back over the real data.
+enum ManifestState {
+  /// No manifest file yet — a fresh install, or nothing has ever been downloaded. `[]` is correct.
+  case absent
+  /// The manifest decoded. This is the only state whose contents can be trusted.
+  case items([DownloadedItem])
+  /// The file EXISTS and could not be read. Never treat this as "no downloads".
+  case unreadable(reason: String)
+}
+
 /// TASK-782: surfaces a genuine (non-pause) download failure to the UI so the row
 /// shows "Download failed" + a retry/dismiss affordance instead of silently vanishing.
 struct FailedDownload: Identifiable {
@@ -93,6 +106,17 @@ final class DownloadManager: NSObject {
   /// non-pause error branch and the moveItem-catch so the Downloads UI can show a
   /// "Download failed — retry" row rather than the row silently disappearing.
   private(set) var failedDownloads: [String: FailedDownload] = [:]
+
+  /// Set when the manifest was found corrupt and had to be quarantined and rebuilt. Non-nil
+  /// means the user has lost titles and watch positions even though their videos still play —
+  /// which they must be told, rather than left to notice their library looks wrong.
+  /// Cleared by `acknowledgeManifestRecovery()` once shown.
+  private(set) var manifestUnavailableReason: String?
+
+  /// Dismiss the manifest-recovery notice after the UI has surfaced it.
+  func acknowledgeManifestRecovery() {
+    manifestUnavailableReason = nil
+  }
 
   private var backgroundSession: URLSession
   private var downloadTasks: [URLSessionDownloadTask: String] = [:]
@@ -427,6 +451,100 @@ final class DownloadManager: NSObject {
     }
   }
 
+  /// Reads and decodes the manifest, distinguishing the three states that matter.
+  ///
+  /// The whole point is that "the file is not there" and "the file is there and unreadable"
+  /// are DIFFERENT, and were previously the same: a decode failure fell through to `[]`, and
+  /// the next write persisted that empty state. One truncated write — a jetsam kill, a full
+  /// disk — and twenty downloads became one, with the .mp4 files orphaned on disk, invisible
+  /// and unreclaimable through the app.
+  ///
+  /// A failure to READ is never evidence that there is nothing to read.
+  private func loadManifest() -> ManifestState {
+    let fileURL = downloadsMetadataFileURL
+    guard let data = try? Data(contentsOf: fileURL) else {
+      return .absent
+    }
+    // An empty file is a torn write, not an empty library. `JSONDecoder` rejects it anyway,
+    // but say so explicitly so the intent survives a refactor.
+    guard !data.isEmpty else {
+      return .unreadable(reason: "manifest file is zero bytes")
+    }
+    do {
+      return .items(try JSONDecoder().decode([DownloadedItem].self, from: data))
+    } catch {
+      return .unreadable(reason: error.localizedDescription)
+    }
+  }
+
+  /// Moves a corrupt manifest aside instead of letting it be overwritten, and rebuilds what
+  /// can be rebuilt from the media still on disk.
+  ///
+  /// Quarantine rather than delete: the file is the only record of what the user had, it may
+  /// be partially salvageable by hand, and deleting is exactly the instinct that caused the
+  /// data loss in the first place.
+  ///
+  /// Returns the reconstructed manifest, which is written back so the app has a coherent
+  /// state to work from.
+  @discardableResult
+  private func quarantineAndRebuildManifest(reason: String) -> [DownloadedItem] {
+    let fm = FileManager.default
+    let fileURL = downloadsMetadataFileURL
+
+    if fm.fileExists(atPath: fileURL.path) {
+      let stamp = ISO8601DateFormatter().string(from: Date())
+        .replacingOccurrences(of: ":", with: "-")
+      let quarantined = fileURL.deletingLastPathComponent()
+        .appendingPathComponent("downloads.corrupt-\(stamp).json")
+      do {
+        try fm.moveItem(at: fileURL, to: quarantined)
+        log.error("downloads manifest unreadable (\(reason)) — quarantined to \(quarantined.lastPathComponent)")
+      } catch {
+        // Could not move it aside. Do NOT proceed to overwrite: leaving the corrupt file in
+        // place preserves whatever it still holds, and the caller gets an empty list for this
+        // launch rather than a destroyed manifest.
+        log.error("downloads manifest unreadable (\(reason)) and could not be quarantined — \(error.localizedDescription). Leaving it untouched.")
+        manifestUnavailableReason = "Your downloads list couldn't be read. Your downloaded videos are still on this device."
+        return []
+      }
+    }
+
+    // Rebuild from the media that actually exists. Every file in the Downloads directory is
+    // named `<itemId>.mp4`, so the id — the one thing that matters for playback and for
+    // de-duplicating a re-download — is recoverable. Title and duration are not, so they are
+    // filled with honest placeholders rather than invented values.
+    let dir = downloadsDirectory()
+    let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+    let rebuilt: [DownloadedItem] = files.compactMap { url in
+      guard url.pathExtension.lowercased() == "mp4" else { return nil }
+      let id = url.deletingPathExtension().lastPathComponent
+      guard !id.isEmpty else { return nil }
+      let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
+      let added = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+      return DownloadedItem(
+        id: id,
+        title: id,          // The real title is gone with the manifest; the id is at least true.
+        year: nil,
+        videoPath: url.lastPathComponent,
+        posterPath: nil,
+        fileSize: size,
+        downloadedAt: added,
+        resumePositionSeconds: 0,
+        durationSeconds: 0
+      )
+    }
+
+    if rebuilt.isEmpty {
+      manifestUnavailableReason = "Your downloads list couldn't be read and no downloaded videos were found."
+    } else {
+      manifestUnavailableReason = "Your downloads list was rebuilt from the videos on this device. "
+        + "Titles and watch positions for \(rebuilt.count) item(s) were lost, but the videos still play."
+      log.info("rebuilt downloads manifest from disk — \(rebuilt.count) item(s) recovered")
+    }
+    saveDownloadedItems(rebuilt)
+    return rebuilt
+  }
+
   func getDownloadedItems() -> [DownloadedItem] {
     if let cached = cachedDownloadedItems { return cached }
 
@@ -434,9 +552,19 @@ final class DownloadManager: NSObject {
     // Migrate from UserDefaults on first launch after upgrade: copy data to file, then remove key.
     let fileURL = downloadsMetadataFileURL
     var rawData: Data?
-    if let fileData = try? Data(contentsOf: fileURL) {
-      rawData = fileData
-    } else if let udData = UserDefaults.standard.data(forKey: storageKey) {
+    switch loadManifest() {
+    case .items:
+      rawData = try? Data(contentsOf: fileURL)
+    case .unreadable(let reason):
+      // Corrupt, not empty. Quarantine, rebuild from disk, and return that — never fall
+      // through to `[]` and let a later write make the loss permanent.
+      let rebuilt = quarantineAndRebuildManifest(reason: reason)
+      cachedDownloadedItems = rebuilt
+      return rebuilt
+    case .absent:
+      rawData = nil
+    }
+    if rawData == nil, let udData = UserDefaults.standard.data(forKey: storageKey) {
       // Migration path: write to Application Support, then remove from UserDefaults.
       // Only remove from UserDefaults after confirming the write succeeded — preserves
       // data if the write fails (e.g. disk full) so the next launch can retry (TASK-549).
@@ -754,14 +882,25 @@ final class DownloadManager: NSObject {
 
     // Read raw items from the metadata file to preserve filename-only storage invariant,
     // then insert the new item (which already uses filename-only videoPath).
+    // THE DATA-LOSS SITE. This used to be `try?` → `rawItems = []` → insert → save, so a
+    // manifest that failed to decode was replaced by a one-element array. Twenty downloads
+    // became one and the .mp4 files orphaned on disk.
+    //
+    // Now: absent means genuinely empty and `[]` is right; unreadable means quarantine the
+    // file and rebuild from the media actually present, so the new item joins the recovered
+    // set instead of replacing everything.
     let rawItems: [DownloadedItem]
-    if let rawData = try? Data(contentsOf: downloadsMetadataFileURL),
-       let decoded = try? JSONDecoder().decode([DownloadedItem].self, from: rawData) {
+    switch loadManifest() {
+    case .items(let decoded):
       rawItems = decoded
-    } else {
+    case .absent:
       rawItems = []
+    case .unreadable(let reason):
+      rawItems = quarantineAndRebuildManifest(reason: reason)
     }
-    var updatedItems = rawItems
+    // Guard against a duplicate id — a rebuild from disk will already contain this item if
+    // its file landed before the manifest was rewritten.
+    var updatedItems = rawItems.filter { $0.id != item.id }
     updatedItems.insert(item, at: 0)
     saveDownloadedItems(updatedItems)
     cachedDownloadedItems = nil
