@@ -41,6 +41,8 @@ final class AppState {
   static let fallbackURL = URL(string: "https://0.0.0.0")!
   private enum Keys {
     static let baseURL = "dsReel.baseURL"
+    /// The last address a login or reconnect actually SUCCEEDED on — see lastGoodAddress.
+    static let lastGoodAddress = "dsReel.lastGoodAddress"
     static let lanAddress = "dsReel.lanAddress"
     static let wanAddress = "dsReel.wanAddress"
     static let username = "dsReel.username"
@@ -58,6 +60,27 @@ final class AppState {
       UserDefaults.standard.set(baseURL, forKey: Keys.baseURL)
       updateAPI()
     }
+  }
+
+  /// The last address a login or reconnect actually succeeded on.
+  ///
+  /// The candidate cascade tries addresses in the order QuickConnect happens to list the
+  /// NAS's interfaces, which is arbitrary — this NAS advertises both eth0 (.145) and eth1
+  /// (.148) and the app used whichever DSM named first. That is not a failure (both answer),
+  /// but it is a coin flip on every launch, and it means a working address is re-discovered
+  /// rather than remembered.
+  ///
+  /// Recording the winner and trying it FIRST makes the choice stable, and makes a stale
+  /// baseURL self-correcting in one attempt instead of a full cascade: the device log that
+  /// prompted this showed a stored baseURL of 192.168.50.146:8090 — a host that has not
+  /// existed for some time — with the app reaching the server only because QuickConnect
+  /// supplied working candidates behind it.
+  ///
+  /// Deliberately NOT the same thing as baseURL: baseURL is what the USER configured (or
+  /// the last winner), while this is purely a performance/stability hint. A wrong value
+  /// here costs one failed 2s probe and nothing else, so it never needs to be authoritative.
+  var lastGoodAddress: String {
+    didSet { UserDefaults.standard.set(lastGoodAddress, forKey: Keys.lastGoodAddress) }
   }
 
   /// Local network address (e.g. 192.168.1.100). Optional — set alongside wanAddress
@@ -208,6 +231,7 @@ final class AppState {
 
     qualityCap = d.string(forKey: Keys.qualityCap) ?? "auto"
     baseURL = storedBaseURL
+    lastGoodAddress = d.string(forKey: Keys.lastGoodAddress) ?? ""
     lanAddress = d.string(forKey: Keys.lanAddress) ?? ""
     wanAddress = d.string(forKey: Keys.wanAddress) ?? ""
     username = d.string(forKey: Keys.username) ?? ""
@@ -537,7 +561,39 @@ final class AppState {
       addDirect(raw)
     }
 
-    return candidates
+    return Self.preferringLastGood(candidates, lastGood: lastGoodAddress)
+  }
+
+  /// Moves the last known-good address to the front of the cascade.
+  ///
+  /// Order matters because the cascade tries candidates SEQUENTIALLY with a timeout each,
+  /// and QuickConnect lists the NAS's interfaces in an order the client does not control.
+  /// This NAS answers on both eth0 (.145) and eth1 (.148), so which one the app used was a
+  /// coin flip per launch — not a failure, but not stable either, and it meant a working
+  /// address was re-discovered instead of remembered.
+  ///
+  /// The bigger win is a STALE baseURL. The device log that prompted this had
+  /// 192.168.50.146:8090 stored, a host that no longer exists; every launch paid its full
+  /// timeout before the cascade found a live address. Starting from the last address that
+  /// actually answered skips that.
+  ///
+  /// STABLE otherwise: a pure move-to-front, so every other candidate keeps its relative
+  /// position and the LAN-before-WAN-before-relay ordering the timeouts are tuned around
+  /// (2s / 8s / 15s) is preserved. An unmatched or empty hint is a no-op.
+  static func preferringLastGood(
+    _ candidates: [QuickConnectResolver.Candidate],
+    lastGood: String
+  ) -> [QuickConnectResolver.Candidate] {
+    let hint = lastGood.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !hint.isEmpty,
+          let idx = candidates.firstIndex(where: { $0.url.absoluteString == hint }),
+          idx != 0
+    else { return candidates }
+
+    var reordered = candidates
+    let winner = reordered.remove(at: idx)
+    reordered.insert(winner, at: 0)
+    return reordered
   }
 
   func login() async {
@@ -632,6 +688,9 @@ final class AppState {
             baseURL = candidate.url.absoluteString
             self.useHTTPS = candidate.url.scheme == "https"
             if let port = candidate.url.port { self.defaultPort = port }
+            // Remember the winner so the next launch tries it first rather than
+            // re-discovering it from whatever order QuickConnect happens to return.
+            lastGoodAddress = candidate.url.absoluteString
           }
           if !savedPassword.isEmpty {
             Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
@@ -958,7 +1017,10 @@ final class AppState {
         _ = try await probe.syncStatus(timeout: statusTimeout)
         homeLog.info("reconnect: \(candidate.url) fully verified — using")
         api = probe
-        if !candidate.requiresTunnelCookie { baseURL = candidate.url.absoluteString }
+        if !candidate.requiresTunnelCookie {
+          baseURL = candidate.url.absoluteString
+          lastGoodAddress = candidate.url.absoluteString
+        }
         clearNetworkError()
         return true
       } catch let err as APIError {
@@ -976,7 +1038,10 @@ final class AppState {
         }
         homeLog.info("reconnect: \(candidate.url) returned API error but is reachable — using")
         api = probe
-        if !candidate.requiresTunnelCookie { baseURL = candidate.url.absoluteString }
+        if !candidate.requiresTunnelCookie {
+          baseURL = candidate.url.absoluteString
+          lastGoodAddress = candidate.url.absoluteString
+        }
         clearNetworkError()
         return true
       } catch {

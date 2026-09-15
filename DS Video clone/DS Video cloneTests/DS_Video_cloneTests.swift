@@ -2736,3 +2736,81 @@ struct SyncCursorClampTests {
                                      serverItem: 100, serverProgress: 0))
   }
 }
+
+// MARK: - Connection candidate ordering
+
+/// The cascade should start from the address that last actually worked.
+///
+/// Candidates are tried SEQUENTIALLY with a timeout each (2s LAN / 8s WAN / 15s relay), and
+/// QuickConnect lists the NAS's interfaces in an order the client does not control. This NAS
+/// answers on both eth0 (192.168.50.145) and eth1 (192.168.50.148), so which one the app
+/// used was a coin flip per launch.
+///
+/// The costlier case is a STALE baseURL. A device log showed 192.168.50.146:8090 stored — a
+/// host that no longer exists — so every launch paid a full timeout on a dead address before
+/// the cascade found a live one.
+@MainActor
+@Suite("Candidate ordering")
+struct CandidateOrderingTests {
+
+  private func candidate(_ s: String) -> QuickConnectResolver.Candidate {
+    .init(url: URL(string: s)!, requiresTunnelCookie: false)
+  }
+
+  /// The real shape from the device: a dead address first, both live interfaces behind it.
+  @Test func theLastGoodAddressIsTriedFirst() {
+    let cascade = [
+      candidate("http://192.168.50.146:8090"),  // dead
+      candidate("http://192.168.50.145:5000"),  // eth0, live
+      candidate("http://192.168.50.148:5000"),  // eth1, live — the one that worked
+    ]
+
+    let ordered = AppState.preferringLastGood(cascade, lastGood: "http://192.168.50.148:5000")
+
+    #expect(ordered.first?.url.absoluteString == "http://192.168.50.148:5000",
+            "the known-good address is not tried first, so a dead address still costs a timeout")
+    #expect(ordered.count == cascade.count, "reordering must not drop a candidate")
+  }
+
+  /// A move-to-front, not a sort: every other candidate keeps its relative position, or the
+  /// LAN-before-WAN-before-relay ordering the per-candidate timeouts are tuned around breaks.
+  @Test func everyOtherCandidateKeepsItsRelativeOrder() {
+    let cascade = [candidate("http://a:1"), candidate("http://b:2"),
+                   candidate("http://c:3"), candidate("http://d:4")]
+
+    let ordered = AppState.preferringLastGood(cascade, lastGood: "http://c:3")
+
+    #expect(ordered.map(\.url.absoluteString) == ["http://c:3", "http://a:1", "http://b:2", "http://d:4"])
+  }
+
+  /// An unusable hint must be a no-op, never a reshuffle — a wrong hint should cost nothing.
+  @Test func anUnmatchedOrEmptyHintChangesNothing() {
+    let cascade = [candidate("http://a:1"), candidate("http://b:2")]
+    let expected = ["http://a:1", "http://b:2"]
+
+    #expect(AppState.preferringLastGood(cascade, lastGood: "").map(\.url.absoluteString) == expected)
+    #expect(AppState.preferringLastGood(cascade, lastGood: "   ").map(\.url.absoluteString) == expected)
+    #expect(AppState.preferringLastGood(cascade, lastGood: "http://gone:9").map(\.url.absoluteString) == expected)
+    // Already first — must not churn.
+    #expect(AppState.preferringLastGood(cascade, lastGood: "http://a:1").map(\.url.absoluteString) == expected)
+  }
+
+  /// Matching is exact. A hint that merely shares a host must not promote a different port
+  /// or scheme — 192.168.50.146:8090 and 192.168.50.146:5000 are different endpoints, and
+  /// only one of them is the one that answered.
+  @Test func matchingIsExactNotByHost() {
+    let cascade = [candidate("http://192.168.50.148:5000"),
+                   candidate("http://192.168.50.148:8090")]
+
+    let ordered = AppState.preferringLastGood(cascade, lastGood: "http://192.168.50.148:8090")
+    #expect(ordered.first?.url.absoluteString == "http://192.168.50.148:8090")
+
+    // A host-only hint matches nothing, and is therefore a no-op.
+    let byHost = AppState.preferringLastGood(cascade, lastGood: "192.168.50.148")
+    #expect(byHost.map(\.url.absoluteString) == cascade.map(\.url.absoluteString))
+  }
+
+  @Test func anEmptyCascadeIsHandled() {
+    #expect(AppState.preferringLastGood([], lastGood: "http://a:1").isEmpty)
+  }
+}
