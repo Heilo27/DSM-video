@@ -2893,3 +2893,73 @@ struct LibraryStalenessTests {
     #expect(!("2026-09-15T20:00:00Z" > "2026-09-15T21:00:00Z"))
   }
 }
+
+// MARK: - Heartbeat must not read a stalled cursor as "nothing to do"
+
+/// The heartbeat gate is where Just Added actually died.
+///
+/// It took three attempts to find, because every earlier fix was DOWNSTREAM. runHeartbeat
+/// computes `beat.itemSeq > cursors.itemSeq` — the same comparison as runDeltaSync's delta
+/// gate — so a local cursor of 348155 against a server at 13904 reads as "no item changes"
+/// and runDeltaSync is never called at all. The cursor clamp and the library-staleness check
+/// both live INSIDE runDeltaSync, so neither could ever run.
+///
+/// The device log said so on every beat: "change detected (items=false progress=true)".
+/// Only progress ever triggered a sync, on its own separate cursor — which is exactly why
+/// the app looked alive while the library silently stopped growing.
+///
+/// The warm-launch path makes it permanent rather than transient: homeLoad takes
+/// PATH=in-memory whenever the rails are already populated, so the heartbeat is the ONLY
+/// thing that runs.
+@Suite("Heartbeat gate")
+struct HeartbeatGateTests {
+
+  /// Decides whether runHeartbeat should trigger a sync. Mirrors the three-way condition in
+  /// AppState.runHeartbeat so the RULE is testable without a network or a database.
+  private func shouldSync(localItem: Int, localProgress: Int,
+                          serverItem: Int, serverProgress: Int) -> Bool {
+    let itemsChanged = serverItem > localItem
+    let progressChanged = serverProgress > localProgress
+    let cursorAhead = SyncCursorClamp.isAhead(
+      localItem: localItem, localProgress: localProgress,
+      serverItem: serverItem, serverProgress: serverProgress)
+    return itemsChanged || progressChanged || cursorAhead
+  }
+
+  /// The exact numbers from the device. Without the cursorAhead term this is FALSE, which
+  /// is the whole defect.
+  @Test func aStalledCursorTriggersASyncInsteadOfBeingIgnored() {
+    #expect(
+      shouldSync(localItem: 348155, localProgress: 49642,
+                 serverItem: 13904, serverProgress: 49883),
+      """
+      The heartbeat still reads a stalled cursor as "no changes", so runDeltaSync is never \
+      called and neither the clamp nor the staleness check can run.
+      """
+    )
+  }
+
+  /// Even when progress is ALSO caught up — the case where nothing else would fire.
+  @Test func aStalledCursorTriggersEvenWithProgressUpToDate() {
+    #expect(shouldSync(localItem: 348155, localProgress: 49883,
+                       serverItem: 13904, serverProgress: 49883),
+            "with progress level, the stalled item cursor is the only signal left")
+  }
+
+  /// The ordinary cases must be unchanged — a heartbeat that always syncs would hammer the
+  /// NAS every 30 seconds, which is its own defect.
+  @Test func aHealthyCursorDoesNotForceASync() {
+    // Fully caught up: nothing to do.
+    #expect(!shouldSync(localItem: 13904, localProgress: 49883,
+                        serverItem: 13904, serverProgress: 49883))
+    // Behind on items: syncs for the ordinary reason.
+    #expect(shouldSync(localItem: 13800, localProgress: 49883,
+                       serverItem: 13904, serverProgress: 49883))
+    // Behind on progress only: still syncs, as before.
+    #expect(shouldSync(localItem: 13904, localProgress: 49800,
+                       serverItem: 13904, serverProgress: 49883))
+    // Fresh install.
+    #expect(shouldSync(localItem: 0, localProgress: 0,
+                       serverItem: 13904, serverProgress: 49883))
+  }
+}

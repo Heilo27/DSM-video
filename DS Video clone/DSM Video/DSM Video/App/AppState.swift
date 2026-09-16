@@ -2045,9 +2045,34 @@ final class AppState {
     do {
       let beat = try await apiSnapshot.syncHeartbeat()
       let cursors = await LocalStore.shared.getSyncCursors()
+
+      // A cursor AHEAD of the server means "sync" here, not "nothing to do".
+      //
+      // THIS is where Just Added actually died, and it took three attempts to find because
+      // the fixes were all downstream. `beat.itemSeq > cursors.itemSeq` is the same
+      // comparison as runDeltaSync's delta gate, so a local cursor of 348155 against a
+      // server at 13904 makes itemsChanged FALSE — and runDeltaSync is never called at
+      // all. The clamp and the staleness check both live INSIDE runDeltaSync, so neither
+      // could ever run. The device log said so plainly on every beat:
+      // "change detected (items=false progress=true)" — only progress ever triggered a
+      // sync, on its own separate cursor, which is why the app looked alive while the
+      // library silently stopped growing.
+      //
+      // The warm-launch path makes this permanent rather than transient: homeLoad takes
+      // PATH=in-memory whenever the rails are already populated, so the heartbeat is the
+      // ONLY thing that runs, and it had decided there was nothing to do.
+      let cursorAhead = SyncCursorClamp.isAhead(
+        localItem: cursors.itemSeq, localProgress: cursors.progressSeq,
+        serverItem: beat.itemSeq, serverProgress: beat.progressSeq)
       let itemsChanged = beat.itemSeq > cursors.itemSeq
       let progressChanged = beat.progressSeq > cursors.progressSeq
-      if itemsChanged || progressChanged {
+      if cursorAhead {
+        homeLog.warning("""
+          heartbeat: local cursor is AHEAD of the server           (item \(cursors.itemSeq) vs \(beat.itemSeq)) — the delta gate would read this as           "no changes" forever; forcing a sync so the reset can run
+          """)
+        dlog.warn(.library, "cursor ahead of server — forcing a sync to recover")
+      }
+      if itemsChanged || progressChanged || cursorAhead {
         homeLog.info("heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged)) — syncing")
         homeBackgroundFetchTask?.cancel()
         homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
