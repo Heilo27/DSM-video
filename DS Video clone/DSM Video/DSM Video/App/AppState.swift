@@ -1873,11 +1873,26 @@ final class AppState {
       // Cheap to be wrong — one re-fetch — and the alternative is a library that never
       // recovers without a reinstall.
       var forceResync = false
-      if localCount > 0, let serverNewest = try? await apiSnapshot.items(
-        libraryId: libs.first(where: { $0.kind != "tv" })?.id ?? libs.first?.id ?? "",
-        limit: 1).items.first?.addedAt {
+      if localCount > 0 {
+        // filter=justAdded, NOT a bare limit:1.
+        //
+        // /items defaults to ORDER BY title, so `limit: 1` returns the alphabetical head —
+        // on this library "Wuthering Heights", added in April. The first version of this
+        // check compared that five-month-old timestamp against local, concluded the library
+        // was current, and could never fire. filter=justAdded is ORDER BY added_at DESC.
+        //
+        // Across EVERY library, not just movies: a TV-only addition is exactly as stale and
+        // would have been missed by checking the movie library alone.
+        var serverNewest = ""
+        for lib in libs {
+          if let newest = try? await apiSnapshot.items(
+            libraryId: lib.id, limit: 1, filter: "justAdded").items.first?.addedAt,
+             newest > serverNewest {
+            serverNewest = newest
+          }
+        }
         let localNewest = await LocalStore.shared.newestAddedAt()
-        if !localNewest.isEmpty, serverNewest > localNewest {
+        if !serverNewest.isEmpty, !localNewest.isEmpty, serverNewest > localNewest {
           homeLog.warning("""
             runDeltaSync: server has items newer than local             (server \(serverNewest) > local \(localNewest)) while cursors agree —             the delta stream is not delivering; forcing a resync
             """)

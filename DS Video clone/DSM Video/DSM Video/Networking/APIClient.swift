@@ -91,8 +91,12 @@ struct APIClient {
                                       response: GenresResponse.self, timeoutInterval: Timeout.interactive)
   }
 
+  /// - Parameter filter: server-side mode. "justAdded" orders by added_at DESC; the default
+  ///   (empty) orders by TITLE, which is why a bare `limit: 1` returns an alphabetical head
+  ///   rather than the newest item — a trap that silently defeated the staleness check.
   func items(libraryId: String, limit: Int = 50, offset: Int = 0,
-             genres: [String] = [], genreMode: GenreMode = .any) async throws -> ItemsResponse {
+             genres: [String] = [], genreMode: GenreMode = .any,
+             filter: String? = nil) async throws -> ItemsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
     }
@@ -107,6 +111,9 @@ struct APIClient {
     if !genres.isEmpty {
       comps.queryItems?.append(URLQueryItem(name: "genre", value: genres.joined(separator: ",")))
       comps.queryItems?.append(URLQueryItem(name: "genreMode", value: genreMode.rawValue))
+    }
+    if let filter, !filter.isEmpty {
+      comps.queryItems?.append(URLQueryItem(name: "filter", value: filter))
     }
     guard let url = comps.url else {
       throw APIError.invalidURL

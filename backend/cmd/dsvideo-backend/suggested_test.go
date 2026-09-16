@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -194,4 +195,47 @@ func TestSuggestedCompletesOnASingleConnection(t *testing.T) {
 			t.Error("suggested an item the viewer already has progress on")
 		}
 	}
+}
+
+// /items?filter=justAdded must order by added_at DESC, and the DEFAULT must not.
+//
+// The client's library-staleness check asks the server "what is your newest item?" and
+// compares it against local. The first version asked with a bare limit:1, which silently
+// returns the ALPHABETICAL head because /items defaults to ORDER BY title — on the real
+// library that was "Wuthering Heights" from April, five months stale. The check compared
+// that against local, concluded the library was current, and could never fire.
+//
+// This pins the ordering contract the client now depends on. Asserting the default too is
+// the point: if it ever changed to added_at, a future reader might "simplify" the client
+// back to a bare limit:1 and silently reintroduce the bug.
+func TestItemsOrderingContract(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	s := string(src)
+
+	// The justAdded branch must sort newest-first.
+	idx := strings.Index(s, `case "justAdded":`)
+	if idx < 0 {
+		t.Fatal(`the "justAdded" filter mode is gone — the client's staleness check depends on it`)
+	}
+	branch := s[idx:min(idx+400, len(s))]
+	if !strings.Contains(branch, "ORDER BY i.added_at DESC") {
+		t.Error(`filter=justAdded no longer orders by added_at DESC, so the client's ` +
+			`"what is your newest item" question now returns the wrong answer`)
+	}
+
+	// And the default must still be title-ordered, which is WHY the filter is required.
+	if !strings.Contains(s, "ORDER BY i.title ASC, i.id ASC") {
+		t.Error("the default /items ordering changed; re-check every caller that assumes " +
+			"it must pass filter=justAdded to get the newest item")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
