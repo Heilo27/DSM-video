@@ -658,6 +658,25 @@ final class AppState {
         dlog.info(.auth, "  candidate \(i + 1): \(c.url.host ?? "?"):\(c.url.port.map(String.init) ?? "-") \(c.url.scheme ?? "?")\(c.requiresTunnelCookie ? " (relay)" : "")")
       }
 
+      // Remember the LAN address QuickConnect just told us about.
+      //
+      // The user only ever signs in with a QuickConnect ID (FRD-000 M5: "the user does not
+      // choose a mode, does not re-enter an address"). QuickConnect's response already
+      // contains the NAS's private interface addresses, so persisting the first one here
+      // means the LAN path is available on the NEXT launch without waiting for a
+      // resolution round-trip — and it stops Settings → Home being something the user has
+      // to discover and fill in by hand.
+      //
+      // Only when the user has not set one themselves: a hand-entered address is a
+      // deliberate choice and must not be overwritten by discovery.
+      if lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+         let discoveredLAN = candidates.first(where: {
+           !$0.requiresTunnelCookie && Self.isPrivateLANAddress($0.url.absoluteString)
+         })?.url.absoluteString {
+        lanAddress = discoveredLAN
+        dlog.info(.auth, "learned LAN address from QuickConnect: \(discoveredLAN)")
+      }
+
       var lastError: Error?
       // Every candidate's failure, as "host:port — reason". The user-facing error names
       // these; without them "Login failed" is indistinguishable across a stale LAN address,
@@ -1064,6 +1083,30 @@ final class AppState {
     case failed          // no reachable address found
   }
 
+  /// The first private-network candidate that answers, or nil when none does.
+  ///
+  /// Deliberately FAST and deliberately quiet. This runs on every foreground, including the
+  /// overwhelmingly common case of being away from home where no LAN address can possibly
+  /// answer — so a slow probe here would add latency to every single resume. A LAN that is
+  /// actually present answers in milliseconds (measured: 13ms), so 1.5s is generous; a LAN
+  /// that is absent fails fast on a closed network rather than timing out.
+  ///
+  /// Candidates come from buildCandidates(), which resolves them out of the QuickConnect
+  /// response — so the user signing in with a QuickConnect ID is all that is ever required.
+  /// A hand-entered LAN address in Settings still works and is still preferred, but is no
+  /// longer necessary.
+  private func firstReachableLANCandidate() async -> URL? {
+    guard let candidates = try? await buildCandidates() else { return nil }
+    for candidate in candidates where !candidate.requiresTunnelCookie {
+      guard Self.isPrivateLANAddress(candidate.url.absoluteString) else { continue }
+      let probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: false)
+      if (try? await probe.serverVersion(timeout: 1.5)) != nil {
+        return candidate.url
+      }
+    }
+    return nil
+  }
+
   /// Returns how the revalidation resolved so the caller knows whether it still needs
   /// to trigger a load itself. On `.switched` this method already posts
   /// networkDidReconnect (which drives homeLoad), so the caller must NOT load again.
@@ -1073,10 +1116,35 @@ final class AppState {
       // Never resolved (QC ID) — go straight to the full cascade.
       return await reconnect() ? .switched : .failed
     }
-    // Only worth re-probing when we actually have a second address to fall back to.
-    let hasLAN = !lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    let hasWAN = !wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    guard hasLAN || hasWAN else { return .stillGood }
+    // PREFER THE LAN WHENEVER IT IS REACHABLE — do not wait for the WAN path to die.
+    //
+    // This used to return .stillGood the moment the current address answered a 2s probe.
+    // The WAN/QuickConnect path answers perfectly well from inside the house — it is just
+    // ~100x slower (measured: 21s for an /items call that takes 13ms on the LAN) — so
+    // coming home never switched anything. The app stayed on the relay all evening and
+    // every sync crawled, which is what made a full re-fetch time out repeatedly.
+    //
+    // FRD-000 M5 is explicit that this is the product, not a setting: connect on the LAN
+    // when home, over WAN when away, "the user does not choose a mode, does not re-enter
+    // an address, and ideally does not notice". Requiring a hand-entered LAN address in
+    // Settings was the app failing that requirement and charging the user for it.
+    //
+    // So: if we are NOT on a private address, ask whether a private one is reachable now.
+    // buildCandidates() already resolves the LAN IPs out of the QuickConnect response, so
+    // signing in with a QuickConnect ID is all the user ever has to do.
+    let onLAN = Self.isPrivateLANAddress(api.baseURL.absoluteString)
+    if !onLAN, let lanCandidate = await firstReachableLANCandidate() {
+      homeLog.info("revalidateConnection: on WAN but the LAN is reachable — switching to \(lanCandidate.absoluteString)")
+      dlog.info(.auth, "came home — switching from the remote path to \(lanCandidate.host ?? "?")")
+      baseURL = lanCandidate.absoluteString
+      lastGoodAddress = lanCandidate.absoluteString
+      if let port = lanCandidate.port { defaultPort = port }
+      useHTTPS = lanCandidate.scheme == "https"
+      api = APIClient(baseURL: lanCandidate, token: sessionToken, usesTunnelCookie: false)
+      clearNetworkError()
+      NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
+      return .switched
+    }
 
     // Quick 2s probe of the address we think we're on.
     if (try? await api.serverVersion(timeout: 2)) != nil {

@@ -3009,3 +3009,65 @@ struct SyncTaskLifecycleTests {
             "restarting a sync discards every page already fetched")
   }
 }
+
+// MARK: - LAN/WAN switching is automatic
+
+/// Coming home must move the app onto the LAN without the user doing anything.
+///
+/// FRD-000 M5 states this as product, not preference: connect on the LAN when home, over
+/// WAN when away, and "the user does not choose a mode, does not re-enter an address, and
+/// ideally does not notice."
+///
+/// It did not work. revalidateConnection returned .stillGood the moment the CURRENT address
+/// answered a 2s probe — and the WAN/QuickConnect path answers perfectly well from inside
+/// the house, just ~100x slower (measured: 21s for an /items call that takes 13ms on the
+/// LAN). So arriving home switched nothing, every sync crawled on the relay, and the
+/// workaround was to hand-enter a LAN address in Settings — the app failing the requirement
+/// and charging the user for it.
+@Suite("LAN preference")
+@MainActor
+struct LANPreferenceTests {
+
+  /// The decision the fix adds: when NOT on a private address, look for one.
+  private func shouldProbeForLAN(currentAddress: String) -> Bool {
+    !AppState.isPrivateLANAddress(currentAddress)
+  }
+
+  /// The real address from the device log.
+  @Test func aWorkingWANAddressStillTriggersALANProbe() {
+    #expect(
+      shouldProbeForLAN(currentAddress: "https://DSMvideo.synology.me:5001"),
+      """
+      On the WAN path the app must still ask whether the LAN is reachable. Probing only \
+      when the current address is DEAD is why coming home changed nothing — the relay \
+      answers, just slowly.
+      """
+    )
+    // QuickConnect relay hostnames are equally not-LAN.
+    #expect(shouldProbeForLAN(currentAddress: "https://synr-us6.PRIMEAUNAS.direct.quickconnect.to:36273"))
+  }
+
+  /// Already on the LAN: no probe, no cost. This runs on every foreground, so it must be
+  /// free in the steady state.
+  @Test func alreadyOnLANDoesNotProbe() {
+    #expect(!shouldProbeForLAN(currentAddress: "http://192.168.50.148:5000"))
+    #expect(!shouldProbeForLAN(currentAddress: "http://192.168.50.145:5000"))
+    #expect(!shouldProbeForLAN(currentAddress: "http://10.0.0.5:5000"))
+    #expect(!shouldProbeForLAN(currentAddress: "http://nas.local:5000"))
+  }
+
+  /// The private-address predicate is what keeps credentials off the open internet — the
+  /// LAN candidates are plain http and carry the password. Pin the ranges.
+  @Test func onlyGenuinelyPrivateAddressesCountAsLAN() {
+    // RFC 1918 and link-local.
+    #expect(AppState.isPrivateLANAddress("192.168.50.148"))
+    #expect(AppState.isPrivateLANAddress("10.1.2.3"))
+    #expect(AppState.isPrivateLANAddress("172.16.0.1"))
+    #expect(AppState.isPrivateLANAddress("169.254.1.1"))
+    // Public addresses must NEVER be treated as LAN — that would send the password in
+    // cleartext to whatever a QuickConnect response happened to name.
+    #expect(!AppState.isPrivateLANAddress("8.8.8.8"))
+    #expect(!AppState.isPrivateLANAddress("DSMvideo.synology.me"))
+    #expect(!AppState.isPrivateLANAddress("172.32.0.1"))  // just outside 172.16/12
+  }
+}
