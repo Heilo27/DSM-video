@@ -877,9 +877,14 @@ actor LocalStore {
         -- so this rail agrees with PlaybackProgress.isFinished / getProgressSeconds.
         AND \(Self.sqlIsInProgress)
       ORDER BY p.updated_at DESC
-      LIMIT 20
+      LIMIT 40
     """
-    return fetchItems(sql: sql, deduplicateByShow: true, maxCount: 10)
+    // 16, not 10. A rail that ends after ten cards looks truncated on a phone and is
+    // visibly short on a TV, where more of the row is on screen at once. The SQL LIMIT is
+    // raised alongside it because dedup-by-show runs AFTER the query — with episodes
+    // dominating recent additions, too small a window can starve the rail before the
+    // dedup ever reaches enough distinct shows.
+    return fetchItems(sql: sql, deduplicateByShow: true, maxCount: 16)
   }
 
   private func queryJustAdded() -> [ItemSummary] {
@@ -896,7 +901,7 @@ actor LocalStore {
       ORDER BY i.added_at DESC
       LIMIT 500
     """
-    var items = fetchItems(sql: sql, deduplicateByShow: true, maxCount: 8)
+    var items = fetchItems(sql: sql, deduplicateByShow: true, maxCount: 16)
     items = fillShowPosters(items)
     return items
   }
@@ -998,6 +1003,23 @@ actor LocalStore {
 
   func hasItems() -> Bool {
     totalItemCount() > 0
+  }
+
+  /// The newest `added_at` in the local store, or "" when empty.
+  ///
+  /// Used to detect a sync that has silently stopped delivering. The cursor comparison in
+  /// runDeltaSync catches a cursor that ran AHEAD of the server, but not every way a sync
+  /// can wedge — and the symptom is identical and invisible either way: rails keep
+  /// rendering, logs keep saying "done", and the library quietly stops growing. Comparing
+  /// the newest local item against the newest the server reports is a direct check on the
+  /// thing the user actually notices.
+  func newestAddedAt() -> String {
+    guard let db else { return "" }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "SELECT MAX(added_at) FROM items", -1, &stmt, nil) == SQLITE_OK else { return "" }
+    defer { sqlite3_finalize(stmt) }
+    guard sqlite3_step(stmt) == SQLITE_ROW else { return "" }
+    return sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
   }
 
   // MARK: - Sync Cursors

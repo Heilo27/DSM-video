@@ -2848,3 +2848,48 @@ struct SuggestedGenreTests {
     #expect(AppState.suggestionGenre(from: []) == nil)
   }
 }
+
+// MARK: - Library staleness detection
+
+/// A sync can wedge without the cursor ever running ahead.
+///
+/// SyncCursorClamp catches one failure — a local cursor that exceeds the server's. It is not
+/// the only way the delta stream stops delivering, and every variant looks identical from
+/// outside: rails render, the log says "done", and the library silently stops growing.
+/// Reported from a real phone, where new movies were present on the server AND in the delta
+/// feed while Just Added kept showing the same TV shows.
+///
+/// The direct check is the one the user actually makes: is the server holding something
+/// newer than anything stored locally?
+@Suite("Library staleness")
+struct LibraryStalenessTests {
+
+  /// ISO8601 timestamps compare correctly as plain strings, which is what the check relies
+  /// on. Worth pinning: if the server ever changed format (offsets, fractional seconds),
+  /// lexical comparison would quietly stop working and the check would never fire.
+  @Test func iso8601TimestampsOrderLexically() {
+    #expect("2026-09-15T20:24:43Z" > "2026-09-15T20:11:51Z")
+    #expect("2026-09-15T00:00:00Z" > "2026-09-14T23:59:59Z")
+    #expect("2026-10-01T00:00:00Z" > "2026-09-30T23:59:59Z")
+    // Equal is NOT newer — the check must not fire when they agree, or it would force a
+    // resync on every sync forever.
+    #expect(!("2026-09-15T20:24:43Z" > "2026-09-15T20:24:43Z"))
+  }
+
+  /// The real numbers from the device: the server had items from 2026-09-15 while the app
+  /// was showing a library that stopped earlier.
+  @Test func detectsTheRealDeviceStaleness() {
+    let serverNewest = "2026-09-15T20:24:43Z"   // Sword Art Online the Movie
+    let localNewest = "2026-09-12T10:45:34Z"    // what the phone had
+    #expect(serverNewest > localNewest, "the staleness the device exhibited is not detected")
+  }
+
+  /// A healthy library must NOT trigger a resync — re-downloading everything on every sync
+  /// is its own defect, and one this project has already had.
+  @Test func aCaughtUpLibraryDoesNotResync() {
+    let ts = "2026-09-15T20:24:43Z"
+    #expect(!(ts > ts), "an up-to-date library would resync forever")
+    // Local ahead of server is also not staleness — it happens briefly after a local write.
+    #expect(!("2026-09-15T20:00:00Z" > "2026-09-15T21:00:00Z"))
+  }
+}

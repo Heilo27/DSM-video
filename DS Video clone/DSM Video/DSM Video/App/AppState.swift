@@ -1436,7 +1436,7 @@ final class AppState {
     // beyond the round-trip saving — a client whose sync has stalled would otherwise seed
     // from its own stale rails and suggest against something watched weeks ago.
     do {
-      let resp = try await apiSnapshot.suggested(libraryId: libraryID, limit: 8)
+      let resp = try await apiSnapshot.suggested(libraryId: libraryID, limit: 16)
       if !resp.items.isEmpty {
         homeSuggested = resp.items
         homeSuggestedGenre = resp.genre
@@ -1486,7 +1486,7 @@ final class AppState {
         libraryId: seed.libraryId ?? libraryID ?? "lib_movies",
         limit: 60, genres: [genre], genreMode: .any)
       let exclude = Set(seedPool.map(\.id) + homeJustAdded.map(\.id))
-      let picks = resp.items.filter { !exclude.contains($0.id) }.shuffled().prefix(8)
+      let picks = resp.items.filter { !exclude.contains($0.id) }.shuffled().prefix(16)
       homeSuggested = Array(picks)
       homeSuggestedGenre = genre
       homeLog.info("suggested: \(picks.count) item(s) for genre \(genre) (client fallback)")
@@ -1559,7 +1559,7 @@ final class AppState {
             positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds) != .unwatched
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
-    ).prefix(10))
+    ).prefix(16))
 
     let recentlyWatched = Array(deduplicated(
       allItems
@@ -1569,14 +1569,14 @@ final class AppState {
             positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds)
         }
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
-    ).prefix(8))
+    ).prefix(16))
 
     let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
     let justAdded = Array(deduplicatedByShow(
       allItems
         .filter { !watchedIDs.contains($0.id) }
         .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    ).prefix(8))
+    ).prefix(16))
 
     return (continueWatching, justAdded, recentlyWatched)
   }
@@ -1858,7 +1858,37 @@ final class AppState {
 
       // Step 3: Fetch item deltas if server has new items
       let localCount = await LocalStore.shared.totalItemCount()
-      if status.itemSeq > cursors.itemSeq || localCount == 0 {
+
+      // A cursor that agrees with the server but a LIBRARY that does not.
+      //
+      // The clamp above catches a cursor that ran ahead. It does not catch every way a sync
+      // can wedge, and the symptom is identical and invisible in all of them: rails keep
+      // rendering, the log keeps saying "done", and the library silently stops growing.
+      // Reported from a real phone — new movies were on the server and in the delta feed,
+      // and Just Added kept showing the same TV shows.
+      //
+      // So check the thing the user actually notices rather than only the bookkeeping: if
+      // the server has items newer than anything stored locally, the delta stream has not
+      // been delivering whatever the cursors claim, and a resync from zero is warranted.
+      // Cheap to be wrong — one re-fetch — and the alternative is a library that never
+      // recovers without a reinstall.
+      var forceResync = false
+      if localCount > 0, let serverNewest = try? await apiSnapshot.items(
+        libraryId: libs.first(where: { $0.kind != "tv" })?.id ?? libs.first?.id ?? "",
+        limit: 1).items.first?.addedAt {
+        let localNewest = await LocalStore.shared.newestAddedAt()
+        if !localNewest.isEmpty, serverNewest > localNewest {
+          homeLog.warning("""
+            runDeltaSync: server has items newer than local             (server \(serverNewest) > local \(localNewest)) while cursors agree —             the delta stream is not delivering; forcing a resync
+            """)
+          dlog.warn(.library, "library is behind the server — forcing a full resync")
+          await LocalStore.shared.setItemSeq(0)
+          cursors = await LocalStore.shared.getSyncCursors()
+          forceResync = true
+        }
+      }
+
+      if status.itemSeq > cursors.itemSeq || localCount == 0 || forceResync {
         homeLog.info("runDeltaSync: fetching item deltas since seq=\(cursors.itemSeq)")
         var since = cursors.itemSeq
         var afterRowid: Int? = nil
