@@ -391,32 +391,42 @@ final class DSReelUITests: XCTestCase {
     )
   }
 
-  /// The Tab mirror matches A11y.Tab.
+  /// Every tab is present and addressable.
   ///
   /// Separate from the setup mirror check because these only exist once signed in, so the
   /// unconfigured launch above cannot see them. Demo mode is what puts the app past the
   /// login screen without a server.
   ///
-  /// SKIPS THE ASSERTION ON SPLIT LAYOUT, and says so rather than failing. ContentView
-  /// resolves `.split` whenever horizontalSizeClass is .regular (ContentView.swift:33-36),
-  /// and a NavigationSplitView has a SIDEBAR, not a tab bar — so on iPad, and on any device
-  /// the runner reports as regular, these identifiers correctly do not exist. The first
-  /// version asserted them unconditionally and failed for a layout that was behaving
-  /// exactly as designed.
+  /// ADDRESSES TABS BY LABEL, NOT BY IDENTIFIER, and that is deliberate (TASK-909).
+  /// SwiftUI's system tab bar does not expose accessibilityIdentifier on the tab BUTTON at
+  /// all on this OS: a captured UI hierarchy shows all five buttons rendered with correct
+  /// labels and zero identifier attributes, and three modifier placements were measured —
+  /// on the Label inside .tabItem, on the content view, and via the iOS 18 Tab(_:systemImage:)
+  /// API — with identifier(tab.home)=false every time. The label is the only handle there is.
+  /// It is also a real contract: these strings are user-visible and are what VoiceOver reads.
+  ///
+  /// This test previously looked the tabs up by identifier and, when that failed, fell
+  /// through to a "must be split layout then" branch that asserted something weaker. It
+  /// therefore reported SUCCESS on every run while the identifiers addressed nothing — the
+  /// exact shape of a test passing against broken code. The layout branches are now told
+  /// apart by what is actually on screen.
   ///
   /// Not an XCTSkip: this suite bans those, because a skip reports success at the moment a
   /// feature breaks. The sidebar is checked instead, so the test still asserts something on
   /// every layout.
-  func testTabIdentifierMirrorIsComplete() {
+  func testEveryTabIsPresentAndAddressable() {
     let app = UITest.launchInDemoMode()
     _ = app.wait(for: .runningForeground, timeout: UITest.launchTimeout)
 
-    // Tabs and sidebar are mutually exclusive; find out which this device got.
-    let home = app.buttons[UIID.Tab.home]
-    let isTabLayout = home.waitForExistence(timeout: UITest.timeout)
+    // Tabs and sidebar are mutually exclusive; find out which this device got. ContentView
+    // resolves `.split` whenever horizontalSizeClass is .regular (ContentView.swift:33-36),
+    // and a NavigationSplitView has a SIDEBAR, not a tab bar — so on iPad, and on any device
+    // the runner reports as regular, there are correctly no tabs to find.
+    let isTabLayout = app.buttons["Home"].waitForExistence(timeout: UITest.timeout)
+      && app.buttons["Settings"].exists
 
     guard isTabLayout else {
-      // Split layout. Assert the sidebar is actually there, so a genuinely broken root
+      // Genuinely a split layout. Assert the sidebar is actually there, so a broken root
       // still fails rather than quietly taking this branch.
       XCTAssertTrue(
         app.cells.firstMatch.waitForExistence(timeout: UITest.timeout)
@@ -426,16 +436,13 @@ final class DSReelUITests: XCTestCase {
       return
     }
 
-    for (name, id) in [
-      ("home", UIID.Tab.home),
-      ("libraries", UIID.Tab.libraries),
-      ("downloads", UIID.Tab.downloads),
-      ("watchlist", UIID.Tab.watchlist),
-      ("settings", UIID.Tab.settings),
-    ] {
+    // Title Case, not ALL CAPS — see the TASK-858 note in MainView: all-caps labels overflow
+    // the system's tab slot width and clipped "LIBRARIES" to "IBRARIES" at default Dynamic
+    // Type. Asserting the exact strings here keeps that regression visible.
+    for name in ["Home", "Libraries", "Downloads", "Watchlist", "Settings"] {
       requireExists(
-        app.buttons[id],
-        "UIID.Tab.\(name) (\(id)) — mirror may have drifted from A11y, or the tab was removed",
+        app.buttons[name],
+        "Tab \"\(name)\" is missing from the tab bar, or its label changed",
         timeout: UITest.timeout
       )
     }

@@ -40,11 +40,21 @@ enum A11y {
 
   /// The five tabs in MainView's TabView, in order.
   ///
-  /// These were declared here and applied to nothing — the tab bar carried no identifiers
-  /// at all, so neither the UI suite nor VoiceOver automation could address it. `shows` was
-  /// also stale: there is no Shows tab. Search moved into each library's toolbar and the
-  /// fifth slot is Watchlist, so the registry was describing a tab bar the app stopped
-  /// having. A registry nobody applies drifts silently, which is how it got here.
+  /// THESE DO NOT REACH THE TAB BUTTONS, AND CANNOT — address a tab by its LABEL instead
+  /// (`app.buttons["Home"]`). SwiftUI's system tab bar does not expose
+  /// accessibilityIdentifier on the tab button on this OS. Measured on iOS 26: a captured UI
+  /// hierarchy shows all five buttons rendered with correct labels and zero identifier
+  /// attributes, and three placements were tried — on the Label inside .tabItem (what
+  /// MainView still does), on the content view, and via the iOS 18 Tab(_:systemImage:) API —
+  /// all giving identifier(tab.home)=false. It is not a placement problem. TASK-909.
+  ///
+  /// Kept rather than deleted because MainView applies them and they cost nothing; if a
+  /// future SDK starts propagating them, the wiring is already in place. Do not write a test
+  /// that looks a tab up by these — that is how testTabIdentifierMirrorIsComplete came to
+  /// report success for years while addressing nothing.
+  ///
+  /// (Historical: `shows` was also stale — there is no Shows tab. Search moved into each
+  /// library's toolbar and the fifth slot is Watchlist.)
   enum Tab {
     static let home = "tab.home"
     static let libraries = "tab.libraries"

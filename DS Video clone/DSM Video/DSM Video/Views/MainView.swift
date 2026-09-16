@@ -38,15 +38,19 @@ struct MainView: View {
         // matches the platform convention for tab items besides.
         //
         // A11y.Tab was declared in the registry and applied to NOTHING — five identifiers
-        // no view used, so the tab bar was unaddressable by identifier to both VoiceOver
-        // automation and the UI suite. Found by a layout test that could not locate the bar
-        // to measure against. Same dead-registry shape as TASK-772's unused modifier.
+        // no view used. It is applied below now, but be warned:
         //
-        // The identifier goes on the Label INSIDE .tabItem, not on the content view: the
-        // content view's identifier describes the PAGE, and the tab BUTTON is a separate
-        // element the modifier never reaches. Putting it outside compiles, reads as correct,
-        // and leaves the bar exactly as unaddressable as before — which is how the first
-        // attempt at this failed.
+        // THE IDENTIFIERS DO NOT REACH THE TAB BUTTONS. This comment used to claim that
+        // putting the modifier on the Label inside .tabItem is the placement that works and
+        // that the content view is the one that fails. Both are wrong. Measured on iOS 26 —
+        // a captured UI hierarchy shows all five buttons rendered with correct labels and
+        // ZERO identifier attributes — for all three of: the Label inside .tabItem (below),
+        // the content view, and the iOS 18 Tab(_:systemImage:) API. SwiftUI's system tab bar
+        // simply does not expose accessibilityIdentifier on the button. TASK-909.
+        //
+        // Consequence for tests: address a tab by its LABEL (app.buttons["Home"]), never by
+        // UIID.Tab.*. The modifiers stay because they cost nothing and would start working
+        // if a future SDK propagated them.
         TabView {
           LibraryHomeView()
             .tabItem {
