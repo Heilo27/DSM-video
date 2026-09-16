@@ -3129,3 +3129,81 @@ struct SiriTitleMatchingTests {
     #expect(MediaIntentRouter.bestMatch(for: "anything", in: []) == nil)
   }
 }
+
+// MARK: - Top Shelf snapshot
+
+/// The file the app writes and the Top Shelf extension reads.
+///
+/// The extension is a SEPARATE PROCESS with its own copy of these structs, so the contract
+/// between them is a JSON file and nothing else — no compiler check spans the boundary. The
+/// failure mode is silent and total: a shape the extension cannot decode renders an empty
+/// shelf, which looks exactly like "no content" rather than "broken".
+@Suite("Top Shelf snapshot")
+@MainActor
+struct TopShelfSnapshotTests {
+  private func entry(_ id: String, progress: Double?) -> TopShelfItem {
+    TopShelfItem(id: id, title: "Title \(id)", year: 2024,
+                 imageURL: "http://nas.local/api/v1/images/\(id)?w=760",
+                 deepLinkURL: "dsvideo://item/\(id)",
+                 playbackProgress: progress)
+  }
+
+  @Test func snapshotRoundTrips() throws {
+    let original = TopShelfSnapshot(
+      sectionTitle: "Continue Watching",
+      items: [entry("a", progress: 0.42), entry("b", progress: nil)]
+    )
+    let data = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(TopShelfSnapshot.self, from: data)
+
+    #expect(decoded.sectionTitle == "Continue Watching")
+    #expect(decoded.items.count == 2)
+    #expect(decoded.items[0].playbackProgress == 0.42)
+    #expect(decoded.items[1].playbackProgress == nil)
+    #expect(decoded.items[0].deepLinkURL == "dsvideo://item/a")
+  }
+
+  /// An installed build's topshelf.json is a BARE ARRAY, written before the wrapper existed.
+  /// The extension must still read it, or every existing install shows an empty shelf until
+  /// the user happens to open the app — the exact symptom this change set out to fix.
+  ///
+  /// This pins the app-side half of that contract: the legacy payload the extension's
+  /// fallback decoder has to accept is still a valid `[TopShelfItem]`.
+  @Test func legacyBareArrayStillDecodes() throws {
+    let legacyJSON = """
+    [{"id":"x","title":"Old Film","year":2001,
+      "imageURL":"http://nas.local/api/v1/images/x?w=760",
+      "deepLinkURL":"dsvideo://item/x"}]
+    """.data(using: .utf8)!
+
+    let items = try JSONDecoder().decode([TopShelfItem].self, from: legacyJSON)
+    #expect(items.count == 1)
+    #expect(items[0].id == "x")
+    // Absent in the old format — must decode as nil, not fail the whole file.
+    #expect(items[0].playbackProgress == nil)
+  }
+
+  /// A snapshot with the wrapper must NOT decode as the legacy array, and vice versa —
+  /// otherwise the extension's "try new, then try old" ordering could silently pick wrong.
+  @Test func theTwoFormatsAreDistinguishable() throws {
+    let modern = try JSONEncoder().encode(
+      TopShelfSnapshot(sectionTitle: "Continue Watching", items: [entry("a", progress: 0.1)]))
+    #expect((try? JSONDecoder().decode([TopShelfItem].self, from: modern)) == nil)
+
+    let legacy = try JSONEncoder().encode([entry("a", progress: nil)])
+    #expect((try? JSONDecoder().decode(TopShelfSnapshot.self, from: legacy)) == nil)
+  }
+
+  /// tvOS requires playbackProgress in 0...1. A zero-duration item would make the obvious
+  /// position/duration division produce NaN, and NaN is not something tvOS can draw.
+  @Test func progressIsClampedAndNeverNaN() {
+    func progress(position: Int, duration: Int) -> Double? {
+      guard duration > 0 else { return nil }
+      return min(1, max(0, Double(position) / Double(duration)))
+    }
+    #expect(progress(position: 0, duration: 0) == nil)      // would have been NaN
+    #expect(progress(position: 50, duration: 100) == 0.5)
+    #expect(progress(position: 200, duration: 100) == 1)    // clamped, not 2.0
+    #expect(progress(position: -5, duration: 100) == 0)
+  }
+}

@@ -1367,7 +1367,13 @@ final class AppState {
   var homeLibraries: [Library] = []
   /// Bumped on homeForceRefresh so TVLibraryRail's .task(id:) re-triggers a fresh fetch.
   var libraryRailsVersion: UUID = UUID()
-  var homeContinueWatching: [ItemSummary] = []
+  /// Both rails write the Top Shelf snapshot, because the shelf prefers Continue Watching
+  /// and falls back to Just Added. Hooking only one meant the shelf went stale exactly when
+  /// it mattered — finishing an episode changes Continue Watching, and without this didSet
+  /// the shelf kept offering the thing you just watched.
+  var homeContinueWatching: [ItemSummary] = [] {
+    didSet { writeTopShelfSnapshot() }
+  }
   var homeJustAdded: [ItemSummary] = [] {
     didSet { writeTopShelfSnapshot() }
   }
@@ -2577,15 +2583,25 @@ final class AppState {
 
   // MARK: - Top Shelf Snapshot
 
-  /// Writes the Just Added rail (up to 10 items) to the shared App Group container
-  /// so the Top Shelf extension can display them when the app is focused.
+  /// Writes CONTINUE WATCHING (up to 10 items) to the shared App Group container so the
+  /// Top Shelf extension can display it when the app is focused.
+  ///
+  /// Continue Watching, not Just Added. The Top Shelf is the surface you see before opening
+  /// anything, so its job is to get you back into what you were already watching in one
+  /// click — that is what the shelf is for on every other tvOS app, and what was asked for.
+  /// Just Added is discovery, and discovery is what the home screen's rails are for.
+  ///
+  /// Falls back to Just Added when nothing is in progress, so a fresh install or a
+  /// fully-caught-up viewer sees content rather than an app icon on an empty shelf.
   func writeTopShelfSnapshot() {
-    // An empty rail must CLEAR the shelf, not leave the previous contents advertised.
-    // The early-return here meant any non-logout path to an empty homeJustAdded (server
-    // unreachable, library removed, a failed load that cleared the rails) left a stale
-    // topshelf.json on disk — so the Top Shelf kept offering titles that deep-linked into
-    // items the user may no longer have access to.
-    guard !homeJustAdded.isEmpty else {
+    // An empty shelf must CLEAR it, not leave the previous contents advertised.
+    // The early-return here meant any non-logout path to empty rails (server unreachable,
+    // library removed, a failed load that cleared them) left a stale topshelf.json on disk
+    // — so the Top Shelf kept offering titles that deep-linked into items the user may no
+    // longer have access to.
+    let usingContinueWatching = !homeContinueWatching.isEmpty
+    let source = usingContinueWatching ? homeContinueWatching : homeJustAdded
+    guard !source.isEmpty else {
       deleteTopShelfSnapshot()
       return
     }
@@ -2593,7 +2609,7 @@ final class AppState {
       forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
     ) else { return }
 
-    let items: [TopShelfItem] = homeJustAdded.prefix(10).compactMap { item in
+    let items: [TopShelfItem] = source.prefix(10).compactMap { item in
       // Prefer backdrop for landscape Top Shelf cards, fall back to poster
       let imageID = item.backdropImageId ?? item.posterImageId
       // SECURITY (TASK-774): do NOT bake the live bearer session token into the persisted
@@ -2605,17 +2621,29 @@ final class AppState {
       // persist the tokenless URL only. Artwork that requires auth simply won't render in Top
       // Shelf; titles + deep links still work. Never persist the credential.
       let imageURLString: String? = imageID.flatMap { api.imageURL(id: $0, width: 760)?.absoluteString }
+      // tvOS draws the resume bar from this. Guard the divisor: a zero duration would
+      // produce NaN, and NaN assigned to playbackProgress is not a number tvOS can draw.
+      var progress: Double? = nil
+      if let p = item.progress, p.durationSeconds > 0 {
+        progress = min(1, max(0, Double(p.positionSeconds) / Double(p.durationSeconds)))
+      }
+
       return TopShelfItem(
         id: item.id,
         title: item.title,
         year: item.year,
         imageURL: imageURLString,
-        deepLinkURL: "dsvideo://item/\(item.id)"
+        deepLinkURL: "dsvideo://item/\(item.id)",
+        playbackProgress: progress
       )
     }
 
+    let snapshot = TopShelfSnapshot(
+      sectionTitle: usingContinueWatching ? "Continue Watching" : "Just Added",
+      items: items
+    )
     let fileURL = container.appendingPathComponent("topshelf.json")
-    guard let data = try? JSONEncoder().encode(items) else { return }
+    guard let data = try? JSONEncoder().encode(snapshot) else { return }
     try? data.write(to: fileURL, options: .atomic)
   }
 }
