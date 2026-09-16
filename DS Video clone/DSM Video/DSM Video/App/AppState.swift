@@ -1412,47 +1412,68 @@ final class AppState {
   /// an error — a suggestion that could not be computed is not a problem the user needs to
   /// act on, and the home screen must not grow an error state for a nicety.
   func loadSuggestedRail() async {
-    // Seed from the most recent progress, whether or not it was finished. That is the whole
-    // point: the rail this replaces could only see items past 95%, so a half-watched film
-    // told it nothing.
+    let apiSnapshot = api
+    let libraryID = homeLibraries.first(where: { $0.kind != "tv" })?.id ?? homeLibraries.first?.id
+
+    // Preferred path: one request, seeded server-side from the progress table. That matters
+    // beyond the round-trip saving — a client whose sync has stalled would otherwise seed
+    // from its own stale rails and suggest against something watched weeks ago.
+    do {
+      let resp = try await apiSnapshot.suggested(libraryId: libraryID, limit: 8)
+      if !resp.items.isEmpty {
+        homeSuggested = resp.items
+        homeSuggestedGenre = resp.genre
+        homeLog.info("suggested: \(resp.items.count) item(s) for genre \(resp.genre) (server)")
+        return
+      }
+      // An empty answer is legitimate — no progress yet on a fresh install. Don't fall
+      // through to the legacy path, which would only reach the same conclusion slowly.
+      homeSuggested = []
+      homeSuggestedGenre = ""
+      return
+    } catch let err as APIError {
+      // Only a MISSING endpoint justifies the fallback. Any other failure (auth, timeout,
+      // a real server error) should leave the rail empty rather than quietly doing twice
+      // the work against a server that is already struggling.
+      guard case .http(404) = err else {
+        homeLog.warning("suggested: server request failed — \(err.userMessage)")
+        homeSuggested = []
+        homeSuggestedGenre = ""
+        return
+      }
+      homeLog.info("suggested: server has no /suggested endpoint — using the client fallback")
+    } catch {
+      homeLog.warning("suggested: server request failed — \(error.localizedDescription)")
+      homeSuggested = []
+      homeSuggestedGenre = ""
+      return
+    }
+
+    // Fallback for an older server: derive it client-side in two requests. Seeds from the
+    // local rails, which is why it is second choice — those are only as fresh as this
+    // device's sync.
     let seedPool = homeContinueWatching + homeRecentlyWatched
     guard let seed = seedPool.first else {
       homeSuggested = []
       homeSuggestedGenre = ""
       return
     }
-
-    let apiSnapshot = api
     do {
       let detail = try await apiSnapshot.itemDetail(id: seed.id)
-      // Prefer a genre that is specific enough to be a recommendation. "Drama" matches a
-      // third of most libraries and says nothing; the later entries in TMDb's list are
-      // usually the distinctive ones.
       guard let genre = Self.suggestionGenre(from: detail.genres) else {
         homeSuggested = []
         homeSuggestedGenre = ""
         return
       }
-
-      // Pull a wide page and sample from it, so the rail differs between launches instead
-      // of showing the same alphabetical head every time.
       let resp = try await apiSnapshot.items(
-        libraryId: seed.libraryId ?? homeLibraries.first?.id ?? "lib_movies",
+        libraryId: seed.libraryId ?? libraryID ?? "lib_movies",
         limit: 60, genres: [genre], genreMode: .any)
-
-      // Never suggest something the viewer is already watching or has just finished — that
-      // is Continue Watching's job, and a rail that repeats the rail above it is noise.
       let exclude = Set(seedPool.map(\.id) + homeJustAdded.map(\.id))
-      let picks = resp.items
-        .filter { !exclude.contains($0.id) }
-        .shuffled()
-        .prefix(8)
-
+      let picks = resp.items.filter { !exclude.contains($0.id) }.shuffled().prefix(8)
       homeSuggested = Array(picks)
       homeSuggestedGenre = genre
-      homeLog.info("suggested: \(picks.count) item(s) for genre \(genre) seeded from \(seed.title)")
+      homeLog.info("suggested: \(picks.count) item(s) for genre \(genre) (client fallback)")
     } catch {
-      // Silent on purpose — see the note above.
       homeLog.warning("suggested: could not build rail — \(error.localizedDescription)")
       homeSuggested = []
       homeSuggestedGenre = ""
@@ -1787,12 +1808,23 @@ final class AppState {
         homeLog.warning("""
           runDeltaSync: local cursor AHEAD of server           (item \(cursors.itemSeq) > \(status.itemSeq), progress \(cursors.progressSeq) > \(status.progressSeq))           — server sequence was reset; clamping so deltas resume
           """)
-        dlog.warn(.library, "sync cursor ahead of server — clamping and re-fetching")
+        dlog.warn(.library, "sync cursor ahead of server — resetting and re-fetching")
+        // RESET TO ZERO, not to the server's current seq.
+        //
+        // Clamping to status.itemSeq looks like the conservative choice and is wrong: the
+        // gate below is `status.itemSeq > cursors.itemSeq`, so a cursor set equal to the
+        // server's makes it FALSE, and nothing would be fetched until the server's next
+        // change. The library would stay exactly as stale as it was, having logged a fix.
+        //
+        // Zero is correct because a cursor ahead of the server means the server's sequence
+        // space was REBUILT. Nothing local can be assumed to correspond to it, so the whole
+        // stream is genuinely new to us. This costs one full item re-fetch, once, which is
+        // the same work a fresh install does.
         if cursors.itemSeq > status.itemSeq {
-          await LocalStore.shared.setItemSeq(status.itemSeq)
+          await LocalStore.shared.setItemSeq(0)
         }
         if cursors.progressSeq > status.progressSeq {
-          await LocalStore.shared.setProgressSeq(status.progressSeq)
+          await LocalStore.shared.setProgressSeq(0)
         }
         cursors = await LocalStore.shared.getSyncCursors()
       }

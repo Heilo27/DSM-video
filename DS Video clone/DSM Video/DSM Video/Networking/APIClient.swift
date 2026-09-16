@@ -129,6 +129,24 @@ struct APIClient {
     return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none, response: ItemsResponse.self, timeoutInterval: 15)
   }
 
+  /// Titles sharing a genre with whatever this user watched most recently.
+  ///
+  /// One request: the server picks the seed from the progress table directly, so it is
+  /// correct even when this client's sync is behind — and it avoids fetching an item's full
+  /// detail purely to read its genres, which ItemSummary does not carry.
+  func suggested(libraryId: String?, limit: Int = 8) async throws -> SuggestedResponse {
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/suggested"),
+                                    resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    var q = [URLQueryItem(name: "limit", value: String(limit))]
+    if let libraryId { q.append(URLQueryItem(name: "libraryId", value: libraryId)) }
+    comps.queryItems = q
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none,
+                             response: SuggestedResponse.self, timeoutInterval: Timeout.interactive)
+  }
+
   func tvShows(libraryId: String) async throws -> TVShowsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL

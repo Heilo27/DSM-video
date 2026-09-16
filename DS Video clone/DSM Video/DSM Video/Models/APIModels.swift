@@ -397,6 +397,14 @@ struct Subtitle: Decodable, Hashable {
 
 // MARK: - Progress
 
+/// Response of GET /api/v1/suggested — the Suggested rail, resolved server-side.
+struct SuggestedResponse: Decodable {
+  /// The genre the items were chosen from, for the rail's subtitle. Empty when the server
+  /// had nothing to seed from (no progress yet), which is the ordinary first-run case.
+  let genre: String
+  let items: [ItemSummary]
+}
+
 struct ProgressRequest: Encodable {
   let positionSeconds: Int
   let durationSeconds: Int

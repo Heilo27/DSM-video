@@ -1090,6 +1090,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		// — that last one is worth noting, because transcode sessions are consequently only
 		// reaped by timeout rather than closed when the client stops watching.
 		r.Get("/genres", s.handleGenres)
+		r.Get("/suggested", s.handleSuggested)
 		r.Get("/libraries/summary", s.handleLibrariesSummary)
 		r.Get("/items", s.handleItems)
 		r.Get("/items/{id}", s.handleItemDetail)
