@@ -228,7 +228,117 @@ Response includes:
 ### POST `/admin/scan`
 Trigger a library re-scan (requires auth).
 
+## Route inventory (generated)
+
+The prose sections above document the **18 routes the iOS/tvOS clients actually call** —
+the browsing, playback, progress and auth surface — with request/response shapes. That is the
+contract worth describing by hand, and it is deliberately not the whole route table.
+
+For completeness, every route the server registers is listed below, with ✅ marking the ones
+documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
+
+**80 routes total: 69 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
+
+### Client-facing
+
+| Route | Methods | Documented |
+|---|---|---|
+| `/admin/metadata/refresh` | POST | — |
+| `/admin/normalize/status` | GET | — |
+| `/admin/scan` | POST | ✅ |
+| `/admin/status` | GET | ✅ |
+| `/auth/login` | POST | ✅ |
+| `/auth/logout` | POST | ✅ |
+| `/auth/pairing/exchange` | POST | ✅ |
+| `/auth/pairing/generate` | POST | ✅ |
+| `/auth/quickconnect/resolve` | POST | ✅ |
+| `/auth/refresh` | POST | — |
+| `/downloads` | GET | — |
+| `/downloads/{itemId}` | DELETE, POST | — |
+| `/dsvideo` | GET | — |
+| `/dsvideo/` | GET | — |
+| `/genres` | GET | — |
+| `/images/{id}` | GET | ✅ |
+| `/items` | GET | ✅ |
+| `/items/{id}` | GET | ✅ |
+| `/items/{id}/playback` | GET | ✅ |
+| `/items/{id}/progress` | POST | ✅ |
+| `/items/{id}/tmdb-fix` | POST | — |
+| `/items/{id}/tmdb-search` | GET | — |
+| `/just-added` | GET | — |
+| `/libraries` | GET | ✅ |
+| `/libraries/summary` | GET | — |
+| `/playback/{sessionId}/init.mp4` | GET | — |
+| `/playback/{sessionId}/master.m3u8` | GET | ✅ |
+| `/playback/{sessionId}/segments/{name}` | GET | ✅ |
+| `/playback/{sessionId}/stop` | POST | — |
+| `/playback/{sessionId}/stream` | GET | ✅ |
+| `/playback/{sessionId}/{name}.m4s` | GET | — |
+| `/playback/{sessionId}/{name}.ts` | GET | — |
+| `/playback/{sessionId}/{variant}.m3u8` | GET | ✅ |
+| `/playlists` | GET, POST | — |
+| `/playlists/{id}` | DELETE, GET | — |
+| `/playlists/{id}/items` | POST | — |
+| `/playlists/{id}/items/{itemId}` | DELETE | — |
+| `/progress` | GET | — |
+| `/progress/all` | GET | — |
+| `/search` | GET | ✅ |
+| `/settings` | GET, PUT | — |
+| `/shows` | GET | — |
+| `/shows/{showName}` | GET | — |
+| `/suggested` | GET | — |
+| `/sync/deleted` | GET | — |
+| `/sync/heartbeat` | GET | — |
+| `/sync/items` | GET | — |
+| `/sync/status` | GET | — |
+| `/tmdb/image` | GET | — |
+| `/trickplay/{itemId}/trickplay.jpg` | GET | — |
+| `/trickplay/{itemId}/trickplay.vtt` | GET | — |
+| `/tv/shows` | GET | — |
+| `/tv/shows/{showId}/episodes` | GET | — |
+| `/tv/shows/{showId}/seasons` | GET | — |
+| `/tv/shows/{showId}/tmdb-fix` | POST | — |
+| `/tv/shows/{showId}/tmdb-search` | GET | — |
+| `/version` | GET | — |
+| `/watchlist` | GET | — |
+| `/watchlist/{itemId}` | DELETE, GET, POST | — |
+| `/web` | GET | — |
+| `Authorization` | GET | — |
+| `Cookie` | GET | — |
+| `Location` | GET | — |
+| `User-Agent` | GET | — |
+| `X-Forwarded-For` | GET | — |
+| `X-Forwarded-Host` | GET | — |
+| `X-Forwarded-Proto` | GET | — |
+| `X-Real-IP` | GET | — |
+| `X-TMDb-API-Key` | GET | — |
+
+### Synology WebAPI compatibility layer
+
+Legacy surface for DS Video clients. The shipping apps use `/api/v1` with Bearer auth and do
+not depend on these.
+
+| Route | Methods | Documented |
+|---|---|---|
+| `/webapi/DSVideoServer/entry.cgi` | GET, POST | — |
+| `/webapi/DSVideoServer/poster.cgi` | GET | — |
+| `/webapi/DSVideoServer/vtestreaming.cgi` | POST | — |
+| `/webapi/DSVideoServer/vtestreaming.cgi/*` | GET, POST | — |
+| `/webapi/VideoStation/poster.cgi` | GET | — |
+| `/webapi/VideoStation/vtestreaming.cgi` | POST | — |
+| `/webapi/VideoStation/vtestreaming.cgi/*` | GET, POST | — |
+| `/webapi/entry.cgi` | GET, POST | — |
+| `/webapi/query.cgi` | GET, POST | — |
+
+### Static / player
+
+| Route | Methods | Documented |
+|---|---|---|
+| `/` | GET | — |
+| `/web/*` | HANDLE | — |
+
 ## Notes / v1 limitations
 
 - DSM auth is used to validate credentials; **permissions mapping** to DSM shared folders is a v2 goal.
 - tvOS support is achieved by the client consuming the same browsing and playback APIs; focus/UI is handled client-side.
+- **Scope**: the prose sections cover the client-facing surface, not every registered route. The generated inventory above is the complete list. The live wire contract has been diffed against the clients' decoded keys and matches exactly — the gap here is documentation coverage, not a contract mismatch.
