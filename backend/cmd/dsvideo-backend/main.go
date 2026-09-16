@@ -1055,9 +1055,18 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	//
 	// This is therefore a product decision, not a pure fix: gate it and lose Top Shelf
 	// artwork, or keep the path oracle (item IDs are "it_"+hex(absolute path), so 200-vs-404
-	// enumerates the NAS's titles and directory tree unauthenticated and unthrottled).
+	// enumerates the NAS's titles and directory tree).
 	// A signed, expiring, item-scoped image URL would satisfy both; that is the real fix.
-	r.Get("/images/{id}", s.handleImage)
+	//
+	// NO LONGER UNTHROTTLED. Being public is a deliberate tradeoff; being unlimited was not
+	// part of it. Enumeration needs volume — the ID space is hex of an absolute path, so a
+	// useful sweep is thousands of probes — and a per-IP cap removes the practical oracle
+	// without touching Top Shelf, which loads a handful of posters per refresh.
+	//
+	// The budget is deliberately generous: a cold home screen fetches every visible poster
+	// at once, so this must sit well above a real client's burst and well below a sweep.
+	// It is its own bucket, so poster loads and login attempts can never exhaust each other.
+	r.With(s.imageRateLimit).Get("/images/{id}", s.handleImage)
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
@@ -1799,6 +1808,33 @@ type loginResponse struct {
 // Allows up to 10 attempts per 60-second window per IP.
 // Returns true (and writes a 429 response) when the limit is exceeded.
 // Stale windows are cleaned up on each call for that IP.
+// imageRateLimitMax and imageRateLimitWindow bound anonymous artwork requests per IP.
+//
+// Sized from the real burst: a cold iOS home screen renders four rails of up to 16 cards
+// and fetches every visible poster at once, and the web UI's grid can ask for more. 600 per
+// minute clears that by a wide margin — including several screens in quick succession, and
+// several devices behind one NAT — while a path-enumeration sweep of a library-sized ID
+// space needs orders of magnitude more and now takes days instead of minutes.
+const (
+	imageRateLimitMax    = 600
+	imageRateLimitWindow = time.Minute
+)
+
+// imageRateLimit throttles the public image route per IP.
+//
+// 429 rather than 403: this is a volume control, not an authorization decision, and a
+// client that has simply loaded a lot of artwork should be told to wait, not told no.
+func (s *Server) imageRateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.rateLimitExceeded(r, rateLimitBucketImage, imageRateLimitMax, imageRateLimitWindow) {
+			w.Header().Set("Retry-After", "60")
+			writeErr(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) checkAuthRateLimit(w http.ResponseWriter, r *http.Request) bool {
 	if !s.authRateLimitExceeded(r) {
 		return false
@@ -1813,9 +1849,25 @@ func (s *Server) checkAuthRateLimit(w http.ResponseWriter, r *http.Request) bool
 // plane can share one counter with the REST plane while emitting a Synology-shaped
 // error body instead of the REST one.
 func (s *Server) authRateLimitExceeded(r *http.Request) bool {
-	const maxAttempts = 10
-	const windowSeconds = 60
+	return s.rateLimitExceeded(r, rateLimitBucketAuth, 10, 60*time.Second)
+}
 
+// rateLimitBucketAuth is the bucket the login/pairing limiter counts in.
+const rateLimitBucketAuth = "auth"
+
+// rateLimitBucketImage is the bucket the public artwork route counts in.
+const rateLimitBucketImage = "image"
+
+// rateLimitKey is the ONE definition of how a limiter counter is addressed. Tests that
+// inspect the map directly use it too, so the key shape cannot drift between them.
+func rateLimitKey(bucket, ip string) string { return bucket + "|" + ip }
+
+// rateLimitExceeded is the one fixed-window, per-IP limiter.
+//
+// bucket namespaces the counter so two routes with different budgets cannot consume each
+// other's allowance — poster loads must never be able to exhaust the login budget, and a
+// brute-force attempt on login must never lock the caller out of artwork.
+func (s *Server) rateLimitExceeded(r *http.Request, bucket string, maxAttempts int, window time.Duration) bool {
 	// Use net.SplitHostPort to correctly parse the host from RemoteAddr.
 	// This handles both IPv4 ("1.2.3.4:port") and IPv6 ("[::1]:port") correctly.
 	// strings.LastIndex would corrupt IPv6 keys by truncating at the last colon.
@@ -1825,7 +1877,7 @@ func (s *Server) authRateLimitExceeded(r *http.Request) bool {
 	}
 
 	now := time.Now()
-	raw, _ := s.authRateLimit.LoadOrStore(ip, &authRateEntry{count: 0, windowEnd: now.Add(windowSeconds * time.Second)})
+	raw, _ := s.authRateLimit.LoadOrStore(rateLimitKey(bucket, ip), &authRateEntry{count: 0, windowEnd: now.Add(window)})
 	entry := raw.(*authRateEntry)
 
 	// Per-entry lock, not a server-wide one: two different IPs attempting to log in at the
@@ -1835,7 +1887,7 @@ func (s *Server) authRateLimitExceeded(r *http.Request) bool {
 	// If the window has expired, reset it
 	if now.After(entry.windowEnd) {
 		entry.count = 0
-		entry.windowEnd = now.Add(windowSeconds * time.Second)
+		entry.windowEnd = now.Add(window)
 	}
 	entry.count++
 	exceeded := entry.count > maxAttempts
@@ -8547,14 +8599,14 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	// on only one half. The folder's name has to be decided from the whole folder before
 	// any episode is filed, which means buffering rather than streaming.
 	type epRow struct {
-		id, path     string
-		showName     sql.NullString
-		year         sql.NullInt64
-		posterPath   sql.NullString
-		seasonNum    sql.NullInt64
-		addedAt      sql.NullString
-		changeSeq    sql.NullInt64
-		folderName   string
+		id, path   string
+		showName   sql.NullString
+		year       sql.NullInt64
+		posterPath sql.NullString
+		seasonNum  sql.NullInt64
+		addedAt    sql.NullString
+		changeSeq  sql.NullInt64
+		folderName string
 	}
 	var eps []epRow
 	nameCounts := map[string]map[string]int{}

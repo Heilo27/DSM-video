@@ -58,7 +58,7 @@ func TestAuthRateLimitWindowResets(t *testing.T) {
 		t.Fatal("10.0.0.3 should be over its limit after 11 attempts")
 	}
 
-	raw, ok := s.authRateLimit.Load("10.0.0.3")
+	raw, ok := s.authRateLimit.Load(rateLimitKey(rateLimitBucketAuth, "10.0.0.3"))
 	if !ok {
 		t.Fatal("no rate limit entry stored for 10.0.0.3")
 	}
@@ -85,7 +85,7 @@ func TestAuthRateLimitDoesNotSerializeAcrossIPs(t *testing.T) {
 
 	// Materialise the blocked IP's entry so we have something to pin.
 	attemptFrom(s, "192.168.1.10")
-	raw, ok := s.authRateLimit.Load("192.168.1.10")
+	raw, ok := s.authRateLimit.Load(rateLimitKey(rateLimitBucketAuth, "192.168.1.10"))
 	if !ok {
 		t.Fatal("no rate limit entry stored for 192.168.1.10")
 	}
@@ -164,7 +164,7 @@ func TestAuthRateLimitReaperDropsExpiredEntries(t *testing.T) {
 	attemptFrom(s, "10.1.0.1") // expired below
 	attemptFrom(s, "10.1.0.2") // still inside its window
 
-	rawOld, _ := s.authRateLimit.Load("10.1.0.1")
+	rawOld, _ := s.authRateLimit.Load(rateLimitKey(rateLimitBucketAuth, "10.1.0.1"))
 	old := rawOld.(*authRateEntry)
 	old.mu.Lock()
 	old.windowEnd = time.Now().Add(-1 * time.Minute)
@@ -186,10 +186,10 @@ func TestAuthRateLimitReaperDropsExpiredEntries(t *testing.T) {
 		return true
 	})
 
-	if _, still := s.authRateLimit.Load("10.1.0.1"); still {
+	if _, still := s.authRateLimit.Load(rateLimitKey(rateLimitBucketAuth, "10.1.0.1")); still {
 		t.Error("expired entry for 10.1.0.1 survived the reaper")
 	}
-	if _, still := s.authRateLimit.Load("10.1.0.2"); !still {
+	if _, still := s.authRateLimit.Load(rateLimitKey(rateLimitBucketAuth, "10.1.0.2")); !still {
 		t.Error("live entry for 10.1.0.2 was reaped while its window was still open")
 	}
 }
