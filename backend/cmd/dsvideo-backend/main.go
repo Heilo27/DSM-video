@@ -770,6 +770,7 @@ func main() {
 	r.Use(trustedRealIP)
 	r.Use(redactSensitiveParams) // must run before Logger to prevent token leakage in logs
 	r.Use(middleware.Logger)
+	r.Use(restoreTrueURL) // ...and immediately after, so handlers read real query params
 	r.Use(middleware.Recoverer)
 	r.Use(bodyLimitMiddleware) // TASK-810: cap request bodies to avoid NAS OOM DoS
 
@@ -1658,12 +1659,29 @@ func (s *Server) getTMDbClient(r *http.Request) *metadata.TMDbClient {
 // Logging Middleware
 // -------------------------
 
-// redactSensitiveParams replaces the values of sensitive query parameters with
-// "[REDACTED]" in the request URL before chi's Logger middleware sees it.
-// This prevents session tokens sent as _sid= or token= query params from
-// appearing verbatim in Synology package log files.
-// NOTE: only r.URL is modified — the actual query string seen by handlers is
-// unaffected because this runs before routing resolves to a handler.
+// redactSensitiveParams hides session tokens from the request line chi's Logger prints,
+// so a _sid= or token= query param does not appear verbatim in Synology package logs.
+//
+// It redacts for the LOGGER ONLY and restores the originals before the handler runs.
+//
+// THIS MIDDLEWARE WAS PREVIOUSLY BROKEN IN BOTH DIRECTIONS, and a test now pins each half
+// because either one alone can be satisfied by a wrong implementation:
+//
+//  1. It rewrote r.URL and passed the rewritten request down the whole chain, on the stated
+//     reasoning that it "runs before routing resolves to a handler". chi routes whatever
+//     request the middleware calls next.ServeHTTP with, so that was false — every handler
+//     received the redacted URL. getWebAPISession (webapi.go) reads _sid from the query
+//     string and so read the literal "[REDACTED]", breaking query-param auth on the legacy
+//     Synology WebAPI layer. Its form-body and cookie fallbacks masked the failure.
+//
+//  2. It never redacted the log anyway. chi's DefaultLogFormatter prints r.RequestURI
+//     (middleware/logger.go:118) — the raw, unparsed string off the wire. Rewriting r.URL
+//     does not touch it, so the token it existed to hide was printed in full the whole time.
+//
+// Both are addressed by redacting RequestURI (what the logger reads) as well as URL, and
+// restoring both immediately below the logger so handlers see the truth. The restore is a
+// separate middleware rather than a defer because the logger builds its entry on the way
+// DOWN, not after the handler returns.
 // maxRequestBodyBytes caps any inbound request body. TASK-810: the JSON endpoints decode
 // r.Body with no limit; on an internet-exposed NAS a single multi-GB POST would stream
 // into the decoder and OOM-kill the process. Every legitimate request here (JSON control
@@ -1681,21 +1699,78 @@ func bodyLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// trueRequestLine carries the un-redacted URL and RequestURI from redactSensitiveParams
+// down to restoreTrueURL.
+type trueRequestLine struct {
+	url        *url.URL
+	requestURI string
+}
+
+type trueURLKeyType struct{}
+
+var trueURLKey = trueURLKeyType{}
+
+// sensitiveQueryParams are the query parameters whose VALUES must never reach a log.
+var sensitiveQueryParams = []string{"_sid", "token"}
+
+// redactedQuery returns a copy of the query with sensitive values replaced, and whether
+// anything was actually redacted. Returning the flag lets the caller skip the copy
+// entirely for the overwhelmingly common request that carries neither param.
+func redactedQuery(q url.Values) (url.Values, bool) {
+	var found bool
+	for _, p := range sensitiveQueryParams {
+		if q.Has(p) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	out := make(url.Values, len(q))
+	for k, v := range q {
+		out[k] = v
+	}
+	for _, p := range sensitiveQueryParams {
+		if out.Has(p) {
+			out.Set(p, "[REDACTED]")
+		}
+	}
+	return out, true
+}
+
 func redactSensitiveParams(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if q := r.URL.Query(); q.Has("_sid") || q.Has("token") {
-			if q.Has("_sid") {
-				q.Set("_sid", "[REDACTED]")
-			}
-			if q.Has("token") {
-				q.Set("token", "[REDACTED]")
-			}
-			sanitized := *r.URL
-			sanitized.RawQuery = q.Encode()
-			r2 := r.WithContext(r.Context())
-			r2.URL = &sanitized
-			next.ServeHTTP(w, r2)
+		q, redacted := redactedQuery(r.URL.Query())
+		if !redacted {
+			next.ServeHTTP(w, r)
 			return
+		}
+		saved := trueRequestLine{url: r.URL, requestURI: r.RequestURI}
+
+		sanitized := *r.URL
+		sanitized.RawQuery = q.Encode()
+
+		r2 := r.WithContext(context.WithValue(r.Context(), trueURLKey, saved))
+		r2.URL = &sanitized
+		// chi's logger prints RequestURI, not URL — redacting only URL hid nothing.
+		r2.RequestURI = sanitized.RequestURI()
+		next.ServeHTTP(w, r2)
+	})
+}
+
+// restoreTrueURL puts the real URL back for the handlers, undoing redactSensitiveParams.
+//
+// Install it directly BELOW middleware.Logger: the logger reads the request line on the
+// way down, so everything above this sees the redacted URL and everything below sees the
+// truth. A request that was never redacted carries no context value and passes straight
+// through.
+func restoreTrueURL(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if saved, ok := r.Context().Value(trueURLKey).(trueRequestLine); ok && saved.url != nil {
+			r = r.WithContext(r.Context())
+			r.URL = saved.url
+			r.RequestURI = saved.requestURI
 		}
 		next.ServeHTTP(w, r)
 	})
