@@ -2,8 +2,12 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Suggested rail replaces Recently Watched, which required an item past 95% complete
@@ -103,5 +107,91 @@ func TestNullGenresYieldsNoSuggestion(t *testing.T) {
 	var ns sql.NullString
 	if got := pickSuggestionGenre(ns.String); got != "" {
 		t.Errorf("a NULL genres column produced %q", got)
+	}
+}
+
+// /suggested must complete on a single pooled connection.
+//
+// A cursor holds a pool connection while it is drained, so a query issued INSIDE rows.Next()
+// needs a second one. Under concurrency every connection ends up held by a cursor whose
+// goroutine waits for a connection that only frees when a cursor closes, and nothing
+// proceeds. That exact defect shipped three times in this codebase (870636b fixed the last
+// three instances), so a new handler that opens a cursor gets pinned the moment it is added
+// rather than after the next outage.
+//
+// Pinning the pool to ONE connection is the whole point: with more available the defective
+// shape merely gets slow, and the test would pass against the bug.
+func TestSuggestedCompletesOnASingleConnection(t *testing.T) {
+	s := singleConnServer(t, 4)
+
+	// Give the user progress on one item with genres, so the seed query returns something
+	// and the handler proceeds to open its cursor — otherwise it short-circuits and the
+	// test would prove nothing.
+	if _, err := s.db.Exec(
+		`INSERT INTO items(id, library_id, type, title, genres, added_at, duration_seconds)
+		 VALUES('seed', 'lib_movies', 'movie', 'Seed Film', 'Animation,Family', '2026-01-01T00:00:00Z', 6000)`,
+	); err != nil {
+		t.Fatalf("insert seed: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq)
+		 VALUES('seed', 'u1', 300, 6000, '2026-09-15T21:00:00Z', 1)`,
+	); err != nil {
+		t.Fatalf("insert progress: %v", err)
+	}
+	// And candidates in the same genre for the cursor to actually iterate.
+	for i := 0; i < 5; i++ {
+		id := "cand" + string(rune('A'+i))
+		if _, err := s.db.Exec(
+			`INSERT INTO items(id, library_id, type, title, genres, added_at, duration_seconds)
+			 VALUES(?, 'lib_movies', 'movie', ?, 'Animation,Family', '2026-01-01T00:00:00Z', 6000)`,
+			id, "Candidate "+id,
+		); err != nil {
+			t.Fatalf("insert candidate: %v", err)
+		}
+	}
+
+	req := authedReq(http.MethodGet, "/suggested?libraryId=lib_movies", "u1")
+	rec := httptest.NewRecorder()
+
+	// A deadlock test must never be able to wedge the suite: run the handler in a goroutine
+	// behind a timeout so a regression FAILS loudly instead of hanging CI forever.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleSuggested(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handleSuggested did not complete on a single connection — it is querying " +
+			"inside an open cursor, which deadlocks the pool under concurrency")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var resp struct {
+		Genre string           `json:"genre"`
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Animation over Family: both are on the seed, and Family is not broad either, but
+	// Animation comes first — the rule takes the FIRST non-broad genre.
+	if resp.Genre != "Animation" {
+		t.Errorf("genre = %q, want Animation", resp.Genre)
+	}
+	if len(resp.Items) == 0 {
+		t.Error("no items returned, so the cursor was never exercised")
+	}
+	// The seed itself must not be suggested back — the viewer is already watching it.
+	for _, it := range resp.Items {
+		if it["id"] == "seed" {
+			t.Error("suggested an item the viewer already has progress on")
+		}
 	}
 }

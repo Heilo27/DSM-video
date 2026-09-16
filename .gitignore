@@ -63,3 +63,7 @@ backend/dsvideo-backend-new
 # backend/dsvideo-backend but not the cmd/ path, so every `go build` produced
 # a 17MB diff in the working tree (TASK-819 work surfaced it).
 backend/cmd/dsvideo-backend/dsvideo-backend
+
+# Per-session QA token + server for the live UI test (LiveSuggestedRailTests). Written by
+# hand at /tmp, never in the repo — a bearer token must not be committed.
+/tmp/dsvideo-qa-live.txt

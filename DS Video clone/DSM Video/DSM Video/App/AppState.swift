@@ -1411,6 +1411,23 @@ final class AppState {
   /// Best-effort by design. Every failure path leaves the rail EMPTY rather than surfacing
   /// an error — a suggestion that could not be computed is not a problem the user needs to
   /// act on, and the home screen must not grow an error state for a nicety.
+  /// Applies a computed rail set and refreshes Suggested from it.
+  ///
+  /// Four code paths assign the three rails — cold start, first-page-of-sync, post-sync, and
+  /// the detached recompute — and Suggested has to follow all of them. It was wired into the
+  /// recompute alone, so on a cold start (the common launch) the rail simply never appeared
+  /// until something else forced a full recompute. Funnelling every site through here is
+  /// what stops the next path from silently skipping it.
+  ///
+  /// Suggested is fired and not awaited: it is a network call, and the three local rails
+  /// must render immediately rather than waiting on it.
+  private func applyRails(_ rails: HomeRails) {
+    homeContinueWatching = rails.continueWatching
+    homeJustAdded = rails.justAdded
+    homeRecentlyWatched = rails.recentlyWatched
+    Task { await loadSuggestedRail() }
+  }
+
   func loadSuggestedRail() async {
     let apiSnapshot = api
     let libraryID = homeLibraries.first(where: { $0.kind != "tv" })?.id ?? homeLibraries.first?.id
@@ -1617,9 +1634,7 @@ final class AppState {
       let rails = await Task.detached(priority: .userInitiated) {
         await LocalStore.shared.queryRails()
       }.value
-      homeContinueWatching = rails.continueWatching
-      homeJustAdded = rails.justAdded
-      homeRecentlyWatched = rails.recentlyWatched
+      applyRails(rails)
       homeIsCacheDecoding = false
       // Skip background network sync when offline — cached content is already shown
       // and network calls will fail anyway (TASK-291).
@@ -1889,9 +1904,7 @@ final class AppState {
             // After first page on cold start, show rails immediately
             if !background && pageCount == 1 {
               let rails = await LocalStore.shared.queryRails()
-              homeContinueWatching = rails.continueWatching
-              homeJustAdded = rails.justAdded
-              homeRecentlyWatched = rails.recentlyWatched
+              applyRails(rails)
             }
             if !page.hasMore {
               reachedEndOfChanges = true
@@ -1954,9 +1967,7 @@ final class AppState {
 
       // Step 5: Recompute rails from local store and update UI
       let rails = await LocalStore.shared.queryRails()
-      homeContinueWatching = rails.continueWatching
-      homeJustAdded = rails.justAdded
-      homeRecentlyWatched = rails.recentlyWatched
+      applyRails(rails)
       clearNetworkError()
       homeLog.info("runDeltaSync: done — CW=\(rails.continueWatching.count) JA=\(rails.justAdded.count) RW=\(rails.recentlyWatched.count)")
       // Step 6: Refresh watchlist so it stays current with server state
@@ -2016,9 +2027,11 @@ final class AppState {
   func refreshProgressFromLocal() async {
     guard !isDemoMode else { return }
     let rails = await LocalStore.shared.queryRails()
-    homeContinueWatching = rails.continueWatching
-    homeJustAdded = rails.justAdded
-    homeRecentlyWatched = rails.recentlyWatched
+    // Via applyRails so Suggested refreshes too. This is the site where it matters most:
+    // the viewer has just finished something, which is precisely when the seed — and so
+    // the suggestion — should change. Assigning the three rails directly here would leave
+    // Suggested recommending against the PREVIOUS film until something else recomputed.
+    applyRails(rails)
   }
 
   /// Optimistic progress write: update the local store immediately (durability), mark it
