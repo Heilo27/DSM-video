@@ -1423,9 +1423,43 @@ final class AppState {
   /// must render immediately rather than waiting on it.
   private func applyRails(_ rails: HomeRails) {
     homeContinueWatching = rails.continueWatching
+    // The local value is a FALLBACK, shown immediately so the rail is never blank, then
+    // replaced by the server's answer below. See loadJustAddedRail.
     homeJustAdded = rails.justAdded
     homeRecentlyWatched = rails.recentlyWatched
+    Task { await loadJustAddedRail() }
     Task { await loadSuggestedRail() }
+  }
+
+  /// Replaces Just Added with the server's own answer.
+  ///
+  /// The rail used to be derived entirely from the local SQLite mirror — ORDER BY added_at
+  /// over whatever had been synced. That is the client guessing about a library it does not
+  /// hold, and it fails silently in the one way that matters: when the sync stalls, the rail
+  /// keeps rendering confidently stale content with nothing anywhere reporting a problem.
+  /// A phone showed the same four TV shows for days while the server held a dozen newer
+  /// films, and four separate client-side fixes chased the symptom.
+  ///
+  /// The server has first-hand knowledge of its library, precomputes this on a timer, and
+  /// is now the authority. The local query survives only as the offline fallback: if the
+  /// request fails, whatever applyRails already set stays on screen rather than the rail
+  /// going blank.
+  func loadJustAddedRail() async {
+    guard !isDemoMode, sessionToken != nil else { return }
+    let apiSnapshot = api
+    do {
+      let resp = try await apiSnapshot.justAdded(limit: 16)
+      guard !resp.items.isEmpty else {
+        homeLog.info("justAdded: server returned an empty rail — keeping the local fallback")
+        return
+      }
+      homeJustAdded = resp.items
+      homeLog.info("justAdded: \(resp.items.count) item(s) from the server")
+    } catch {
+      // Offline, or an older server with no /just-added. The local fallback is already on
+      // screen, so there is nothing to surface to the user.
+      homeLog.warning("justAdded: server request failed, keeping local — \(error.localizedDescription)")
+    }
   }
 
   func loadSuggestedRail() async {
@@ -1708,11 +1742,29 @@ final class AppState {
 
   func homeForceRefresh() async {
     guard !isDemoMode else { return }
-    homeLog.info("homeForceRefresh: clearing local store, running full sync")
+    // DO NOT clearAll() here. This is what broke Just Added.
+    //
+    // clearAll() deletes every item AND zeroes the cursor, and only THEN tries to
+    // re-download the whole library. On a slow link that re-download is likely to fail —
+    // this phone is on the WAN path, where a small /items call measured 21 SECONDS against
+    // 13ms on the LAN — and the device is then left with ZERO items and a cursor at 0,
+    // strictly worse than before the refresh and with no way out: every later cycle
+    // restarts from 0 and fails the same way.
+    //
+    // It was also invisible. clearAll() logs nothing, and this function logs only to
+    // homeLog (OSLog), not dlog — so on the device's diagnostic file the cursor appeared
+    // to drop to 0 for no reason, which sent four separate fixes after the wrong cause.
+    //
+    // Resetting the cursor alone gets the same full re-fetch, because upsertItems is
+    // idempotent by id: every row is rewritten as it arrives. The difference is that the
+    // user keeps a working library the entire time the re-fetch is running, and keeps it
+    // even if the re-fetch never finishes.
+    homeLog.info("homeForceRefresh: resetting sync cursor, running full sync")
+    dlog.info(.library, "force refresh — re-fetching the library from seq 0")
     homeBackgroundFetchTask?.cancel()
     homeBackgroundFetchTask = nil
     homeIsBackgroundRefreshing = false
-    await Task.detached(priority: .utility) { await LocalStore.shared.clearAll() }.value
+    await LocalStore.shared.setItemSeq(0)
     homeIsLoading = true
     homeError = nil
     defer { homeIsLoading = false }   // see homeLoad(): cancellation must not latch the flag
@@ -1930,13 +1982,63 @@ final class AppState {
         // every rail until a sign-out forced a full resync — while the log line at the
         // page cap promised the opposite ("remaining items sync on the next cycle").
         var reachedEndOfChanges = false
+        // A page failure must not discard the pages that already landed.
+        //
+        // This was a bare `try`, so a timeout on ANY page threw straight past the
+        // setItemSeq below to the outer catch — leaving the cursor exactly where it was
+        // when the loop started. Combined with a reset to 0 (the staleness path, or a
+        // clearAll), that stranded the device at seq 0 with an empty items table: every
+        // launch re-reset, re-fetched, timed out, and got nowhere. The user's log shows
+        // that loop — "local=0" at 09:07:17, 09:14:28, 09:14:31, 09:21:55, each followed
+        // by a timeout, never once reaching the end.
+        //
+        // It is not a rare edge either: this phone is on the WAN path, where /items
+        // measured 21 SECONDS against 13ms on the LAN, and syncItems asks for 500 items
+        // with a 30s budget. Timing out mid-sync is the NORMAL case there, so the sync has
+        // to be resumable rather than all-or-nothing.
+        //
+        // Catch it, keep every page already upserted, and let the cursor advance below to
+        // whatever was actually consumed. The next cycle resumes from there instead of
+        // starting over.
+        var fetchError: Error? = nil
+        // Resuming from a known cursor means few pages, so ask for large ones. Starting
+        // from zero means ~11 pages at 500, every one of them a timeout risk on WAN.
+        let pageLimit = since == 0 ? 200 : 500
         repeat {
-          let page = try await apiSnapshot.syncItems(since: since, limit: 500, afterRowid: afterRowid)
+          let page: SyncItemsResponse
+          do {
+            // Smaller pages when starting from zero. A full re-fetch is the slowest case
+            // and the one most likely to be interrupted, so each page should be cheap
+            // enough to land over a slow link — a page that times out costs the whole
+            // page, and at 500 items that is most of a minute of work discarded.
+            page = try await apiSnapshot.syncItems(since: since, limit: pageLimit, afterRowid: afterRowid)
+          } catch {
+            homeLog.warning("""
+              runDeltaSync: page \(pageCount + 1) failed at seq=\(since) — \(error.localizedDescription);               keeping the \(pageCount) page(s) already fetched and resuming next cycle
+              """)
+            fetchError = error
+            break
+          }
           if !page.items.isEmpty {
             await LocalStore.shared.upsertItems(page.items)
             since = page.nextSeq
             afterRowid = page.hasMore ? page.nextAfterRowid : nil
             pageCount += 1
+
+            // CHECKPOINT EVERY PAGE. The items are already durable — upsertItems commits
+            // its own transaction — so the watermark recording them must be durable too.
+            //
+            // The cursor used to be written ONCE, after the loop. Every page's rows landed
+            // on disk while the bookkeeping that says so did not, so any interruption threw
+            // away the record of work that had actually completed: a throw, a cancellation,
+            // or iOS suspending the app when its ~30s background grant expired. On an
+            // 11-page fetch at 21s per page over WAN, that is a four-minute window in which
+            // every termination mode loses everything.
+            //
+            // Checkpointing here makes the sync resumable under all of them. Deliberately
+            // NOT capped at status.itemSeq: `since` is the server's own nextSeq, which is
+            // exactly what the next request should ask from.
+            await LocalStore.shared.setItemSeq(min(since, status.itemSeq))
 
             // Non-advancing cursor: the next request would be byte-identical to the
             // one we just made, so we'd refetch the same page indefinitely. Stop and
@@ -1971,19 +2073,32 @@ final class AppState {
         // Fetch and apply deletions. Only advance the item cursor if the deletion
         // request succeeds — a failure means deleted IDs are unknown and must be
         // retried on the next sync cycle (TASK-437).
-        var deletionSucceeded = true
-        do {
-          let deleted = try await apiSnapshot.syncDeleted(since: cursors.itemSeq)
-          if !deleted.deletedIds.isEmpty {
-            homeLog.info("runDeltaSync: \(deleted.deletedIds.count) deleted items")
-            await LocalStore.shared.deleteItems(deleted.deletedIds)
+        // Deletions are swept only when the item fetch finished. Skipping them is safe now
+        // that the cursor is checkpointed per page: the next cycle re-requests deletions
+        // from the LAST CHECKPOINT, so nothing in the unswept range is lost — the earlier
+        // version of this advanced the cursor past deletions it had deliberately skipped,
+        // which would have made those deletions unreachable forever.
+        var deletionSucceeded = false
+        if fetchError != nil {
+          homeLog.info("runDeltaSync: skipping deletions — the item fetch did not finish; they sweep on the next cycle from the checkpointed cursor")
+        } else {
+          do {
+            let deleted = try await apiSnapshot.syncDeleted(since: cursors.itemSeq)
+            if !deleted.deletedIds.isEmpty {
+              homeLog.info("runDeltaSync: \(deleted.deletedIds.count) deleted items")
+              await LocalStore.shared.deleteItems(deleted.deletedIds)
+            }
+            deletionSucceeded = true
+          } catch {
+            homeLog.warning("runDeltaSync: syncDeleted failed — will retry on next sync: \(error.localizedDescription)")
           }
-        } catch {
-          homeLog.warning("runDeltaSync: syncDeleted failed — will retry on next sync: \(error.localizedDescription)")
-          deletionSucceeded = false
         }
 
-        if deletionSucceeded {
+        // Advance the cursor to whatever was ACTUALLY consumed, even when the fetch failed
+        // partway. This is the durability half of the fix above: upserted pages are on
+        // disk, so the cursor must reflect them or the next cycle re-downloads work that
+        // already landed — and, when the cursor was reset to 0, never escapes the loop.
+        if deletionSucceeded || fetchError != nil {
           // TASK-847: advance only to what was actually consumed. On a clean run that is
           // status.itemSeq; on an early exit it is `since`, the last cursor the loop
           // committed, so the un-fetched remainder is re-requested next cycle instead of

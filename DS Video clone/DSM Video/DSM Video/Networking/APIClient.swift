@@ -154,6 +154,30 @@ struct APIClient {
                              response: SuggestedResponse.self, timeoutInterval: Timeout.interactive)
   }
 
+  /// The "Just Added" rail, computed BY THE SERVER.
+  ///
+  /// The clients used to derive this themselves from their local SQLite mirror. That is a
+  /// guess about the library made by the party that does not hold it, and it fails in the
+  /// worst possible way: when the mirror stops updating, the rail keeps rendering
+  /// confidently stale content and nothing reports a problem. A phone showed the same four
+  /// TV shows for days while the server held a dozen newer films.
+  ///
+  /// The server precomputes and caches this, so the call is cheap and the answer is
+  /// authoritative.
+  func justAdded(libraryId: String? = nil, limit: Int = 16) async throws -> ItemsResponse {
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/just-added"),
+                                    resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    var q = [URLQueryItem(name: "limit", value: String(limit))]
+    if let libraryId { q.append(URLQueryItem(name: "libraryId", value: libraryId)) }
+    comps.queryItems = q
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none,
+                                      response: ItemsResponse.self,
+                                      timeoutInterval: Timeout.interactive)
+  }
+
   func tvShows(libraryId: String) async throws -> TVShowsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL
@@ -402,8 +426,14 @@ struct APIClient {
     if let r = afterRowid { queryItems.append(URLQueryItem(name: "afterRowid", value: String(r))) }
     comps.queryItems = queryItems
     guard let url = comps.url else { throw APIError.invalidURL }
+    // 90s, not 30. A 500-item page is a genuinely large response, and over the WAN path
+    // (QuickConnect / DDNS) a 100-item /items call measured 21 SECONDS against 13ms on the
+    // LAN. At 30s this timed out on essentially every remote sync, which is how a device
+    // could never finish a full re-fetch. The caller now also asks for smaller pages when
+    // it has to start from scratch — see runDeltaSync — so this budget covers the slow
+    // link rather than encouraging bigger requests.
     return try await request(url: url, method: "GET", body: Optional<Int>.none,
-                             response: SyncItemsResponse.self, timeoutInterval: 30)
+                             response: SyncItemsResponse.self, timeoutInterval: 90)
   }
 
   func syncDeleted(since: Int) async throws -> SyncDeletedResponse {

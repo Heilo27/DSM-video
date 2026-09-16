@@ -174,6 +174,8 @@ type Server struct {
 	// map and the table by the background purge loop and at startup. (Persistence was
 	// TASK-309, now shipped — this is no longer in-memory-only.)
 	revokedTokens sync.Map
+	// Precomputed "Just Added" rail — the server owns this answer, not the clients.
+	justAdded *justAddedCache
 
 	// Pairing codes: code → pairingEntry (tvOS ↔ iOS device pairing)
 	pairingMu    sync.Mutex
@@ -437,6 +439,7 @@ func main() {
 		metaInFlight:   make(map[string]bool),
 		metaSemaphore:  make(chan struct{}, 5), // max 5 concurrent TMDb lookups
 		pairingCodes:   make(map[string]pairingEntry),
+		justAdded:      newJustAddedCache(),
 
 		trickplayInFlight:  make(map[string]chan struct{}),
 		subExtractInFlight: make(map[string]chan struct{}),
@@ -524,6 +527,10 @@ func main() {
 
 	// P0-1: reap idle playSessions. The map was written on every /playback but NEVER
 	// deleted (no stop path), so each play leaked one entry forever → slow OOM on the
+	// Precompute the "Just Added" rail and keep it fresh. The server owns this answer
+	// because it is the party that actually holds the library — see justadded.go.
+	s.startJustAddedRefresher()
+
 	// 3.8GB box. The HLS CleanupManager already reaps the generator's own session map +
 	// temp dirs on a tick; this loop is its sibling for the HTTP-layer playSessions map.
 	// Every 5 min we collect entries idle (no segment/playlist fetch) past the grace
@@ -1091,6 +1098,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		// reaped by timeout rather than closed when the client stops watching.
 		r.Get("/genres", s.handleGenres)
 		r.Get("/suggested", s.handleSuggested)
+		r.Get("/just-added", s.handleJustAdded)
 		r.Get("/libraries/summary", s.handleLibrariesSummary)
 		r.Get("/items", s.handleItems)
 		r.Get("/items/{id}", s.handleItemDetail)
