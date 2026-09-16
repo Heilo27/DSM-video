@@ -1930,9 +1930,15 @@
       try {
         // Trigger a background scan, then load items + progress in parallel.
         api('/api/v1/libraries').catch(() => {});
-        const [moviesData, progressData] = await Promise.all([
+        const [moviesData, progressData, justAddedData, suggestedData] = await Promise.all([
           api('/api/v1/items?libraryId=lib_movies').catch(() => ({ items: [] })),
-          api('/api/v1/progress/all').catch(() => ({ progress: {} }))
+          api('/api/v1/progress/all').catch(() => ({ progress: {} })),
+          // Just Added and Suggested are the SERVER's answers, not ours. It holds the
+          // library; deriving either here would repeat the mistake the native clients made
+          // — a rail that renders confidently stale content whenever the client's view of
+          // the library falls behind, with nothing reporting a problem.
+          api('/api/v1/just-added?limit=20').catch(() => ({ items: [] })),
+          api('/api/v1/suggested?limit=20').catch(() => ({ genre: '', items: [] }))
         ]);
 
         const items = moviesData.items || [];
@@ -1965,14 +1971,20 @@
         continueWatching.sort(byUpdatedDesc);
         recentlyWatched.sort(byUpdatedDesc);
 
-        // Recently Added: newest by addedAt.
-        const recentlyAdded = [...items]
-          .sort((a, b) => (Date.parse(b.addedAt) || 0) - (Date.parse(a.addedAt) || 0))
-          .slice(0, 20);
+        // Just Added comes from the server, which dedupes by SHOW — a season import is one
+        // new thing, not twelve. It also covers EVERY library: this page only ever fetched
+        // lib_movies above, so a locally-derived rail could never show a new TV show at all.
+        const justAdded = (justAddedData && justAddedData.items) || [];
+
+        // Suggested: genre-seeded from what was watched most recently, server-side.
+        const suggested = (suggestedData && suggestedData.items) || [];
+        const suggestedGenre = (suggestedData && suggestedData.genre) || '';
+        const suggestedTitle = suggestedGenre ? `Suggested · ${suggestedGenre}` : 'Suggested';
 
         const rails = [
           renderRail('Continue Watching', continueWatching.slice(0, 20), { resume: true }),
-          renderRail('Recently Added', recentlyAdded),
+          renderRail('Just Added', justAdded),
+          renderRail(suggestedTitle, suggested),
           renderRail('Recently Watched', recentlyWatched.slice(0, 20))
         ].filter(Boolean).join('');
 

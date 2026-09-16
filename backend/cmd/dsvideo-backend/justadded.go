@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +41,9 @@ const justAddedRefreshInterval = 12 * time.Hour
 //
 // The server has first-hand knowledge of its own library. It should answer the question.
 type justAddedCache struct {
-	mu          sync.RWMutex
-	byLibrary   map[string][]map[string]any
-	computedAt  time.Time
+	mu         sync.RWMutex
+	byLibrary  map[string][]map[string]any
+	computedAt time.Time
 }
 
 func newJustAddedCache() *justAddedCache {
@@ -101,6 +102,13 @@ func (s *Server) refreshJustAdded() {
 // Deduplicated by SHOW, not by item: a TV show that just gained twelve episodes is ONE new
 // thing on the rail, not twelve. Without this a single season import buries every film the
 // user added the same week — which is precisely what the clients' rails looked like.
+//
+// The grouping is the codebase's ONE answer for "which show is this episode part of":
+// showFolderFromPath → resolveFolderShowNames → showGroupKey, the same three calls the
+// list endpoints make. This rail originally keyed episodes on their own title, which is
+// the one thing that is NOT stable across a show's episodes — an unmatched import whose
+// show_name is NULL gave every episode a distinct key and nine of the rail's 24 slots went
+// to one anime series. The folder is what those episodes actually share.
 func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 	where := "WHERE i.added_at != ''"
 	var args []any
@@ -115,7 +123,7 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 	rows, err := s.db.Query(`
 		SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number,
-		       i.library_id
+		       i.library_id, i.path
 		FROM items i
 		`+where+`
 		ORDER BY i.added_at DESC
@@ -125,33 +133,85 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 	}
 	defer rows.Close()
 
-	out := make([]map[string]any, 0, justAddedCacheSize)
-	seenShows := map[string]bool{}
+	// Pass 1: read every candidate, and count show names per folder as we go.
+	type candidate struct {
+		id, typ, title, addedAt, libID, folder string
+		year, duration, season, episode        sql.NullInt64
+		rating                                 sql.NullFloat64
+		posterPath, backdropPath, showName     sql.NullString
+	}
+	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
+	var cands []candidate
+	nameCounts := map[string]map[string]int{}
 	for rows.Next() {
-		var id, typ, title, addedAt, libID string
-		var year, duration, seasonNumber, episodeNumber sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, showName sql.NullString
-
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath, &showName, &seasonNumber, &episodeNumber, &libID); err != nil {
+		var c candidate
+		var path string
+		if err := rows.Scan(&c.id, &c.typ, &c.title, &c.year, &c.duration, &c.addedAt,
+			&c.rating, &c.posterPath, &c.backdropPath, &c.showName, &c.season, &c.episode,
+			&c.libID, &path); err != nil {
 			continue
 		}
+		if c.typ == "episode" {
+			c.folder = showFolderFromPath(path, tvRoot)
+			if c.folder != "" {
+				if nameCounts[c.folder] == nil {
+					nameCounts[c.folder] = map[string]int{}
+				}
+				if c.showName.Valid && c.showName.String != "" {
+					nameCounts[c.folder][c.showName.String]++
+				}
+			}
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-		// One entry per show. Episodes collapse onto their show; films are their own key.
-		key := strings.ToLower(title) + "|" + typ
-		if showName.Valid && showName.String != "" {
-			key = "tv|" + strings.ToLower(showName.String)
+	// One name per folder, so a part-matched folder does not split into two shows.
+	folderNames := resolveFolderShowNames(nameCounts)
+
+	// Pass 2: emit newest-first, one entry per show.
+	out := make([]map[string]any, 0, justAddedCacheSize)
+	seenShows := map[string]bool{}
+	for _, c := range cands {
+		id, typ, title, addedAt, libID := c.id, c.typ, c.title, c.addedAt, c.libID
+		year, duration, seasonNumber, episodeNumber := c.year, c.duration, c.season, c.episode
+		rating := c.rating
+		posterPath, backdropPath := c.posterPath, c.backdropPath
+
+		// The FOLDER's resolved name, not this episode's — an unmatched episode groups
+		// with its siblings rather than forming a show of its own.
+		showName := c.showName
+		var key string
+		if typ == "episode" && c.folder != "" {
+			showName = folderNames[c.folder]
+			key = "tv|" + showGroupKey(c.folder, showName)
+		} else {
+			// A film is its own show.
+			key = strings.ToLower(title) + "|" + typ
 		}
 		if seenShows[key] {
 			continue
 		}
 		seenShows[key] = true
 
+		// The rail's unit is the SHOW, so an episode row is labelled with its show. The
+		// episode's own title names one file ("… Episode 12 Destiny Bond") and reads as
+		// noise next to film titles; the folder is the honest label when nothing matched.
+		display := title
+		if typ == "episode" {
+			if showName.Valid && showName.String != "" {
+				display = showName.String
+			} else if c.folder != "" {
+				display = c.folder
+			}
+		}
+
 		item := map[string]any{
 			"id":              id,
 			"type":            typ,
-			"title":           title,
+			"title":           display,
 			"year":            nullIntToAny(year),
 			"durationSeconds": nullIntToAny(duration),
 			"addedAt":         addedAt,
@@ -181,7 +241,7 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 			break
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // handleJustAdded serves the precomputed rail.
