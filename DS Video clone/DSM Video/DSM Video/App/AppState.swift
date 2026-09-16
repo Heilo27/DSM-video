@@ -1655,9 +1655,15 @@ final class AppState {
         homeLog.info("homeLoad[\(callID)]: QC resolved to \(self.api.baseURL)")
       }
       // Sync in background — may update rails once complete
-      homeLog.info("homeLoad[\(callID)]: starting background delta sync")
-      homeBackgroundFetchTask?.cancel()
-      homeBackgroundFetchTask = Task { await self.runDeltaSyncWithBackgroundTask() }
+      // Same rule as the heartbeat: do not cancel a sync that is still running. A relaunch
+      // or a re-entry into homeLoad while a long WAN resync is mid-flight would otherwise
+      // restart it from seq 0 and it would never reach the end.
+      if let existing = homeBackgroundFetchTask, !existing.isCancelled {
+        homeLog.info("homeLoad[\(callID)]: a background sync is already running — leaving it alone")
+      } else {
+        homeLog.info("homeLoad[\(callID)]: starting background delta sync")
+        homeBackgroundFetchTask = Task { await self.runDeltaSyncWithBackgroundTask() }
+      }
     } else {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
       homeIsCacheDecoding = false
@@ -2073,9 +2079,29 @@ final class AppState {
         dlog.warn(.library, "cursor ahead of server — forcing a sync to recover")
       }
       if itemsChanged || progressChanged || cursorAhead {
-        homeLog.info("heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged)) — syncing")
-        homeBackgroundFetchTask?.cancel()
-        homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
+        // NEVER cancel a sync that is still running.
+        //
+        // This is what actually broke Just Added, and it hid behind three wrong diagnoses.
+        // The heartbeat fires every 30s. A full re-fetch is 11 pages, and over the WAN path
+        // this phone uses (https://DSMvideo.synology.me:5001) a single /items call measured
+        // 21 SECONDS against 13ms on the LAN. So the resync could never finish inside one
+        // heartbeat interval: the next beat cancelled it, restarted from seq 0, and the
+        // next cancelled that. The device log shows the loop plainly — "local=0" at
+        // 09:07:17, 09:14:28 and 09:14:31, each followed by a cancellation, never once
+        // reaching the end.
+        //
+        // Cancelling made sense when this only ever started a SHORT delta. It is wrong for
+        // a full resync, and wrong in general: an in-flight sync is strictly closer to done
+        // than a fresh one, so restarting it can only lose progress. Whatever this beat
+        // detected will still be there for the next one.
+        if let existing = homeBackgroundFetchTask, !existing.isCancelled {
+          homeLog.info("""
+            heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged))             but a sync is already running — leaving it alone
+            """)
+        } else {
+          homeLog.info("heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged)) — syncing")
+          homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
+        }
       }
     } catch {
       // Heartbeat failures are usually transient. But a persistent failure here is the

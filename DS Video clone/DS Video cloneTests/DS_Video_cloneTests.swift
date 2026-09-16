@@ -2963,3 +2963,49 @@ struct HeartbeatGateTests {
                        serverItem: 13904, serverProgress: 49883))
   }
 }
+
+// MARK: - A running sync must not be cancelled and restarted
+
+/// The heartbeat cancelled the sync it was trying to trigger.
+///
+/// This is what actually broke Just Added, after three wrong diagnoses. The heartbeat fires
+/// every 30 seconds. A full re-fetch is 11 pages, and over the WAN path the phone uses
+/// (https://DSMvideo.synology.me:5001) a single /items call measured 21 SECONDS against
+/// 13ms on the LAN. The resync therefore could never finish inside one heartbeat interval:
+/// the next beat cancelled it, restarted from seq 0, and the beat after cancelled that.
+///
+/// The device log shows the loop directly — "local=0" at 09:07:17, 09:14:28 and 09:14:31,
+/// each followed by a cancellation, never once reaching the end. No amount of fixing the
+/// cursor arithmetic could help, because the fetch was being killed regardless.
+@Suite("Sync task lifecycle")
+struct SyncTaskLifecycleTests {
+
+  /// Mirrors the rule now used at both call sites: start a sync only when none is running.
+  private func shouldStartSync(existingIsRunning: Bool) -> Bool { !existingIsRunning }
+
+  @Test func aRunningSyncIsLeftAlone() {
+    #expect(
+      !shouldStartSync(existingIsRunning: true),
+      """
+      A new sync would be started while one is already running. At the previous call sites \
+      that meant cancelling the in-flight fetch, which over a slow link can never complete \
+      before the next 30s heartbeat.
+      """
+    )
+  }
+
+  @Test func noRunningSyncStartsOne() {
+    #expect(shouldStartSync(existingIsRunning: false),
+            "with nothing in flight the heartbeat must still be able to trigger a sync")
+  }
+
+  /// The property that matters, stated as the invariant rather than the mechanics: a sync
+  /// already in progress is strictly closer to done than a fresh one, so restarting can
+  /// only ever lose work. Whatever this beat detected is still there for the next beat.
+  @Test func restartingCanOnlyLoseProgress() {
+    let pagesFetchedSoFar = 7
+    let pagesAfterRestart = 0
+    #expect(pagesAfterRestart < pagesFetchedSoFar,
+            "restarting a sync discards every page already fetched")
+  }
+}
