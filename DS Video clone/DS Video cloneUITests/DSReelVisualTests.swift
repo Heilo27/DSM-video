@@ -265,7 +265,17 @@ final class DSReelVisualTests: XCTestCase {
 
       // The tab bar's top edge is the occlusion line. Locate it by a real tab rather than by
       // assuming a height — the bar grows with Dynamic Type, which is the whole difficulty.
-      let homeTab = app.buttons[UIID.Tab.home]
+      //
+      // Located by LABEL, not by UIID.Tab.home. MainView applies .accessibilityIdentifier
+      // inside .tabItem and carries a comment asserting that is the placement which reaches
+      // the tab button; a captured UI hierarchy shows all five tab buttons rendered with
+      // correct labels and NO identifier at all, and moving the modifier onto the content
+      // view does not fix it either (both measured, iOS 26 / deployment target 18).
+      // Identifier-based lookup therefore fails in this test's own setup, so it never got as
+      // far as measuring occlusion — it failed for a reason unrelated to TASK-884. Until the
+      // identifier issue is resolved (TASK-909), the label is what actually addresses the
+      // bar, and it is a real contract: these strings are user-visible.
+      let homeTab = app.buttons["Home"]
       guard homeTab.waitForExistence(timeout: UITest.timeout) else {
         XCTFail("Could not find the Home tab at \(size), so the tab bar's position is unknown.")
         continue
