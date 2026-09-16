@@ -3071,3 +3071,61 @@ struct LANPreferenceTests {
     #expect(!AppState.isPrivateLANAddress("172.32.0.1"))  // just outside 172.16/12
   }
 }
+
+// MARK: - Siri media intents
+
+/// Disambiguating a SPOKEN title.
+///
+/// Speech gives a phrase, not an id, and the server's search is a substring match — asking
+/// for "Blade Runner" happily returns "Blade Runner 2049" too, and the server's own order
+/// does not know which one the user meant. Saying a film's exact name must open THAT film,
+/// not its sequel, because the failure is silent: the user gets a plausible wrong movie and
+/// no indication anything was ambiguous.
+@Suite("Siri title matching")
+@MainActor
+struct SiriTitleMatchingTests {
+  private func item(_ id: String, _ title: String) -> ItemSummary {
+    ItemSummary(id: id, type: "movie", title: title, year: nil, durationSeconds: nil,
+                addedAt: "2026-01-01T00:00:00Z", rating: nil, posterImageId: nil,
+                backdropImageId: nil, progress: nil, showName: nil, showFolderId: nil,
+                seasonNumber: nil, episodeNumber: nil, libraryId: nil, changeSeq: nil)
+  }
+
+  @Test func exactTitleWinsOverASequelTheServerRankedFirst() {
+    // The order here is the trap: the sequel is first, as a substring search may well
+    // return it. Taking items.first would open the wrong film.
+    let results = [item("a", "Blade Runner 2049"), item("b", "Blade Runner")]
+    let best = MediaIntentRouter.bestMatch(for: "Blade Runner", in: results)
+    #expect(best?.id == "b")
+  }
+
+  @Test func matchingIgnoresCasing() {
+    let results = [item("a", "Top Gun: Maverick"), item("b", "Top Gun")]
+    #expect(MediaIntentRouter.bestMatch(for: "top gun", in: results)?.id == "b")
+  }
+
+  /// No exact hit: prefer something that STARTS with what was said over an arbitrary
+  /// substring match, since a spoken phrase is usually the beginning of a title.
+  @Test func prefixBeatsAnIncidentalSubstring() {
+    let results = [item("a", "The Last Starfighter"), item("b", "Starfighter Academy")]
+    #expect(MediaIntentRouter.bestMatch(for: "Starfighter", in: results)?.id == "b")
+  }
+
+  /// With neither an exact nor a prefix hit, the server's ranking is the best signal left.
+  ///
+  /// Both candidates here merely CONTAIN the term — neither starts with it — so the prefix
+  /// rule cannot break the tie and first-place order wins. (An earlier version of this test
+  /// used "Horizon Line" as the second item and expected the first to win; that was the
+  /// test being wrong, not the code: "Horizon Line" does start with "horizon", so the
+  /// prefix rule fired exactly as designed.)
+  @Test func fallsBackToServerOrderWhenNothingMatchesBetter() {
+    let results = [item("a", "The Grand Horizon"), item("b", "A Distant Horizon")]
+    #expect(MediaIntentRouter.bestMatch(for: "horizon", in: results)?.id == "a")
+  }
+
+  /// An empty result set must produce nil, not a crash and not a wrong item — the intent
+  /// relies on nil to tell the user plainly that nothing matched.
+  @Test func emptyResultsResolveToNothing() {
+    #expect(MediaIntentRouter.bestMatch(for: "anything", in: []) == nil)
+  }
+}

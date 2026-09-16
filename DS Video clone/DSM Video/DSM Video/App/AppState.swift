@@ -277,6 +277,15 @@ final class AppState {
     if AppState.isUITestDemoLaunch {
       bootstrapDemoMode()
     }
+    // UI-TEST SIRI HOOK: stands in for FindItemIntent setting a pending search term.
+    // A UI test cannot speak to Siri, and the intent itself is thin — it resolves a term
+    // and writes this property. Injecting the property is what lets a test exercise the
+    // part that actually broke on the Top Shelf deep link: the cold-launch race where a
+    // value is set before the view exists.
+    //   Launch argument: -UITestSiriSearch <term>
+    if let term = AppState.uiTestSiriSearchTerm {
+      pendingSearchTerm = term
+    }
     // QA live-session hook — see qaLiveToken. Adopts a real token + server so homeLoad()
     // runs its true path against a live NAS. No-op unless the launch args are present.
     if let qaToken = AppState.qaLiveToken {
@@ -310,6 +319,16 @@ final class AppState {
   static var isUITestDemoLaunch: Bool {
     ProcessInfo.processInfo.arguments.contains("-UITestDemoMode")
       || ProcessInfo.processInfo.environment["UITEST_DEMO"] == "1"
+  }
+
+  /// The term passed as `-UITestSiriSearch <term>`, standing in for Siri's FindItemIntent.
+  /// nil unless the argument is present, so ordinary launches are untouched.
+  static var uiTestSiriSearchTerm: String? {
+    let args = ProcessInfo.processInfo.arguments
+    guard let flag = args.firstIndex(of: "-UITestSiriSearch"),
+          args.index(after: flag) < args.endIndex else { return nil }
+    let term = args[args.index(after: flag)]
+    return term.isEmpty ? nil : term
   }
 
   /// UI-TEST RESET HOOK: clears the app's own persisted defaults so every test starts from a
@@ -2546,6 +2565,15 @@ final class AppState {
 
   /// Set when the app is opened via a dsvideo://item/{id} URL from the Top Shelf.
   var pendingDeepLinkItemID: String? = nil
+
+  /// Set when Siri asks for a search ("find X in DSM Video"), or when a spoken title
+  /// matched nothing and the user is better served by the search screen than by Home.
+  ///
+  /// Separate from `pendingDeepLinkItemID` because the destinations differ: one opens an
+  /// item, the other opens a search surface pre-filled with a term. Collapsing them into a
+  /// single "pending navigation" enum was the alternative; two plain optionals read better
+  /// at both ends and neither consumer has to switch on a case it does not handle.
+  var pendingSearchTerm: String? = nil
 
   // MARK: - Top Shelf Snapshot
 

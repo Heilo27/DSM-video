@@ -114,6 +114,10 @@ struct DS_Video_cloneApp: App {
                     // DownloadManager is a singleton — capturing it strongly here is
                     // correct and matches the lifetimes involved.
                     let state = appState
+                    // App Intents run in this process with no SwiftUI environment, so Siri
+                    // has no other way to reach the signed-in state. Registered here
+                    // because this is where the scene's state becomes available.
+                    AppStateHolder.register(state)
                     DownloadManager.shared.tokenProvider = { state.sessionToken }
                     DownloadManager.shared.usesTunnelCookieProvider = { state.api.usesTunnelCookie }
                     // A download's URL is session-scoped (/playback/{id}/stream), so the

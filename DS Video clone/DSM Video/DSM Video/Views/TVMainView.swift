@@ -353,7 +353,7 @@ private struct TVHomeView: View {
     // pushing ItemDetailView from a search result confined the detail page — hero art,
     // metadata and the Play/Start Over buttons — to that card's bounds.
     .fullScreenCover(isPresented: $showSearch) {
-      TVSearchView()
+      TVSearchView(initialTerm: appState.pendingSearchTerm)
         .environment(appState)
     }
     #if DEBUG
@@ -409,6 +409,13 @@ private struct TVHomeView: View {
       navPath = [id]
       appState.pendingDeepLinkItemID = nil
     }
+    // Siri asked for a search, or a spoken title matched nothing. Same cold-launch hazard
+    // as the deep link below: an intent can set this before this view exists, so it is
+    // read from BOTH .onChange and .task.
+    .onChange(of: appState.pendingSearchTerm) { _, term in
+      guard term?.isEmpty == false else { return }
+      showSearch = true
+    }
     // .onChange only observes SUBSEQUENT changes. onOpenURL fires at the WindowGroup
     // level even while signed out, so a cold launch from a Top Shelf tile set the ID
     // while the pairing screen was up; by the time this view was constructed the value
@@ -418,6 +425,9 @@ private struct TVHomeView: View {
       if let id = appState.pendingDeepLinkItemID {
         navPath = [id]
         appState.pendingDeepLinkItemID = nil
+      }
+      if appState.pendingSearchTerm?.isEmpty == false {
+        showSearch = true
       }
     }
   }
@@ -1084,6 +1094,10 @@ private struct TVSearchView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
 
+  /// Pre-filled when Siri asked for a search, or when a spoken title matched nothing.
+  /// nil for the ordinary case where the user opened Search themselves.
+  var initialTerm: String? = nil
+
   @State private var searchText: String = ""
   @State private var results: [ItemSummary] = []
   @State private var isSearching: Bool = false
@@ -1247,7 +1261,18 @@ private struct TVSearchView: View {
           Button("Done") { dismiss() }
         }
       }
-      .onAppear { searchFieldFocused = true }
+      .onAppear {
+        searchFieldFocused = true
+        // Seed and run the search Siri asked for. Assigning searchText would also trip the
+        // debounce in .onChange, but that waits before firing and this term came from a
+        // deliberate voice command — run it immediately so results are on screen by the
+        // time the user looks up.
+        if let term = initialTerm, !term.isEmpty, searchText.isEmpty {
+          searchText = term
+          appState.pendingSearchTerm = nil
+          Task { await search() }
+        }
+      }
       .onDisappear { debounceTask?.cancel() }
     }
   }
