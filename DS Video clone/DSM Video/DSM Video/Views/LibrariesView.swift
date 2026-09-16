@@ -495,10 +495,17 @@ struct LibraryHomeView: View {
                 seeAllLibrary: nil
               )
             }
-            if !appState.homeRecentlyWatched.isEmpty {
+            // Suggested replaces Recently Watched. That rail required an item past 95%
+            // complete (isFinished), so anything stopped partway went to Continue Watching
+            // and could never appear here — the two rails competed for the same data and
+            // this one always lost, showing two finished shows while an evening of
+            // half-watched films sat in the rail above.
+            if !appState.homeSuggested.isEmpty {
               HomeRail(
-                title: "Recently Watched",
-                items: appState.homeRecentlyWatched,
+                title: appState.homeSuggestedGenre.isEmpty
+                  ? "Suggested"
+                  : "Suggested · \(appState.homeSuggestedGenre)",
+                items: appState.homeSuggested,
                 seeAllLibrary: nil
               )
             }

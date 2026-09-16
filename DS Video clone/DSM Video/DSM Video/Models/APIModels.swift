@@ -401,6 +401,22 @@ struct ProgressRequest: Encodable {
   let positionSeconds: Int
   let durationSeconds: Int
   let state: String?
+  /// When the viewer was actually at this position (RFC3339), not when this is uploaded.
+  ///
+  /// Omitted for a live write, where the two are the same and the server's receive time is
+  /// correct. Sent by the outbox flush, where they are NOT: a backlog replayed after a
+  /// reconnect would otherwise land with one server timestamp across every row, and both
+  /// home rails sort on it. Optional so an older server ignores it harmlessly.
+  let watchedAt: String?
+
+  /// Defaulted so a live write reads as it always did — `watchedAt` is only meaningful when
+  /// replaying a queued row, and requiring it at every call site would be noise.
+  init(positionSeconds: Int, durationSeconds: Int, state: String?, watchedAt: String? = nil) {
+    self.positionSeconds = positionSeconds
+    self.durationSeconds = durationSeconds
+    self.state = state
+    self.watchedAt = watchedAt
+  }
 }
 
 struct ProgressResponse: Decodable {

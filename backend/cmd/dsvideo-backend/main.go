@@ -2166,6 +2166,7 @@ func (s *Server) isAdmin(u authedUser) bool {
 		return strings.EqualFold(u.Username, owner)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+
 	if _, err := s.db.Exec(
 		`INSERT INTO settings(key, user_id, value, updated_at) VALUES('owner_username','',?,?)
 		 ON CONFLICT(key, user_id) DO NOTHING`,
@@ -4900,6 +4901,20 @@ type progressRequest struct {
 	// behaviour for this field to drive. Do not add logic keyed on it without deciding what
 	// happens when an older client omits it entirely.
 	State string `json:"state,omitempty"`
+
+	// When the viewer was ACTUALLY at this position, RFC3339, client clock.
+	//
+	// updated_at used to be stamped server-side at receive time, which is the same thing
+	// only when the write arrives immediately. It frequently does not: the client queues
+	// progress in an outbox while the NAS is unreachable and flushes the backlog in one
+	// burst, so an entire evening's viewing landed on a single second. Observed live —
+	// 106 rows sharing one timestamp, 25 sharing another — and since both home rails sort
+	// on updated_at, they were ordering by WHEN THE QUEUE DRAINED rather than when anything
+	// was watched. Recently Watched showed a stale, arbitrary slice of one flush.
+	//
+	// Optional on purpose: an older client omits it and the server falls back to receive
+	// time, which is exactly the previous behaviour.
+	WatchedAt string `json:"watchedAt,omitempty"`
 }
 
 // itemExists reports whether an items row with this id is present. TASK-797: guards
@@ -5500,6 +5515,23 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	u := userFromCtx(r.Context())
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Prefer the client's watch time over receive time — see progressRequest.WatchedAt.
+	//
+	// Validated, not trusted: the timestamp comes from a client clock, and a wrong one
+	// poisons the rails it is meant to fix. A value that will not parse, or that sits more
+	// than a day in the future (clock skew, a device set wrong), falls back to receive time.
+	// Past values are accepted without limit — replaying an old backlog is the entire point.
+	watchedAt := now
+	if req.WatchedAt != "" {
+		if t, perr := time.Parse(time.RFC3339, req.WatchedAt); perr != nil {
+			log.Printf("[progress] unparseable watchedAt %q — using receive time", req.WatchedAt)
+		} else if t.After(time.Now().UTC().Add(24 * time.Hour)) {
+			log.Printf("[progress] watchedAt %q is more than a day ahead — using receive time", req.WatchedAt)
+		} else {
+			watchedAt = t.UTC().Format(time.RFC3339)
+		}
+	}
 	s.progressMu.Lock()
 	// The upsert is conditional: a write is applied only if it is NEWER than what we hold,
 	// or if it meaningfully moves the position within the same title.
@@ -5542,7 +5574,7 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 			"updated_at=excluded.updated_at, "+
 			"write_seq=excluded.write_seq "+
 			"WHERE excluded.write_seq > progress.write_seq",
-		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, now, writeSeq,
+		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, watchedAt, writeSeq,
 	)
 	var rowsAffected int64
 	if err == nil {

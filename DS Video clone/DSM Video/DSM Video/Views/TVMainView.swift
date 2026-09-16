@@ -232,9 +232,18 @@ private struct TVHomeView: View {
                 TVLandscapeRail(title: "Just Added", items: appState.homeJustAdded)
               }
 
-              // Recently Watched rail
-              if !appState.homeRecentlyWatched.isEmpty {
-                TVLandscapeRail(title: "Recently Watched", items: appState.homeRecentlyWatched)
+              // Suggested rail — replaces Recently Watched. That rail only admitted items
+              // past 95% complete, so anything stopped partway went to Continue Watching
+              // and could never appear here; the two competed for the same data and this
+              // one always lost. Suggested reads the genres of what was watched most
+              // recently and offers OTHER titles, so it complements Continue Watching.
+              if !appState.homeSuggested.isEmpty {
+                TVLandscapeRail(
+                  title: appState.homeSuggestedGenre.isEmpty
+                    ? "Suggested"
+                    : "Suggested · \(appState.homeSuggestedGenre)",
+                  items: appState.homeSuggested
+                )
               }
 
               // Empty state.
@@ -251,6 +260,7 @@ private struct TVHomeView: View {
                   && appState.homeContinueWatching.isEmpty
                   && appState.homeJustAdded.isEmpty
                   && appState.homeRecentlyWatched.isEmpty
+                  && appState.homeSuggested.isEmpty
                   && appState.homeLibraries.isEmpty {
                 DSContentUnavailable(
             title: "No Libraries",

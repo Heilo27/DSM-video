@@ -1286,6 +1286,26 @@ final class AppState {
   }
   var homeRecentlyWatched: [ItemSummary] = []
 
+  /// Titles sharing a genre with something watched recently.
+  ///
+  /// Replaces Recently Watched on the home screen. That rail required an item to be past
+  /// 95% complete — the `isFinished` rule — so anything stopped partway went to Continue
+  /// Watching and could never appear in it. On a real library that left it showing two
+  /// finished shows while an evening of half-watched films sat in the other rail: the two
+  /// rails were competing for the same data, and one of them always lost.
+  ///
+  /// Suggested has no such overlap. It reads the genres of what was watched most recently
+  /// and offers OTHER things in those genres, so it complements Continue Watching instead
+  /// of duplicating it, and it is useful on a night when nothing is half-finished.
+  ///
+  /// Populated separately from computeHomeRails because it needs the network: ItemSummary
+  /// carries no genres (only ItemDetail does), so the genres of the seed item and the
+  /// matching titles both come from the server.
+  var homeSuggested: [ItemSummary] = []
+  /// The genre the current suggestions were built from, for the rail's subtitle — "Because
+  /// you watched" with no reason is just a shrug.
+  var homeSuggestedGenre: String = ""
+
   // Loading state flags
   var homeIsLoading: Bool = false
   var homeIsCacheDecoding: Bool = false
@@ -1309,6 +1329,8 @@ final class AppState {
     homeContinueWatching = []
     homeJustAdded = []
     homeRecentlyWatched = []
+    homeSuggested = []
+    homeSuggestedGenre = ""
     homeIsLoading = false
     homeIsCacheDecoding = false
     homeIsBackgroundRefreshing = false
@@ -1364,6 +1386,9 @@ final class AppState {
         self.homeContinueWatching = cont
         self.homeJustAdded = added
         self.homeRecentlyWatched = watched
+        // Suggested depends on the rails above (it seeds from what was watched most
+        // recently) and needs the network, so it runs after them and never blocks them.
+        Task { await self.loadSuggestedRail() }
         self.homeLog.info("recomputeHomeRails: done in \(elapsed)s — cont=\(cont.count) added=\(added.count) watched=\(watched.count)")
         // The single highest-value line in the log for the "rails are missing" report:
         // it says whether the rails were computed empty (a data/filter problem) or
@@ -1377,6 +1402,74 @@ final class AppState {
     }
   }
 
+
+  /// Builds the Suggested rail from the genres of what was watched most recently.
+  ///
+  /// Network-backed, unlike the other rails: ItemSummary carries no genres, so both the
+  /// seed's genres and the candidate list come from the server.
+  ///
+  /// Best-effort by design. Every failure path leaves the rail EMPTY rather than surfacing
+  /// an error — a suggestion that could not be computed is not a problem the user needs to
+  /// act on, and the home screen must not grow an error state for a nicety.
+  func loadSuggestedRail() async {
+    // Seed from the most recent progress, whether or not it was finished. That is the whole
+    // point: the rail this replaces could only see items past 95%, so a half-watched film
+    // told it nothing.
+    let seedPool = homeContinueWatching + homeRecentlyWatched
+    guard let seed = seedPool.first else {
+      homeSuggested = []
+      homeSuggestedGenre = ""
+      return
+    }
+
+    let apiSnapshot = api
+    do {
+      let detail = try await apiSnapshot.itemDetail(id: seed.id)
+      // Prefer a genre that is specific enough to be a recommendation. "Drama" matches a
+      // third of most libraries and says nothing; the later entries in TMDb's list are
+      // usually the distinctive ones.
+      guard let genre = Self.suggestionGenre(from: detail.genres) else {
+        homeSuggested = []
+        homeSuggestedGenre = ""
+        return
+      }
+
+      // Pull a wide page and sample from it, so the rail differs between launches instead
+      // of showing the same alphabetical head every time.
+      let resp = try await apiSnapshot.items(
+        libraryId: seed.libraryId ?? homeLibraries.first?.id ?? "lib_movies",
+        limit: 60, genres: [genre], genreMode: .any)
+
+      // Never suggest something the viewer is already watching or has just finished — that
+      // is Continue Watching's job, and a rail that repeats the rail above it is noise.
+      let exclude = Set(seedPool.map(\.id) + homeJustAdded.map(\.id))
+      let picks = resp.items
+        .filter { !exclude.contains($0.id) }
+        .shuffled()
+        .prefix(8)
+
+      homeSuggested = Array(picks)
+      homeSuggestedGenre = genre
+      homeLog.info("suggested: \(picks.count) item(s) for genre \(genre) seeded from \(seed.title)")
+    } catch {
+      // Silent on purpose — see the note above.
+      homeLog.warning("suggested: could not build rail — \(error.localizedDescription)")
+      homeSuggested = []
+      homeSuggestedGenre = ""
+    }
+  }
+
+  /// Picks the most useful genre to recommend from.
+  ///
+  /// Skips the broadest categories when anything more specific is available: a library's
+  /// Drama bucket is typically a third of it, so "Because you watched … Drama" is close to
+  /// a random shuffle. Falls back to whatever exists rather than giving up, since a broad
+  /// suggestion still beats an empty rail.
+  nonisolated static func suggestionGenre(from genres: [String]?) -> String? {
+    guard let genres, !genres.isEmpty else { return nil }
+    let tooBroad: Set<String> = ["Drama", "Comedy", "Action", "Thriller", "Adventure"]
+    return genres.first(where: { !tooBroad.contains($0) }) ?? genres.first
+  }
 
   nonisolated static func computeHomeRails(_ allItems: [ItemSummary])
     -> (continueWatching: [ItemSummary], justAdded: [ItemSummary], recentlyWatched: [ItemSummary])
@@ -2008,7 +2101,9 @@ final class AppState {
     for row in pending {
       do {
         let applied = try await api.setProgress(
-          id: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+          id: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds,
+          // The time this was WATCHED, not the time the queue happens to be draining.
+          watchedAt: row.updatedAt.isEmpty ? nil : row.updatedAt)
         // TASK-891: only clear the pending flag when the server actually STORED the write.
         // An applied:false means a newer write superseded this one — the row is obsolete, so
         // clearing it is correct, but count it separately from a real upload so the log

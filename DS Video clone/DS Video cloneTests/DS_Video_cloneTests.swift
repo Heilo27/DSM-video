@@ -2814,3 +2814,37 @@ struct CandidateOrderingTests {
     #expect(AppState.preferringLastGood([], lastGood: "http://a:1").isEmpty)
   }
 }
+
+// MARK: - Suggested rail
+
+/// Genre selection for the Suggested rail.
+///
+/// Replaces Recently Watched, which required an item past 95% complete (isFinished) — so
+/// anything stopped partway went to Continue Watching and could never appear in it. On a
+/// real library that left it showing two finished shows while an evening of half-watched
+/// films sat in the rail above: two rails competing for the same data, one always losing.
+@Suite("Suggested rail")
+struct SuggestedGenreTests {
+
+  /// The broadest genres make the worst recommendations. A library's Drama bucket is often
+  /// a third of it, so "Because you watched … Drama" is close to a random shuffle.
+  @Test func prefersASpecificGenreOverABroadOne() {
+    // Aladdin's real genres from the live server.
+    #expect(AppState.suggestionGenre(from: ["Animation", "Family", "Adventure", "Fantasy", "Romance"]) == "Animation")
+    // Order matters: the first non-broad entry wins, not merely any of them.
+    #expect(AppState.suggestionGenre(from: ["Drama", "Action", "Western"]) == "Western")
+    #expect(AppState.suggestionGenre(from: ["Comedy", "Documentary"]) == "Documentary")
+  }
+
+  /// A broad suggestion still beats an empty rail, so an all-broad list must not give up.
+  @Test func fallsBackWhenEveryGenreIsBroad() {
+    #expect(AppState.suggestionGenre(from: ["Drama"]) == "Drama")
+    #expect(AppState.suggestionGenre(from: ["Action", "Thriller"]) == "Action")
+  }
+
+  /// No genres means no suggestion — better an absent rail than one built on nothing.
+  @Test func noGenresYieldsNoSuggestion() {
+    #expect(AppState.suggestionGenre(from: nil) == nil)
+    #expect(AppState.suggestionGenre(from: []) == nil)
+  }
+}

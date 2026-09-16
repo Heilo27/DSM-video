@@ -200,12 +200,17 @@ struct APIClient {
   /// superseded by a newer write and silently discarded — not an error, but not a
   /// success either, so callers must not treat a 200 alone as "saved".
   @discardableResult
-  func setProgress(id: String, positionSeconds: Int, durationSeconds: Int) async throws -> Bool {
+  /// - Parameter watchedAt: RFC3339 time the viewer was at this position. Pass nil for a
+  ///   live write (the server's receive time is right); pass the stored time when replaying
+  ///   an outbox backlog, or every replayed row collapses onto the flush's timestamp.
+  func setProgress(id: String, positionSeconds: Int, durationSeconds: Int,
+                   watchedAt: String? = nil) async throws -> Bool {
     let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
     let resp = try await request(
       path: "/api/v1/items/\(enc)/progress",
       method: "POST",
-      body: ProgressRequest(positionSeconds: positionSeconds, durationSeconds: durationSeconds, state: "playing"),
+      body: ProgressRequest(positionSeconds: positionSeconds, durationSeconds: durationSeconds,
+                            state: "playing", watchedAt: watchedAt),
       response: ProgressResponse.self,
       // A write, not an interactive read: this is called from the player and from the
       // outbox flush loop. Inheriting the general default let a single stalled write block

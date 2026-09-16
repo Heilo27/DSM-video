@@ -706,6 +706,14 @@ actor LocalStore {
     let itemId: String
     let positionSeconds: Int
     let durationSeconds: Int
+    /// When the viewer was actually at this position, not when the row is being uploaded.
+    ///
+    /// The column already existed and was used only for ORDER BY; it was never read out, so
+    /// the flush could not tell the server when anything was watched and the server stamped
+    /// its own receive time. A backlog flushed after a reconnect therefore landed with one
+    /// timestamp across every row — measured live at 106 rows on a single second — and both
+    /// home rails sort on it, so they ordered by when the queue drained.
+    let updatedAt: String
   }
 
   /// Progress rows the server has not yet confirmed, oldest first so the flush replays in
@@ -715,7 +723,7 @@ actor LocalStore {
     guard let db else { return [] }
     var stmt: OpaquePointer?
     let sql = """
-      SELECT item_id, position_seconds, duration_seconds
+      SELECT item_id, position_seconds, duration_seconds, updated_at
       FROM progress
       WHERE pending_sync = 1
       ORDER BY updated_at ASC
@@ -730,7 +738,8 @@ actor LocalStore {
       out.append(PendingProgress(
         itemId: String(cString: idC),
         positionSeconds: Int(sqlite3_column_int64(stmt, 1)),
-        durationSeconds: Int(sqlite3_column_int64(stmt, 2))
+        durationSeconds: Int(sqlite3_column_int64(stmt, 2)),
+        updatedAt: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
       ))
     }
     return out
