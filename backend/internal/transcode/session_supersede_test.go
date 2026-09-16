@@ -43,6 +43,12 @@ func TestSeekStormDoesNotLockOutPlayback(t *testing.T) {
 	if sess == nil {
 		t.Fatal("expected a session")
 	}
+	// This is the one test here that starts a REAL session, so it is the one that must stop
+	// it. StartSession spawns ffmpeg writing segments into the generator's TempDir; without
+	// this the test returns while that process is still writing and t.TempDir()'s RemoveAll
+	// races it — an intermittent "TempDir RemoveAll cleanup: unlinkat ...: directory not
+	// empty" that fails the package only under the load of a full `go test ./...` run.
+	t.Cleanup(func() { _ = g.StopSession(sess.SessionID) })
 
 	// The three superseded sessions must be gone — they were transcoding positions nobody
 	// will ever watch.
