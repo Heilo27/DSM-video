@@ -63,17 +63,32 @@ def check_xcode
   dev_path  = `xcode-select -p 2>/dev/null`.strip
   UI.message("#{ver} (#{build_num}) at #{dev_path}")
 
-  # Three independent beta signals. Any one of them means App Store Connect will
-  # reject the archive with INVALID_BINARY *after* a full archive+upload cycle —
-  # so fail here instead, where it costs seconds rather than half an hour.
+  # Beta signals. Any one means App Store Connect will reject the archive with
+  # INVALID_BINARY *after* a full archive+upload cycle — so fail here instead,
+  # where it costs seconds rather than half an hour.
   #   1. version string literally says beta
   #   2. the active developer dir is an Xcode-beta.app
-  #   3. the build number ends in a lowercase letter (Apple's beta convention;
-  #      GM/release builds end in a digit, e.g. 16C5032a is beta, 16C5032 is not)
+  #   3. no Mac App Store receipt — betas are portal downloads, releases are not
+  #
+  # THE TRAILING-LETTER RULE WAS REMOVED. It read "GM/release builds end in a
+  # digit, e.g. 16C5032a is beta" — but 16C5032a WAS the Xcode 16.2 release, so
+  # the rule was wrong the day it was written. It went unnoticed because no
+  # release build tripped it until Xcode 27.0 (build 27A266a, released
+  # 2026-09-14), at which point this guard blocked every legitimate submission
+  # and told the user to go install the Xcode they already had.
+  #
+  # The MAS receipt is the signal that actually separates the two: Apple ships
+  # betas from the developer portal as Xcode-beta.app with no receipt, and
+  # releases through the App Store with one. A release Xcode downloaded directly
+  # from the portal also has no receipt — hence `warn`, not `fail`, for that one
+  # alone: it is evidence, not proof, and refusing to build on it would repeat
+  # the mistake this comment exists to record.
+  mas_receipt = File.exist?(File.join(dev_path.sub(%r{/Contents/Developer\z}, ""),
+                                      "Contents/_MASReceipt/receipt"))
+
   reasons = []
-  reasons << "version string says beta"            if ver.downcase.include?("beta")
-  reasons << "active Xcode is #{dev_path}"         if dev_path.downcase.include?("beta")
-  reasons << "build number #{build_num} is a beta" if build_num =~ /[a-z]\z/
+  reasons << "version string says beta"    if ver.downcase.include?("beta")
+  reasons << "active Xcode is #{dev_path}" if dev_path.downcase.include?("beta")
 
   unless reasons.empty?
     UI.user_error!(
@@ -82,10 +97,19 @@ def check_xcode
       "Signals: #{reasons.join('; ')}\n\n" \
       "Fix: install a release Xcode from the App Store, then point at it:\n" \
       "  sudo xcode-select -s /Applications/Xcode.app\n" \
-      "Verify with: xcodebuild -version   (build number must NOT end in a letter)\n\n" \
+      "Verify with: xcodebuild -version\n\n" \
       "To build locally anyway (NOT for submission), set ALLOW_BETA_XCODE=1."
     ) unless ENV["ALLOW_BETA_XCODE"] == "1"
     UI.important("ALLOW_BETA_XCODE=1 set — continuing despite: #{reasons.join('; ')}")
+  end
+
+  unless mas_receipt
+    UI.important(
+      "This Xcode has no Mac App Store receipt, so it was not installed from the " \
+      "App Store. That is expected for a portal download and is NOT by itself a " \
+      "beta — but if the upload comes back INVALID_BINARY, read the App Store " \
+      "Connect red box: it is the only place the real reason appears."
+    )
   end
   ver
 end
