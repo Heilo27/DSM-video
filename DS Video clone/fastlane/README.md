@@ -39,6 +39,38 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 
 
+### ios test
+
+```sh
+[bundle exec] fastlane ios test
+```
+
+
+
+### ios check_focus
+
+```sh
+[bundle exec] fastlane ios check_focus
+```
+
+
+
+### ios mutation_gate
+
+```sh
+[bundle exec] fastlane ios mutation_gate
+```
+
+
+
+### ios preflight
+
+```sh
+[bundle exec] fastlane ios preflight
+```
+
+
+
 ### ios upload_metadata
 
 ```sh

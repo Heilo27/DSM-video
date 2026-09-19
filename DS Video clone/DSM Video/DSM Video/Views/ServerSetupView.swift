@@ -339,20 +339,35 @@ struct SetupConnectScreen: View {
         Image(systemName: "lock.fill")
           .foregroundStyle(Color.dsTextMuted)
           .frame(width: 20)
-        Group {
-          if showPassword {
-            TextField("Password", text: $password)
-              .textInputAutocapitalization(.never)
-              .autocorrectionDisabled()
-          } else {
-            SecureField("Password", text: $password)
-          }
+        // .focused() and the identifier go on EACH FIELD, not on a Group wrapping them.
+        //
+        // Applying them to the Group put the focus binding on a wrapper whose child
+        // changes type when the reveal button is toggled. The rendered SecureField was
+        // hittable with the keyboard up, but tapping it never gave it keyboard focus —
+        // measured: address field focus=true after tap, password focus=false after tap.
+        // Typing then failed with "Neither element nor any descendant has keyboard focus",
+        // which reads like a test bug and is not: the user cannot type a password either.
+        //
+        // The duplication between the two branches is deliberate. SwiftUI needs the
+        // modifiers on the actual TextField/SecureField for focus to bind, and factoring
+        // them back onto a shared parent is precisely what broke it.
+        if showPassword {
+          TextField("Password", text: $password)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .textContentType(.password)
+            .submitLabel(.go)
+            .focused($focusedField, equals: .password)
+            .accessibilityIdentifier(A11y.Setup.passwordField)
+            .onSubmit { if canConnect { Task { await connect() } } }
+        } else {
+          SecureField("Password", text: $password)
+            .textContentType(.password)
+            .submitLabel(.go)
+            .focused($focusedField, equals: .password)
+            .accessibilityIdentifier(A11y.Setup.passwordField)
+            .onSubmit { if canConnect { Task { await connect() } } }
         }
-        .textContentType(.password)
-        .submitLabel(.go)
-        .focused($focusedField, equals: .password)
-        .accessibilityIdentifier(A11y.Setup.passwordField)
-        .onSubmit { if canConnect { Task { await connect() } } }
 
         Button {
           showPassword.toggle()
