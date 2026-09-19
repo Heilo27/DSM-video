@@ -79,6 +79,14 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 
 
+### ios fetch_profiles_ios
+
+```sh
+[bundle exec] fastlane ios fetch_profiles_ios
+```
+
+
+
 ### ios build_and_upload
 
 ```sh

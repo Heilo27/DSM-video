@@ -276,12 +276,35 @@ platform :ios do
     )
   end
 
+  # Fetch the iOS App Store profile via the API key.
+  #
+  # Xcode on this machine has no signed-in Apple ID ("No Accounts"), so
+  # -allowProvisioningUpdates cannot create a distribution profile on demand — the archive
+  # succeeds and exportArchive then fails with "No profiles for 'HeiloProjects.DSReel' were
+  # found", after the slow part is already done. Only a development "iOS Team Provisioning
+  # Profile" was installed locally; App Store export needs a distribution one.
+  #
+  # tvOS already solved this (fetch_profiles_tvos); iOS simply never had the equivalent.
+  lane :fetch_profiles_ios do |options|
+    sigh(
+      api_key:        api_key,
+      app_identifier: IOS_BUNDLE_ID,
+      platform:       "ios",
+      force:          options[:force] ? true : false
+    )
+    UI.success("iOS provisioning profile installed.")
+  end
+
   # Archive the Release build and upload the binary to App Store Connect / TestFlight.
   # The metadata/submit lanes use skip_binary_upload, so this lane is what actually
   # gets the .ipa to ASC.
   lane :build_and_upload do
     check_xcode
     check_version_match
+
+    # Provisioning must be fetched BEFORE export — see fetch_profiles_ios for why the
+    # archive can succeed while the export fails.
+    fetch_profiles_ios(force: true)
     # The "DSM Video" iOS scheme is SHARED (xcshareddata/xcschemes/DSM Video.xcscheme)
     # pointing at the iOS app target. Previously it was an implicit user scheme fastlane
     # couldn't see, so fastlane silently fell back to the only shared scheme — the tvOS
