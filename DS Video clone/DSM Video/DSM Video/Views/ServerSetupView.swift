@@ -135,6 +135,33 @@ struct SetupConnectScreen: View {
         .padding(24)
       }
       .scrollDismissesKeyboard(.interactively)
+      // KEEP THE FORM CLEAR OF THE KEYBOARD ACCESSORY.
+      //
+      // The Done accessory is a floating bar, not part of the layout, so nothing reserved
+      // space for it and it rendered ON TOP of the form. Measured on iPhone 17 Pro with the
+      // keyboard up: accessory at y=491..539, password field at y=527..548 — the field's
+      // CENTRE (537.5) sat underneath the bar. A tap there hit the toolbar, so the field
+      // never took focus and the user could not type a password at all. The field's frame
+      // was identical before and after the keyboard appeared, confirming nothing had moved
+      // it out of the way.
+      //
+      // This reads like a focus bug and is an OCCLUSION bug, which is why instrumenting
+      // @FocusState explained nothing: the transition never fired because the tap never
+      // reached the field.
+      //
+      // safeAreaInset reserves real layout space, so the ScrollView's content ends above
+      // the accessory instead of behind it. Zero when the keyboard is down.
+      //
+      // Same defect as TASK-906, one layer up: that added the accessory because the
+      // keyboard covered CONNECT; the accessory then covered the password field.
+      .safeAreaInset(edge: .bottom, spacing: 0) {
+        // 96pt, sized from measurement, not guessed: the accessory is 48pt tall and sits
+        // ~92pt above the keyboard's top edge on iPhone 17 Pro, and a 56pt inset moved the
+        // password field only from y=527 to y=492.7 — still 1.7pt inside the bar. 96 clears
+        // it with margin on every size class tested, and the inset only applies while a
+        // field is focused, so the resting layout is unchanged.
+        Color.clear.frame(height: focusedField == nil ? 0 : 96)
+      }
     }
     // The keyboard covers Connect once all three fields are filled, and nothing could
     // move it: the form is short enough that the ScrollView has no room to scroll the
@@ -340,17 +367,12 @@ struct SetupConnectScreen: View {
           .foregroundStyle(Color.dsTextMuted)
           .frame(width: 20)
         // .focused() and the identifier go on EACH FIELD, not on a Group wrapping them.
+        // A binding on a wrapper whose child changes type does not reach the rendered field.
         //
-        // Applying them to the Group put the focus binding on a wrapper whose child
-        // changes type when the reveal button is toggled. The rendered SecureField was
-        // hittable with the keyboard up, but tapping it never gave it keyboard focus —
-        // measured: address field focus=true after tap, password focus=false after tap.
-        // Typing then failed with "Neither element nor any descendant has keyboard focus",
-        // which reads like a test bug and is not: the user cannot type a password either.
-        //
-        // The duplication between the two branches is deliberate. SwiftUI needs the
-        // modifiers on the actual TextField/SecureField for focus to bind, and factoring
-        // them back onto a shared parent is precisely what broke it.
+        // NOTE: this was once believed to be the cause of "the password field cannot take
+        // focus". It was not. That bug was the keyboard accessory rendering on top of the
+        // field — see the safeAreaInset on the ScrollView above, which is the actual fix.
+        // Splitting the modifiers is still correct, just not the cure it was thought to be.
         if showPassword {
           TextField("Password", text: $password)
             .textInputAutocapitalization(.never)
