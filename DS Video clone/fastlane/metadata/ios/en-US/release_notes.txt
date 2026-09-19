@@ -1,24 +1,28 @@
-This update fixes playback interruptions, adds mark as watched, and makes search and your watchlist reachable everywhere.
+Ask Siri for a movie, and your Home screen finally stays up to date.
 
-PLAYBACK THAT RECOVERS
-• A phone call, Siri, or another app no longer leaves playback stuck — audio resumes properly afterward.
-• Unplugging headphones or removing AirPods now pauses cleanly instead of leaving the player in a stuck state.
-• If your NAS drops off the network mid-video, you now get a clear message and can retry, instead of an endless loading spinner.
-• Audio keeps playing when you lock your screen. You can turn this off in Settings.
+SIRI
+• "Play Blade Runner in DSM Video" or "Find Blade Runner in DSM Video" opens it straight to the title — no typing on a remote.
 
-NEW CONTROLS
-• Mark as Watched and Mark as Unwatched — clear a stray resume point or catch up on something you watched elsewhere.
-• Playback Speed is now in Settings, so it's easy to find and easy to set back to normal.
+HOME SCREEN THAT'S ACTUALLY CURRENT
+• Just Added now comes from your server instead of being guessed at on the device, so films you added an hour ago show up. A show that gained a whole season counts as one new thing, not twelve, so it can't bury everything else.
+• New Suggested row, picked by genre from what you've been watching.
+• Rows no longer go stale after a pull-to-refresh.
 
-FIND YOUR STUFF
-• Search now works from the Home screen on iPhone and searches your whole library, not just one section.
-• Your Watchlist is now reachable on iPad.
-• Play is clearly unavailable for videos that aren't downloaded when your NAS is offline, instead of failing after you tap.
+SHOWS THAT WERE HIDING
+• A series split across two folders, or with only some episodes matched, now appears once instead of twice — or not at all. Star Trek: The Next Generation and others are back.
+• Episode names are correct where they used to show the filename.
 
-ACCESSIBILITY
-• The launch animation is skipped when Reduce Motion is on.
-• Better VoiceOver labels on setup and diagnostics, and text that scales properly at larger sizes.
+HOME AND AWAY
+• The app now switches between your home network and remote access on its own. Come home and it notices, without a restart or a trip to Settings.
+• The library keeps syncing instead of quietly stopping and looking fine.
 
-Plus consistent empty screens and a round of layout polish.
+PLAYBACK
+• HEVC videos that played as audio-only now play properly.
+• Scrubbing repeatedly no longer locks you out of your own video.
+• Faster startup and smoother seeking, with deeper buffering.
+• Downloads that failed silently now actually download.
 
-Thanks for using DSM Video. Keep the feedback coming.
+FIXES
+• Only one volume indicator on screen.
+• Bigger, more reliable tap targets, and buttons that no longer look available when they aren't.
+• Error messages name the real problem instead of guessing.

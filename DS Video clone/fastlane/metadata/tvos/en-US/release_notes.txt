@@ -1,21 +1,25 @@
-This update fixes the remote controls in the player, adds mark as watched, and brings your Watchlist to Apple TV.
+Just say what you want to watch, and your Home screen finally stays up to date.
 
-PLAYER CONTROLS THAT WORK
-• Every button in the player is now reachable with the remote — skip to start, back 15, forward 15, and skip to end previously could not be selected at all.
-• Playback speed is now also in Settings. If your videos were stuck playing fast with no way to change it, this fixes it.
-• Menu now closes the controls first instead of exiting playback entirely.
-• Pressing Menu during the next-episode countdown no longer starts the next episode anyway.
+SIRI
+• Hold the microphone button and say "Play Blade Runner in DSM Video" or "Find Blade Runner in DSM Video" — it opens straight to the title. No more typing on the on-screen keyboard.
 
-NEW ON APPLE TV
-• Your Watchlist now appears on the Home screen. Saved items were previously impossible to view.
-• Mark as Watched and Mark as Unwatched on any video.
+A HOME SCREEN THAT'S CURRENT
+• Just Added now comes from your server rather than being guessed at on the device, so recently added films actually appear. A show that gained a season counts as one new thing instead of twelve, so it can't push everything else off the row.
+• New Suggested row, picked by genre from what you've been watching.
 
-FIXES
-• Long descriptions no longer push the cast and Next Episode button off screen where the remote couldn't reach them.
-• Content sits properly inside the safe area, so nothing crops at the edges of your TV.
-• Signing in no longer shows an old error message while a correct password is working.
-• If your NAS drops off the network mid-video, you get a clear message instead of an endless spinner.
+SHOWS THAT WERE HIDING
+• A series split across two folders, or with only some episodes matched, now appears once instead of twice — or not at all. Star Trek: The Next Generation and others are back.
+• Episode names are correct where they used to show the filename.
 
-Plus consistent empty screens and layout polish throughout.
+REMOTE AND FOCUS
+• Play is selected when you open a video, instead of Next Episode.
+• Next Episode is no longer oversized next to Play.
 
-Thanks for using DSM Video on Apple TV. Keep the feedback coming.
+PLAYBACK
+• HEVC videos that played as audio-only now play properly.
+• Scrubbing repeatedly no longer locks you out of your own video.
+• Faster startup, smoother seeking, and deeper buffering.
+
+CONNECTION
+• The app switches between your home network and remote access on its own, without a restart.
+• The library keeps syncing instead of quietly stopping while appearing fine.
