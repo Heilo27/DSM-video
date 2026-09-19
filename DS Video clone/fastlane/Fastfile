@@ -428,6 +428,29 @@ platform :ios do
       clean:          true,
       output_directory: File.join(ROOT, "build"),
       output_name:    "DSM Video tvOS.ipa",
+      # MANUAL SIGNING FOR THE ARCHIVE TOO, not just the export.
+      #
+      # The export_options below already pinned the AppStore profiles, but the ARCHIVE ran
+      # with the project's Automatic signing. Automatic asks Xcode to resolve a profile
+      # itself, and with no signed-in Apple ID it fails:
+      #
+      #   error: No Accounts: Add a new account in Accounts settings.
+      #   error: No profiles for 'HeiloProjects.DSReel' were found: Xcode couldn't find any
+      #          tvOS App DEVELOPMENT provisioning profiles matching 'HeiloProjects.DSReel'.
+      #
+      # Note "Development" — sigh had just installed the AppStore profiles, which is why the
+      # error looks contradictory. Automatic signing wants a development profile to archive
+      # with, regardless of the export method.
+      #
+      # Forcing manual signing with the profiles fetch_profiles_tvos just installed makes
+      # the archive use the same ones the export will. The project keeps Automatic for
+      # everyday Xcode use and for Xcode Cloud, which HAS an account; only this lane
+      # overrides it.
+      # NOTE: signing settings are NOT passed via xcargs. An xcarg applies to EVERY target
+      # in the build, so a single PROVISIONING_PROFILE_SPECIFIER would hand the app's
+      # profile to the Top Shelf extension, whose bundle id is different and would not
+      # match. The per-target Release settings live in the project instead — see the tvOS
+      # app and Top Shelf build configurations.
       xcargs:         "-allowProvisioningUpdates",
       export_team_id: TEAM_ID,
       export_options: {
