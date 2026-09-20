@@ -239,6 +239,30 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 
 
+### ios attach_build_tvos
+
+```sh
+[bundle exec] fastlane ios attach_build_tvos
+```
+
+
+
+### ios why_not_ready
+
+```sh
+[bundle exec] fastlane ios why_not_ready
+```
+
+
+
+### ios set_whats_new
+
+```sh
+[bundle exec] fastlane ios set_whats_new
+```
+
+
+
 ### ios final_checklist
 
 ```sh

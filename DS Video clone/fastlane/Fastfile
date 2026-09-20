@@ -691,6 +691,89 @@ platform :ios do
 end
 
 platform :ios do
+  # Attach the VALID tvOS build to the tvOS version record.
+  #
+  # Uploading a binary and creating a version do NOT link them — the version shows
+  # "no build" and submission is blocked. iOS has attach_build for exactly this;
+  # tvOS needs its own because the build must be filtered by PLATFORM, or the
+  # iOS build of the same version is selected and the tvOS submission is rejected.
+  lane :attach_build_tvos do
+    asc_token
+    app = Spaceship::ConnectAPI::App.find(TVOS_BUNDLE_ID)
+    version = app.get_app_store_versions(
+      filter: { versionString: VERSION, platform: "TV_OS" }
+    ).first
+    UI.user_error!("No tvOS #{VERSION} version record found") if version.nil?
+    build = app.get_builds(includes: "preReleaseVersion").find do |b|
+      b.pre_release_version&.version == VERSION &&
+        b.processing_state == "VALID" &&
+        b.pre_release_version&.platform == "TV_OS"
+    end
+    UI.user_error!("No VALID tvOS #{VERSION} build found to attach") if build.nil?
+    version.select_build(build_id: build.id)
+    UI.success("ATTACHED tvOS build #{build.version} to version #{VERSION}")
+  end
+end
+
+platform :ios do
+  # Diagnose "appStoreVersions ... is not in valid state" on submit.
+  # ASC returns that generic message and hides the real reasons behind the
+  # version's own state; this prints what is actually missing.
+  lane :why_not_ready do |options|
+    asc_token
+    plat = options[:platform] || "IOS"
+    app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+    v = app.get_app_store_versions(
+      filter: { versionString: VERSION, platform: plat }, includes: "build,appStoreVersionSubmission"
+    ).first
+    UI.user_error!("No #{plat} #{VERSION} version record") if v.nil?
+    UI.message("PLATFORM=#{plat} state=#{v.app_store_state} releaseType=#{v.release_type}")
+    UI.message("build=#{v.build&.version || 'NONE'} (#{v.build&.processing_state})")
+    UI.message("copyright=#{v.copyright.inspect}")
+    begin
+      loc = v.get_app_store_version_localizations
+      loc.each do |l|
+        UI.message("LOC #{l.locale}: desc=#{!l.description.to_s.empty?} whatsNew=#{!l.whats_new.to_s.empty?} keywords=#{!l.keywords.to_s.empty?} support=#{l.support_url.inspect}")
+      end
+    rescue => e
+      UI.error("localizations: #{e.message}")
+    end
+    begin
+      idd = v.fetch_app_store_review_detail
+      UI.message("REVIEW contact=#{idd.contact_first_name} #{idd.contact_last_name} email=#{idd.contact_email} demo=#{idd.demo_account_required}")
+    rescue => e
+      UI.error("review detail: #{e.message}")
+    end
+  end
+end
+
+platform :ios do
+  # Write What's New directly onto the version localization.
+  #
+  # deliver reported success uploading metadata for 1.3.6 while whatsNew stayed EMPTY,
+  # and ASC then refused the submission with the unhelpful "appStoreVersions ... is not
+  # in valid state". What's New is REQUIRED for any version after the first, so an empty
+  # one blocks review with no direct explanation. Setting it explicitly is reliable.
+  #
+  #   fastlane set_whats_new platform:IOS
+  lane :set_whats_new do |options|
+    asc_token
+    plat = options[:platform] || "IOS"
+    dir  = plat == "TV_OS" ? "tvos" : "ios"
+    notes = File.read("metadata/#{dir}/en-US/release_notes.txt").strip
+    UI.user_error!("release_notes.txt is empty for #{dir}") if notes.empty?
+
+    app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+    v = app.get_app_store_versions(filter: { versionString: VERSION, platform: plat }).first
+    UI.user_error!("No #{plat} #{VERSION} version record") if v.nil?
+    v.get_app_store_version_localizations.each do |loc|
+      loc.update(attributes: { whatsNew: notes })
+      UI.success("Set What's New on #{plat} #{loc.locale} (#{notes.length} chars)")
+    end
+  end
+end
+
+platform :ios do
   lane :final_checklist do
     asc_token
     app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
