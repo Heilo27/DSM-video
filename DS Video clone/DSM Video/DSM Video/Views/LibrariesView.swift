@@ -18,6 +18,8 @@ struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
 
   @Environment(\.dismiss) private var dismiss
   @State private var query: String = ""
+  /// Raises the keyboard on appear. Was declared and never used — dead state, so this
+  /// sheet opened with an unfocused field and needed a second tap before you could type.
   @FocusState private var fieldFocused: Bool
 
   private var results: [Item] {
@@ -56,6 +58,10 @@ struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
       }
       .background(Color.black.ignoresSafeArea())
       .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: title)
+      .searchFocused($fieldFocused)
+      // Deferred one runloop turn: the field is installed by the navigation bar during
+      // this same layout pass, and setting focus before it exists fails silently.
+      .onAppear { DispatchQueue.main.async { fieldFocused = true } }
       .navigationTitle("Search")
       .navigationBarTitleDisplayMode(.inline)
       .toolbarColorScheme(.dark, for: .navigationBar)

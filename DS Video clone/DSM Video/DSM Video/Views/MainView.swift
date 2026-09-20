@@ -345,6 +345,9 @@ struct SearchView: View {
   @State private var searchError: String?
   @State private var debounceTask: Task<Void, Never>?
   @State private var searchTask: Task<Void, Never>?
+  /// Drives the keyboard up on appear. Tapping Search is an unambiguous statement of
+  /// intent to type, so making the user tap a second time is pure friction.
+  @FocusState private var searchFocused: Bool
   @AppStorage("dsReel.recentSearches") private var recentSearchesRaw: String = ""
 
   private var recentSearches: [String] {
@@ -430,7 +433,22 @@ struct SearchView: View {
     }
     .background(Color.black.ignoresSafeArea())
     .navigationTitle("Search")
-    .searchable(text: $searchText, prompt: "Search videos")
+    // ALWAYS SHOWN, and focused on appear.
+    //
+    // The default placement (.automatic) collapses the field into the large navigation
+    // title, so opening Search presented an empty screen reading "Enter a title to search
+    // your library" with NO field to type in — the user had to know to pull down to
+    // reveal it. .navigationBarDrawer(.always) pins it open, matching LibrariesView which
+    // already does this.
+    //
+    // searchFocused raises the keyboard. Every call site reaches this view from a
+    // deliberate tap on Search, so there is no case where the keyboard is unwanted.
+    .searchable(
+      text: $searchText,
+      placement: .navigationBarDrawer(displayMode: .always),
+      prompt: "Search videos"
+    )
+    .searchFocused($searchFocused)
     .onSubmit(of: .search) {
       // Explicit submit — this is the only path that records a recent search.
       searchTask?.cancel()
@@ -460,6 +478,10 @@ struct SearchView: View {
       if appState.isDemoMode && recentSearchesRaw.isEmpty {
         recentSearchesRaw = ["Action movies", "The Signal", "2024"].joined(separator: "\u{001F}")
       }
+      // Raise the keyboard. Deferred one runloop turn: the search field is installed by
+      // the navigation bar during this same layout pass, and setting focus before it
+      // exists is a no-op that fails silently.
+      DispatchQueue.main.async { searchFocused = true }
     }
     .onChange(of: results) { _, newResults in
       guard hasSearched && !isSearching else { return }

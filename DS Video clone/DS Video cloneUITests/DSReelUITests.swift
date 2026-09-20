@@ -391,6 +391,46 @@ final class DSReelUITests: XCTestCase {
     )
   }
 
+  /// Opening Search shows a search field, focused, without scrolling.
+  ///
+  /// Reported from a real iPhone: tapping Search opened a screen reading "Enter a title to
+  /// search your library" with NO field visible — you had to know to pull down to reveal
+  /// it, and even then it was not focused, so typing needed a second tap.
+  ///
+  /// Two causes, both here: .searchable had no `placement`, so it defaulted to .automatic
+  /// and collapsed into the large title; and nothing requested focus. Tapping a Search
+  /// button is an unambiguous statement of intent to type.
+  func testSearchOpensWithAFocusedFieldWithoutScrolling() {
+    let app = UITest.launchInDemoMode()
+    _ = app.wait(for: .runningForeground, timeout: UITest.launchTimeout)
+
+    // Search lives on HOME (LibraryHomeView's toolbar / Cinematic overlay), not on the
+    // Libraries tab — Libraries shows only "Movies" and "TV Shows". Measured, after an
+    // earlier version of this test navigated to Libraries and failed looking for it.
+    let searchButton = app.buttons["Search"].firstMatch
+    requireHittable(searchButton, "the Search button in Libraries")
+    searchButton.tap()
+
+    // The field must be there WITHOUT any scrolling. Asserting on the field itself, not on
+    // the placeholder text, because the empty-state copy was visible the whole time — that
+    // is exactly what made the bug look like a rendered screen rather than a broken one.
+    let field = app.searchFields.firstMatch
+    XCTAssertTrue(
+      field.waitForExistence(timeout: UITest.timeout),
+      "No search field after tapping Search. It is collapsed into the navigation title — "
+        + "the user has to pull down to reveal a field they just asked for."
+    )
+
+    // And it must already hold focus, or the keyboard is not up and typing needs a
+    // second tap.
+    let focused = (field.value(forKey: "hasKeyboardFocus") as? Bool) ?? false
+    XCTAssertTrue(
+      focused,
+      "The search field exists but is not focused, so the keyboard is down. Anyone who "
+        + "tapped Search intends to type."
+    )
+  }
+
   /// Every tab is present and addressable.
   ///
   /// Separate from the setup mirror check because these only exist once signed in, so the
