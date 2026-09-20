@@ -8,9 +8,10 @@ default_platform(:ios)
 # Bump here and in Xcode together, or run `fastlane bump version:X.Y.Z`
 # which updates both.
 #
-# NOTE: 1.3.5 is WAITING_FOR_REVIEW on both platforms as of 2026-08-30; 1.3.4 is
-# READY_FOR_SALE on tvOS and 1.3.3 on iOS. ASC will not let you re-create an
-# existing version record — run `fastlane asc_state` before choosing a number.
+# NOTE: 1.3.6 is READY_FOR_SALE on BOTH platforms as of 2026-09-20. ASC will not
+# let you re-create an existing version record, and this comment goes stale the
+# moment a release ships — run `fastlane asc_state` before choosing a number
+# rather than trusting what is written here.
 # ──────────────────────────────────────────────────────
 VERSION = "1.3.6"
 
