@@ -2620,6 +2620,11 @@ final class AppState {
       // no shared Keychain access group between the app and the extension. So we fail closed:
       // persist the tokenless URL only. Artwork that requires auth simply won't render in Top
       // Shelf; titles + deep links still work. Never persist the credential.
+      // width=760 is a REQUEST, not a guarantee: /api/v1/images/{id} ignores ?w= for a
+      // cached image and serves the stored file as-is (measured: w=760 and w=1920 return
+      // the identical 883KB 2000x3000 file). Left as-is because changing it changes
+      // nothing today; see TASK-913 for the real issue, which is that posterImageId and
+      // backdropImageId are the SAME id, so the 16:9 shelf card is fed a 2:3 poster.
       let imageURLString: String? = imageID.flatMap { api.imageURL(id: $0, width: 760)?.absoluteString }
       // tvOS draws the resume bar from this. Guard the divisor: a zero duration would
       // produce NaN, and NaN assigned to playbackProgress is not a number tvOS can draw.

@@ -18,12 +18,35 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- ATS IS PER-BUNDLE. An .appex does NOT inherit the parent app's exception.
+	     The tvOS app carries NSAllowsLocalNetworking so it can reach a NAS over
+	     cleartext http on the LAN; this extension had NO ATS keys at all, so it fell
+	     back to the default and every image load was blocked. The persisted URLs are
+	     http://<private-ip>:5000/api/v1/images/... — all of them refused, and a
+	     TVTopShelfSectionedItem with no image renders as NOTHING, which is why the
+	     shelf showed only the app icon.
+	     Verified in the shipped 1.3.6 IPA: app Info.plist had the key, appex had none. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.tv-top-shelf</string>
 		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).TopShelfProvider</string>
+		<!-- The BARE name, not $(PRODUCT_MODULE_NAME).TopShelfProvider.
+		     The class is declared @objc(TopShelfProvider), which renames it in the
+		     Objective-C runtime — `nm` on the built binary shows the symbol as
+		     _OBJC_CLASS_$_TopShelfProvider, with no module prefix. The mangled name
+		     therefore resolved to NOTHING: tvOS spawned the extension process
+		     ("Successfully spawned DSM Video Top Shelf"), failed to instantiate the
+		     principal class, and completed the fetch with no content — which renders
+		     as the bare app icon, exactly like having no data.
+		     Either drop the @objc rename and keep the mangled name, or keep the rename
+		     and use the bare name here. They must agree. -->
+		<string>TopShelfProvider</string>
 	</dict>
 </dict>
 </plist>

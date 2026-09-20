@@ -1,4 +1,5 @@
 import TVServices
+import os.log
 
 // MARK: - Shared model (local copy for the extension process)
 // Keep in sync with TopShelfItem.swift in the main app target.
@@ -25,10 +26,25 @@ private struct TopShelfSnapshot: Codable {
     let items: [TopShelfItem]
 }
 
+/// The App Group shared with the parent app. File scope, not a property: os.log string
+/// interpolation is a closure, so referencing an instance property inside a log line would
+/// require explicit `self` under Swift 6 strict concurrency.
+private let appGroupID = "group.HeiloProjects.DSReel"
+
 // MARK: - Provider
 
 @objc(TopShelfProvider)
 class TopShelfProvider: TVTopShelfContentProvider {
+
+    /// The extension had NO logging, and every failure path returned empty silently — a
+    /// missing container, an unreadable file and undecodable JSON all looked identical to
+    /// "no content". That is why the bare-icon bug survived four wrong theories across two
+    /// sessions: there was no way to ask the device what it actually saw.
+    ///
+    /// Read it with: xcrun simctl spawn <udid> log stream --predicate \
+    ///   'subsystem == "com.dsm.dsvideo.topshelf"'
+    /// or on a paired Apple TV, Console.app filtered to the same subsystem.
+    private let log = Logger(subsystem: "com.dsm.dsvideo.topshelf", category: "provider")
 
     // The COMPLETION-HANDLER overload, not the async one.
     //
@@ -40,6 +56,9 @@ class TopShelfProvider: TVTopShelfContentProvider {
     override func loadTopShelfContent(completionHandler: @escaping (((any TVTopShelfContent)?) -> Void)) {
         let snapshot = loadSnapshot()
         guard !snapshot.items.isEmpty else {
+            // nil is "no content", which tvOS draws as the bare app icon — the SAME thing a
+            // broken shelf looks like. The log line is the only way to tell them apart.
+            log.notice("no items to show — returning nil (tvOS will render the app icon alone)")
             completionHandler(nil)
             return
         }
@@ -66,6 +85,13 @@ class TopShelfProvider: TVTopShelfContentProvider {
             return item
         }
 
+        let withoutImages = snapshot.items.filter { ($0.imageURL ?? "").isEmpty }.count
+        if withoutImages > 0 {
+            // An item with no image renders as nothing, so a shelf of them looks empty.
+            log.error("\(withoutImages) of \(snapshot.items.count) item(s) have NO imageURL — those cards will render blank")
+        }
+        log.notice("presenting \(shelfItems.count) item(s)")
+
         let section = TVTopShelfItemCollection(items: shelfItems)
         section.title = snapshot.sectionTitle
         completionHandler(TVTopShelfSectionedContent(sections: [section]))
@@ -83,20 +109,28 @@ class TopShelfProvider: TVTopShelfContentProvider {
     private func loadSnapshot() -> TopShelfSnapshot {
         let empty = TopShelfSnapshot(sectionTitle: "", items: [])
         guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
-        ) else { return empty }
+            forSecurityApplicationGroupIdentifier: appGroupID
+        ) else {
+            log.error("no container for app group \(appGroupID, privacy: .public) — check the App Groups entitlement on BOTH the app and this extension")
+            return empty
+        }
 
         let fileURL = container.appendingPathComponent("topshelf.json")
-        guard let data = try? Data(contentsOf: fileURL) else { return empty }
+        guard let data = try? Data(contentsOf: fileURL) else {
+            log.notice("no topshelf.json at \(fileURL.path, privacy: .public) — the app has not written one yet (it writes on home load)")
+            return empty
+        }
 
         let decoder = JSONDecoder()
         if let snapshot = try? decoder.decode(TopShelfSnapshot.self, from: data) {
+            log.notice("decoded \(snapshot.items.count) item(s), section \(snapshot.sectionTitle, privacy: .public)")
             return snapshot
         }
         if let legacy = try? decoder.decode([TopShelfItem].self, from: data) {
-            // Old file: it only ever held Just Added.
+            log.notice("decoded \(legacy.count) item(s) in the LEGACY array format")
             return TopShelfSnapshot(sectionTitle: "Just Added", items: legacy)
         }
+        log.error("topshelf.json is \(data.count) bytes but decodes as neither format — schema drift between the app and this extension")
         return empty
     }
 }
