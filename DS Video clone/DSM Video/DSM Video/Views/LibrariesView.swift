@@ -666,6 +666,12 @@ private struct ContinueWatchingCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
+          // Same rule as TVLandscapeCard: a real backdrop fills this 16:9 box with
+          // nothing to crop, but the poster fallback overflows vertically and the
+          // alignment picks the surviving band. Centre lands on torsos; top keeps the
+          // faces and title treatment posters put up there.
+          .frame(width: 200, height: 120,
+                 alignment: item.backdropImageId != nil ? .center : .top)
         } else {
           Rectangle()
             .fill(Color(white: 0.1))

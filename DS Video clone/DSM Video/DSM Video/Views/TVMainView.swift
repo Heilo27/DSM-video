@@ -813,28 +813,29 @@ private struct TVLandscapeCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          // CROP FROM THE TOP, not the centre.
+          // Alignment follows what actually ARRIVES, which is why it is not a constant.
           //
-          // This asks for `backdropImageId ?? posterImageId`, but the server emits the SAME
-          // id for both (TASK-913), so what arrives is ALWAYS the 2:3 portrait poster —
-          // measured 2000x3000. scaledToFill on a 2:3 source in this 16:9 box matches WIDTH
-          // and overflows vertically by a large margin, so the alignment decides which
-          // horizontal band survives. Centre landed on torsos and legs ("A View to a Kill",
-          // "Borg vs McEnroe") and only looked right when a poster happened to put its art
-          // in the middle — which is why it read as intermittent.
+          // With a real 16:9 backdrop (TASK-913), source and box agree and scaledToFill
+          // crops essentially nothing — .center is right, and is what the artwork was
+          // composed for.
           //
-          // Posters put the title treatment and faces in the upper half essentially without
-          // exception, so .top is the band most likely to be the subject. This is a
-          // MITIGATION, not the fix: the real fix is TASK-913, making backdrops separately
-          // addressable so a 16:9 card gets a 16:9 source and no crop is needed at all.
-          .frame(width: cardWidth, height: cardHeight, alignment: .top)
+          // The fallback is different. Items TMDb has no backdrop for still send the 2:3
+          // poster, which matches on WIDTH and overflows vertically by a wide margin, so
+          // alignment alone decides which horizontal band survives. Centre landed on
+          // torsos and legs ("A View to a Kill", "Borg vs McEnroe") and only looked right
+          // when a poster happened to centre its art — which is exactly why the user saw
+          // it as intermittent. Posters put titles and faces in the upper half almost
+          // without exception, so .top keeps the subject.
+          .frame(width: cardWidth, height: cardHeight,
+                 alignment: item.backdropImageId != nil ? .center : .top)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
             .resizable()
             .scaledToFill()
-            // Same top-crop as the network path above — see the note there.
+            // Demo assets are portrait poster art with no backdrop counterpart, so this
+            // is always the fallback case from the note above: crop from the top.
             .frame(width: cardWidth, height: cardHeight, alignment: .top)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
