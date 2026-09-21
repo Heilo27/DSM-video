@@ -2612,6 +2612,7 @@ final class AppState {
     let items: [TopShelfItem] = source.prefix(10).compactMap { item in
       // Prefer backdrop for landscape Top Shelf cards, fall back to poster
       let imageID = item.backdropImageId ?? item.posterImageId
+      let imageKind: APIClient.ImageKind = item.backdropImageId != nil ? .backdrop : .poster
       // SECURITY (TASK-774): do NOT bake the live bearer session token into the persisted
       // image URL. This file is unencrypted JSON in a shared App Group container — a token
       // written here is a working, long-lived credential readable via device backup or any
@@ -2620,12 +2621,15 @@ final class AppState {
       // no shared Keychain access group between the app and the extension. So we fail closed:
       // persist the tokenless URL only. Artwork that requires auth simply won't render in Top
       // Shelf; titles + deep links still work. Never persist the credential.
-      // width=760 is a REQUEST, not a guarantee: /api/v1/images/{id} ignores ?w= for a
-      // cached image and serves the stored file as-is (measured: w=760 and w=1920 return
-      // the identical 883KB 2000x3000 file). Left as-is because changing it changes
-      // nothing today; see TASK-913 for the real issue, which is that posterImageId and
-      // backdropImageId are the SAME id, so the 16:9 shelf card is fed a 2:3 poster.
-      let imageURLString: String? = imageID.flatMap { api.imageURL(id: $0, width: 760)?.absoluteString }
+      // TASK-913, resolved. The earlier note here claimed the server "ignores ?w=",
+      // measured from w=760 and w=1920 returning the identical 883KB 2000x3000 file.
+      // That reading was wrong: ParseImageSize snapped EVERYTHING above 500 to
+      // `original`, so both requests asked for the same thing and got it. The server
+      // now serves w780/w1280 backdrop rungs, and `type=` picks poster vs backdrop —
+      // without it this 16:9 shelf card was fed the 2:3 poster and cropped to a torso.
+      let imageURLString: String? = imageID.flatMap {
+        api.imageURL(id: $0, width: 780, kind: imageKind)?.absoluteString
+      }
       // tvOS draws the resume bar from this. Guard the divisor: a zero duration would
       // produce NaN, and NaN assigned to playbackProgress is not a number tvOS can draw.
       var progress: Double? = nil

@@ -807,7 +807,8 @@ private struct TVLandscapeCard: View {
 
         if let imageID = item.backdropImageId ?? item.posterImageId {
           AuthenticatedImage(
-            url: appState.api.imageURL(id: imageID, width: 760),
+            url: appState.api.imageURL(id: imageID, width: 760,
+                                        kind: item.backdropImageId != nil ? .backdrop : .poster),
             token: appState.sessionToken,
             usesTunnelCookie: appState.api.usesTunnelCookie
           )

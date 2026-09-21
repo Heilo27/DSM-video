@@ -229,6 +229,10 @@ func sizeToWidth(size ImageSize) int {
 		return 342
 	case ImageSizeW500:
 		return 500
+	case ImageSizeW780:
+		return 780
+	case ImageSizeW1280:
+		return 1280
 	case ImageSizeOriginal:
 		return 0
 	default:
@@ -248,6 +252,10 @@ func ParseImageSize(width string) ImageSize {
 		return ImageSizeW342
 	case "500":
 		return ImageSizeW500
+	case "780":
+		return ImageSizeW780
+	case "1280":
+		return ImageSizeW1280
 	case "original", "":
 		return ImageSizeOriginal
 	default:
@@ -263,6 +271,10 @@ func ParseImageSize(width string) ImageSize {
 			return ImageSizeW342
 		case n <= 500:
 			return ImageSizeW500
+		case n <= 780:
+			return ImageSizeW780
+		case n <= 1280:
+			return ImageSizeW1280
 		default:
 			return ImageSizeOriginal
 		}

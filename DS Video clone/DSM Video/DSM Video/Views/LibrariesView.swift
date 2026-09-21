@@ -656,11 +656,12 @@ private struct ContinueWatchingCard: View {
             .resizable()
             .scaledToFill()
         } else if let backdropId = item.backdropImageId ?? item.posterImageId {
-          // 200x120 card. 500 is the top of the server's ladder before it falls back
-          // to serving the full-resolution original — the right cap for a thumbnail
-          // this size, and what `width: 400` was already being rounded up to.
+          // 200x120 card @3x wants 600px. TASK-913 added w780 as a backdrop rung, so
+          // this now lands on a real 16:9 backdrop at 780 rather than a 2:3 poster
+          // upscaled from 500 and centre-cropped.
           AuthenticatedImage(
-            url: appState.api.imageURL(id: backdropId, width: 500),
+            url: appState.api.imageURL(id: backdropId, width: 780,
+                                        kind: item.backdropImageId != nil ? .backdrop : .poster),
             token: appState.sessionToken,
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
@@ -862,7 +863,12 @@ private struct HomeRail: View {
         urls: items.map { item in
           if useLandscapeCards {
             let backdropId = item.backdropImageId ?? item.posterImageId
-            return backdropId.flatMap { appState.api.imageURL(id: $0, width: 500) }
+            // Must match TVLandscapeCard/ItemBackdropCell exactly — same width AND
+            // same kind — or the prefetched bytes land under a different cache key.
+            return backdropId.flatMap {
+              appState.api.imageURL(id: $0, width: 780,
+                                    kind: item.backdropImageId != nil ? .backdrop : .poster)
+            }
           }
           // Must match ItemPosterCell's request exactly (342 = 110pt @3x on the
           // server's ladder) or the prefetched bytes land under a different cache

@@ -142,12 +142,13 @@ struct HomeHero: View {
       if appState.isDemoMode, let assetName = DemoData.posterAssetNames[item.id] {
         Image(assetName).resizable().scaledToFill()
       } else if let imageId = item.backdropImageId ?? item.posterImageId {
-        // Full-bleed 380pt hero: at native scale this genuinely exceeds the server's
-        // 500px top rung, so it resolves to `original`. Left deliberately — but note
-        // `width: 800` never meant 800px; the backend snaps anything over 500 to the
-        // full-resolution source. Kept explicit so it reads as intentional.
+        // Full-bleed 380pt hero. TASK-913: w1280 is a real backdrop rung now, so this
+        // gets a genuine 1280px 16:9 image instead of rounding up to the uncompressed
+        // `original`. Falls back to the poster's id (and .poster) when TMDb gave the
+        // item no backdrop.
         AuthenticatedImage(
-          url: appState.api.imageURL(id: imageId, width: 800),
+          url: appState.api.imageURL(id: imageId, width: 1280,
+                                      kind: item.backdropImageId != nil ? .backdrop : .poster),
           token: appState.sessionToken,
           usesTunnelCookie: appState.api.usesTunnelCookie
         )

@@ -3429,6 +3429,36 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// selectItemImage picks which of an item's two artwork paths to serve.
+//
+// TASK-913: an item's poster (2:3) and backdrop (16:9) are reached through the SAME id
+// — /api/v1/images/{itemID} — so `?type=` is the ONLY thing that tells them apart. A
+// 16:9 card that omits it gets the 2:3 poster, which then centre-crops a portrait onto
+// a torso. Every tvOS rail card was doing exactly that.
+//
+// Empty strings matter here. The callers read these out of sql.NullString, whose .Valid
+// is true for '', so a bare validity check accepted backdrop_path='' and then asked TMDb
+// for the empty path — which fails as image_not_found. Treating '' as absent lets
+// type=backdrop fall back to the poster for items TMDb has no backdrop for, rather than
+// 404ing a card that has perfectly good poster art.
+//
+// Returns false only when the item has neither.
+func selectItemImage(posterPath, backdropPath, wantType string) (string, metadata.ImageType, bool) {
+	hasPoster := posterPath != ""
+	hasBackdrop := backdropPath != ""
+
+	switch {
+	case wantType == string(metadata.ImageTypeBackdrop) && hasBackdrop:
+		return backdropPath, metadata.ImageTypeBackdrop, true
+	case hasPoster:
+		return posterPath, metadata.ImageTypePoster, true
+	case hasBackdrop:
+		return backdropPath, metadata.ImageTypeBackdrop, true
+	default:
+		return "", "", false
+	}
+}
+
 func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	imageID := chi.URLParam(r, "id")
 	if imageID == "" {
@@ -3523,21 +3553,9 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine which image to serve based on query param
-	imageTypeParam := r.URL.Query().Get("type")
-	var path string
-	var imgType metadata.ImageType
-
-	if imageTypeParam == "backdrop" && backdropPath.Valid {
-		path = backdropPath.String
-		imgType = metadata.ImageTypeBackdrop
-	} else if posterPath.Valid {
-		path = posterPath.String
-		imgType = metadata.ImageTypePoster
-	} else if backdropPath.Valid {
-		path = backdropPath.String
-		imgType = metadata.ImageTypeBackdrop
-	} else {
+	path, imgType, ok := selectItemImage(
+		posterPath.String, backdropPath.String, r.URL.Query().Get("type"))
+	if !ok {
 		writeErr(w, http.StatusNotFound, "no_image_available")
 		return
 	}

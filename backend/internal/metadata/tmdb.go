@@ -24,10 +24,17 @@ type ImageSize string
 
 const (
 	ImageSizeOriginal ImageSize = "original"
-	ImageSizeW500     ImageSize = "w500"
-	ImageSizeW342     ImageSize = "w342"
-	ImageSizeW185     ImageSize = "w185"
-	ImageSizeW92      ImageSize = "w92"
+	// TASK-913: w1280 and w780 exist ONLY in TMDb's backdrop ladder, not the poster one.
+	// Without them the widest rung was w500, so a 16:9 TV rail card asking for w=760 fell
+	// straight through to `original` and pulled a multi-megabyte source image per card.
+	// TMDb serves a poster request for these sizes as a redirect to the nearest poster
+	// width, so they are safe to request for either type.
+	ImageSizeW1280 ImageSize = "w1280"
+	ImageSizeW780  ImageSize = "w780"
+	ImageSizeW500  ImageSize = "w500"
+	ImageSizeW342  ImageSize = "w342"
+	ImageSizeW185  ImageSize = "w185"
+	ImageSizeW92   ImageSize = "w92"
 )
 
 // TMDbClient handles communication with The Movie Database API.

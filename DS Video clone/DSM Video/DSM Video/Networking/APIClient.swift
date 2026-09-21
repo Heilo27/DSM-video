@@ -355,30 +355,47 @@ struct APIClient {
     _ = try await request(url: url, method: "POST", body: Body(tmdbId: tmdbId), response: EmptyDecodable.self)
   }
 
-  /// Widths the backend actually serves. `metadata.ParseImageSize` snaps any `w` to
-  /// the TMDB ladder — 92 / 185 / 342 / 500 — and treats **anything above 500 as
-  /// `original`**, i.e. the full-resolution source image. Asking for `w=800` or
-  /// `w=1400` is therefore not "a big thumbnail", it's the uncompressed original.
+  /// Which artwork to ask the server for. An item's poster and backdrop share ONE id
+  /// (`/api/v1/images/{itemID}`), so this is the only thing that tells them apart —
+  /// omit it and the server serves the 2:3 poster (TASK-913).
+  enum ImageKind: String {
+    /// 2:3 portrait. Grid cells, show tiles, the detail-page poster.
+    case poster
+    /// 16:9 landscape. Wide rail cards, heroes, Top Shelf.
+    case backdrop
+  }
+
+  /// Widths the backend serves, snapped from any `w` by `metadata.ParseImageSize`.
+  /// Anything above the top rung is served as `original` — the full-resolution source,
+  /// not "a big thumbnail".
   ///
   /// Passing a value off-ladder is silently rounded server-side, so the client would
   /// mint a distinct URL (= distinct URLCache + NSCache key) for bytes identical to a
   /// neighbouring request. Snapping here keeps one cache entry per real size.
-  static let imageWidthLadder = [92, 185, 342, 500]
-
-  /// Snap a point size to the smallest ladder width that covers it at native scale,
-  /// **capped at 500**. Pass the size the image is actually *drawn* at, in points.
   ///
-  /// The cap matters: a 180pt grid cell at 3x wants 540px, which is past the top rung
-  /// — and falling through to `original` would fetch the full-resolution source, far
-  /// worse than the slight upscale from 500. For thumbnail-sized art a few percent of
-  /// softness is invisible; multiple megabytes per cell is not. Callers that genuinely
-  /// want `original` (full-bleed heroes) should pass a width explicitly instead.
-  static func ladderWidth(forPointWidth points: CGFloat, scale: CGFloat) -> Int {
+  /// TASK-913: 780 and 1280 are BACKDROP-only rungs on TMDb. They exist here because a
+  /// 16:9 TV rail card is genuinely ~760px wide — before they were added, every such
+  /// card rounded up to `original` and pulled megabytes per tile.
+  static let imageWidthLadder = [92, 185, 342, 500]
+  static let backdropWidthLadder = [92, 185, 342, 500, 780, 1280]
+
+  /// Snap a point size to the smallest ladder width that covers it at native scale.
+  /// Pass the size the image is actually *drawn* at, in points.
+  ///
+  /// The cap matters: a 180pt grid cell at 3x wants 540px, past the poster ladder's top
+  /// rung — and falling through to `original` would fetch the full-resolution source,
+  /// far worse than the slight upscale from 500. For thumbnail-sized art a few percent
+  /// of softness is invisible; multiple megabytes per cell is not. Callers that
+  /// genuinely want `original` (full-bleed heroes) should pass a width explicitly.
+  static func ladderWidth(forPointWidth points: CGFloat, scale: CGFloat,
+                          kind: ImageKind = .poster) -> Int {
+    let ladder = kind == .backdrop ? backdropWidthLadder : imageWidthLadder
     let needed = points * scale
-    return imageWidthLadder.first { CGFloat($0) >= needed } ?? imageWidthLadder[imageWidthLadder.count - 1]
+    return ladder.first { CGFloat($0) >= needed } ?? ladder[ladder.count - 1]
   }
 
-  func imageURL(id: String, width: Int? = nil, version: Int? = nil) -> URL? {
+  func imageURL(id: String, width: Int? = nil, version: Int? = nil,
+                kind: ImageKind = .poster) -> URL? {
     guard baseURL != AppState.fallbackURL else { return nil }
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/images/\(id)"), resolvingAgainstBaseURL: false) else {
       return nil
@@ -386,6 +403,9 @@ struct APIClient {
     var items: [URLQueryItem] = []
     if let width { items.append(URLQueryItem(name: "w", value: String(width))) }
     if let version { items.append(URLQueryItem(name: "v", value: String(version))) }
+    // Only sent for backdrops: `poster` is the server's default, and omitting it keeps
+    // every existing poster URL byte-identical so caches stay warm across this upgrade.
+    if kind == .backdrop { items.append(URLQueryItem(name: "type", value: kind.rawValue)) }
     if !items.isEmpty { comps.queryItems = items }
     return comps.url
   }

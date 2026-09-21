@@ -843,7 +843,8 @@ struct ItemDetailView: View {
   private var backdropImage: some View {
     if let backdropId = detail?.images?.backdrop?.id ?? detail?.images?.backdrop?.mapperId {
       AuthenticatedImage(
-        url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq),
+        url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq,
+                                    kind: .backdrop),
         token: appState.sessionToken,
         usesTunnelCookie: appState.api.usesTunnelCookie
       )

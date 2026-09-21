@@ -142,6 +142,36 @@ struct APIClientTests {
     #expect(query.contains("w=300"))
   }
 
+  // TASK-913: an item's poster and backdrop share one id, so `type` is the only thing
+  // that distinguishes them. Without it the server serves the 2:3 poster, and a 16:9
+  // rail card centre-crops a portrait onto a torso — the reported Apple TV symptom.
+  @Test func imageURLRequestsBackdropExplicitly() {
+    let client = APIClient(baseURL: URL(string: "http://localhost:8090")!, token: "tok")
+    let query = client.imageURL(id: "abc123", width: 780, kind: .backdrop)?.query ?? ""
+    #expect(query.contains("type=backdrop"))
+    #expect(query.contains("w=780"))
+  }
+
+  /// `poster` is the server's default. Omitting it keeps every pre-existing poster URL
+  /// byte-identical, so caches stay warm across this upgrade instead of re-downloading
+  /// every tile under a new key.
+  @Test func imageURLOmitsTypeForPosters() {
+    let client = APIClient(baseURL: URL(string: "http://localhost:8090")!, token: "tok")
+    let query = client.imageURL(id: "abc123", width: 342)?.query ?? ""
+    #expect(!query.contains("type="))
+    #expect(client.imageURL(id: "abc123", width: 342, kind: .poster)?.query?.contains("type=") != true)
+  }
+
+  /// Backdrops get two extra rungs (780/1280) that posters do not: they are
+  /// backdrop-only sizes on TMDb. Before they existed a ~760px card rounded up to
+  /// `original` and pulled the full-resolution source for every tile.
+  @Test func backdropLadderReachesAboveFiveHundred() {
+    #expect(APIClient.ladderWidth(forPointWidth: 380, scale: 2, kind: .backdrop) == 780)
+    #expect(APIClient.ladderWidth(forPointWidth: 640, scale: 2, kind: .backdrop) == 1280)
+    // Posters stay capped — a 180pt cell at 3x must not start fetching originals.
+    #expect(APIClient.ladderWidth(forPointWidth: 180, scale: 3, kind: .poster) == 500)
+  }
+
   @Test func imageURLOmitsWidthWhenNil() {
     let url = URL(string: "http://localhost:8090")!
     let client = APIClient(baseURL: url, token: "tok")
