@@ -347,7 +347,10 @@ struct SearchView: View {
   @State private var searchTask: Task<Void, Never>?
   /// Drives the keyboard up on appear. Tapping Search is an unambiguous statement of
   /// intent to type, so making the user tap a second time is pure friction.
+  /// iOS only — .searchFocused does not exist on tvOS.
+  #if !os(tvOS)
   @FocusState private var searchFocused: Bool
+  #endif
   @AppStorage("dsReel.recentSearches") private var recentSearchesRaw: String = ""
 
   private var recentSearches: [String] {
@@ -443,12 +446,19 @@ struct SearchView: View {
     //
     // searchFocused raises the keyboard. Every call site reaches this view from a
     // deliberate tap on Search, so there is no case where the keyboard is unwanted.
+    // iOS only: .navigationBarDrawer and .searchFocused are unavailable on tvOS, which has
+    // its own search surface (TVSearchView) and its own focus model. This file compiles
+    // into BOTH targets.
+    #if !os(tvOS)
     .searchable(
       text: $searchText,
       placement: .navigationBarDrawer(displayMode: .always),
       prompt: "Search videos"
     )
     .searchFocused($searchFocused)
+    #else
+    .searchable(text: $searchText, prompt: "Search videos")
+    #endif
     .onSubmit(of: .search) {
       // Explicit submit — this is the only path that records a recent search.
       searchTask?.cancel()
@@ -481,7 +491,9 @@ struct SearchView: View {
       // Raise the keyboard. Deferred one runloop turn: the search field is installed by
       // the navigation bar during this same layout pass, and setting focus before it
       // exists is a no-op that fails silently.
+      #if !os(tvOS)
       DispatchQueue.main.async { searchFocused = true }
+      #endif
     }
     .onChange(of: results) { _, newResults in
       guard hasSearched && !isSearching else { return }

@@ -435,6 +435,22 @@ private struct TVHomeView: View {
 
 // MARK: - Landscape Card Rail (Continue Watching / Just Added)
 
+/// Room for the focus effect to grow into.
+///
+/// `.buttonStyle(.card)` SCALES a focused card up and lifts it. Nothing reserved space for
+/// that, so the enlarged card was clipped by the ScrollView viewport: top and bottom on
+/// every card, and the LEFT EDGE of the first card in every rail — reported from a real
+/// Apple TV, where "Wreck-It Ralph" lost its left edge and its year read "012" instead of
+/// "2012", and "A View to a Kill" read "985" for 1985.
+///
+/// This is CONTENT padding, deliberately. TASK-856 moved title-safe onto the ScrollView's
+/// own frame so the viewport clips at the title-safe boundary rather than in the overscan
+/// band — that is correct and must stay. The clip rect therefore starts at x=60 with the
+/// first card flush against it, so the growth room has to come from inside.
+///
+/// 28pt: a 214pt card at the focus scale grows ~11pt per side, plus the focus shadow.
+private let tvRailFocusInset: CGFloat = 28
+
 private struct TVLandscapeRail: View {
   @Environment(AppState.self) private var appState
   let title: String
@@ -492,14 +508,24 @@ private struct TVLandscapeRail: View {
             }
           }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, tvRailFocusInset)
+        // Leading inset too: the first card sits flush against the clip rect at x=60, so
+        // without this it grows straight into the boundary and is shaved.
+        .padding(.leading, tvRailFocusInset)
         .focusSection()
       }
       // TASK-856: title-safe insets the ScrollView frame, not the LazyHStack. Padding the
       // stack only insets its content extremes, leaving the viewport at x[0,1920] — the
       // "Just Added" rail's 5th card title rendered into the right overscan band and read
       // "Northern Pas" on a real TV. Padding the ScrollView clips at x=1860 instead.
-      .padding(.horizontal, 60)
+      //
+      // Leading is 60 - tvRailFocusInset so the two insets SUM to 60: the viewport still
+      // clips at the title-safe boundary, and the first card's left edge still lines up at
+      // x=60 under the rail title, but there are now 28pt of slack inside the clip rect for
+      // the focus effect to grow into. Trailing stays a full 60 — nothing grows off the
+      // right edge, and a partially visible card there is a valid scroll cue.
+      .padding(.leading, 60 - tvRailFocusInset)
+      .padding(.trailing, 60)
     }
   }
 }
@@ -584,7 +610,9 @@ private struct TVLibraryRail: View {
               }
             }
           }
-          .padding(.vertical, 12)
+          .padding(.vertical, tvRailFocusInset)
+          // Leading inset too — see tvRailFocusInset.
+          .padding(.leading, tvRailFocusInset)
           .focusSection()
         }
         // TASK-856: title-safe must inset the ScrollView's own frame, not the LazyHStack.
@@ -593,7 +621,11 @@ private struct TVLibraryRail: View {
         // the right 60pt overscan band and lost its trailing characters on a real TV
         // ("Northern Pas"). Padding the ScrollView moves the clip edge to x=1860, so text is
         // cut at the title-safe boundary; a partially visible card is still a valid scroll cue.
-        .padding(.horizontal, 60)
+        //
+        // Leading is 60 - tvRailFocusInset so the two sum to 60 — see the matching note on
+        // TVLandscapeRail.
+        .padding(.leading, 60 - tvRailFocusInset)
+        .padding(.trailing, 60)
       }
     }
     // TASK-432: stagger per-rail fetches to avoid N concurrent requests on home load.
@@ -780,14 +812,29 @@ private struct TVLandscapeCard: View {
             usesTunnelCookie: appState.api.usesTunnelCookie
           )
           .scaledToFill()
-          .frame(width: cardWidth, height: cardHeight, alignment: .center)
+          // CROP FROM THE TOP, not the centre.
+          //
+          // This asks for `backdropImageId ?? posterImageId`, but the server emits the SAME
+          // id for both (TASK-913), so what arrives is ALWAYS the 2:3 portrait poster —
+          // measured 2000x3000. scaledToFill on a 2:3 source in this 16:9 box matches WIDTH
+          // and overflows vertically by a large margin, so the alignment decides which
+          // horizontal band survives. Centre landed on torsos and legs ("A View to a Kill",
+          // "Borg vs McEnroe") and only looked right when a poster happened to put its art
+          // in the middle — which is why it read as intermittent.
+          //
+          // Posters put the title treatment and faces in the upper half essentially without
+          // exception, so .top is the band most likely to be the subject. This is a
+          // MITIGATION, not the fix: the real fix is TASK-913, making backdrops separately
+          // addressable so a 16:9 card gets a 16:9 source and no crop is needed at all.
+          .frame(width: cardWidth, height: cardHeight, alignment: .top)
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
             .resizable()
             .scaledToFill()
-            .frame(width: cardWidth, height: cardHeight, alignment: .center)
+            // Same top-crop as the network path above — see the note there.
+            .frame(width: cardWidth, height: cardHeight, alignment: .top)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
