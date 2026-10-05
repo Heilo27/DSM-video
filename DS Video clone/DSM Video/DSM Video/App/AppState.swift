@@ -1407,6 +1407,26 @@ final class AppState {
 
   // Background fetch task handle — cancelled on forceRefresh/logout
   private var homeBackgroundFetchTask: Task<Void, Never>?
+  /// Identifies the sync that owns homeBackgroundFetchTask, so a finishing sync clears
+  /// only its own handle — never one a later start put there.
+  private var homeBackgroundSyncID = UUID()
+
+  /// Starts a background sync unless one is genuinely still running.
+  ///
+  /// The handle is cleared when the sync finishes. A finished Task is never `isCancelled`,
+  /// so a handle left behind read as "a sync is already running" for the rest of the
+  /// session: after the launch sync, every heartbeat that saw a change skipped it, and
+  /// progress from other devices never arrived until a relaunch.
+  private func startBackgroundSyncIfIdle(_ work: @escaping @MainActor () async -> Void) -> Bool {
+    if let existing = homeBackgroundFetchTask, !existing.isCancelled { return false }
+    let id = UUID()
+    homeBackgroundSyncID = id
+    homeBackgroundFetchTask = Task {
+      await work()
+      if self.homeBackgroundSyncID == id { self.homeBackgroundFetchTask = nil }
+    }
+    return true
+  }
   /// Bumped by clearHomeState(). Detached rail computations capture it and drop their
   /// result if it changed while they were running.
   private var homeStateGeneration: UInt64 = 0
@@ -1785,11 +1805,10 @@ final class AppState {
       // Same rule as the heartbeat: do not cancel a sync that is still running. A relaunch
       // or a re-entry into homeLoad while a long WAN resync is mid-flight would otherwise
       // restart it from seq 0 and it would never reach the end.
-      if let existing = homeBackgroundFetchTask, !existing.isCancelled {
-        homeLog.info("homeLoad[\(callID)]: a background sync is already running — leaving it alone")
-      } else {
+      if startBackgroundSyncIfIdle({ await self.runDeltaSyncWithBackgroundTask() }) {
         homeLog.info("homeLoad[\(callID)]: starting background delta sync")
-        homeBackgroundFetchTask = Task { await self.runDeltaSyncWithBackgroundTask() }
+      } else {
+        homeLog.info("homeLoad[\(callID)]: a background sync is already running — leaving it alone")
       }
     } else {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
@@ -2302,13 +2321,12 @@ final class AppState {
         // a full resync, and wrong in general: an in-flight sync is strictly closer to done
         // than a fresh one, so restarting it can only lose progress. Whatever this beat
         // detected will still be there for the next one.
-        if let existing = homeBackgroundFetchTask, !existing.isCancelled {
+        if !startBackgroundSyncIfIdle({ await self.runDeltaSync(background: true) }) {
           homeLog.info("""
             heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged))             but a sync is already running — leaving it alone
             """)
         } else {
           homeLog.info("heartbeat: change detected (items=\(itemsChanged) progress=\(progressChanged)) — syncing")
-          homeBackgroundFetchTask = Task { await self.runDeltaSync(background: true) }
         }
       }
     } catch {
