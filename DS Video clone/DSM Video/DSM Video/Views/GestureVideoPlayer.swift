@@ -118,7 +118,6 @@ struct GestureVideoPlayer: View {
     @State private var isAdjustingVolume: Bool = false
     @State private var volumeLevel: Float = 0.5
     @State private var volumeStartLevel: Float = 0.5
-    @State private var showVolumeIndicator: Bool = false
 
 
     @State private var showSkipIndicator: SkipDirection? = nil
@@ -130,7 +129,6 @@ struct GestureVideoPlayer: View {
     @State private var videoFillMode: VideoFillMode = UserDefaults.standard.bool(forKey: "dsReel.videoFitMode") ? .fit : .fill
 
     @State private var hideControlsTask: Task<Void, Never>?
-    @State private var hideVolumeIndicatorTask: Task<Void, Never>?
     @State private var skipHideTask: Task<Void, Never>?
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var timeObserver: Any?
@@ -453,11 +451,6 @@ struct GestureVideoPlayer: View {
             // Scrub preview
             if showScrubPreview {
                 scrubPreviewOverlay
-            }
-
-            // Volume indicator
-            if showVolumeIndicator {
-                volumeIndicatorOverlay
             }
 
             // Skip indicator
@@ -1174,24 +1167,6 @@ struct GestureVideoPlayer: View {
         .accessibilityHidden(true)
     }
 
-    private var volumeIndicatorOverlay: some View {
-        HStack(spacing: 12) {
-            Image(systemName: volumeLevel > 0 ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                .font(.title2)
-                .accessibilityLabel(volumeLevel > 0 ? "Volume" : "Muted")
-
-            ProgressView(value: Double(volumeLevel))
-                .tint(.white)
-                .frame(width: 100)
-                .accessibilityLabel("Volume level")
-                .accessibilityValue("\(Int(volumeLevel * 100)) percent")
-        }
-        .foregroundStyle(.white)
-        .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .accessibilityHidden(true)
-    }
-
 
     @ViewBuilder
     private func skipIndicatorOverlay(direction: SkipDirection) -> some View {
@@ -1250,13 +1225,13 @@ struct GestureVideoPlayer: View {
 
             hideControlsTask?.cancel()
         } else {
-            // Vertical gesture — full screen controls volume; full height swipe = 0–100%
+            // Vertical gesture — full screen controls volume; full height swipe = 0–100%.
+            // No HUD of our own: setting the volume through MPVolumeView makes iOS show its
+            // system volume HUD, so drawing one here put two meters on screen for one swipe.
             if !isAdjustingVolume {
                 isAdjustingVolume = true
                 volumeStartLevel = volumeLevel
-                showVolumeIndicator = true
             }
-            scheduleHideVolumeIndicator()
 
             let delta = Float(-translation.height / height)
             volumeLevel = max(0, min(1, volumeStartLevel + delta))
@@ -1273,13 +1248,7 @@ struct GestureVideoPlayer: View {
             showScrubPreview = false
         }
 
-        // Always reset volume adjustment state and schedule hide
-        // The auto-hide timer ensures indicator disappears even if gesture state is inconsistent
-        if isAdjustingVolume {
-            isAdjustingVolume = false
-        }
-        // Schedule hide with short delay for smooth UX (indicator stays briefly after release)
-        scheduleHideVolumeIndicator()
+        isAdjustingVolume = false
 
         scheduleHideControls()
     }
@@ -1915,7 +1884,6 @@ struct GestureVideoPlayer: View {
         // runs on the next cleanup() after PiP stops and the view dismisses for real.
         if isPiPActive {
             hideControlsTask?.cancel()
-            hideVolumeIndicatorTask?.cancel()
             skipHideTask?.cancel()
             controlsHideTask?.cancel()
             return
@@ -1931,7 +1899,6 @@ struct GestureVideoPlayer: View {
         isPiPActive = false
         #endif
         hideControlsTask?.cancel()
-        hideVolumeIndicatorTask?.cancel()
         skipHideTask?.cancel()
         controlsHideTask?.cancel()
         #if os(tvOS)
@@ -1951,7 +1918,7 @@ struct GestureVideoPlayer: View {
         downloadDeletedObserver = nil
         // Must reset alongside the tokens: the subscription it guards lives in
         // `cancellables`, which is torn down here too. Leaving it true would make the
-        // guard permanent and a re-presented player would have no volume HUD at all —
+        // guard permanent and a re-presented player would never track volume again —
         // turning a duplicate-registration bug into a missing-feature one.
         didRegisterVolumeObserver = false
         player?.pause()
@@ -2161,18 +2128,6 @@ struct GestureVideoPlayer: View {
         }
     }
 
-    private func scheduleHideVolumeIndicator() {
-        hideVolumeIndicatorTask?.cancel()
-        hideVolumeIndicatorTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(1500))
-            if !Task.isCancelled {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    showVolumeIndicator = false
-                }
-            }
-        }
-    }
-
 
     // MARK: - Volume Control
 
@@ -2278,18 +2233,14 @@ struct GestureVideoPlayer: View {
         // outputVolume is readable immediately without waiting for activation.
         volumeLevel = audioSession.outputVolume
 
-        // TRACK the hardware volume, but do NOT draw our own HUD for it.
+        // TRACK the hardware volume, but never draw our own HUD — for the buttons OR the
+        // swipe. iOS shows its system volume HUD for both (the swipe sets volume through
+        // MPVolumeView, which triggers it), and a HUD of ours put a second meter over the
+        // picture. Reported from a device, twice: buttons first, then the swipe.
         //
-        // iOS already shows a volume HUD when the hardware buttons are pressed, and this
-        // showed a SECOND one in the middle of the video at the same time — two indicators
-        // for one action, the app's sitting over the picture. Reported from a device.
-        //
-        // The value still has to be read: the drag gesture's HUD displays volumeLevel, and
-        // a hardware press that did not update it would make the next swipe jump from a
-        // stale value. So keep the subscription, drop the presentation.
-        //
-        // The drag gesture is deliberately NOT changed (see the vertical-drag branch): iOS
-        // draws nothing for that, so there our HUD is the only feedback the user gets.
+        // The value still has to be read: a vertical swipe starts from volumeLevel, and a
+        // hardware press that did not update it would make the next swipe jump from a
+        // stale value.
         audioSession.publisher(for: \.outputVolume)
             .dropFirst()
             .receive(on: DispatchQueue.main)
