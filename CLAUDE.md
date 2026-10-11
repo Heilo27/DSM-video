@@ -1,15 +1,8 @@
-# DSVideo — Friday Context
-
-## What This Is
-Video streaming server packaged as a Synology DSM NAS package. Serves personal video library with transcoding and remote playback.
-
-## Stack
-Go · Node.js · Synology DSM packaging
-
-## Critical Rules
-- Must package as a valid Synology SPK — build produces a DSM-installable package
-- Runs on NAS hardware — performance and memory constraints
-- No external runtime dependencies; everything must be bundled
-
-## Ticketmaster ID
-`dsvideo`
+# DSVideo
+Video streaming server packaged as a Synology DSM NAS package: personal library, transcoding, remote playback.
+Stack: Go, Node.js, Synology SPK packaging
+Rules:
+- Build must produce a valid DSM-installable SPK.
+- Runs on NAS hardware: watch memory and CPU.
+- No external runtime deps; bundle everything.
+Docs: docs/design-spec.md, docs/api/.
