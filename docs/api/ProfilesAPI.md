@@ -276,8 +276,8 @@ filtered). **X** = exempt.
 | `/admin/*` | U | plus the existing server-admin rule |
 | `/auth/*`, `/version` | A | |
 | `GET /images/{id}`, `GET /tmdb/image` | X | public artwork |
-| `/playback/{sessionId}/*` | X | session id is the capability; gated at creation |
-| `/webapi/*` (Synology compatibility) | F / R, P | no header possible → FR-221 fallback, same filter (FR-251); R answers WebAPI error 105 (the envelope has no string code); WatchStatus writes to the fallback profile |
+| `/playback/{sessionId}/*` | X, bound | session id is the capability; gated at creation. Bound to the minting profile: a request whose `X-DSVideo-Profile` names a different profile gets `403 content_restricted` (header-less player requests are served on the id alone). Same check after a restart rehydrate; pre-upgrade sessions count as owner-minted. `POST …/stop` is not checked (serves no bytes) |
+| `/webapi/*` (Synology compatibility) | F / R, P | no header possible → FR-221 fallback, same filter (FR-251); R answers WebAPI error 105 (the envelope has no string code); WatchStatus writes to the fallback profile; a stream id minted for any other profile answers error 105 |
 
 ## Error codes (added)
 

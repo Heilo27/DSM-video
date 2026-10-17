@@ -240,6 +240,14 @@ type PlaySession struct {
 	LastAccess   time.Time
 	PlaybackMode transcode.PlaybackMode
 	Transcoding  bool
+	// UserID and ProfileID name the account and profile the session was minted for
+	// (FRD-002 FR-250). Every byte-serving read checks the requesting profile against
+	// ProfileID in memory (playSessionProfileAllowed), so a session minted under an adult
+	// profile cannot be replayed under a kid profile. Empty ProfileID only for a session
+	// whose minting profile is unknown (a pre-upgrade row with no account), which stays
+	// a pure capability.
+	UserID    string
+	ProfileID string
 }
 
 func main() {
@@ -1347,6 +1355,7 @@ CREATE TABLE IF NOT EXISTS play_sessions (
     playback_mode INTEGER NOT NULL DEFAULT 0,
     transcoding   INTEGER NOT NULL DEFAULT 0,
     user_id       TEXT,
+    profile_id    TEXT,
     created_at    TEXT NOT NULL,
     last_access   TEXT NOT NULL
 );
@@ -1526,6 +1535,19 @@ CREATE TABLE IF NOT EXISTS watchlist (
 				log.Printf("[migrate] video_codec_tag re-probe scheduling failed: %v", bErr)
 			} else if n, _ := res.RowsAffected(); n > 0 {
 				log.Printf("[migrate] scheduled %d HEVC rows for one re-probe to capture the codec tag", n)
+			}
+		}
+	}
+
+	// play_sessions.profile_id — the profile a session was minted for (FRD-002 FR-250), so
+	// a rehydrated session is held to the same profile as a live one. Rows written before
+	// this column existed stay NULL and are treated as owner-minted (rehydratePlaySession).
+	{
+		var exists bool
+		_ = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('play_sessions') WHERE name='profile_id'`).Scan(&exists)
+		if !exists {
+			if _, err := db.Exec(`ALTER TABLE play_sessions ADD COLUMN profile_id TEXT`); err != nil {
+				return fmt.Errorf("migration play_sessions.profile_id: %w", err)
 			}
 		}
 	}
@@ -3732,7 +3754,8 @@ func (s *Server) handleTMDbImageProxy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "id")
 	// FR-250 refused-if-above; for playback the gate is session creation (FR-252).
-	if v, ok := s.requestViewer(w, r); !ok || !s.refuseAboveCeiling(w, r, v, itemID) {
+	v, ok := s.requestViewer(w, r)
+	if !ok || !s.refuseAboveCeiling(w, r, v, itemID) {
 		return
 	}
 
@@ -3959,6 +3982,8 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    time.Now(),
 		LastAccess:   time.Now(),
 		PlaybackMode: playbackMode,
+		UserID:       v.UserID,
+		ProfileID:    v.ProfileID,
 	}
 
 	// Determine playback kind based on mode
@@ -4009,18 +4034,12 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	s.playSessions[sessionID] = ps
 	s.mu.Unlock()
 
-	u := userFromCtx(r.Context())
 	// Persist alongside the in-memory entry so the session survives a restart. Best
 	// effort: a failure here costs restart-resumption, not playback.
-	s.persistPlaySession(sessionID, ps, u.ID)
-	// Resume point is the viewing profile's (FR-230). Best effort like the lookup itself:
-	// the session is already registered, so a profiles failure starts at 0 rather than 500.
-	var resume map[string]any
-	if pv, err := s.viewerFor(r); err != nil {
-		log.Printf("[playback] viewer for resume: %v", err)
-	} else {
-		resume, _ = s.getProfileProgress(pv.ProfileID, itemID)
-	}
+	s.persistPlaySession(sessionID, ps)
+	// Resume point is the viewing profile's (FR-230). Best effort: the session is
+	// already registered, so a lookup failure starts at 0 rather than 500.
+	resume, _ := s.getProfileProgress(v.ProfileID, itemID)
 	var resumePos any = 0
 	if resume != nil {
 		if v, ok := resume["positionSeconds"].(int); ok {
@@ -4740,6 +4759,10 @@ func (s *Server) handlePlaybackStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if !playSessionProfileAllowed(r, ps) {
+		writeContentRestricted(w)
+		return
+	}
 
 	// Remux mode: pipe through ffmpeg to convert container to fragmented MP4
 	// This handles MKV→MP4 remux and audio transcode (AC3/DTS→AAC) in real-time
@@ -5046,6 +5069,10 @@ func (s *Server) handleHLSFile(filename string) http.HandlerFunc {
 			writeErr(w, http.StatusNotFound, "not_found")
 			return
 		}
+		if !playSessionProfileAllowed(r, ps) {
+			writeContentRestricted(w)
+			return
+		}
 
 		// For the master playlist, block until ffmpeg has written it.
 		// ffmpeg generates segments in the background so the file may not
@@ -5087,6 +5114,10 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if !playSessionProfileAllowed(r, ps) {
+		writeContentRestricted(w)
+		return
+	}
 	fullPath := filepath.Join(ps.HLSDir, name)
 	if !strings.HasPrefix(filepath.Clean(fullPath)+"/", filepath.Clean(ps.HLSDir)+"/") {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -5118,12 +5149,33 @@ func (s *Server) handleHLSSegmentRoot(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if !playSessionProfileAllowed(r, ps) {
+		writeContentRestricted(w)
+		return
+	}
 	fullPath := filepath.Join(ps.HLSDir, name)
 	if !strings.HasPrefix(filepath.Clean(fullPath)+"/", filepath.Clean(ps.HLSDir)+"/") {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	http.ServeFile(w, r, fullPath)
+}
+
+// playSessionProfileAllowed is FRD-002 FR-250 for the byte-serving /playback/{sessionId}/*
+// routes: a session serves only the profile it was minted for.
+//
+// These routes carry no token (AVPlayer sends no Authorization on segment fetches), so the
+// requester's profile is known only when the request names one in X-DSVideo-Profile. A
+// request that names a different profile is refused, whatever the title's rating: that is
+// the "adult session replayed after switching to a kid profile" case. A request that names
+// no profile (AVPlayer segments, the /web player, header-less builds) is served on the
+// session id alone, as before; the session was gated when it was minted (FR-252).
+//
+// Pure in-memory comparison, so HLS segment serving pays no DB hit. An empty ProfileID is a
+// legacy session whose minting profile could not be resolved; it stays a pure capability.
+func playSessionProfileAllowed(r *http.Request, ps PlaySession) bool {
+	named := strings.TrimSpace(r.Header.Get(profileHeader))
+	return named == "" || ps.ProfileID == "" || named == ps.ProfileID
 }
 
 func (s *Server) getSession(sessionID string) (PlaySession, bool) {
@@ -5244,14 +5296,14 @@ func (s *Server) itemExists(itemID string) (exists bool, known bool) {
 //
 // Best effort by design: a write failure costs the ability to resume after a restart, not
 // playback itself, so it is logged and swallowed rather than failing the request.
-func (s *Server) persistPlaySession(sessionID string, ps PlaySession, userID string) {
+func (s *Server) persistPlaySession(sessionID string, ps PlaySession) {
 	_, err := s.db.Exec(
 		`INSERT INTO play_sessions
-		   (session_id, item_id, path, kind, hls_dir, playback_mode, transcoding, user_id, created_at, last_access)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)
+		   (session_id, item_id, path, kind, hls_dir, playback_mode, transcoding, user_id, profile_id, created_at, last_access)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(session_id) DO UPDATE SET last_access = excluded.last_access`,
 		sessionID, ps.ItemID, ps.Path, ps.Kind, ps.HLSDir, int(ps.PlaybackMode),
-		boolToInt(ps.Transcoding), userID,
+		boolToInt(ps.Transcoding), ps.UserID, ps.ProfileID,
 		ps.CreatedAt.UTC().Format(time.RFC3339), ps.LastAccess.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
@@ -5271,13 +5323,13 @@ func (s *Server) persistPlaySession(sessionID string, ps PlaySession, userID str
 // 404s for segments that no longer exist, which is worse than a clean restart.
 func (s *Server) rehydratePlaySession(sessionID string) (PlaySession, bool) {
 	var ps PlaySession
-	var hlsDir sql.NullString
+	var hlsDir, userID, profileID sql.NullString
 	var mode, transcoding int
 	var createdAt, lastAccess string
 	err := s.db.QueryRow(
-		`SELECT item_id, path, kind, hls_dir, playback_mode, transcoding, created_at, last_access
+		`SELECT item_id, path, kind, hls_dir, playback_mode, transcoding, user_id, profile_id, created_at, last_access
 		 FROM play_sessions WHERE session_id = ?`, sessionID,
-	).Scan(&ps.ItemID, &ps.Path, &ps.Kind, &hlsDir, &mode, &transcoding, &createdAt, &lastAccess)
+	).Scan(&ps.ItemID, &ps.Path, &ps.Kind, &hlsDir, &mode, &transcoding, &userID, &profileID, &createdAt, &lastAccess)
 	if err != nil {
 		return PlaySession{}, false
 	}
@@ -5299,6 +5351,18 @@ func (s *Server) rehydratePlaySession(sessionID string) (PlaySession, bool) {
 	ps.Transcoding = transcoding != 0
 	ps.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	ps.LastAccess = time.Now()
+	ps.UserID = userID.String
+	ps.ProfileID = profileID.String
+	if ps.ProfileID == "" && ps.UserID != "" {
+		// FR-250: a row persisted before play_sessions.profile_id existed is treated as
+		// minted by the account's owner profile. Resolved once here, on the cache miss,
+		// so the per-request check stays in memory.
+		if rows, lErr := s.loadProfiles(context.Background(), ps.UserID); lErr == nil {
+			if owner, ok := ownerOf(rows); ok {
+				ps.ProfileID = owner.ID
+			}
+		}
+	}
 
 	s.mu.Lock()
 	s.playSessions[sessionID] = ps

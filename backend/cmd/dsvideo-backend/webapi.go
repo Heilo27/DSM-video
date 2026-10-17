@@ -2304,6 +2304,8 @@ func (s *Server) webAPIStreamingOpen(w http.ResponseWriter, r *http.Request, ses
 		CreatedAt:    time.Now(),
 		LastAccess:   time.Now(), // TASK-794: seed so the idle reaper doesn't evict before first GET
 		PlaybackMode: 0,          // DirectPlay
+		UserID:       v.UserID,
+		ProfileID:    v.ProfileID,
 	}
 
 	s.mu.Lock()
@@ -2357,6 +2359,19 @@ func (s *Server) handleWebAPIVTEStreaming(w http.ResponseWriter, r *http.Request
 	if !ok {
 		writeWebAPIError(w, 1101)
 		return
+	}
+	// FR-250/FR-251: a stream serves only the profile it was minted for. The WebAPI layer
+	// always speaks for the FR-221 default profile, so an id minted by the app under any
+	// other profile (or by another account) is refused here rather than replayed.
+	if ps.ProfileID != "" {
+		v, vok := s.webAPIViewer(w, r, session)
+		if !vok {
+			return
+		}
+		if ps.UserID != v.UserID || ps.ProfileID != v.ProfileID {
+			writeWebAPIError(w, webAPIErrNoPermission)
+			return
+		}
 	}
 
 	// Serve the video file directly (the iOS app uses AVPlayer which handles seeking via Range headers)

@@ -247,6 +247,14 @@ route's class is listed in `docs/api/ProfilesAPI.md` §"Enforcement by route". T
 - **Exempt.** `/images/{id}` and `/tmdb/image` (public artwork, reachable only by an id taken from a
   filtered listing) and `/playback/{sessionId}/*` (the session id is the capability, and the session was
   gated when it was created).
+- **Session bound to its profile.** A play session belongs to the profile it was started for, and it
+  survives a server restart with that profile. A request on `/playback/{sessionId}/*` that names a
+  different profile is refused with `content_restricted` (403), whatever the title's rating, so a session
+  started under an adult profile cannot be replayed after switching to a kid profile. A request that names
+  no profile (the system player fetching segments, the `/web` player, older builds) is still served on the
+  session id alone. The WebAPI layer speaks for its FR-221 profile, so it refuses (error 105) a stream
+  started for any other profile. Sessions started before this rule existed are treated as started by the
+  owner profile. Stopping a session is never refused: it serves nothing.
 
 **FR-251 [DESIGN]** The Synology WebAPI compatibility layer has no way to send the header. It resolves the
 profile by FR-221 and applies the same filter to its library, list and stream calls. If it skipped the
