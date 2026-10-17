@@ -44,6 +44,7 @@ TARGETS=(
   "$VIEWS/ItemDetailView.swift|OverlayButton|focused"
   "$VIEWS/ProfileViews.swift|PinPadKey|focusedKey"
   "$VIEWS/ProfileViews.swift|EditorControl|focusedControl"
+  "$VIEWS/CollectionViews.swift|CollectionControl|focusedControl"
 )
 
 if [[ ! -f "$PLAYER" ]]; then

@@ -265,6 +265,10 @@ private struct TVHomeView: View {
                 )
               }
 
+              // Collections (FRD-002 §9): a kids' profile's browse, an extra row for Teens
+              // and Adult. Renders what GET /collections returned; hidden offline.
+              CollectionsRail()
+
               // Empty state.
               //
               // Gated on "nothing at all is on screen", NOT just on homeLibraries being empty.

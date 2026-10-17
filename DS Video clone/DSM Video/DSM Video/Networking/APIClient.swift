@@ -190,6 +190,39 @@ struct APIClient {
                                       timeoutInterval: Timeout.interactive)
   }
 
+  /// The active profile's browse collections (FRD-002 FR-275). The server decides which
+  /// collections this profile is offered and drops empty ones; an empty array means "no
+  /// collections yet" (FR-276), not a failure.
+  func collections() async throws -> CollectionsResponse {
+    let url = baseURL.appendingPathComponent("/api/v1/collections")
+    return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none,
+                                      response: CollectionsResponse.self,
+                                      timeoutInterval: Timeout.interactive)
+  }
+
+  /// One page of a collection's titles, in the /items envelope (FR-275). A show is one entry
+  /// (an `episode` row whose `showName` names the show). An offered collection with nothing
+  /// visible answers `total: 0`; an id not offered to this profile is 404 unknown_collection.
+  func collectionItems(id: String, sort: String = "title", order: String = "asc",
+                       limit: Int = 60, offset: Int = 0) async throws -> ItemsResponse {
+    guard var comps = URLComponents(
+      url: baseURL.appendingPathComponent("/api/v1/collections")
+        .appendingPathComponent(id).appendingPathComponent("items"),
+      resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    comps.queryItems = [
+      URLQueryItem(name: "sort", value: sort),
+      URLQueryItem(name: "order", value: order),
+      URLQueryItem(name: "limit", value: String(limit)),
+      URLQueryItem(name: "offset", value: String(offset)),
+    ]
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await requestWithRetry(url: url, method: "GET", body: Optional<Int>.none,
+                                      response: ItemsResponse.self,
+                                      timeoutInterval: Timeout.interactive)
+  }
+
   func tvShows(libraryId: String) async throws -> TVShowsResponse {
     guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/tv/shows"), resolvingAgainstBaseURL: false) else {
       throw APIError.invalidURL

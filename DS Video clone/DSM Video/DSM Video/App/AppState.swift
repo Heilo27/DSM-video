@@ -1535,6 +1535,9 @@ final class AppState {
     homeSuggestedGenre = ""
     watchlistItems = []
     watchlistLoadFailed = false
+    homeCollections = []
+    homeCollectionsLoad = .notLoaded
+    collectionsInFlightGeneration = nil
     // SECURITY (TASK-775): explicitly delete the Top Shelf snapshot on logout/clear.
     // Setting homeJustAdded = [] above triggers writeTopShelfSnapshot()'s didSet, but that
     // function early-returns on empty state and never overwrites/removes the file — so a
@@ -1631,6 +1634,66 @@ final class AppState {
     homeRecentlyWatched = rails.recentlyWatched
     Task { await loadJustAddedRail() }
     Task { await loadSuggestedRail() }
+    Task { await loadCollections() }
+    return true
+  }
+
+  // MARK: - Collections (FRD-002 §9)
+
+  /// The active profile's collections exactly as GET /collections returned them. The server
+  /// decides which collections a profile is offered and hides empty ones (FR-273, FR-274), so
+  /// nothing here filters, reorders or re-derives tiers.
+  var homeCollections: [MediaCollection] = []
+  var homeCollectionsLoad: CollectionsLoadState = .notLoaded
+  /// The generation a collections request is in flight for, so the several applyRails calls a
+  /// sync makes do not stack duplicate requests. A new generation always gets its own load.
+  private var collectionsInFlightGeneration: UInt64?
+
+  /// What every browse surface shows for collections right now. Offline (or demo) hides them:
+  /// they are never recomputed from the local catalog.
+  var collectionsBrowse: CollectionsBrowse {
+    CollectionsBrowse.decide(
+      collections: homeCollections,
+      load: homeCollectionsLoad,
+      isKids: activeProfile?.isKids ?? false,
+      isOffline: isDemoMode || isOffline || serverUnreachable)
+  }
+
+  func loadCollections() async {
+    guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
+    let generation = homeStateGeneration
+    guard collectionsInFlightGeneration != generation else { return }
+    collectionsInFlightGeneration = generation
+    let apiSnapshot = api
+    let result: Result<[MediaCollection], any Error>
+    do {
+      result = .success(try await apiSnapshot.collections().collections)
+    } catch {
+      result = .failure(error)
+    }
+    if collectionsInFlightGeneration == generation { collectionsInFlightGeneration = nil }
+    applyCollections(result, startedAt: generation)
+  }
+
+  /// Applies a GET /collections answer that started at `generation`. Dropped when the profile
+  /// changed or the state was cleared meanwhile (FR-261). A failure with nothing on screen is
+  /// recorded so a kids' profile can say "couldn't load", distinct from "none yet" (FR-276);
+  /// a failed refresh over collections already shown keeps them.
+  @discardableResult
+  func applyCollections(_ result: Result<[MediaCollection], any Error>,
+                        startedAt generation: UInt64) -> Bool {
+    guard homeResultIsCurrent(generation, "collections") else { return false }
+    switch result {
+    case .success(let list):
+      homeCollections = list
+      homeCollectionsLoad = .loaded
+      homeLog.info("collections: \(list.count) from the server")
+    case .failure(let error):
+      if error is CancellationError { return false }
+      let message = (error as? APIError)?.userMessage ?? error.localizedDescription
+      homeLog.warning("collections: request failed — \(message)")
+      if homeCollections.isEmpty { homeCollectionsLoad = .failed }
+    }
     return true
   }
 
@@ -1867,6 +1930,8 @@ final class AppState {
       dlog.info(.home, "homeLoad: in-memory (CW=\(homeContinueWatching.count) JA=\(homeJustAdded.count) RW=\(homeRecentlyWatched.count))")
       homeError = nil  // clear any stale error banner alongside populated content
       Task { await self.runHeartbeat() }
+      // The rails are reused, but a collections load that failed (or never ran) retries.
+      if homeCollectionsLoad != .loaded { Task { await self.loadCollections() } }
       return
     }
 

@@ -552,3 +552,23 @@ struct GenresResponse: Decodable {
   let genres: [GenreCount]
 }
 
+
+// MARK: - Collections (FRD-002 §9)
+
+/// One browse collection from GET /collections (FR-270–FR-276). Every field is server data:
+/// which collections a profile gets, their titles and their order are decided by the server's
+/// one definition (FR-271), so the client renders this list as-is and never re-derives it.
+struct MediaCollection: Decodable, Hashable, Identifiable, Sendable {
+  let id: String
+  let title: String
+  /// `studio` | `theme` | `genre`. Display only.
+  let kind: String
+  /// Titles visible to the active profile, counted by the server.
+  let itemCount: Int
+  /// Artwork for the tile: the poster of a member title, nil when none has one.
+  let posterImageId: String?
+}
+
+struct CollectionsResponse: Decodable, Sendable {
+  let collections: [MediaCollection]
+}

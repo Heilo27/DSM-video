@@ -199,7 +199,7 @@ struct ItemsGridView: View {
       await load()
       // Genres load after the grid so the content appears first; the filter bar populating
       // a moment later is fine, an empty grid waiting on a secondary request is not.
-      await loadGenres()
+      if showsGenres { await loadGenres() }
     }
     #if !os(tvOS)
     // Search is a magnifying-glass button in the nav bar that presents a search
@@ -245,7 +245,7 @@ struct ItemsGridView: View {
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
         SortChipBar(selection: $sortOption)
-        GenreFilterBar(available: availableGenres, selected: $selectedGenres, mode: $genreMode)
+        browseFilterBar
         if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
           Text("Showing cached content")
             .font(.caption2)
@@ -276,7 +276,7 @@ struct ItemsGridView: View {
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
         SortChipBar(selection: $sortOption)
-        GenreFilterBar(available: availableGenres, selected: $selectedGenres, mode: $genreMode)
+        browseFilterBar
       }
     }
     .onChange(of: items) { _, new in sortedItems = sorted(new, by: sortOption) }
@@ -289,6 +289,19 @@ struct ItemsGridView: View {
       if selectedGenres.count >= 2 { Task { await load() } }
     }
     #endif
+  }
+
+  /// Kids' profiles browse by collections in place of the genre list (FRD-002 FR-270).
+  private var showsGenres: Bool {
+    CollectionsBrowse.showsGenres(isKids: appState.activeProfile?.isKids ?? false)
+  }
+
+  @ViewBuilder private var browseFilterBar: some View {
+    if showsGenres {
+      GenreFilterBar(available: availableGenres, selected: $selectedGenres, mode: $genreMode)
+    } else {
+      CollectionChipBar()
+    }
   }
 
   private func itemAccessibilityLabel(_ item: ItemSummary) -> String {
