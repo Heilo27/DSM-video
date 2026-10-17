@@ -138,6 +138,10 @@ final class AppState {
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
 
+  /// Whether this session's server supports profiles. In memory: `.unknown` at launch and
+  /// after sign-out, moved only by `refreshProfiles()`. Read through `progressSyncAllowed`.
+  var profileSupport: ProfileSupport = .unknown
+
   /// Set when the on-disk store could not be opened, so local persistence is dead and the
   /// server write is the only copy of a watch position. Surfaced as a banner; nil when healthy.
   var localStoreUnavailableMessage: String?
@@ -820,6 +824,10 @@ final class AppState {
     reconnectRetryTask = nil
     stopHeartbeatTimer()  // TASK-428: prevent timer from firing after logout
     clearHomeState()
+    // Profiles belong to the account: the next sign-in must re-learn support and must not
+    // send this account's profile id.
+    profileSupport = .unknown
+    ActiveProfileStore.shared.clearAll()
     // TASK-807: purge on-device content so a shared device leaves no cross-user residue.
     // Downloads are @MainActor (sync); the SQLite cache is an actor (async).
     DownloadManager.shared.clearAll()
@@ -1962,6 +1970,16 @@ final class AppState {
     let apiSnapshot = api
     homeLog.info("runDeltaSync: background=\(background)")
 
+    // Learn profile support BEFORE any progress traffic, so a sync that starts ahead of the
+    // list load cannot send header-less progress (FR-221 would file it under a kid).
+    if profileSupport == .unknown {
+      await refreshProfiles()
+    }
+    // One profile for the whole pass, even if the user switches mid-sync (FR-233).
+    let scope = await LocalStore.shared.activeScope
+    let progressAllowed = ProfileGate.progressSyncAllowed(scope: scope, support: profileSupport)
+    let progressAPI = apiSnapshot.pinned(to: scope.headerValue)
+
     // Step 0: push before pulling. Any progress recorded while the NAS was unreachable is
     // still flagged pending; it MUST go up before we download the server's copy, otherwise
     // the server's older value comes back down and upsertProgress's last-writer-wins
@@ -1971,7 +1989,7 @@ final class AppState {
     do {
       // Step 1: Get server seq numbers and our local cursors
       let status = try await apiSnapshot.syncStatus()
-      var cursors = await LocalStore.shared.getSyncCursors()
+      var cursors = await LocalStore.shared.getSyncCursors(profileID: scope.id)
       homeLog.info("runDeltaSync: server itemSeq=\(status.itemSeq) local=\(cursors.itemSeq) | server progressSeq=\(status.progressSeq) local=\(cursors.progressSeq)")
 
       // A local cursor AHEAD of the server's is impossible, and it is a permanent stall.
@@ -2009,9 +2027,9 @@ final class AppState {
           await LocalStore.shared.setItemSeq(0)
         }
         if cursors.progressSeq > status.progressSeq {
-          await LocalStore.shared.setProgressSeq(0)
+          await LocalStore.shared.setProgressSeq(0, profileID: scope.id)
         }
-        cursors = await LocalStore.shared.getSyncCursors()
+        cursors = await LocalStore.shared.getSyncCursors(profileID: scope.id)
       }
 
       // Step 2: Fetch libraries (always fast, small payload)
@@ -2230,16 +2248,20 @@ final class AppState {
       // Step 4: Fetch progress if server has updates, or if we have no local progress
       // (cursors.progressSeq == 0 means first sync — always fetch even if server seq is also 0,
       //  because rows may exist from before seq tracking was implemented).
-      if status.progressSeq > cursors.progressSeq || cursors.progressSeq == 0 {
+      // Held while no profile is active on a profile server (ProfileGate): a header-less
+      // fetch returns the most restricted profile's progress into the legacy bucket.
+      if !progressAllowed {
+        homeLog.info("runDeltaSync: progress fetch held — no active profile yet (support=\(String(describing: self.profileSupport)))")
+      } else if status.progressSeq > cursors.progressSeq || cursors.progressSeq == 0 {
         homeLog.info("runDeltaSync: fetching fresh progress (server=\(status.progressSeq) local=\(cursors.progressSeq))")
-        let progressMap = try await apiSnapshot.progressAll().progress
+        let progressMap = try await progressAPI.progressAll().progress
         if !progressMap.isEmpty {
-          await LocalStore.shared.upsertProgress(progressMap)
+          await LocalStore.shared.upsertProgress(progressMap, profileID: scope.id)
         }
         // Only advance cursor if server reports a real seq, otherwise stay at 0
         // so we re-check on next launch until the server starts tracking
         if status.progressSeq > 0 {
-          await LocalStore.shared.setProgressSeq(status.progressSeq)
+          await LocalStore.shared.setProgressSeq(status.progressSeq, profileID: scope.id)
         }
       }
 
@@ -2368,8 +2390,10 @@ final class AppState {
   /// why Continue Watching / Recently Watched were empty on every other device.
   func recordProgress(itemId: String, positionSeconds: Int, durationSeconds: Int) async {
     guard !isDemoMode else { return }
+    let scope = await LocalStore.shared.activeScope
     await LocalStore.shared.upsertSingleProgress(
-      itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds,
+      profileID: scope.id)
 
     // If the store could not be opened, the write above was a silent no-op and the outbox
     // has nothing to replay — so the server write is the ONLY copy. Surface the degraded
@@ -2380,8 +2404,16 @@ final class AppState {
       homeLog.error("recordProgress: LocalStore unavailable — progress depends on the server write alone")
     }
 
+    // No active profile on a profile server: keep the row pending locally (written above)
+    // rather than let a header-less write land on the most restricted profile (FR-221).
+    guard ProfileGate.progressSyncAllowed(scope: scope, support: profileSupport) else {
+      homeLog.info("recordProgress: server write held for \(itemId) — no active profile yet; queued")
+      return
+    }
+
     do {
-      let applied = try await api.setProgress(id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+      let applied = try await api.pinned(to: scope.headerValue).setProgress(
+        id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
       // TASK-891: honour the server's `applied` flag, which the API documents as "callers
       // must not treat a 200 alone as saved". Both outcomes clear the pending flag, but for
       // different reasons, and the log must not claim a save that did not happen:
@@ -2389,7 +2421,8 @@ final class AppState {
       //  - applied:false → a NEWER write superseded this one. This value is stale, so
       //    requeueing it would later overwrite fresher progress. Clear it, don't retry it.
       await LocalStore.shared.markProgressSynced(
-        itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+        itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds,
+        profileID: scope.id)
       if !applied {
         homeLog.info("recordProgress: server superseded the write for \(itemId) — a newer position already won")
       }
@@ -2456,7 +2489,17 @@ final class AppState {
     isFlushingProgress = true
     defer { isFlushingProgress = false }
 
-    let pending = await LocalStore.shared.pendingProgress()
+    // One profile for the whole drain, and none at all while the gate is shut: legacy rows
+    // stay pending until claimLegacyRows hands them to the owner, then upload under the
+    // owner's header. Never header-less (FR-221 would file them under a kid).
+    let scope = await LocalStore.shared.activeScope
+    guard ProfileGate.progressSyncAllowed(scope: scope, support: profileSupport) else {
+      homeLog.info("flushPendingProgress: held — no active profile yet (support=\(String(describing: self.profileSupport)))")
+      return
+    }
+    let progressAPI = api.pinned(to: scope.headerValue)
+
+    let pending = await LocalStore.shared.pendingProgress(profileID: scope.id)
     guard !pending.isEmpty else { return }
 
     homeLog.info("flushPendingProgress: \(pending.count) queued progress row(s) to upload")
@@ -2467,7 +2510,7 @@ final class AppState {
     var superseded = 0
     for row in pending {
       do {
-        let applied = try await api.setProgress(
+        let applied = try await progressAPI.setProgress(
           id: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds,
           // The time this was WATCHED, not the time the queue happens to be draining.
           watchedAt: row.updatedAt.isEmpty ? nil : row.updatedAt)
@@ -2476,7 +2519,8 @@ final class AppState {
         // clearing it is correct, but count it separately from a real upload so the log
         // doesn't claim progress that never landed.
         await LocalStore.shared.markProgressSynced(
-          itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds)
+          itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds,
+          profileID: scope.id)
         if applied {
           uploaded += 1
         } else {
@@ -2502,7 +2546,7 @@ final class AppState {
           // user kept watching during the flush, the row now holds a different position and
           // the guarded update matches nothing — the row stayed pending and was retried on
           // every subsequent flush, exactly the stall this drop path exists to prevent.
-          await LocalStore.shared.dropPendingProgress(itemId: row.itemId)
+          await LocalStore.shared.dropPendingProgress(itemId: row.itemId, profileID: scope.id)
           dropped += 1
           continue
         }
@@ -2516,6 +2560,37 @@ final class AppState {
   // homeRefreshProgress() lived here, "kept for backwards compat with any view that calls
   // it". No view did — and both LibrariesView and TVMainView carry comments explaining
   // why they deliberately call refreshProgressFromLocal directly instead.
+
+  // MARK: - Profiles
+
+  /// Loads the account's profile list and records what it proves about profile support
+  /// (ProfileGate). On a list: caches it for the offline picker (FR-263), hands progress
+  /// recorded before profiles existed to the owner explicitly (FR-233), and enters a
+  /// single-profile account straight into its only profile (AC-002-40). On failure only a
+  /// 404 changes anything (server predates profiles); offline, timeouts and 5xx leave
+  /// support unknown, so progress traffic stays held and is retried on the next sync.
+  func refreshProfiles() async {
+    guard !isDemoMode, sessionToken != nil else { return }
+    do {
+      let resp = try await api.profiles()
+      profileSupport = .supported
+      ActiveProfileStore.shared.setCachedProfiles(resp.profiles)
+      if let owner = resp.profiles.first(where: \.isOwner) {
+        await LocalStore.shared.claimLegacyRows(ownerID: owner.id)
+      } else {
+        homeLog.error("refreshProfiles: list has no owner — legacy progress left unclaimed")
+      }
+      if ActiveProfileStore.shared.activeProfileID == nil, resp.profiles.count == 1,
+         let only = resp.profiles.first {
+        ActiveProfileStore.shared.setActive(only)
+        await LocalStore.shared.setActiveProfile(ProfileScope(profile: only))
+      }
+      homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(ActiveProfileStore.shared.activeProfileID ?? "none")")
+    } catch {
+      profileSupport = ProfileGate.support(afterProfilesError: error)
+      homeLog.warning("refreshProfiles: failed — \(error.localizedDescription); support=\(String(describing: self.profileSupport))")
+    }
+  }
 
   // MARK: - Watchlist
 
@@ -2537,6 +2612,12 @@ final class AppState {
 
   func loadWatchlist() async {
     guard !isDemoMode, sessionToken != nil else { return }
+    // Header-less, this would show the most restricted profile's list (FR-221).
+    guard ProfileGate.progressSyncAllowed(
+      scope: await LocalStore.shared.activeScope, support: profileSupport) else {
+      homeLog.info("loadWatchlist: held — no active profile yet")
+      return
+    }
     do {
       let resp = try await api.watchlist()
       watchlistItems = resp.items
@@ -2558,6 +2639,12 @@ final class AppState {
 
   func toggleWatchlist(item: ItemSummary) async {
     guard !isDemoMode else { return }
+    // Header-less, the write would land on the most restricted profile's list (FR-221).
+    guard ProfileGate.progressSyncAllowed(
+      scope: await LocalStore.shared.activeScope, support: profileSupport) else {
+      homeLog.warning("toggleWatchlist: held — no active profile yet")
+      return
+    }
     // TASK-820: optimistic update, but revert on server failure so the UI can't
     // diverge silently from the server until the next full sync.
     let alreadyIn = watchlistItems.contains(where: { $0.id == item.id })

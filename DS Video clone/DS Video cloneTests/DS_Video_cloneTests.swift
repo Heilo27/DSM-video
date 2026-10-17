@@ -3237,3 +3237,132 @@ struct TopShelfSnapshotTests {
     #expect(progress(position: -5, duration: 100) == 0)
   }
 }
+
+// MARK: - TASK-917 · Legacy progress attribution (FR-221, FR-233, ProfileGate)
+
+/// Bug: until the profile list loads, requests carry no X-DSVideo-Profile, so a family
+/// account's server serves the MOST RESTRICTED profile (FR-221). Pending pre-profile rows
+/// then uploaded to a kid, and the kid's progress downloaded into the legacy bucket that is
+/// later handed to the owner. Rule: no progress/watchlist traffic while no profile is
+/// active on a server that may have profiles; legacy rows go to the owner by an explicit
+/// claim, never by a header-less request. No row lost, no row attributed to a kid.
+@MainActor
+struct LegacyProgressAttributionTests {
+
+  // MARK: Gate: the three ways the list can be missing
+
+  /// Offline launch: GET /profiles never reaches the server, so support stays unknown and
+  /// nothing progress-shaped may leave the device header-less.
+  @Test func offlineLaunchHoldsProgressSync() {
+    for code in [URLError.Code.notConnectedToInternet, .cannotFindHost, .networkConnectionLost] {
+      let support = ProfileGate.support(afterProfilesError: APIError.connection(code))
+      #expect(support == .unknown, "offline (\(code.rawValue)) proves nothing about profiles")
+      #expect(!ProfileGate.progressSyncAllowed(scope: .legacy, support: support))
+    }
+    #expect(!ProfileGate.progressSyncAllowed(
+      scope: .legacy, support: ProfileGate.support(afterProfilesError: APIError.network)))
+  }
+
+  /// Failed list load: the server answered, but not with the list. Only a 404 means "no
+  /// profiles here"; 5xx, timeout and 401 must keep the gate shut.
+  @Test func failedListLoadHoldsProgressSync() {
+    let failures: [APIError] = [
+      .http(500), .http(502), .http(401),
+      .server("internal_error", status: 500),
+      .server("unauthorized", status: 401),
+      .connection(.timedOut),
+      // A profile-level 404 comes from a server that DOES have profiles.
+      .server("unknown_profile", status: 404),
+    ]
+    for failure in failures {
+      let support = ProfileGate.support(afterProfilesError: failure)
+      #expect(support == .unknown, "\(failure) must not read as 'server has no profiles'")
+      #expect(!ProfileGate.progressSyncAllowed(scope: .legacy, support: support))
+    }
+  }
+
+  /// Sync before list: a fresh session has learned nothing yet, and LocalStore starts in
+  /// the legacy scope with no active profile, so the first sync pass is held.
+  @Test func syncBeforeListLoadIsHeld() async throws {
+    let state = AppState()
+    #expect(state.profileSupport == .unknown, "support is learned per session, never assumed")
+
+    let dir = try makeTempContainer("attr-sync-first")
+    defer { removeTempContainer(dir) }
+    let store = await LocalStore.makeForTesting(databaseURL: dir.appendingPathComponent("dsreel.db"))
+    let scope = await store.activeScope
+    #expect(scope.isLegacy && scope.headerValue == nil, "precondition: no active profile")
+    #expect(!ProfileGate.progressSyncAllowed(scope: scope, support: state.profileSupport))
+    #expect(!ProfileGate.progressSyncAllowed(scope: scope, support: .supported),
+            "a loaded list with no CHOSEN profile is still header-less")
+  }
+
+  /// The paired negatives: the gate must not wedge the two legitimate cases.
+  @Test func gateOpensForAnOldServerOrAnActiveProfile() {
+    // A server that predates profiles: header-less IS the account. Legacy keeps working.
+    #expect(ProfileGate.support(afterProfilesError: APIError.http(404)) == .unsupported)
+    #expect(ProfileGate.support(afterProfilesError: APIError.server("not_found", status: 404)) == .unsupported)
+    #expect(ProfileGate.progressSyncAllowed(scope: .legacy, support: .unsupported))
+    // An active profile names itself on every request, whatever support is known.
+    let kid = ProfileScope(id: "p-kid", maxAgeLevel: 1)
+    for support in [ProfileSupport.unknown, .supported, .unsupported] {
+      #expect(ProfileGate.progressSyncAllowed(scope: kid, support: support))
+    }
+  }
+
+  // MARK: Store: held rows survive, then go to the owner and only the owner
+
+  /// Rows recorded before any profile is known stay pending in the legacy bucket while the
+  /// gate is shut, then the explicit owner claim moves every one of them, still pending, to
+  /// the owner. The kid's bucket and its own rows are untouched.
+  @Test func heldLegacyRowsAreClaimedByTheOwnerWithNothingLost() async throws {
+    let dir = try makeTempContainer("attr-claim")
+    defer { removeTempContainer(dir) }
+    let store = await LocalStore.makeForTesting(databaseURL: dir.appendingPathComponent("dsreel.db"))
+    #expect(await store.isUnavailable == false, "precondition: the test store must actually open")
+
+    // Offline launch: two titles watched before the list loaded, written to '' as pending.
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 600, durationSeconds: 7200)
+    await store.upsertSingleProgress(itemId: "ep-1", positionSeconds: 120, durationSeconds: 1500)
+    // The kid already has its own synced position on another title.
+    await store.upsertProgress(
+      ["mv-cars": ItemProgress(positionSeconds: 300, durationSeconds: 6000, updatedAt: "2026-10-01T00:00:00Z")], profileID: "p-kid")
+
+    // Gate shut: the rows are still there, still pending, still unattributed.
+    #expect(!ProfileGate.progressSyncAllowed(scope: await store.activeScope, support: .unknown))
+    #expect(await store.pendingProgressCount(profileID: "") == 2, "held rows are not dropped")
+
+    await store.claimLegacyRows(ownerID: "p-owner")
+
+    let owner = await store.pendingProgress(profileID: "p-owner")
+    #expect(Set(owner.map(\.itemId)) == ["mv-dune", "ep-1"], "every held row reaches the owner")
+    #expect(owner.first(where: { $0.itemId == "mv-dune" })?.positionSeconds == 600)
+    #expect(await store.pendingProgressCount(profileID: "") == 0, "legacy bucket emptied")
+    #expect(await store.pendingProgressCount(profileID: "p-kid") == 0, "nothing queued for the kid")
+
+    // Ceiling opened on purpose: these fixtures have no item rows (unrated = 4), and this
+    // test is about WHOSE row it is, not the age filter.
+    await store.setActiveProfile(ProfileScope(id: "p-kid", maxAgeLevel: ProfileScope.unrestrictedLevel))
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 0, "the kid does not inherit the owner's place")
+    #expect(await store.getProgressSeconds(itemId: "mv-cars") == 300, "the kid's own row is untouched")
+    await store.setActiveProfile(ProfileScope(id: "p-owner", maxAgeLevel: 4))
+    #expect(await store.getProgressSeconds(itemId: "mv-dune") == 600)
+    #expect(await store.getProgressSeconds(itemId: "mv-cars") == 0, "the owner does not inherit the kid's place")
+  }
+
+  /// Where the owner already holds a synced row for a title, an unsent legacy write is the
+  /// newer local truth and wins, staying pending so it still uploads (under the owner).
+  @Test func claimKeepsAnUnsentLegacyWriteOverTheOwnersSyncedRow() async throws {
+    let dir = try makeTempContainer("attr-conflict")
+    defer { removeTempContainer(dir) }
+    let store = await LocalStore.makeForTesting(databaseURL: dir.appendingPathComponent("dsreel.db"))
+    await store.upsertProgress(
+      ["mv-dune": ItemProgress(positionSeconds: 100, durationSeconds: 7200, updatedAt: "2026-10-01T00:00:00Z")], profileID: "p-owner")
+    await store.upsertSingleProgress(itemId: "mv-dune", positionSeconds: 900, durationSeconds: 7200)
+
+    await store.claimLegacyRows(ownerID: "p-owner")
+
+    let owner = await store.pendingProgress(profileID: "p-owner")
+    #expect(owner.count == 1 && owner.first?.positionSeconds == 900)
+  }
+}

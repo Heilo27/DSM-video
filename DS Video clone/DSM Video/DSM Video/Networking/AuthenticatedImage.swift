@@ -120,6 +120,8 @@ enum ImagePrefetcher {
         if usesTunnelCookie {
           req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
         }
+        // AC-002-44: every request from the app names the active profile.
+        ActiveProfileStore.shared.applyHeader(to: &req)
         // No retry here on purpose: a prefetch that misses costs nothing, and the
         // visible-cell load will retry properly when the card actually appears.
         guard let (data, response) = try? await ImageSession.shared.data(for: req),
@@ -300,6 +302,8 @@ struct AuthenticatedImage: View {
       if usesTunnel {
         req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
+      // AC-002-44: every request from the app names the active profile.
+      ActiveProfileStore.shared.applyHeader(to: &req)
 
       // Retry transient failures. Previously a single dropped packet or a NAS busy
       // for one second greyed the card permanently — nothing retried until the token

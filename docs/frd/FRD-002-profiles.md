@@ -153,6 +153,11 @@ or watchlist entry changes value. Safety envelope, all required:
 profile. The device's local progress is kept per profile, and its progress sync cursor is per profile, so
 switching profiles never mixes or overwrites another profile's positions (FRD-001 FR-014, FR-015, FR-019
 apply per profile).
+Until the device knows which profile it is acting for (an offline launch, a profile list that failed to
+load, or a sync that started before the list loaded), it neither uploads nor downloads positions, nor reads
+or changes the watchlist: that traffic waits, and positions stay on the device, until a profile is active
+or the server proves it has no profiles. Stored positions reach the owner only by that explicit hand-over,
+never by a request without a profile, which FR-221 would serve for the most restricted profile.
 
 ## 6. Age ratings
 
@@ -442,6 +447,7 @@ tvOS (TASK-917)
 - **AC-002-43** Given a restricted profile offline, no local read shows a title above its level. Given a PIN-protected profile offline, it cannot be entered, and the picker explains why. (FR-262, FR-263)
 - **AC-002-44** Given an active profile, every request from the app, the Top Shelf extension and App Intents carries its `X-DSVideo-Profile`, and Top Shelf shows no title above its level. (FR-220, FR-264)
 - **AC-002-45** Given a device upgraded with stored positions, those positions appear under the owner profile, and local progress written later is kept per profile. (FR-233)
+- **AC-002-45a** Given an upgraded device in a family account holding unsent positions, launched offline, or whose profile list fails to load, or which syncs before the list loads: no position is lost and none appears under a restricted profile; they appear under the owner once the list loads. (FR-233, FR-221)
 - **AC-002-46** Given a profile deletion, the confirmation says that the profile's history and watchlist will be permanently deleted. (FR-206, FR-266)
 - **AC-002-47** Given a restricted profile and a library with no titles at its level, the empty state names the level, and it differs from both the empty-library state and the load-failure state. (FR-265)
 - **AC-002-48** Given the release that enables server enforcement, the iOS/iPadOS app also offers the picker and sends `X-DSVideo-Profile`. (FR-267)

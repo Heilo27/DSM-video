@@ -959,6 +959,8 @@ final class DownloadManager: NSObject {
       if usesTunnelCookieProvider?() == true {
         req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
       }
+      // AC-002-44: every request from the app names the active profile.
+      ActiveProfileStore.shared.applyHeader(to: &req)
 
       do {
         let (data, response) = try await URLSession.shared.data(for: req)
