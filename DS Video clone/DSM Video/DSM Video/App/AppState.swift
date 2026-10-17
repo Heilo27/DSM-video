@@ -150,6 +150,38 @@ final class AppState {
   /// The last picker moment not yet settled against a FRESH profile list. Kept because the
   /// moment (pairing, launch) usually arrives before `GET /profiles` answers.
   private var pendingPickerTrigger: ProfilePickerTrigger?
+
+  /// Bumped whenever ActiveProfileStore changes from here, so views observing the computed
+  /// profile properties below re-render. The store stays the ONE home of the data (it is
+  /// app-group UserDefaults, which Observation cannot see); this only makes reads tracked.
+  private var profileRevision = 0
+  /// The account's profile limit as the server last stated it (FR-200).
+  private var serverMaxProfiles: Int?
+  /// The age ladder's display labels from GET /profiles/age-levels. Display only: the
+  /// ladder itself is never re-implemented here. Empty until the server has answered.
+  private(set) var ageLevels: [AgeLevelsResponse.Level] = []
+
+  /// The account's profiles as last known (fresh list, else the cached one) (FR-263).
+  var profiles: [Profile] {
+    _ = profileRevision
+    return ActiveProfileStore.shared.cachedProfiles
+  }
+
+  /// The profile this device is acting for, if one is chosen and still listed.
+  var activeProfile: Profile? {
+    _ = profileRevision
+    guard let id = ActiveProfileStore.shared.activeProfileID else { return nil }
+    return ActiveProfileStore.shared.cachedProfiles.first { $0.id == id }
+  }
+
+  /// FR-200's limit, owner included. The server enforces it (`profile_limit_reached`).
+  var maxProfiles: Int { serverMaxProfiles ?? 4 }
+
+  /// The display label for an age level ("Little Kids"), or nil before the server has sent
+  /// the ladder. Callers fall back to wording that does not name the level.
+  func ageLevelLabel(_ level: Int) -> String? {
+    ageLevels.first { $0.level == level }?.label
+  }
   /// When the app last went to the background, for the tvOS 30-minute rule.
   private var enteredBackgroundAt: Date?
 
@@ -850,6 +882,9 @@ final class AppState {
     // send this account's profile id.
     profileSupport = .unknown
     ActiveProfileStore.shared.clearAll()
+    serverMaxProfiles = nil
+    ageLevels = []
+    profileRevision += 1
     needsProfilePicker = false
     pendingPickerTrigger = nil
     enteredBackgroundAt = nil
@@ -2642,6 +2677,8 @@ final class AppState {
       let resp = try await api.profiles()
       profileSupport = .supported
       ActiveProfileStore.shared.setCachedProfiles(resp.profiles)
+      serverMaxProfiles = resp.maxProfiles
+      defer { profileRevision += 1 }
       if let owner = resp.profiles.first(where: \.isOwner) {
         await LocalStore.shared.claimLegacyRows(ownerID: owner.id)
       } else {
@@ -2655,6 +2692,15 @@ final class AppState {
         ActiveProfileStore.shared.setActive(nil)
         await LocalStore.shared.setActiveProfile(.legacy)
         discardProfileScopedHomeState()
+      } else if let remembered = ActiveProfileStore.shared.activeProfileID,
+                let fresh = resp.profiles.first(where: { $0.id == remembered }),
+                fresh.maxAgeLevel != ActiveProfileStore.shared.activeScope.maxAgeLevel {
+        // The active profile's age level was changed (here or on another device). The local
+        // fallback must filter by the NEW ceiling from now on (FR-262); the next home load
+        // re-reads under it. Same profile, so nothing else is discarded.
+        homeLog.info("refreshProfiles: active profile's level is now \(fresh.maxAgeLevel)")
+        ActiveProfileStore.shared.setActive(fresh)
+        await LocalStore.shared.setActiveProfile(ProfileScope(profile: fresh))
       }
       if ActiveProfileStore.shared.activeProfileID == nil, resp.profiles.count == 1,
          let only = resp.profiles.first {
@@ -2662,12 +2708,32 @@ final class AppState {
         await LocalStore.shared.setActiveProfile(ProfileScope(profile: only))
       }
       evaluateProfilePicker(listIsFresh: true)
+      await loadAgeLevelsIfNeeded()
       homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(ActiveProfileStore.shared.activeProfileID ?? "none") picker=\(self.needsProfilePicker)")
     } catch {
       profileSupport = ProfileGate.support(afterProfilesError: error)
       homeLog.warning("refreshProfiles: failed — \(error.localizedDescription); support=\(String(describing: self.profileSupport))")
     }
   }
+
+  /// Fetches the age ladder's display labels once per session (GET /profiles/age-levels).
+  func loadAgeLevelsIfNeeded() async {
+    guard ageLevels.isEmpty, !isDemoMode, sessionToken != nil else { return }
+    do {
+      ageLevels = try await api.ageLevels().levels
+    } catch {
+      // Display labels only: empty states and the tier picker fall back to wording that
+      // does not name the level. Retried on the next call.
+      homeLog.warning("loadAgeLevelsIfNeeded: failed — \(error.localizedDescription)")
+    }
+  }
+
+  #if DEBUG
+  /// QA hook only (ProfileScreenPreviewHost): the ladder labels without a server.
+  func seedAgeLevelsForPreview(_ levels: [AgeLevelsResponse.Level]) {
+    ageLevels = levels
+  }
+  #endif
 
   // MARK: - Profile picker gate (FR-260)
 
@@ -2719,6 +2785,7 @@ final class AppState {
     let wasActive = ActiveProfileStore.shared.activeProfileID == profile.id
     needsProfilePicker = false
     pendingPickerTrigger = nil
+    defer { profileRevision += 1 }
     // Re-choosing the profile already on screen (tvOS asks at launch and after 30 minutes)
     // is not a switch: keep what is shown and let homeLoad refresh it.
     if wasActive && !homeAllRailsEmpty {

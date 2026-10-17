@@ -154,11 +154,16 @@ struct TVShowsView: View {
         #endif
       } else if shows.isEmpty {
         VStack(spacing: 24) {
-          DSContentUnavailable(
-            title: "No TV Shows",
-            systemImage: "tv",
-            description: "No TV shows found in this library."
-          )
+          if let profile = appState.activeProfile, profile.isRestricted {
+            // FR-265: the list is filtered by the profile's level.
+            RestrictedEmptyState(profile: profile, place: library.title)
+          } else {
+            DSContentUnavailable(
+              title: "No TV Shows",
+              systemImage: "tv",
+              description: "No TV shows found in this library."
+            )
+          }
           // TASK-799: give the empty state a focusable action so tvOS focus has a home.
           Button("Refresh") {
             Task { await load() }

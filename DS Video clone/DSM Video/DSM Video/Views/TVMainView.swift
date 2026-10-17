@@ -9,8 +9,27 @@ struct TVMainView: View {
 
   var body: some View {
     Group {
+      #if DEBUG
+      if let screen = ProfileScreenPreview.requested {
+        ProfileScreenPreviewHost(screen: screen)
+      } else {
+        root
+      }
+      #else
+      root
+      #endif
+    }
+  }
+
+  @ViewBuilder
+  private var root: some View {
+    Group {
       if appState.sessionToken == nil {
         TVPairingView()
+      } else if appState.needsProfilePicker {
+        // FR-260: pairing → picker → home. Home is not built while the picker shows, so no
+        // rail from the remembered profile can render or take focus behind it.
+        ProfilePickerView()
       } else {
         TVHomeView()
       }
@@ -311,6 +330,10 @@ private struct TVHomeView: View {
       // positioned by us, respects title-safe, and joins the normal focus order.
       .safeAreaInset(edge: .top, spacing: 0) {
         HStack(spacing: 24) {
+          // The active profile; selecting it opens the picker (FR-260). Absent for a
+          // single-profile account (FR-205).
+          ActiveProfileBadge(size: 56)
+
           Button { showSettings = true } label: {
             Image(systemName: "gear").foregroundStyle(.white)
           }
@@ -1049,6 +1072,7 @@ private struct TVSettingsView: View {
   @AppStorage(SubtitleStyle.backgroundOpacityKey) private var subtitleBackgroundOpacity: Double = 0.0
   // Theme selection (Classic / Nitrate). Shared key with the app entry and iOS Settings.
   @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
+  @FocusState private var switchProfileFocused: Bool
 
   var body: some View {
     NavigationStack {
@@ -1100,6 +1124,22 @@ private struct TVSettingsView: View {
             Text("Light").tag(0.4)
             Text("Medium").tag(0.7)
             Text("Solid").tag(1.0)
+          }
+        }
+
+        if appState.profiles.count > 1 {
+          Section("Profile") {
+            if let profile = appState.activeProfile {
+              LabeledContent("Watching as", value: profile.name)
+            }
+            Button {
+              dismiss()
+              appState.notePickerTrigger(.switchRequested)
+            } label: {
+              Label("Switch Profile", systemImage: "person.2")
+            }
+            .focused($switchProfileFocused)
+            .accessibilityIdentifier("settings.switchProfile")
           }
         }
 

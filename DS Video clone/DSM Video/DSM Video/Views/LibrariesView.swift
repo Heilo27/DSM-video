@@ -601,6 +601,11 @@ struct LibraryHomeView: View {
     // theme. Exactly one of the two is live for any given theme.
     .toolbar {
       if !ThemeHolder.shared.current.usesCinematicChrome {
+        // The active profile; tapping it opens the picker (FR-260). Hidden for a
+        // single-profile account (FR-205).
+        ToolbarItem(placement: .topBarLeading) {
+          ActiveProfileBadge(size: 30)
+        }
         ToolbarItem(placement: .topBarTrailing) {
           NavigationLink { SearchView(isEmbedded: true) } label: {
             Image(systemName: "magnifyingglass")
@@ -631,6 +636,13 @@ struct LibraryHomeView: View {
         .accessibilityHint("Search all movies and TV shows")
         .padding(.trailing, 16)
         .padding(.top, 8)
+      }
+    }
+    .overlay(alignment: .topLeading) {
+      if ThemeHolder.shared.current.usesCinematicChrome {
+        ActiveProfileBadge(size: 32)
+          .padding(.leading, 16)
+          .padding(.top, 8)
       }
     }
 

@@ -106,7 +106,11 @@ struct ItemsGridView: View {
           // the empty result, so the screen contradicted itself and blamed the wrong thing
           // (TASK-897 #3). Filtering is server-side, so `items` is empty in both cases and
           // only the filter state can tell them apart.
-          if selectedGenres.isEmpty {
+          if selectedGenres.isEmpty, let profile = appState.activeProfile, profile.isRestricted {
+            // FR-265: on an age-limited profile the grid is filtered by the server, so an
+            // empty one is about the profile's level, not the library.
+            RestrictedEmptyState(profile: profile, place: library.title)
+          } else if selectedGenres.isEmpty {
             DSContentUnavailable(
               title: "No Videos",
               systemImage: "film.stack",

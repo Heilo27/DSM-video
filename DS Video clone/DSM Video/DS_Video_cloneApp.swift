@@ -148,7 +148,13 @@ struct DS_Video_cloneApp: App {
             // TASK-738: refresh Continue Watching when returning to the foreground so it
             // reflects playback from another device. Skip the very first activation —
             // the initial cold load handles that.
+            // FR-260: tvOS asks for the profile again after a long absence. Background time
+            // is recorded here; the gate decides (iOS ignores it).
+            if newPhase == .background {
+                appState.noteEnteredBackground()
+            }
             guard newPhase == .active else { return }
+            appState.noteReturnedToForeground()
             if didBecomeActiveOnce {
                 // TASK-787: single foreground owner — revalidate connection (LAN→WAN
                 // cascade if the stored address went stale while backgrounded) then

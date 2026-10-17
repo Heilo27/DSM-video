@@ -1425,6 +1425,22 @@ struct SettingsView: View {
     @Bindable var appState = appState
 
     let form = Form {
+      // FR-260: "Switch profile" is always available once the account has profiles to
+      // switch between. A single-profile account sees nothing new (FR-205).
+      if appState.profiles.count > 1 {
+        Section("Profile") {
+          if let profile = appState.activeProfile {
+            LabeledContent("Watching as", value: profile.name)
+          }
+          Button {
+            appState.notePickerTrigger(.switchRequested)
+          } label: {
+            Label("Switch Profile", systemImage: "person.2")
+          }
+          .accessibilityIdentifier("settings.switchProfile")
+        }
+      }
+
       Section {
         // A14: read-only connected-server display + Change Server (mirrors tvOS).
         // TASK-809: long QuickConnect/DDNS URLs must truncate rather than overflow the row.

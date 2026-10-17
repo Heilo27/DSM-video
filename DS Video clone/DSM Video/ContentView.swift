@@ -49,6 +49,10 @@ struct RootView: View {
                 // nothing to route around — ServerSetupView prefills the saved address and
                 // credentials and skips the network scan when it recognises the user.
                 ServerSetupView()
+            } else if appState.needsProfilePicker {
+                // FR-260: after sign-in, on "Switch profile", or when the remembered profile
+                // is gone. Home is not built behind it, so nothing from another profile shows.
+                ProfilePickerView()
             } else {
                 MainView(layout: resolvedLayout)
                     .onAppear {
@@ -70,6 +74,11 @@ struct RootView: View {
                 }
                 .ignoresSafeArea()
             }
+        }
+        // FR-206: the server said the active profile no longer exists. A fresh list drops it
+        // and brings the picker back (refreshProfiles).
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileRejected)) { _ in
+            Task { @MainActor in await appState.refreshProfiles() }
         }
         .onChange(of: appState.sessionToken) { _, newToken in
             if newToken == nil {

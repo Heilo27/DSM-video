@@ -1,0 +1,1124 @@
+import SwiftUI
+
+// MARK: - Profile screens (FRD-002 §8: FR-260, FR-263, FR-266; AC-002-40/40a/41/43/46)
+//
+// One set of screens for both platforms, sized per platform. Every Button here carries a
+// .focused() binding (the tvOS focus rule; scripts/check-tvos-focus.sh guards the flat
+// enums below). Dynamic rows (profiles, avatars, tiers) bind String/Int focus values.
+//
+// Actions go through AppState only (AppState+Profiles.swift); wording comes from ProfileText.
+
+// MARK: - Avatars
+
+/// The apps' built-in avatar set (FR-203: a key from a fixed set, no uploads). A key the
+/// app does not know (another app version's, or none) renders as the name's initial.
+nonisolated enum ProfileAvatar: String, CaseIterable, Identifiable, Sendable {
+  case cat, dog, hare, bird, fish, tortoise, ladybug, lizard, leaf, star, bolt, moon
+
+  var id: String { rawValue }
+
+  var symbol: String {
+    switch self {
+    case .cat: return "cat.fill"
+    case .dog: return "dog.fill"
+    case .hare: return "hare.fill"
+    case .bird: return "bird.fill"
+    case .fish: return "fish.fill"
+    case .tortoise: return "tortoise.fill"
+    case .ladybug: return "ladybug.fill"
+    case .lizard: return "lizard.fill"
+    case .leaf: return "leaf.fill"
+    case .star: return "star.fill"
+    case .bolt: return "bolt.fill"
+    case .moon: return "moon.stars.fill"
+    }
+  }
+
+  /// Display name for VoiceOver ("Cat avatar").
+  var spokenName: String { rawValue.capitalized }
+
+  /// Hue in degrees; each avatar gets its own colour so tiles read apart at a glance.
+  var hue: Double {
+    switch self {
+    case .cat: return 18
+    case .dog: return 38
+    case .hare: return 330
+    case .bird: return 200
+    case .fish: return 185
+    case .tortoise: return 140
+    case .ladybug: return 0
+    case .lizard: return 95
+    case .leaf: return 120
+    case .star: return 48
+    case .bolt: return 265
+    case .moon: return 228
+    }
+  }
+}
+
+struct ProfileAvatarView: View {
+  let avatar: String
+  let name: String
+  var size: CGFloat
+
+  private var known: ProfileAvatar? { ProfileAvatar(rawValue: avatar) }
+
+  private var hue: Double {
+    if let known { return known.hue }
+    // Unknown key: a stable colour from the name, so the same profile always looks the same.
+    let sum = name.unicodeScalars.reduce(0) { ($0 &+ Int($1.value)) % 360 }
+    return Double(sum)
+  }
+
+  var body: some View {
+    RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)
+      .fill(LinearGradient(
+        colors: [Color(hue: hue / 360, saturation: 0.62, brightness: 0.78),
+                 Color(hue: hue / 360, saturation: 0.78, brightness: 0.42)],
+        startPoint: .topLeading, endPoint: .bottomTrailing))
+      .frame(width: size, height: size)
+      .overlay {
+        if let known {
+          Image(systemName: known.symbol)
+            .font(.system(size: size * 0.42, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.95))
+        } else {
+          Text(String(name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased())
+            .font(.system(size: size * 0.44, weight: .bold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.95))
+        }
+      }
+      .accessibilityHidden(true)
+  }
+}
+
+// MARK: - Platform metrics
+
+private enum ProfileMetrics {
+  #if os(tvOS)
+  static let tile: CGFloat = 230
+  static let tileName: Font = .system(size: 30, weight: .semibold)
+  static let title: Font = .system(size: 60, weight: .bold)
+  static let body: Font = .system(size: 28, weight: .regular)
+  static let spacing: CGFloat = 56
+  static let key: CGFloat = 112
+  static let keyFont: Font = .system(size: 44, weight: .semibold, design: .rounded)
+  static let dot: CGFloat = 26
+  #else
+  static let tile: CGFloat = 112
+  static let tileName: Font = .system(size: 17, weight: .semibold)
+  static let title: Font = .system(size: 30, weight: .bold)
+  static let body: Font = .system(size: 16, weight: .regular)
+  static let spacing: CGFloat = 28
+  static let key: CGFloat = 76
+  static let keyFont: Font = .system(size: 32, weight: .medium, design: .rounded)
+  static let dot: CGFloat = 16
+  #endif
+}
+
+/// The picker/management tile: avatar lifts and gains a white ring when focused (tvOS) or
+/// pressed (iOS). A custom style rather than `.plain` so tvOS draws OUR focus treatment.
+private struct ProfileTileButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    TileBody(configuration: configuration)
+  }
+
+  private struct TileBody: View {
+    let configuration: Configuration
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+      let lifted = isFocused || configuration.isPressed
+      configuration.label
+        .scaleEffect(isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1))
+        .environment(\.profileTileLifted, lifted)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isFocused)
+        .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+  }
+}
+
+private struct ProfileTileLiftedKey: EnvironmentKey { static let defaultValue = false }
+private extension EnvironmentValues {
+  var profileTileLifted: Bool {
+    get { self[ProfileTileLiftedKey.self] }
+    set { self[ProfileTileLiftedKey.self] = newValue }
+  }
+}
+
+/// Avatar + name + optional caption, as used in every tile grid.
+private struct ProfileTileLabel<Art: View>: View {
+  let title: String
+  var caption: String?
+  var captionSymbol: String?
+  @ViewBuilder let art: () -> Art
+  @Environment(\.profileTileLifted) private var lifted
+
+  var body: some View {
+    VStack(spacing: 18) {
+      art()
+        .overlay(
+          RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)
+            .strokeBorder(.white, lineWidth: lifted ? ProfileMetrics.tile * 0.03 : 0))
+        .shadow(color: .black.opacity(lifted ? 0.6 : 0), radius: 24, y: 12)
+      Text(title)
+        .font(ProfileMetrics.tileName)
+        .foregroundStyle(lifted ? Color.white : Color.dsTextSecondary)
+        .lineLimit(1)
+      Group {
+        if let caption {
+          Label(caption, systemImage: captionSymbol ?? "lock.fill")
+            .labelStyle(.titleAndIcon)
+        } else {
+          Text(" ")
+        }
+      }
+      .font(ProfileMetrics.body.weight(.medium))
+      .foregroundStyle(Color.dsTextTertiary)
+    }
+    .frame(width: ProfileMetrics.tile + 24)
+  }
+}
+
+private struct AddTileArt: View {
+  var body: some View {
+    RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)
+      .strokeBorder(Color.dsTextTertiary, style: StrokeStyle(lineWidth: 3, dash: [10, 8]))
+      .frame(width: ProfileMetrics.tile, height: ProfileMetrics.tile)
+      .overlay(
+        Image(systemName: "plus")
+          .font(.system(size: ProfileMetrics.tile * 0.3, weight: .light))
+          .foregroundStyle(Color.dsTextSecondary))
+  }
+}
+
+private struct ProfileBackdrop: View {
+  var body: some View {
+    ZStack {
+      Color.black
+      RadialGradient(colors: [Color(white: 0.11), .black], center: .top,
+                     startRadius: 40, endRadius: 1100)
+    }
+    .ignoresSafeArea()
+  }
+}
+
+// MARK: - Picker (FR-260, FR-263)
+
+struct ProfilePickerView: View {
+  @Environment(AppState.self) private var appState
+
+  enum PickerControl: Hashable { case manage }
+
+  @State private var pinTarget: Profile?
+  @State private var offlineNotice: String?
+  @State private var management: ManagementEntry?
+  @FocusState private var focusedProfile: String?
+  @FocusState private var focusedControl: PickerControl?
+
+  private static let addTileID = "__add__"
+
+  var body: some View {
+    let profiles = Array(appState.profiles.prefix(appState.maxProfiles))
+    ZStack {
+      ProfileBackdrop()
+      VStack(spacing: ProfileMetrics.spacing) {
+        Spacer(minLength: 0)
+        Text("Who's watching?")
+          .font(ProfileMetrics.title)
+          .foregroundStyle(.white)
+          .accessibilityAddTraits(.isHeader)
+
+        tiles(profiles)
+
+        if let offlineNotice {
+          Label(offlineNotice, systemImage: "wifi.exclamationmark")
+            .font(ProfileMetrics.body)
+            .foregroundStyle(Color.dsWarning)
+            .multilineTextAlignment(.center)
+            .transition(.opacity)
+        }
+
+        Button {
+          management = .manage
+        } label: {
+          Label("Manage Profiles", systemImage: "pencil")
+            .font(ProfileMetrics.body.weight(.semibold))
+            #if os(iOS)
+            .padding(.horizontal, 20).padding(.vertical, 10)
+            #endif
+        }
+        .buttonStyle(.bordered)
+        .tint(.white)
+        .focused($focusedControl, equals: .manage)
+        .accessibilityHint("Requires the owner's PIN")
+        .accessibilityIdentifier("profilePicker.manage")
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 60)
+    }
+    .task { await appState.refreshProfiles() }
+    .onAppear {
+      if focusedProfile == nil {
+        focusedProfile = appState.activeProfile?.id ?? profiles.first?.id
+      }
+    }
+    .fullScreenCover(item: $pinTarget) { profile in
+      ProfilePinEntryView(profile: profile) { pinTarget = nil }
+        .environment(appState)
+    }
+    .fullScreenCover(item: $management) { entry in
+      ProfileManagementView(startWithAdd: entry == .add) { management = nil }
+        .environment(appState)
+    }
+  }
+
+  @ViewBuilder
+  private func tiles(_ profiles: [Profile]) -> some View {
+    let content = ForEach(profiles) { profile in
+      Button { choose(profile) } label: {
+        ProfileTileLabel(
+          title: profile.name,
+          caption: profile.hasPin ? "PIN" : nil) {
+            ProfileAvatarView(avatar: profile.avatar, name: profile.name,
+                              size: ProfileMetrics.tile)
+        }
+      }
+      .buttonStyle(ProfileTileButtonStyle())
+      .focused($focusedProfile, equals: profile.id)
+      .accessibilityLabel(profile.name)
+      .accessibilityHint(profile.hasPin ? "Protected by a PIN" : "Opens this profile")
+      .accessibilityIdentifier("profilePicker.profile.\(profile.name)")
+    }
+    let add = Group {
+      if profiles.count < appState.maxProfiles {
+        Button { management = .add } label: {
+          ProfileTileLabel(title: "Add Profile") { AddTileArt() }
+        }
+        .buttonStyle(ProfileTileButtonStyle())
+        .focused($focusedProfile, equals: Self.addTileID)
+        .accessibilityHint("Requires the owner's PIN")
+        .accessibilityIdentifier("profilePicker.add")
+      }
+    }
+    #if os(tvOS)
+    HStack(alignment: .top, spacing: 64) { content; add }
+      .focusSection()
+    #else
+    LazyVGrid(columns: [GridItem(.adaptive(minimum: ProfileMetrics.tile + 24), spacing: 24)],
+              spacing: 28) { content; add }
+      .frame(maxWidth: 560)
+    #endif
+  }
+
+  private func choose(_ profile: Profile) {
+    guard profile.hasPin else {
+      offlineNotice = nil
+      Task { await appState.switchProfile(to: profile) }
+      return
+    }
+    // FR-263: a PIN can only be checked by the NAS. Say so instead of offering a pad that
+    // can only fail.
+    if appState.isOffline {
+      withAnimation { offlineNotice = ProfileText.pinNeedsNAS }
+      return
+    }
+    offlineNotice = nil
+    pinTarget = profile
+  }
+}
+
+enum ManagementEntry: String, Identifiable {
+  case manage, add
+  var id: String { rawValue }
+}
+
+// MARK: - PIN pad
+
+/// What the caller decided about an entered PIN.
+enum PinPadOutcome: Equatable {
+  case accept
+  /// Shown under the dots; the digits clear for another try.
+  case reject(String)
+}
+
+/// A 4-digit pad driven by the Siri Remote on tvOS and by touch on iOS. Submits itself on
+/// the 4th digit; the caller verifies (always on the server, FR-213).
+struct PinPadView<Header: View>: View {
+  let title: String
+  var message: String?
+  let submit: (String) async -> PinPadOutcome
+  let cancel: () -> Void
+  @ViewBuilder let header: () -> Header
+
+  enum PinPadKey: Hashable { case k0, k1, k2, k3, k4, k5, k6, k7, k8, k9, delete, cancel }
+
+  @State private var digits = ""
+  @State private var error: String?
+  @State private var busy = false
+  @FocusState private var focusedKey: PinPadKey?
+
+  var body: some View {
+    ZStack {
+      ProfileBackdrop()
+      VStack(spacing: ProfileMetrics.spacing * 0.6) {
+        header()
+        Text(title)
+          .font(ProfileMetrics.title.weight(.semibold))
+          .foregroundStyle(.white)
+          .multilineTextAlignment(.center)
+          .accessibilityAddTraits(.isHeader)
+        dots
+        Group {
+          if let error {
+            Text(error).foregroundStyle(Color.dsError)
+          } else if let message {
+            Text(message).foregroundStyle(Color.dsTextSecondary)
+          } else {
+            Text(" ")
+          }
+        }
+        .font(ProfileMetrics.body)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 900)
+        .accessibilityIdentifier("pinPad.message")
+        keypad
+      }
+      .padding(40)
+    }
+    .onAppear { focusedKey = .k1 }
+    #if os(tvOS)
+    .onExitCommand { cancel() }
+    #endif
+  }
+
+  private var dots: some View {
+    HStack(spacing: ProfileMetrics.dot * 1.2) {
+      ForEach(0..<4, id: \.self) { i in
+        Circle()
+          .fill(i < digits.count ? Color.white : Color.clear)
+          .overlay(Circle().strokeBorder(Color.white.opacity(0.7), lineWidth: 2))
+          .frame(width: ProfileMetrics.dot, height: ProfileMetrics.dot)
+      }
+    }
+    .overlay { if busy { ProgressView().offset(y: ProfileMetrics.dot * 2) } }
+    .accessibilityElement()
+    .accessibilityLabel("\(digits.count) of 4 digits entered")
+  }
+
+  private var keypad: some View {
+    VStack(spacing: 18) {
+      HStack(spacing: 18) {
+        key("1").focused($focusedKey, equals: .k1)
+        key("2").focused($focusedKey, equals: .k2)
+        key("3").focused($focusedKey, equals: .k3)
+      }
+      HStack(spacing: 18) {
+        key("4").focused($focusedKey, equals: .k4)
+        key("5").focused($focusedKey, equals: .k5)
+        key("6").focused($focusedKey, equals: .k6)
+      }
+      HStack(spacing: 18) {
+        key("7").focused($focusedKey, equals: .k7)
+        key("8").focused($focusedKey, equals: .k8)
+        key("9").focused($focusedKey, equals: .k9)
+      }
+      HStack(spacing: 18) {
+        command("Cancel", symbol: nil, action: cancel)
+          .focused($focusedKey, equals: .cancel)
+          .accessibilityIdentifier("pinPad.cancel")
+        key("0").focused($focusedKey, equals: .k0)
+        command("Delete", symbol: "delete.left", action: deleteLast)
+          .focused($focusedKey, equals: .delete)
+          .accessibilityIdentifier("pinPad.delete")
+      }
+    }
+    .disabled(busy)
+    #if os(tvOS)
+    .focusSection()
+    #endif
+  }
+
+  private func key(_ digit: String) -> some View {
+    Button { append(digit) } label: {
+      Text(digit).font(ProfileMetrics.keyFont)
+        .frame(width: ProfileMetrics.key, height: ProfileMetrics.key)
+    }
+    .buttonStyle(PinKeyStyle())
+    .accessibilityIdentifier("pinPad.key.\(digit)")
+  }
+
+  private func command(_ title: String, symbol: String?, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Group {
+        if let symbol {
+          Image(systemName: symbol).font(ProfileMetrics.keyFont.weight(.regular))
+        } else {
+          Text(title).font(ProfileMetrics.body.weight(.semibold))
+        }
+      }
+      .frame(width: ProfileMetrics.key, height: ProfileMetrics.key)
+    }
+    .buttonStyle(PinKeyStyle(outlined: false))
+    .accessibilityLabel(title)
+  }
+
+  private func append(_ digit: String) {
+    guard !busy, digits.count < 4 else { return }
+    digits += digit
+    error = nil
+    guard digits.count == 4 else { return }
+    let entered = digits
+    busy = true
+    Task {
+      let outcome = await submit(entered)
+      busy = false
+      switch outcome {
+      case .accept:
+        digits = ""
+      case .reject(let message):
+        error = message
+        digits = ""
+        focusedKey = .k1
+      }
+    }
+  }
+
+  private func deleteLast() {
+    guard !digits.isEmpty else { return }
+    digits.removeLast()
+  }
+}
+
+private struct PinKeyStyle: ButtonStyle {
+  var outlined = true
+  func makeBody(configuration: Configuration) -> some View {
+    KeyBody(configuration: configuration, outlined: outlined)
+  }
+
+  private struct KeyBody: View {
+    let configuration: Configuration
+    let outlined: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+      let lit = isFocused || configuration.isPressed
+      configuration.label
+        .foregroundStyle(lit ? Color.black : Color.white)
+        .background(Circle().fill(lit ? Color.white : Color.white.opacity(outlined ? 0.1 : 0)))
+        .scaleEffect(isFocused ? 1.1 : 1)
+        .animation(.easeOut(duration: 0.15), value: isFocused)
+    }
+  }
+}
+
+/// Entering a PIN-protected profile (FR-213, AC-002-41): the server checks it every time.
+struct ProfilePinEntryView: View {
+  @Environment(AppState.self) private var appState
+  let profile: Profile
+  let dismiss: () -> Void
+
+  var body: some View {
+    PinPadView(title: "Enter the PIN for \(profile.name)") { pin in
+      switch await appState.verifyProfilePin(profile, pin: pin) {
+      case .success:
+        dismiss()
+        await appState.switchProfile(to: profile)
+        return .accept
+      case .failure(let error):
+        return .reject(ProfileText.pinFailure(error))
+      }
+    } cancel: {
+      dismiss()
+    } header: {
+      ProfileAvatarView(avatar: profile.avatar, name: profile.name, size: ProfileMetrics.tile * 0.6)
+    }
+  }
+}
+
+/// Choosing a new PIN: enter it, then enter it again. Hands the PIN to `chosen`, which
+/// returns nil when it was accepted or the reason it was not.
+struct NewPinView: View {
+  let title: String
+  let chosen: (String) async -> String?
+  let cancel: () -> Void
+
+  @State private var first: String?
+
+  var body: some View {
+    PinPadView(
+      title: first == nil ? title : "Enter it again",
+      message: first == nil ? "Choose 4 digits." : "To make sure it's right."
+    ) { pin in
+      guard let firstPin = first else {
+        first = pin
+        return .accept
+      }
+      guard firstPin == pin else {
+        first = nil
+        return .reject("Those PINs didn't match. Choose a PIN again.")
+      }
+      if let failure = await chosen(pin) {
+        first = nil
+        return .reject(failure)
+      }
+      return .accept
+    } cancel: {
+      cancel()
+    } header: {
+      Image(systemName: "lock.fill")
+        .font(.system(size: ProfileMetrics.tile * 0.25))
+        .foregroundStyle(Color.dsTextSecondary)
+    }
+    .id(first == nil ? "first" : "confirm")
+  }
+}
+
+// MARK: - Management (FR-211, FR-212, FR-266)
+
+struct ProfileManagementView: View {
+  @Environment(AppState.self) private var appState
+  let startWithAdd: Bool
+  let close: () -> Void
+
+  enum ManageControl: Hashable { case done }
+
+  /// The owner PIN for this management session only. Sent with each change because the
+  /// server requires it every time (FR-211); dropped when the screen closes.
+  @State private var ownerPin: String?
+  @State private var editing: EditorTarget?
+  /// Fixed when the screen opens, so setting the owner's first PIN (which flips `hasPin`
+  /// as the list refreshes) does not swap the pad for another one mid-flow.
+  @State private var ownerHadPin: Bool?
+  @FocusState private var focusedProfile: String?
+  @FocusState private var focusedControl: ManageControl?
+
+  private static let addTileID = "__add__"
+
+  private var owner: Profile? { appState.profiles.first(where: \.isOwner) }
+
+  var body: some View {
+    Group {
+      if let ownerPin {
+        list(ownerPin: ownerPin)
+      } else if let owner, ownerHadPin ?? owner.hasPin {
+        PinPadView(title: "Enter the owner's PIN",
+                   message: "Changing profiles needs \(owner.name)'s PIN.") { pin in
+          switch await appState.verifyProfilePin(owner, pin: pin) {
+          case .success:
+            unlock(with: pin)
+            return .accept
+          case .failure(let error):
+            return .reject(ProfileText.pinFailure(error))
+          }
+        } cancel: {
+          close()
+        } header: {
+          ProfileAvatarView(avatar: owner.avatar, name: owner.name, size: ProfileMetrics.tile * 0.6)
+        }
+      } else if let owner {
+        // FR-212: the owner sets a PIN before any other profile can exist. The first PIN
+        // needs no prior one, because only the account holder has a session here.
+        NewPinView(title: "Set a PIN for \(owner.name)") { pin in
+          switch await appState.updateProfile(id: owner.id, UpdateProfileRequest(ownerPin: nil, pin: .set(pin))) {
+          case .success:
+            unlock(with: pin)
+            return nil
+          case .failure(let error):
+            return ProfileText.saveFailure(error)
+          }
+        } cancel: {
+          close()
+        }
+      } else {
+        unavailable
+      }
+    }
+    .onAppear { if ownerHadPin == nil, let owner { ownerHadPin = owner.hasPin } }
+    .fullScreenCover(item: $editing) { target in
+      ProfileEditorView(target: target, ownerPin: ownerPin ?? "") { editing = nil }
+        .environment(appState)
+    }
+  }
+
+  private func unlock(with pin: String) {
+    ownerPin = pin
+    if startWithAdd, appState.profiles.count < appState.maxProfiles {
+      editing = .create
+    }
+  }
+
+  private var unavailable: some View {
+    ZStack {
+      ProfileBackdrop()
+      VStack(spacing: 32) {
+        Text("Profiles couldn't be loaded.")
+          .font(ProfileMetrics.title).foregroundStyle(.white)
+        Text(ProfileText.saveNeedsNAS)
+          .font(ProfileMetrics.body).foregroundStyle(Color.dsTextSecondary)
+        Button("Close", action: close)
+          .buttonStyle(.bordered)
+          .focused($focusedControl, equals: .done)
+      }
+    }
+    .task { await appState.refreshProfiles() }
+  }
+
+  private func list(ownerPin: String) -> some View {
+    let profiles = appState.profiles
+    return ZStack {
+      ProfileBackdrop()
+      VStack(spacing: ProfileMetrics.spacing) {
+        Spacer(minLength: 0)
+        Text("Manage Profiles")
+          .font(ProfileMetrics.title)
+          .foregroundStyle(.white)
+          .accessibilityAddTraits(.isHeader)
+        let tiles = Group {
+          ForEach(profiles) { profile in
+            Button { editing = .edit(profile) } label: {
+              ProfileTileLabel(title: profile.name,
+                               caption: appState.ageLevelLabel(profile.maxAgeLevel),
+                               captionSymbol: profile.hasPin ? "lock.fill" : "person.fill") {
+                ProfileAvatarView(avatar: profile.avatar, name: profile.name, size: ProfileMetrics.tile)
+                  .overlay {
+                    Image(systemName: "pencil")
+                      .font(.system(size: ProfileMetrics.tile * 0.22, weight: .semibold))
+                      .foregroundStyle(.white)
+                      .frame(width: ProfileMetrics.tile, height: ProfileMetrics.tile)
+                      .background(.black.opacity(0.45),
+                                  in: RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16,
+                                                       style: .continuous))
+                  }
+              }
+            }
+            .buttonStyle(ProfileTileButtonStyle())
+            .focused($focusedProfile, equals: profile.id)
+            .accessibilityLabel("Edit \(profile.name)")
+            .accessibilityIdentifier("profileManage.profile.\(profile.name)")
+          }
+          if profiles.count < appState.maxProfiles {
+            Button { editing = .create } label: {
+              ProfileTileLabel(title: "Add Profile") { AddTileArt() }
+            }
+            .buttonStyle(ProfileTileButtonStyle())
+            .focused($focusedProfile, equals: Self.addTileID)
+            .accessibilityIdentifier("profileManage.add")
+          }
+        }
+        #if os(tvOS)
+        HStack(alignment: .top, spacing: 64) { tiles }.focusSection()
+        #else
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: ProfileMetrics.tile + 24), spacing: 24)],
+                  spacing: 28) { tiles }
+          .frame(maxWidth: 560)
+        #endif
+        Button("Done", action: close)
+          .font(ProfileMetrics.body.weight(.semibold))
+          .buttonStyle(.borderedProminent)
+          .tint(.white)
+          .foregroundStyle(.black)
+          .focused($focusedControl, equals: .done)
+          .accessibilityIdentifier("profileManage.done")
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 60)
+    }
+    .onAppear { if focusedProfile == nil { focusedProfile = profiles.first?.id } }
+    #if os(tvOS)
+    .onExitCommand { close() }
+    #endif
+  }
+}
+
+enum EditorTarget: Identifiable, Equatable {
+  case create
+  case edit(Profile)
+  var id: String {
+    switch self {
+    case .create: return "create"
+    case .edit(let p): return p.id
+    }
+  }
+}
+
+// MARK: - Editor
+
+struct ProfileEditorView: View {
+  @Environment(AppState.self) private var appState
+  let target: EditorTarget
+  let ownerPin: String
+  let close: () -> Void
+
+  enum EditorControl: Hashable { case name, pinSet, pinRemove, save, delete, cancel }
+
+  @State private var name = ""
+  @State private var avatar = ProfileAvatar.cat.rawValue
+  @State private var level = 1
+  /// nil = leave as is (edit) / no PIN (create).
+  @State private var pinChange: PinChange?
+  @State private var choosingPin = false
+  @State private var confirmingDelete = false
+  @State private var saving = false
+  @State private var error: String?
+  @FocusState private var focusedControl: EditorControl?
+  @FocusState private var focusedAvatar: String?
+  @FocusState private var focusedLevel: Int?
+
+  private var existing: Profile? {
+    if case .edit(let p) = target { return p }
+    return nil
+  }
+  private var isOwner: Bool { existing?.isOwner ?? false }
+  private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+  private var nameValid: Bool { (1...20).contains(trimmedName.count) }
+
+  /// Whether the profile will have a PIN after saving.
+  private var willHavePin: Bool {
+    switch pinChange {
+    case .set?: return true
+    case .clear?: return false
+    case nil: return existing?.hasPin ?? false
+    }
+  }
+
+  var body: some View {
+    ZStack {
+      ProfileBackdrop()
+      ScrollView {
+        VStack(alignment: .leading, spacing: ProfileMetrics.spacing * 0.7) {
+          Text(existing == nil ? "Add Profile" : "Edit Profile")
+            .font(ProfileMetrics.title)
+            .foregroundStyle(.white)
+            .accessibilityAddTraits(.isHeader)
+
+          HStack(alignment: .center, spacing: 40) {
+            ProfileAvatarView(avatar: avatar, name: trimmedName.isEmpty ? "?" : trimmedName,
+                              size: ProfileMetrics.tile * 0.8)
+            VStack(alignment: .leading, spacing: 10) {
+              sectionLabel("Name")
+              TextField("Name", text: $name)
+                .textContentType(.name)
+                .autocorrectionDisabled()
+                .focused($focusedControl, equals: .name)
+                #if os(iOS)
+                .textFieldStyle(.roundedBorder)
+                #endif
+                .frame(maxWidth: 700)
+                .accessibilityIdentifier("profileEditor.name")
+            }
+          }
+
+          sectionLabel("Avatar")
+          avatarRow
+
+          sectionLabel("Age rating")
+          if isOwner {
+            Text("\(appState.ageLevelLabel(ProfileScope.unrestrictedLevel) ?? "Adult"). The owner profile sees every title, so it can manage them all.")
+              .font(ProfileMetrics.body).foregroundStyle(Color.dsTextSecondary)
+          } else {
+            levelRow
+          }
+
+          sectionLabel("PIN")
+          pinControls
+
+          if let error {
+            Text(error)
+              .font(ProfileMetrics.body)
+              .foregroundStyle(Color.dsError)
+              .accessibilityIdentifier("profileEditor.error")
+          }
+
+          HStack(spacing: 28) {
+            Button {
+              Task { await save() }
+            } label: {
+              Text(saving ? "Saving…" : "Save").frame(minWidth: 160)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.dsAccent)
+            .disabled(!nameValid || saving)
+            .focused($focusedControl, equals: .save)
+            .accessibilityIdentifier("profileEditor.save")
+
+            Button("Cancel", action: close)
+              .buttonStyle(.bordered)
+              .focused($focusedControl, equals: .cancel)
+              .accessibilityIdentifier("profileEditor.cancel")
+
+            Spacer()
+
+            if let existing, !existing.isOwner {
+              Button(role: .destructive) { confirmingDelete = true } label: {
+                Label("Delete Profile", systemImage: "trash")
+              }
+              .buttonStyle(.bordered)
+              .focused($focusedControl, equals: .delete)
+              .accessibilityIdentifier("profileEditor.delete")
+            }
+          }
+          .font(ProfileMetrics.body.weight(.semibold))
+        }
+        .padding(.horizontal, 80)
+        .padding(.vertical, 60)
+      }
+    }
+    .onAppear(perform: load)
+    .task { await appState.loadAgeLevelsIfNeeded() }
+    .fullScreenCover(isPresented: $choosingPin) {
+      NewPinView(title: existing.map { "New PIN for \($0.name)" } ?? "Choose a PIN") { pin in
+        pinChange = .set(pin)
+        choosingPin = false
+        return nil
+      } cancel: {
+        choosingPin = false
+      }
+    }
+    .alert(existing.map { "Delete \($0.name)?" } ?? "Delete profile?",
+           isPresented: $confirmingDelete) {
+      Button("Delete", role: .destructive) { Task { await delete() } }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(ProfileText.deleteConfirmation(name: existing?.name ?? "This profile"))
+    }
+    #if os(tvOS)
+    .onExitCommand { close() }
+    #endif
+  }
+
+  private func sectionLabel(_ text: String) -> some View {
+    Text(text.uppercased())
+      .font(ProfileMetrics.body.weight(.semibold))
+      .tracking(1.5)
+      .foregroundStyle(Color.dsTextTertiary)
+  }
+
+  private var avatarRow: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 28) {
+        ForEach(ProfileAvatar.allCases) { choice in
+          Button { avatar = choice.rawValue } label: {
+            ProfileAvatarView(avatar: choice.rawValue, name: name, size: ProfileMetrics.tile * 0.5)
+              .overlay(
+                RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.08, style: .continuous)
+                  .strokeBorder(.white, lineWidth: avatar == choice.rawValue ? 4 : 0))
+              .padding(8)
+          }
+          .buttonStyle(ProfileTileButtonStyle())
+          .focused($focusedAvatar, equals: choice.rawValue)
+          .accessibilityLabel("\(choice.spokenName) avatar")
+          .accessibilityAddTraits(avatar == choice.rawValue ? .isSelected : [])
+        }
+      }
+      .padding(.vertical, 20)
+      .padding(.horizontal, 8)
+    }
+    #if os(tvOS)
+    .focusSection()
+    #endif
+  }
+
+  private var levelRow: some View {
+    HStack(spacing: 20) {
+      ForEach(1...ProfileScope.unrestrictedLevel, id: \.self) { value in
+        Button { level = value } label: {
+          Text(appState.ageLevelLabel(value) ?? "Level \(value)")
+            .font(ProfileMetrics.body.weight(.semibold))
+            .padding(.horizontal, 28).padding(.vertical, 14)
+            .background(Capsule().fill(level == value ? Color.white : Color.white.opacity(0.1)))
+            .foregroundStyle(level == value ? Color.black : Color.white)
+        }
+        .buttonStyle(ProfileTileButtonStyle())
+        .focused($focusedLevel, equals: value)
+        .accessibilityAddTraits(level == value ? .isSelected : [])
+        .accessibilityIdentifier("profileEditor.level.\(value)")
+      }
+    }
+    #if os(tvOS)
+    .focusSection()
+    #endif
+  }
+
+  @ViewBuilder
+  private var pinControls: some View {
+    let ownerKeepsPin = isOwner && appState.profiles.count > 1
+    HStack(spacing: 24) {
+      Text(willHavePin ? "On" : "Off")
+        .font(ProfileMetrics.body)
+        .foregroundStyle(.white)
+        .frame(minWidth: 80, alignment: .leading)
+      Button(willHavePin ? "Change PIN" : "Set PIN") { choosingPin = true }
+        .buttonStyle(.bordered)
+        .focused($focusedControl, equals: .pinSet)
+        .accessibilityIdentifier("profileEditor.pinSet")
+      if willHavePin && !ownerKeepsPin {
+        Button("Remove PIN") { pinChange = existing?.hasPin == true ? .clear : nil }
+          .buttonStyle(.bordered)
+          .focused($focusedControl, equals: .pinRemove)
+          .accessibilityIdentifier("profileEditor.pinRemove")
+      }
+    }
+    .font(ProfileMetrics.body.weight(.semibold))
+    if ownerKeepsPin {
+      Text("The owner's PIN protects profile changes, so it stays while other profiles exist.")
+        .font(ProfileMetrics.body).foregroundStyle(Color.dsTextTertiary)
+    }
+  }
+
+  private func load() {
+    guard let existing else {
+      let taken = Set(appState.profiles.map(\.avatar))
+      avatar = (ProfileAvatar.allCases.first { !taken.contains($0.rawValue) } ?? .cat).rawValue
+      level = 1
+      return
+    }
+    name = existing.name
+    avatar = existing.avatar
+    level = existing.maxAgeLevel
+  }
+
+  private func save() async {
+    saving = true
+    defer { saving = false }
+    let result: Result<Profile, Error>
+    if let existing {
+      var change = UpdateProfileRequest(ownerPin: ownerPin)
+      if trimmedName != existing.name { change.name = trimmedName }
+      if avatar != existing.avatar { change.avatar = avatar }
+      if !existing.isOwner, level != existing.maxAgeLevel { change.maxAgeLevel = level }
+      change.pin = pinChange
+      result = await appState.updateProfile(id: existing.id, change)
+    } else {
+      var newPin: String?
+      if case .set(let pin)? = pinChange { newPin = pin }
+      result = await appState.createProfile(ownerPin: ownerPin, name: trimmedName, avatar: avatar,
+                                            maxAgeLevel: level, pin: newPin)
+    }
+    switch result {
+    case .success: close()
+    case .failure(let failure): error = ProfileText.saveFailure(failure)
+    }
+  }
+
+  private func delete() async {
+    guard let existing else { return }
+    saving = true
+    defer { saving = false }
+    switch await appState.deleteProfile(id: existing.id, ownerPin: ownerPin) {
+    case .success: close()
+    case .failure(let failure): error = ProfileText.saveFailure(failure)
+    }
+  }
+}
+
+// MARK: - Home badge
+
+/// The active profile's avatar on home; selecting it opens the picker (FR-260 "Switch
+/// profile"). Hidden for single-profile accounts, which behave as before (FR-205).
+struct ActiveProfileBadge: View {
+  @Environment(AppState.self) private var appState
+  var size: CGFloat
+  @FocusState private var focused: Bool
+
+  init(size: CGFloat) { self.size = size }
+
+  var body: some View {
+    if appState.profiles.count > 1, let profile = appState.activeProfile {
+      Button {
+        appState.notePickerTrigger(.switchRequested)
+      } label: {
+        ProfileAvatarView(avatar: profile.avatar, name: profile.name, size: size)
+          #if os(iOS)
+          .frame(minWidth: 44, minHeight: 44)
+          .contentShape(Rectangle())
+          #endif
+      }
+      .focused($focused)
+      .accessibilityLabel("Profile: \(profile.name)")
+      .accessibilityHint("Switch profile")
+      .accessibilityIdentifier("home.activeProfile")
+    }
+  }
+}
+
+// MARK: - Restricted empty state (FR-265, AC-002-47)
+
+/// Shown instead of "no videos" when the active profile has an age limit. Names the level so
+/// it reads apart from an empty library and from a load failure.
+struct RestrictedEmptyState: View {
+  @Environment(AppState.self) private var appState
+  let profile: Profile
+  let place: String
+
+  init(profile: Profile, place: String) {
+    self.profile = profile
+    self.place = place
+  }
+
+  var body: some View {
+    DSContentUnavailable(
+      title: "Nothing at This Age Rating",
+      systemImage: "figure.and.child.holdinghands",
+      description: ProfileText.restrictedEmpty(
+        levelLabel: appState.ageLevelLabel(profile.maxAgeLevel), place: place))
+    .task { await appState.loadAgeLevelsIfNeeded() }
+    .accessibilityIdentifier("emptyState.restricted")
+  }
+}
+
+#if DEBUG
+// MARK: - QA hook
+
+/// `-UITestProfileScreen picker|pin|editor`: renders that screen with fixture profiles and no
+/// session, so the screens can be walked and captured on a simulator without a NAS that has
+/// several profiles. DEBUG builds only. With no session every server call fails as
+/// "unreachable", which is itself one of the states to check (FR-263).
+enum ProfileScreenPreview: String {
+  case picker, pin, editor
+
+  static var requested: ProfileScreenPreview? {
+    let args = ProcessInfo.processInfo.arguments
+    guard let flag = args.firstIndex(of: "-UITestProfileScreen"),
+          args.index(after: flag) < args.endIndex else { return nil }
+    return ProfileScreenPreview(rawValue: args[args.index(after: flag)])
+  }
+
+  static let fixtures: [Profile] = [
+    Profile(id: "pf_owner", name: "Ryan", avatar: "moon", maxAgeLevel: 4, hasPin: true, isOwner: true),
+    Profile(id: "pf_maya", name: "Maya", avatar: "cat", maxAgeLevel: 2, hasPin: false, isOwner: false),
+    Profile(id: "pf_leo", name: "Leo", avatar: "bolt", maxAgeLevel: 3, hasPin: true, isOwner: false),
+  ]
+
+  static let levels: [AgeLevelsResponse.Level] = [
+    .init(level: 1, key: "littleKids", label: "Little Kids", movie: ["G"], tv: ["TV-Y", "TV-G"]),
+    .init(level: 2, key: "olderKids", label: "Older Kids", movie: ["PG"], tv: ["TV-Y7", "TV-PG"]),
+    .init(level: 3, key: "teens", label: "Teens", movie: ["PG-13"], tv: ["TV-14"]),
+    .init(level: 4, key: "adult", label: "Adult", movie: ["R", "NC-17"], tv: ["TV-MA"]),
+  ]
+}
+
+struct ProfileScreenPreviewHost: View {
+  @Environment(AppState.self) private var appState
+  let screen: ProfileScreenPreview
+
+  init(screen: ProfileScreenPreview) {
+    self.screen = screen
+    ActiveProfileStore.shared.setCachedProfiles(ProfileScreenPreview.fixtures)
+  }
+
+  var body: some View {
+    Group {
+      switch screen {
+      case .picker:
+        ProfilePickerView()
+      case .pin:
+        ProfilePinEntryView(profile: ProfileScreenPreview.fixtures[2]) {}
+      case .editor:
+        ProfileEditorView(target: .edit(ProfileScreenPreview.fixtures[1]), ownerPin: "") {}
+      }
+    }
+    .onAppear { appState.seedAgeLevelsForPreview(ProfileScreenPreview.levels) }
+  }
+}
+#endif
