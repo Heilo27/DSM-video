@@ -296,3 +296,26 @@ func TestFR250_EveryRouteMainMountsDirectlyHasADisposition(t *testing.T) {
 		}
 	}
 }
+
+// ── playlist item counts are visible counts (FR-250, ProfilesAPI "GET /playlists" F) ────
+
+func TestFR250_PlaylistItemCountIsTheVisibleCount(t *testing.T) {
+	// given: a playlist holding 3 movies (G, R, unrated)
+	w := newEnfWorld(t)
+	for _, c := range []struct {
+		v    enfViewerSpec
+		want int
+	}{{enfViewers[0], 1}, {enfViewers[1], 1}, {enfViewers[2], 3}} {
+		t.Run(c.v.name, func(t *testing.T) {
+			// when: the viewer lists playlists / then: itemCount counts only what it may see
+			r := w.get(c.v, "/playlists")
+			pls, _ := r.js["playlists"].([]any)
+			if len(pls) != 1 {
+				t.Fatalf("want 1 playlist, got %s", r.raw)
+			}
+			if got := int(pls[0].(map[string]any)["itemCount"].(float64)); got != c.want {
+				t.Errorf("itemCount as %s = %d, want %d (%s)", c.v.name, got, c.want, r.raw)
+			}
+		})
+	}
+}
