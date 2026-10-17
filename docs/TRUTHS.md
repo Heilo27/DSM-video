@@ -48,13 +48,15 @@ Source: M5 final bullet, FRD-001 FR-123.
 Falsifier: if a feature the user wants can only work through a third-party relay we operate, this truth and
 that feature collide, and Ryan decides.
 
-**S5. Kid-safe on the family TV.** It is Ryan's account, but his kids use the Apple TV app too. Each
-viewer can have their own profile (own history, own age ceiling), and the owner decides what a kid's
-profile can see. Source: Ryan, 2026-10-17.
-→ serves P1: on a shared Apple TV, "plays and resumes" is only true per person, and the library is only
-"findable" by a kid if what they find is appropriate.
-Falsifier: if profiles get used for adults wanting separate accounts (sharing, permissions, guests) rather
-than for kid safety, that pressure is A4/household scope and needs Ryan, not a quiet extension.
+**S5. Optional profiles inside one account.** Every DSM user with permission already has their own
+account and library view. Profiles subdivide a single account: any account may add up to four, each with
+its own history and age ceiling, typically so kids can use the shared Apple TV safely. The account holder
+decides what each profile can see. Profiles are optional; an account without them works exactly as before.
+Source: Ryan, 2026-10-17.
+→ serves P1: on a shared Apple TV, "plays and resumes" is only true per person, and a kid can only
+"find" the library if what they find is appropriate.
+Falsifier: if profiles start being used in place of separate DSM accounts (separate people needing their
+own permissions or credentials), that is A4 territory and goes to Ryan, not into a quiet extension.
 
 ## Anti-truths
 
@@ -88,8 +90,11 @@ confirm.
 
 ## Amendment log
 
-- **2026-10-17 · Ryan · S5 added (narrowed from the proposed "household" wording).** Ryan: "it's still
-  for my account. but on apple TV, my kids use the app too, and creating a kid friendly profile makes
-  sense." The product stays single-account; it does not grow into a household or multi-user platform. The
-  FRD-002 Truth Test verdict moves from ESCALATE to KEEP. This makes five secondaries, one over the cap of
-  four. Ryan was not asked to merge any, so none were merged.
+- **2026-10-17 · Ryan · S5 added and corrected.** Ryan: "it's still for my account. but on apple TV, my kids
+  use the app too, and creating a kid friendly profile makes sense." Then: "anyone with an account on my
+  synology NAS, and given permissions, can view the movies and shows on their devices. so we are
+  multi-user already. but this is still just my single account and adding optional profiles." The product
+  is already multi-user, one DSM account per person. S5 adds optional profiles inside one account; it is
+  not a new account or permission system (A4 holds). The FRD-002 Truth Test verdict moves from ESCALATE to
+  KEEP. This makes five secondaries, one over the cap of four. Ryan was not asked to merge any, so none
+  were merged.

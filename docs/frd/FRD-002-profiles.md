@@ -9,13 +9,14 @@ carry them out are tagged **[DESIGN]**; those can be revised without going back 
 **Amends:** FRD-001 FR-008 (new), FR-013, FR-095.
 
 ## Truth Test
-- Serves: **S5** "Kid-safe on the family TV" (Ryan, 2026-10-17).
+- Serves: **S5** "Optional profiles inside one account" (Ryan, 2026-10-17).
 - Supports: S1 (each viewer's position is one server-held truth on every device), S2 (Continue Watching
   stops showing someone else's position), S3 (migration keeps every existing position).
 - Violates: none. Checked against A4 "not a second login system": a profile PIN works only inside a session
   DSM already authenticated and never grants server access by itself, so it is a lock, not a login.
 - Verdict: **KEEP.** Ryan ruled on 2026-10-17 and added S5, in narrowed form: the product is still one
-  account, and profiles exist for kid safety on the shared Apple TV.
+  account per DSM user (the product is already multi-user). Profiles are an optional subdivision of one
+  account.
 
 ---
 
