@@ -189,6 +189,43 @@ func writeWebAPIError(w http.ResponseWriter, code int) {
 	})
 }
 
+// webAPIErrNoPermission is DSM's common WebAPI code 105, "the logged in session does not
+// have permission". The WebAPI envelope carries only a number, so this is the closest it can
+// come to naming content_restricted (FRD-002 FR-250): a title above the profile's ceiling.
+const webAPIErrNoPermission = 105
+
+// webAPIViewer is FRD-002 FR-251: the Synology WebAPI layer cannot send X-DSVideo-Profile,
+// so every call is served for the FR-221 default profile (the most restricted profile in
+// the account, else the owner), and the response names it (FR-222). On failure it writes
+// error 100 and returns false.
+func (s *Server) webAPIViewer(w http.ResponseWriter, r *http.Request, session *WebAPISession) (viewer, bool) {
+	v, err := s.defaultViewer(r.Context(), session.UserID)
+	if err != nil {
+		log.Printf("[WebAPI] profile for %s: %v", session.UserID, err)
+		writeWebAPIError(w, 100)
+		return viewer{}, false
+	}
+	w.Header().Set(profileHeader, v.ProfileID)
+	return v, true
+}
+
+// webAPIRefuseAboveCeiling is the FR-250 "refused if above" gate for the WebAPI detail and
+// stream calls. It writes the error and returns false when the handler must stop; a missing
+// item passes so the handler's own not-found answer is unchanged.
+func (s *Server) webAPIRefuseAboveCeiling(w http.ResponseWriter, r *http.Request, v viewer, itemID string) bool {
+	above, err := s.itemAboveCeiling(r.Context(), v, itemID)
+	if err != nil {
+		log.Printf("[WebAPI] ceiling check %s: %v", itemID, err)
+		writeWebAPIError(w, 100)
+		return false
+	}
+	if above {
+		writeWebAPIError(w, webAPIErrNoPermission)
+		return false
+	}
+	return true
+}
+
 // proxyFormToDSM posts r.Form to a DSM CGI endpoint and returns status, headers, and body.
 // This is used to transparently proxy auth/encryption flows that some DS Video versions
 // expect DSM to handle (e.g. RSA-encrypted password handshake).
@@ -1424,9 +1461,17 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 	sortBy := r.FormValue("sort_by")
 	sortDir := r.FormValue("sort_direction")
 
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok {
+		return
+	}
+	// FR-251: the profile's ceiling is part of the WHERE, so total and every page describe
+	// only the visible set (filtering after LIMIT would leave short pages).
+	vis, visArgs := v.andVisibleFrag("content_rating")
+
 	// Count total
 	var total int
-	s.db.QueryRow("SELECT COUNT(*) FROM items WHERE library_id = 'lib_movies'").Scan(&total)
+	s.db.QueryRow("SELECT COUNT(*) FROM items WHERE library_id = 'lib_movies'"+vis, visArgs...).Scan(&total)
 
 	// Build ORDER BY
 	orderClause := "ORDER BY title ASC"
@@ -1447,8 +1492,8 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 	rows, err := s.db.Query(`
 		SELECT id, title, year, duration_seconds, rating, poster_path, backdrop_path,
 		       overview, genres, original_title, content_rating, director, cast_names
-		FROM items WHERE library_id = 'lib_movies'
-		`+orderClause+` LIMIT ? OFFSET ?`, limit, offset)
+		FROM items WHERE library_id = 'lib_movies'`+vis+`
+		`+orderClause+` LIMIT ? OFFSET ?`, append(visArgs, limit, offset)...)
 	if err != nil {
 		writeWebAPIError(w, 100)
 		return
@@ -1516,7 +1561,7 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 			movieIDs = append(movieIDs, iid)
 		}
 	}
-	progressByID := s.getProgressBatch(session.UserID, movieIDs)
+	progressByID := s.getProfileProgressBatch(v.ProfileID, movieIDs)
 	for _, m := range movies {
 		iid, _ := m["_internal_id"].(string)
 		p, ok := progressByID[iid]
@@ -1552,6 +1597,10 @@ func (s *Server) webAPIMovieGetInfo(w http.ResponseWriter, r *http.Request, sess
 	internalID := s.resolveMapperID(session.SID, idStr, "lib_movies")
 	if internalID == "" {
 		writeWebAPIError(w, 100)
+		return
+	}
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok || !s.webAPIRefuseAboveCeiling(w, r, v, internalID) {
 		return
 	}
 
@@ -1659,9 +1708,17 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok {
+		return
+	}
+	// FR-251: hidden episodes never reach the grouping, so a show whose rating is above the
+	// ceiling is absent and the total counts only visible shows. A show is rated as a whole
+	// (every episode row carries the show's rating, FR-240), so no show is left half-listed.
+	vis, visArgs := v.andVisibleFrag("content_rating")
 	rows, err := s.db.Query(`
 		SELECT id, path, show_name, year, rating, poster_path, backdrop_path, overview, genres
-		FROM items WHERE library_id = 'lib_tv'`)
+		FROM items WHERE library_id = 'lib_tv'`+vis, visArgs...)
 	if err != nil {
 		writeWebAPIError(w, 100)
 		return
@@ -1848,14 +1905,36 @@ func (s *Server) webAPITVShowGetInfo(w http.ResponseWriter, r *http.Request, ses
 	// literal '_' or '%' matched sibling folders and reported their episodes as this show's.
 	folderPrefix := tvRoot + escapeLike(folderName) + "/"
 
-	// Get show metadata
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok {
+		return
+	}
+	// FR-250 "refused if above" for a hidden show: it has episodes, none of them visible.
+	vis, visArgs := v.andVisibleFrag("content_rating")
+	if vis != "" {
+		var all, visible int
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*), COALESCE(SUM(CASE WHEN 1=1`+vis+` THEN 1 ELSE 0 END), 0)
+			FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`,
+			append(visArgs, folderPrefix+"%", folderName)...).Scan(&all, &visible); err != nil {
+			log.Printf("[WebAPI] TVShow getinfo ceiling %q: %v", folderName, err)
+			writeWebAPIError(w, 100)
+			return
+		}
+		if all > 0 && visible == 0 {
+			writeWebAPIError(w, webAPIErrNoPermission)
+			return
+		}
+	}
+
+	// Get show metadata, from visible episodes only
 	var year sql.NullInt64
 	var ratingVal sql.NullFloat64
 	var overview, genres, showNameDB sql.NullString
 	s.db.QueryRow(`
 		SELECT MAX(year), MAX(rating), MAX(overview), MAX(genres), MAX(show_name)
-		FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`,
-		folderPrefix+"%", folderName).Scan(&year, &ratingVal, &overview, &genres, &showNameDB)
+		FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`+vis,
+		append([]any{folderPrefix + "%", folderName}, visArgs...)...).Scan(&year, &ratingVal, &overview, &genres, &showNameDB)
 
 	displayName := folderName
 	if showNameDB.Valid && showNameDB.String != "" {
@@ -1931,6 +2010,14 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok {
+		return
+	}
+	// FR-251: the ceiling is in every WHERE below (rows and totals alike), never applied
+	// after LIMIT.
+	vis, visArgs := v.andVisibleFrag("content_rating")
+
 	var rows *sql.Rows
 	var err error
 	if folderName != "" {
@@ -1939,17 +2026,17 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 			SELECT id, title, season_number, episode_number, episode_title,
 			       duration_seconds, year, rating, poster_path, show_name
 			FROM items
-			WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'
+			WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`+vis+`
 			ORDER BY COALESCE(season_number, 0), COALESCE(episode_number, 0)
 			LIMIT ? OFFSET ?`,
-			folderPrefix+"%", folderName, limit, offset)
+			append(append([]any{folderPrefix + "%", folderName}, visArgs...), limit, offset)...)
 	} else {
 		rows, err = s.db.Query(`
 			SELECT id, title, season_number, episode_number, episode_title,
 			       duration_seconds, year, rating, poster_path, show_name
-			FROM items WHERE library_id = 'lib_tv'
+			FROM items WHERE library_id = 'lib_tv'`+vis+`
 			ORDER BY title ASC
-			LIMIT ? OFFSET ?`, limit, offset)
+			LIMIT ? OFFSET ?`, append(append([]any{}, visArgs...), limit, offset)...)
 	}
 	if err != nil {
 		writeWebAPIError(w, 100)
@@ -2014,7 +2101,7 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 			episodeIDs = append(episodeIDs, id)
 		}
 	}
-	progressByID := s.getProgressBatch(session.UserID, episodeIDs)
+	progressByID := s.getProfileProgressBatch(v.ProfileID, episodeIDs)
 	for _, ep := range episodes {
 		id, ok := ep["_internal_id"].(string)
 		if !ok {
@@ -2041,10 +2128,10 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 		// Same escaping as the row query above — a COUNT that disagrees with the rows it is
 		// supposed to describe is its own bug.
 		folderPrefix := tvRoot + escapeLike(folderName) + "/"
-		s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`,
-			folderPrefix+"%", folderName).Scan(&total)
+		s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`+vis,
+			append([]any{folderPrefix + "%", folderName}, visArgs...)...).Scan(&total)
 	} else {
-		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE library_id = 'lib_tv'").Scan(&total)
+		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE library_id = 'lib_tv'"+vis, visArgs...).Scan(&total)
 	}
 
 	// Clean internal fields
@@ -2067,6 +2154,10 @@ func (s *Server) webAPITVShowEpisodeGetInfo(w http.ResponseWriter, r *http.Reque
 	internalID := s.resolveMapperID(session.SID, idStr, "lib_tv")
 	if internalID == "" {
 		writeWebAPIError(w, 100)
+		return
+	}
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok || !s.webAPIRefuseAboveCeiling(w, r, v, internalID) {
 		return
 	}
 
@@ -2177,6 +2268,12 @@ func (s *Server) webAPIStreamingOpen(w http.ResponseWriter, r *http.Request, ses
 	if internalID == "" {
 		log.Printf("[WebAPI] Streaming open: cannot resolve mapper_id %d", itemMapperID)
 		writeWebAPIError(w, 1101) // File not found
+		return
+	}
+	// FR-250/FR-252: playback is gated when the session is created; the stream GET that
+	// follows is authorized by the session id alone.
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok || !s.webAPIRefuseAboveCeiling(w, r, v, internalID) {
 		return
 	}
 
@@ -2497,26 +2594,31 @@ func (s *Server) handleWebAPIWatchStatus(w http.ResponseWriter, r *http.Request,
 	//     prevent, and which previously destroyed real watch progress.
 	//   - With no progress_seq bump, delta sync never learned anything changed, so watching
 	//     in the DS Video app was invisible to every other device, permanently.
+	// Resolved before progressMu is taken, as handleProgress does: the profiles lookup is a
+	// DB read and must not run under the lock.
+	v, ok := s.webAPIViewer(w, r, session)
+	if !ok {
+		return
+	}
+	s.progressMu.Lock()
 	writeSeq, seqErr := s.incrementSeqErr("progress_seq")
 	if seqErr != nil {
+		s.progressMu.Unlock()
 		writeWebAPIError(w, 100)
 		return
 	}
 
-	// Update progress in database
+	// Update progress in database, keyed by the FR-221 profile (FRD-002 FR-230/FR-251) through
+	// upsertProgress, the one home of the write_seq-guarded statement. This was a private
+	// copy keyed ON CONFLICT(item_id, user_id), a key the profiles migration replaced, so
+	// every DS Video app position failed to store on a migrated database. Progress writes
+	// are accepted above the ceiling (FR-231): history is the viewer's own data.
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`
-		INSERT INTO progress (item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(item_id, user_id) DO UPDATE SET
-			position_seconds = excluded.position_seconds,
-			duration_seconds = excluded.duration_seconds,
-			updated_at = excluded.updated_at,
-			write_seq = excluded.write_seq
-		WHERE excluded.write_seq > progress.write_seq`,
-		internalID, session.UserID, position, totalDuration, now, writeSeq)
+	_, err := s.upsertProgress(v, internalID, position, totalDuration, now, writeSeq)
+	s.progressMu.Unlock()
 
 	if err != nil {
+		log.Printf("[WebAPI] WatchStatus update %s: %v", internalID, err)
 		writeWebAPIError(w, 100)
 		return
 	}

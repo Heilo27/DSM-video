@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	agerating "dsvideo/backend/internal/rating"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,7 +28,8 @@ CREATE TABLE items(
   id TEXT PRIMARY KEY, library_id TEXT, type TEXT, title TEXT,
   year INT, path TEXT, duration_seconds INT, added_at TEXT, updated_at TEXT,
   rating REAL, poster_path TEXT, backdrop_path TEXT, show_name TEXT,
-  season_number INT, episode_number INT);
+  season_number INT, episode_number INT,
+  content_rating TEXT); -- FRD-002 FR-240, as in production
 `
 
 type justAddedRow struct {
@@ -91,7 +93,7 @@ func TestJustAddedCollapsesUnmatchedEpisodesOntoOneShow(t *testing.T) {
 	)
 
 	s := newJustAddedServer(t, rows)
-	items, err := s.queryJustAdded("")
+	items, err := s.queryJustAdded("", agerating.MaxLevel)
 	if err != nil {
 		t.Fatalf("queryJustAdded: %v", err)
 	}
@@ -130,7 +132,7 @@ func TestJustAddedPartMatchedFolderIsOneEntry(t *testing.T) {
 			showName: "Shameless", added: "2026-09-08T00:00:00Z"},
 	})
 
-	items, err := s.queryJustAdded("")
+	items, err := s.queryJustAdded("", agerating.MaxLevel)
 	if err != nil {
 		t.Fatalf("queryJustAdded: %v", err)
 	}
@@ -153,7 +155,7 @@ func TestJustAddedMergesSplitFoldersOfOneShow(t *testing.T) {
 			showName: "Daredevil", added: "2026-09-09T00:00:00Z"},
 	})
 
-	items, err := s.queryJustAdded("")
+	items, err := s.queryJustAdded("", agerating.MaxLevel)
 	if err != nil {
 		t.Fatalf("queryJustAdded: %v", err)
 	}
@@ -175,7 +177,7 @@ func TestJustAddedKeepsDistinctShowsSeparate(t *testing.T) {
 			added: "2026-09-08T00:00:00Z"},
 	})
 
-	items, err := s.queryJustAdded("")
+	items, err := s.queryJustAdded("", agerating.MaxLevel)
 	if err != nil {
 		t.Fatalf("queryJustAdded: %v", err)
 	}
@@ -191,7 +193,7 @@ func TestJustAddedFilmsAreTheirOwnEntries(t *testing.T) {
 		{id: "m2", typ: "movie", title: "Borg vs McEnroe", path: "/movies/Borg/b.mkv", added: "2026-09-09T00:00:00Z"},
 	})
 
-	items, err := s.queryJustAdded("")
+	items, err := s.queryJustAdded("", agerating.MaxLevel)
 	if err != nil {
 		t.Fatalf("queryJustAdded: %v", err)
 	}
@@ -211,7 +213,7 @@ func TestJustAddedOrdersNewestFirst(t *testing.T) {
 			showName: "Show", added: "2026-09-01T00:00:00Z"},
 	})
 
-	items, err := s.queryJustAdded("")
+	items, err := s.queryJustAdded("", agerating.MaxLevel)
 	if err != nil {
 		t.Fatalf("queryJustAdded: %v", err)
 	}

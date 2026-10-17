@@ -258,7 +258,7 @@ filtered). **X** = exempt.
 | `/auth/*`, `/version` | A | |
 | `GET /images/{id}`, `GET /tmdb/image` | X | public artwork |
 | `/playback/{sessionId}/*` | X | session id is the capability; gated at creation |
-| `/webapi/*` (Synology compatibility) | F / R | no header possible → FR-221 fallback, same filter (FR-251) |
+| `/webapi/*` (Synology compatibility) | F / R, P | no header possible → FR-221 fallback, same filter (FR-251); R answers WebAPI error 105 (the envelope has no string code); WatchStatus writes to the fallback profile |
 
 ## Error codes (added)
 

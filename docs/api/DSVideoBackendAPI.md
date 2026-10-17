@@ -222,6 +222,27 @@ Response:
 { "ok": true }
 ```
 
+## Home rails (per profile, FRD-002)
+
+Both rails are served for the request's profile: the one named by `X-DSVideo-Profile`, or
+the FR-221 default when the header is absent (the account's most restricted profile, else
+the owner). The response header `X-DSVideo-Profile` names the profile used. Each item
+carries `contentRating` (raw US certification, `null` when unrated) and `ageLevel` (1-4;
+unrated is 4), as in `ProfilesAPI.md` "Item fields".
+
+### GET `/just-added?libraryId=&limit=`
+Newest titles, one entry per show, `limit` 1-24 (default 16). Titles above the profile's
+age ceiling are left out **before** the show dedup and the 24-title cut, so a restricted
+profile gets a full rail of what it can see (never a shared rail trimmed short). The server
+precomputes one rail per ceiling and library, refreshed every 12 hours and on demand.
+
+### GET `/suggested?libraryId=&limit=`
+`{ "genre": "Animation", "items": [...] }`, `limit` 1-30 (default 8). Seeded from the
+profile's most recently watched title that it can see, and excluding everything that
+profile has progress on (another profile's history is never used). Titles above the
+ceiling are filtered in the query, before `LIMIT`, so the rail is not left short. No visible
+history answers `{ "genre": "", "items": [] }`.
+
 ## Admin (server configuration)
 
 ### GET `/admin/status`
@@ -346,6 +367,17 @@ not depend on these.
 
 ## Notes / v1 limitations
 
+- **Profiles on the Synology WebAPI layer (FRD-002 FR-251).** WebAPI clients cannot send
+  `X-DSVideo-Profile`, so every WebAPI call is served for the FR-221 default profile (the
+  account's most restricted profile, else the owner), and its responses carry
+  `X-DSVideo-Profile` naming it. `Movie.list`, `TVShow.list` and `TVShowEpisode.list` leave
+  out titles above that profile's ceiling, with `total` counting only visible titles (a show
+  is hidden when its rating is). `Movie.getinfo`, `TVShow.getinfo`, `TVShowEpisode.getinfo`
+  and `Streaming.open` (both `entry.cgi` and `vtestreaming.cgi`) answer WebAPI error **105**
+  (DSM's "session does not have permission"; the envelope carries only a number) for a title
+  above the ceiling, and no stream session is created. `WatchStatus.update` /
+  `File.set_watchstatus` write progress to that profile, at any title level (FR-231), and the
+  `watch_status` in listings is that profile's. Posters and backdrops are exempt (FR-250).
 - DSM auth is used to validate credentials; **permissions mapping** to DSM shared folders is a v2 goal.
 - tvOS support is achieved by the client consuming the same browsing and playback APIs; focus/UI is handled client-side.
 - **Scope**: the prose sections cover the client-facing surface, not every registered route. The generated inventory above is the complete list. The live wire contract has been diffed against the clients' decoded keys and matches exactly — the gap here is documentation coverage, not a contract mismatch.

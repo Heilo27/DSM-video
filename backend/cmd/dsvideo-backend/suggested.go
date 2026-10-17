@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"net/http"
 	"strings"
+
+	agerating "dsvideo/backend/internal/rating"
 )
 
 // broadGenres are too common to make a useful recommendation.
@@ -64,11 +66,15 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}
-	// Seeded from, and excluding, the viewing profile's progress (FR-230).
+	// Seeded from, and excluding, the viewing profile's progress (FR-230), and held to its
+	// ceiling (FR-250). The ceiling is in both WHEREs, so the seed is a title the viewer can
+	// see (a progress write above the ceiling is accepted, FR-231, but must not steer the
+	// rail) and LIMIT counts only visible rows: the rail is never left short by filtering.
 	v, ok := s.requestViewer(w, r)
 	if !ok {
 		return
 	}
+	vis, visArgs := v.andVisibleFrag("i.content_rating")
 
 	// The seed: the most recently watched item that actually has genres. Ordering by
 	// progress.updated_at is what makes this track real viewing — the same column the home
@@ -79,9 +85,9 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		SELECT i.genres
 		FROM progress p
 		JOIN items i ON i.id = p.item_id
-		WHERE p.profile_id = ? AND i.genres IS NOT NULL AND i.genres != ''
+		WHERE p.profile_id = ? AND i.genres IS NOT NULL AND i.genres != ''`+vis+`
 		ORDER BY p.updated_at DESC
-		LIMIT 1`, v.ProfileID).Scan(&seedGenres)
+		LIMIT 1`, append([]any{v.ProfileID}, visArgs...)...).Scan(&seedGenres)
 	if err != nil {
 		// No progress at all is the ordinary first-run case, not an error: answer with an
 		// empty rail rather than a status the client has to special-case.
@@ -107,13 +113,16 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 	// Never suggest something already being watched — that is Continue Watching's job.
 	where += " AND i.id NOT IN (SELECT item_id FROM progress WHERE profile_id = ?)"
 	args = append(args, v.ProfileID)
+	where += vis
+	args = append(args, visArgs...)
 
 	// RANDOM() so the rail differs between launches instead of showing the same
 	// alphabetical head forever.
 	args = append(args, limit)
 	rows, err := s.db.Query(`
 		SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
-		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number
+		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number,
+		       i.content_rating
 		FROM items i
 		WHERE `+where+`
 		ORDER BY RANDOM()
@@ -130,9 +139,10 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		var year, duration, seasonNumber, episodeNumber sql.NullInt64
 		var rating sql.NullFloat64
 		var posterPath, backdropPath, showName sql.NullString
+		var contentRating *string
 
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath, &showName, &seasonNumber, &episodeNumber); err != nil {
+			&posterPath, &backdropPath, &showName, &seasonNumber, &episodeNumber, &contentRating); err != nil {
 			continue
 		}
 
@@ -146,6 +156,9 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 			"rating":          nullFloatToAny(rating),
 			"posterImageId":   nil,
 			"backdropImageId": nil,
+			// ProfilesAPI.md "Item fields": unrated is null / level 4 (FR-242).
+			"contentRating": contentRating,
+			"ageLevel":      agerating.LevelPtr(contentRating),
 		}
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id

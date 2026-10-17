@@ -5,9 +5,12 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	agerating "dsvideo/backend/internal/rating"
 )
 
 // justAddedCacheSize is how many titles the rail holds.
@@ -27,7 +30,7 @@ const justAddedCacheSize = 24
 // started server answers correctly without waiting for the first tick.
 const justAddedRefreshInterval = 12 * time.Hour
 
-// justAddedCache holds the precomputed rail, per library.
+// justAddedCache holds the precomputed rail, per library and per age ceiling.
 //
 // WHY THE SERVER OWNS THIS
 // ------------------------
@@ -40,10 +43,22 @@ const justAddedRefreshInterval = 12 * time.Hour
 // newer films, and four separate client-side fixes chased the symptom.
 //
 // The server has first-hand knowledge of its own library. It should answer the question.
+//
+// PER CEILING (FRD-002 FR-250)
+// ----------------------------
+// A restricted profile's rail is computed with its ceiling inside the query, so the dedup and
+// the 24-slot cut see only visible titles and the rail is as full as the library allows.
+// Trimming the shared rail afterwards would leave a kids' profile a short or empty rail
+// whenever the newest additions are adult. There are only four ceilings, so every
+// (ceiling, library) rail is precomputed: 4 × libraries small indexed queries per refresh.
 type justAddedCache struct {
 	mu         sync.RWMutex
-	byLibrary  map[string][]map[string]any
+	byLibrary  map[string][]map[string]any // key: justAddedKey(maxLevel, libraryID)
 	computedAt time.Time
+}
+
+func justAddedKey(maxLevel int, libraryID string) string {
+	return strconv.Itoa(maxLevel) + "|" + libraryID
 }
 
 func newJustAddedCache() *justAddedCache {
@@ -80,24 +95,27 @@ func (s *Server) refreshJustAdded() {
 	libs.Close()
 
 	next := map[string][]map[string]any{}
-	// The empty key is the all-libraries rail, which is what the home screen asks for.
-	for _, id := range append(libraryIDs, "") {
-		rows, err := s.queryJustAdded(id)
-		if err != nil {
-			log.Printf("[justAdded] compute failed for library %q: %v", id, err)
-			continue
+	// The empty library is the all-libraries rail, which is what the home screen asks for.
+	for level := agerating.MinLevel; level <= agerating.MaxLevel; level++ {
+		for _, id := range append(libraryIDs, "") {
+			rows, err := s.queryJustAdded(id, level)
+			if err != nil {
+				log.Printf("[justAdded] compute failed for library %q, ceiling %d: %v", id, level, err)
+				continue
+			}
+			next[justAddedKey(level, id)] = rows
 		}
-		next[id] = rows
 	}
 
 	s.justAdded.mu.Lock()
 	s.justAdded.byLibrary = next
 	s.justAdded.computedAt = time.Now()
 	s.justAdded.mu.Unlock()
-	log.Printf("[justAdded] refreshed %d librar(ies)", len(next))
+	log.Printf("[justAdded] refreshed %d librar(ies) at %d ceilings", len(libraryIDs)+1, agerating.MaxLevel-agerating.MinLevel+1)
 }
 
-// queryJustAdded computes the newest titles for one library, or all when libraryID is "".
+// queryJustAdded computes the newest titles for one library, or all when libraryID is "",
+// leaving out titles above maxLevel (FR-250; agerating.MaxLevel filters nothing).
 //
 // Deduplicated by SHOW, not by item: a TV show that just gained twelve episodes is ONE new
 // thing on the rail, not twelve. Without this a single season import buries every film the
@@ -109,12 +127,17 @@ func (s *Server) refreshJustAdded() {
 // the one thing that is NOT stable across a show's episodes — an unmatched import whose
 // show_name is NULL gave every episode a distinct key and nine of the rail's 24 slots went
 // to one anime series. The folder is what those episodes actually share.
-func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
+func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]any, error) {
 	where := "WHERE i.added_at != ''"
 	var args []any
 	if libraryID != "" {
 		where += " AND i.library_id = ?"
 		args = append(args, libraryID)
+	}
+	// In the WHERE, before the over-fetch LIMIT and the dedup, never after (see justAddedCache).
+	if clause, cargs := agerating.Visible("i.content_rating", maxLevel); clause != "" {
+		where += " AND " + clause
+		args = append(args, cargs...)
 	}
 
 	// Over-fetch, then dedup: the dedup is by show and cannot be expressed as a LIMIT.
@@ -123,7 +146,7 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 	rows, err := s.db.Query(`
 		SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number,
-		       i.library_id, i.path
+		       i.library_id, i.path, i.content_rating
 		FROM items i
 		`+where+`
 		ORDER BY i.added_at DESC
@@ -139,6 +162,7 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 		year, duration, season, episode        sql.NullInt64
 		rating                                 sql.NullFloat64
 		posterPath, backdropPath, showName     sql.NullString
+		contentRating                          *string
 	}
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	var cands []candidate
@@ -148,7 +172,7 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 		var path string
 		if err := rows.Scan(&c.id, &c.typ, &c.title, &c.year, &c.duration, &c.addedAt,
 			&c.rating, &c.posterPath, &c.backdropPath, &c.showName, &c.season, &c.episode,
-			&c.libID, &path); err != nil {
+			&c.libID, &path, &c.contentRating); err != nil {
 			continue
 		}
 		if c.typ == "episode" {
@@ -219,6 +243,9 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 			"libraryId":       libID,
 			"posterImageId":   nil,
 			"backdropImageId": nil,
+			// ProfilesAPI.md "Item fields": unrated is null / level 4 (FR-242).
+			"contentRating": c.contentRating,
+			"ageLevel":      agerating.LevelPtr(c.contentRating),
 		}
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id
@@ -252,16 +279,22 @@ func (s *Server) queryJustAdded(libraryID string) ([]map[string]any, error) {
 func (s *Server) handleJustAdded(w http.ResponseWriter, r *http.Request) {
 	libraryID := strings.TrimSpace(r.URL.Query().Get("libraryId"))
 	limit := clampInt(parseInt(r.URL.Query().Get("limit"), 16), 1, justAddedCacheSize)
+	// The viewing profile picks which precomputed rail is served (FR-250).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	key := justAddedKey(v.MaxAgeLevel, libraryID)
 
 	s.justAdded.mu.RLock()
-	items, ok := s.justAdded.byLibrary[libraryID]
+	items, ok := s.justAdded.byLibrary[key]
 	age := time.Since(s.justAdded.computedAt)
 	s.justAdded.mu.RUnlock()
 
 	if !ok || age > justAddedRefreshInterval {
 		s.refreshJustAdded()
 		s.justAdded.mu.RLock()
-		items = s.justAdded.byLibrary[libraryID]
+		items = s.justAdded.byLibrary[key]
 		s.justAdded.mu.RUnlock()
 	}
 

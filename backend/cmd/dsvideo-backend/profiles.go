@@ -372,6 +372,16 @@ func (s *Server) itemAboveCeiling(ctx context.Context, v viewer, itemID string) 
 	return rating.LevelPtr(p) > v.MaxAgeLevel, nil
 }
 
+// andVisibleFrag is andVisible for queries that already have a WHERE: it returns
+// " AND <clause>" (or "") and the args to append.
+func (v viewer) andVisibleFrag(col string) (string, []any) {
+	clause, cargs := v.VisibleClause(col)
+	if clause == "" {
+		return "", nil
+	}
+	return " AND " + clause, cargs
+}
+
 // writeContentRestricted is the "refused above the ceiling" answer (FR-250): it names the
 // real cause, never a not-found that blames the library.
 func writeContentRestricted(w http.ResponseWriter) {
