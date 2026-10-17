@@ -10,7 +10,7 @@ enum CollectionsLoadState: Equatable, Sendable {
 /// What a browse surface shows for collections (FRD-002 FR-270, FR-274, FR-276).
 ///
 /// Which collections a profile gets is the server's decision; this only decides presentation.
-/// `isKids` (Profile.isKids) picks whether collections REPLACE the genre list (kids) or are an
+/// `isKids` (the server's `Profile.kids`, FR-270) picks whether collections REPLACE the genre list (kids) or are an
 /// extra row (Teens and Adult), and whether an empty or failed answer is worth saying out loud:
 /// for a kids' profile collections are the primary browse, so silence would be a dead end.
 enum CollectionsBrowse: Equatable {

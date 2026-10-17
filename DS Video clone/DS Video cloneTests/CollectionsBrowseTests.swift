@@ -52,10 +52,11 @@ struct CollectionsBrowseTests {
   }
 
   @Test func kidsReplaceGenresTeensKeepThem() {
-    let olderKids = Profile(id: "k", name: "K", avatar: "fox", maxAgeLevel: 2, hasPin: false, isOwner: false)
-    let teens = Profile(id: "t", name: "T", avatar: "owl", maxAgeLevel: 3, hasPin: false, isOwner: false)
-    #expect(!CollectionsBrowse.showsGenres(isKids: olderKids.isKids))
-    #expect(CollectionsBrowse.showsGenres(isKids: teens.isKids))
+    // Who is a kid is the server's `kids` flag (TASK-921), not a level the client compares.
+    let olderKids = Profile(id: "k", name: "K", avatar: "fox", maxAgeLevel: 2, hasPin: false, isOwner: false, kids: true)
+    let teens = Profile(id: "t", name: "T", avatar: "owl", maxAgeLevel: 3, hasPin: false, isOwner: false, kids: false)
+    #expect(!CollectionsBrowse.showsGenres(isKids: olderKids.kids))
+    #expect(CollectionsBrowse.showsGenres(isKids: teens.kids))
   }
 
   // MARK: Wire shape

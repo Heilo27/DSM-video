@@ -902,12 +902,12 @@ struct ProfileEditorView: View {
         choosingPin = false
       }
     }
-    .alert(existing.map { "Delete \($0.name)?" } ?? "Delete profile?",
+    .alert(ProfileDeleteConfirmation(profile: existing).title,
            isPresented: $confirmingDelete) {
-      Button("Delete", role: .destructive) { Task { await delete() } }
-      Button("Cancel", role: .cancel) {}
+      Button("Delete", role: .destructive) { Task { await resolveDelete(.delete) } }
+      Button("Cancel", role: .cancel) { Task { await resolveDelete(.cancel) } }
     } message: {
-      Text(ProfileText.deleteConfirmation(name: existing?.name ?? "This profile"))
+      Text(ProfileDeleteConfirmation(profile: existing).message)
     }
     #if os(tvOS)
     .onExitCommand { close() }
@@ -1028,13 +1028,40 @@ struct ProfileEditorView: View {
     }
   }
 
-  private func delete() async {
-    guard let existing else { return }
-    saving = true
+  private func resolveDelete(_ choice: ProfileDeleteConfirmation.Choice) async {
+    if choice == .delete { saving = true }
     defer { saving = false }
-    switch await appState.deleteProfile(id: existing.id, ownerPin: ownerPin) {
-    case .success: close()
-    case .failure(let failure): error = ProfileText.saveFailure(failure)
+    switch await ProfileDeleteConfirmation(profile: existing)
+      .perform(choice, on: appState, ownerPin: ownerPin) {
+    case nil: break
+    case .success?: close()
+    case .failure(let failure)?: error = ProfileText.saveFailure(failure)
+    }
+  }
+}
+
+// MARK: - Delete confirmation (FR-206, FR-266, AC-002-46, OC-2040)
+
+/// What the delete confirmation says and what each of its two buttons does, held apart from
+/// the view so both can be tested without rendering it. Cancel must never reach the server.
+struct ProfileDeleteConfirmation {
+  let profile: Profile?
+
+  enum Choice { case delete, cancel }
+
+  var title: String { profile.map { "Delete \($0.name)?" } ?? "Delete profile?" }
+  var message: String { ProfileText.deleteConfirmation(name: profile?.name ?? "This profile") }
+
+  /// Runs the chosen button. `.cancel` returns nil without any request; `.delete` deletes
+  /// the profile (the destructive call, FR-206) and returns the server's answer.
+  @MainActor
+  func perform(_ choice: Choice, on appState: AppState, ownerPin: String) async -> Result<Void, Error>? {
+    switch choice {
+    case .cancel:
+      return nil
+    case .delete:
+      guard let profile else { return nil }
+      return await appState.deleteProfile(id: profile.id, ownerPin: ownerPin)
     }
   }
 }

@@ -292,8 +292,9 @@ struct ItemsGridView: View {
   }
 
   /// Kids' profiles browse by collections in place of the genre list (FRD-002 FR-270).
+  /// Who is a kid is the server's answer (`Profile.kids`), never a level compared here.
   private var showsGenres: Bool {
-    CollectionsBrowse.showsGenres(isKids: appState.activeProfile?.isKids ?? false)
+    CollectionsBrowse.showsGenres(isKids: appState.activeProfile?.kids ?? false)
   }
 
   @ViewBuilder private var browseFilterBar: some View {

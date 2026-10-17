@@ -500,7 +500,8 @@ actor LocalStore {
   /// - Existing rows go to the legacy bucket `''`. They belong to the owner (FR-233), whose
   ///   id is not known until /profiles answers; `claimLegacyRows(ownerID:)` moves them then.
   /// - The global `progress_seq` cursor becomes the legacy bucket's cursor `progress_seq:`.
-  /// - items gain `age_level` (NULL = unrated = 4, fail closed) and `content_rating`.
+  /// - items gain `age_level` (NULL = unrated: counts as the server's unrated level) and
+  ///   `content_rating`.
   private func migrateToV3() throws {
     try execThrows("BEGIN IMMEDIATE")
     do {
@@ -694,6 +695,7 @@ actor LocalStore {
   func upsertProgress(_ progress: [String: ItemProgress], profileID: String? = nil) {
     guard !progress.isEmpty, let db else { return }
     let pid = profileID ?? activeScope.id
+    guard !refusesWrites(for: pid, "upsertProgress") else { return }
     exec("BEGIN TRANSACTION")
     // TASK-840: conflict resolution is now ownership-based, NOT a wall-clock comparison.
     //
@@ -756,6 +758,7 @@ actor LocalStore {
                             profileID: String? = nil) {
     guard let db else { return }
     let pid = profileID ?? activeScope.id
+    guard !refusesWrites(for: pid, "upsertSingleProgress") else { return }
     var stmt: OpaquePointer?
     let sql = """
       INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync, profile_id)
@@ -916,13 +919,13 @@ actor LocalStore {
       SELECT p.position_seconds, p.duration_seconds
       FROM progress p
       LEFT JOIN items i ON i.id = p.item_id
-      WHERE p.item_id = ?3 AND p.profile_id = ?1 AND \(Self.sqlVisibleToScope)
+      WHERE p.item_id = ?4 AND p.profile_id = ?1 AND \(Self.sqlVisibleToScope)
       LIMIT 1
     """
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
     defer { sqlite3_finalize(stmt) }
     bindScope(stmt)
-    sqlite3_bind_text(stmt, 3, itemId, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_text(stmt, 4, itemId, -1, SQLITE_TRANSIENT)
     guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
     let position = Int(sqlite3_column_int(stmt, 0))
     let duration = Int(sqlite3_column_int(stmt, 1))
@@ -971,17 +974,24 @@ actor LocalStore {
 
   // MARK: Profile filter (FR-201, FR-262)
   //
-  // Every query that returns titles or positions binds the active scope as ?1 (profile id)
-  // and ?2 (max age level). Progress joins carry `p.profile_id = ?1` IN THE JOIN, so a LEFT
-  // JOIN still returns the title with no progress rather than another profile's. The age
-  // rule is ProfileScope.allows(ageLevel:) in SQL: a NULL level is unrated, which is 4.
+  // Every query that returns titles or positions binds the active scope as ?1 (profile id),
+  // ?2 (max age level) and ?3 (the unrated level); query-specific parameters start at ?4.
+  // Progress joins carry `p.profile_id = ?1` IN THE JOIN, so a LEFT JOIN still returns the
+  // title with no progress rather than another profile's.
+  //
+  // sqlVisibleToScope is the client visibility rule (FR-242) as every offline read runs it:
+  // a NULL level counts as the server's unrated level (GET /profiles/age-levels, not the
+  // ladder's top), bound from the scope (never a literal here). Its Swift twin is
+  // ProfileScope.allows(ageLevel:), for lists that never reach SQLite; SQL cannot call Swift,
+  // hence two sites. Change one, change both:
+  // ProfileScopeFixTests pins them to the same answer for every level and for NULL.
   private static let sqlProgressForScope = "p.profile_id = ?1"
-  private static let sqlVisibleToScope =
-    "COALESCE(i.age_level, \(ProfileScope.unrestrictedLevel)) <= ?2"
+  private static let sqlVisibleToScope = "COALESCE(i.age_level, ?3) <= ?2"
 
   private func bindScope(_ stmt: OpaquePointer?) {
     sqlite3_bind_text(stmt, 1, activeScope.id, -1, SQLITE_TRANSIENT)
     sqlite3_bind_int64(stmt, 2, Int64(activeScope.maxAgeLevel))
+    sqlite3_bind_int64(stmt, 3, Int64(activeScope.unratedLevel))
   }
 
   func queryRails() -> HomeRails {
@@ -1106,17 +1116,17 @@ actor LocalStore {
       SELECT \(Self.itemSelectColumns)
       FROM items i
       LEFT JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
-      WHERE i.library_id = ?3
+      WHERE i.library_id = ?4
         AND \(Self.sqlVisibleToScope)
       ORDER BY i.added_at DESC
-      LIMIT ?4
+      LIMIT ?5
     """
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
     defer { sqlite3_finalize(stmt) }
     bindScope(stmt)
-    sqlite3_bind_text(stmt, 3, libraryId, -1, SQLITE_TRANSIENT)
-    sqlite3_bind_int64(stmt, 4, Int64(limit))
+    sqlite3_bind_text(stmt, 4, libraryId, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int64(stmt, 5, Int64(limit))
     var results: [ItemSummary] = []
     while sqlite3_step(stmt) == SQLITE_ROW {
       results.append(itemFromStatement(stmt))
@@ -1210,6 +1220,7 @@ actor LocalStore {
 
   func setProgressSeq(_ seq: Int, profileID: String? = nil) {
     guard let db else { return }
+    guard !refusesWrites(for: profileID ?? activeScope.id, "setProgressSeq") else { return }
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES(?, ?)", -1, &stmt, nil) == SQLITE_OK else { return }
     defer { sqlite3_finalize(stmt) }
@@ -1221,6 +1232,23 @@ actor LocalStore {
   }
 
   // MARK: - Profiles
+
+  /// The stored age level of one title, or nil when it is unknown: the title is not in the
+  /// local catalog, or the server never sent a level for it (an older server, or a row not yet
+  /// backfilled). nil is NOT "unrestricted": callers must treat it as the unrated level and
+  /// fail closed, exactly as sqlVisibleToScope does. Reads no scope, so it answers the same
+  /// whichever profile is active (DownloadManager uses it to gate legacy downloads).
+  func ageLevel(forItemID itemID: String) -> Int? {
+    guard !itemID.isEmpty, let db else { return nil }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "SELECT age_level FROM items WHERE id = ?1", -1, &stmt, nil) == SQLITE_OK else {
+      return nil
+    }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, itemID, -1, SQLITE_TRANSIENT)
+    guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+    return colOptInt(stmt, 0)
+  }
 
   /// Moves progress recorded before profiles existed (the legacy bucket '') to the owner
   /// (FR-233), once the owner's id is known. Where the owner already has a row for the same
@@ -1277,22 +1305,79 @@ actor LocalStore {
     exec("COMMIT")
   }
 
-  /// Items synced before the server sent `ageLevel` have NULL levels, which every read
-  /// treats as 4: a restricted profile would see nothing until each item changed. The first
-  /// time the server proves it supports profiles, re-fetch the catalog once. Resetting the
-  /// cursor alone is safe (see homeForceRefresh): upsertItems is idempotent and the library
-  /// stays usable throughout. Returns true when it reset the cursor.
-  func beginAgeLevelBackfillIfNeeded() -> Bool {
-    guard db != nil else { return false }
-    let done = scalarInt("SELECT value FROM sync_cursors WHERE key = 'age_level_backfill'") ?? 0
-    guard done == 0 else { return false }
-    exec("BEGIN TRANSACTION")
-    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', 0)")
-    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('age_level_backfill', 1)")
-    exec("COMMIT")
-    log.info("age-level backfill: item cursor reset so every item is re-fetched with its level")
+  /// Refuses a progress write filed under the unchosen scope. Nothing may be recorded for
+  /// "no profile chosen" on a profile account: such a row would belong to nobody, and must
+  /// never reach the legacy bucket the owner claims (FR-233). AppState drops these saves
+  /// before they get here; this is the backstop for any other caller.
+  private func refusesWrites(for profileID: String, _ site: StaticString) -> Bool {
+    guard profileID == ProfileScope.unchosenID else { return false }
+    log.warning("\(site): refused — no profile is chosen on this profile account")
     return true
   }
+
+  /// Every profile id this device holds data for: progress rows (pending outbox included)
+  /// and per-profile progress cursors. Excludes the legacy bucket '' (claimed by the owner,
+  /// never purged here). refreshProfiles purges any id the server no longer lists (FR-206).
+  func storedProfileIDs() -> Set<String> {
+    guard let db else { return [] }
+    let sql = """
+      SELECT profile_id FROM progress WHERE profile_id <> ''
+      UNION
+      SELECT substr(key, length('progress_seq:') + 1) FROM sync_cursors
+        WHERE key LIKE 'progress\\_seq:_%' ESCAPE '\\'
+    """
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      log.error("storedProfileIDs: prepare failed — \(String(cString: sqlite3_errmsg(db)))")
+      return []
+    }
+    defer { sqlite3_finalize(stmt) }
+    var ids = Set<String>()
+    while sqlite3_step(stmt) == SQLITE_ROW {
+      if let id = colText(stmt, 0), !id.isEmpty { ids.insert(id) }
+    }
+    return ids
+  }
+
+  /// Items synced before the server sent `ageLevel` have NULL levels, which every read
+  /// treats as unrated: a restricted profile would see nothing until each item changed.
+  /// Called on every successful GET /profiles (the server has proved it sends levels): if any
+  /// title is missing its level, reset the catalog cursor so the next sync re-fetches every
+  /// item with its level. Resetting the cursor alone is safe (see homeForceRefresh):
+  /// upsertItems is idempotent and the library stays usable throughout. Returns true when it
+  /// reset the cursor.
+  ///
+  /// Once, not every call: a re-fetch from 0 checkpoints its cursor per page, so a title
+  /// whose change_seq is below the cursor has been re-fetched. While the re-fetch is under
+  /// way (or after it finished) no NULL title sits below the cursor, and this does nothing,
+  /// so it never restarts a resumable re-fetch. If one DOES sit below the cursor, a sync pass
+  /// that was already in flight wrote its own cursor over the reset, and the reset is
+  /// re-armed. Bounded by `maxAgeLevelBackfills` so a title the server never re-sends cannot
+  /// cause a full re-fetch at every launch.
+  func beginAgeLevelBackfillIfNeeded() -> Bool {
+    guard let db else { return false }
+    guard scalarInt("SELECT 1 FROM items WHERE age_level IS NULL LIMIT 1") != nil else { return false }
+    let attempts = scalarInt("SELECT value FROM sync_cursors WHERE key = 'age_level_backfill'") ?? 0
+    if attempts > 0 {
+      guard attempts < Self.maxAgeLevelBackfills else { return false }
+      let cursor = scalarInt("SELECT value FROM sync_cursors WHERE key = 'item_seq'") ?? 0
+      var stmt: OpaquePointer?
+      guard sqlite3_prepare_v2(
+        db, "SELECT 1 FROM items WHERE age_level IS NULL AND change_seq < ?1 LIMIT 1",
+        -1, &stmt, nil) == SQLITE_OK else { return false }
+      sqlite3_bind_int64(stmt, 1, Int64(cursor))
+      let skipped = sqlite3_step(stmt) == SQLITE_ROW
+      sqlite3_finalize(stmt)
+      guard skipped else { return false }
+    }
+    exec("BEGIN TRANSACTION")
+    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', 0)")
+    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('age_level_backfill', \(attempts + 1))")
+    exec("COMMIT")
+    log.info("age-level backfill \(attempts + 1): item cursor reset so every item is re-fetched with its level")
+    return true
+  }
+  private static let maxAgeLevelBackfills = 3
 
   // MARK: - Clear
 

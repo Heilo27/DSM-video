@@ -55,10 +55,37 @@ func RekeyAndMigrate(db *sql.DB, oldID, newID, cleanPath string, probe *transcod
 			_ = tx.Rollback()
 		}
 	}()
+	if err = RekeyAndMigrateTx(tx, oldID, newID, cleanPath, probe, seq); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("rekey: commit: %w", err)
+	}
+	return nil
+}
+
+// RekeyAndMigrateTx is RekeyAndMigrate inside a transaction the caller owns (and commits).
+//
+// It exists so the caller can allocate the row's item_seq in the SAME transaction. SQLite
+// admits one writer at a time, so a sequence allocated inside the writing transaction cannot
+// be overtaken: no later sequence can be allocated, committed and advertised on /sync while
+// this row is still uncommitted. Allocating outside (autocommit) and writing afterwards
+// opened exactly that window, and a device whose cursor passed the later sequence never
+// fetched this row (TASK-919).
+func RekeyAndMigrateTx(tx *sql.Tx, oldID, newID, cleanPath string, probe *transcode.ProbeResult, seq int64) error {
+	if tx == nil {
+		return fmt.Errorf("rekey: nil tx")
+	}
+	if probe == nil {
+		return fmt.Errorf("rekey: nil probe")
+	}
+	if newID == oldID {
+		return fmt.Errorf("rekey: newID == oldID (%s) — caller should use the same-path update", oldID)
+	}
 
 	// 1. Clear any items row already sitting on the destination id (a rescan that beat us).
 	//    After this DELETE the UPDATE below cannot PK-collide.
-	if _, err = tx.Exec(`DELETE FROM items WHERE id = ?`, newID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM items WHERE id = ?`, newID); err != nil {
 		return fmt.Errorf("rekey: clear conflicting newID row: %w", err)
 	}
 
@@ -82,21 +109,17 @@ func RekeyAndMigrate(db *sql.DB, oldID, newID, cleanPath string, probe *transcod
 	//    pre-existing (newID, …) PK; the follow-up DELETE drops the now-stale (oldID, …)
 	//    rows so nothing is orphaned and no duplicate FK rows linger.
 	for _, table := range fkItemTables {
-		if _, err = tx.Exec(
+		if _, err := tx.Exec(
 			fmt.Sprintf(`UPDATE OR IGNORE %s SET item_id = ? WHERE item_id = ?`, table),
 			newID, oldID,
 		); err != nil {
 			return fmt.Errorf("rekey: migrate %s: %w", table, err)
 		}
-		if _, err = tx.Exec(
+		if _, err := tx.Exec(
 			fmt.Sprintf(`DELETE FROM %s WHERE item_id = ?`, table), oldID,
 		); err != nil {
 			return fmt.Errorf("rekey: prune stale %s: %w", table, err)
 		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("rekey: commit: %w", err)
 	}
 	return nil
 }

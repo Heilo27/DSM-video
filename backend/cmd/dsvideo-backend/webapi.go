@@ -126,7 +126,7 @@ func persistSession(db *sql.DB, session *WebAPISession) {
 		session.SID, session.UserID, session.Username, session.Token, session.DeviceID, session.CreatedAt.Unix(),
 	)
 	if err != nil {
-		log.Printf("[WebAPI] Failed to persist session %s: %v", session.SID[:min(16, len(session.SID))], err)
+		log.Printf("[WebAPI] Failed to persist session %s: %v", sidFingerprint(session.SID), err)
 	}
 }
 
@@ -270,6 +270,35 @@ func (s *Server) writeProxiedResponse(w http.ResponseWriter, status int, hdr htt
 	_, _ = w.Write(body)
 }
 
+// storedWebAPISession returns the stored session for sid, or nil when there is none or it
+// no longer owns its account key.
+//
+// TASK-931: a session saved before account_claims existed can carry a shared account key
+// that now belongs to a different DSM user. Such a session is deleted (memory and SQLite)
+// and treated as absent, so every caller answers its usual expired-session error and the
+// client signs in again under its own key.
+func (s *Server) storedWebAPISession(ctx context.Context, sid string) *WebAPISession {
+	session := webAPISessions.Get(sid)
+	if session == nil {
+		return nil
+	}
+	owned, err := s.credentialOwnsAccount(ctx, session.UserID, session.Username)
+	if err != nil {
+		// Not a verdict on the session: keep it rather than sign the user out on a
+		// transient database error.
+		log.Printf("[WebAPI] account owner check: %v", err)
+		return session
+	}
+	if owned {
+		return session
+	}
+	log.Printf("[WebAPI] session %s holds account key %s, which belongs to another DSM user; dropped (TASK-931)",
+		sidFingerprint(sid), session.UserID)
+	webAPISessions.Delete(sid)
+	deletePersistedSession(s.db, sid)
+	return nil
+}
+
 // getWebAPISession extracts and validates session from request.
 // If the SID is not found in our local store, it validates against DSM
 // (for the case where the official app authenticated through DSM ports directly).
@@ -298,14 +327,17 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 	isDSVideo := isDSVideoUA(ua)
 
 	if sid == "" {
-		log.Printf("[WebAPI] getWebAPISession: no SID (isDSVideo=%v ua=%q cookie=%q)", isDSVideo, ua, r.Header.Get("Cookie"))
+		log.Printf("[WebAPI] getWebAPISession: no SID (isDSVideo=%v ua=%q cookie_names=%q)", isDSVideo, ua, cookieNames(r.Header.Get("Cookie")))
 		return nil
 	}
 
 	sid = strings.TrimSpace(strings.Trim(sid, "\""))
 
-	// Try our own session store first
-	if session := webAPISessions.Get(sid); session != nil {
+	// Try our own session store first. A stored session whose account key now belongs to
+	// another DSM user is dropped there and handled as an unknown SID below: a DS Video SID
+	// that DSM still accepts is re-created under this user's own key; anything else answers
+	// the caller's no-session error and the client signs in again.
+	if session := s.storedWebAPISession(r.Context(), sid); session != nil {
 		return session
 	}
 
@@ -316,16 +348,15 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 	// AllowUnvalidatedDSVideo is explicitly enabled (trusted-LAN workaround for
 	// fragile DS Video builds; never safe when port-forwarded).
 	if isDSVideo {
-		sidPrefix := func() string {
-			if len(sid) > 16 {
-				return sid[:16]
-			}
-			return sid
-		}
+		sidPrefix := func() string { return sidFingerprint(sid) }
 
 		if account, vErr := s.validateDSMSession(sid); vErr == nil && account != "" {
-			userID := "u_" + sanitizeID(account)
-			if token, err := s.issueToken(userID, account); err == nil {
+			userID, err := s.accountKey(r.Context(), account) // TASK-931: account_claims, not sanitizeID
+			var token string
+			if err == nil {
+				token, err = s.issueToken(userID, account)
+			}
+			if err == nil {
 				session := &WebAPISession{
 					SID:       sid,
 					UserID:    userID,
@@ -338,15 +369,18 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 				webAPISessions.sessions[sid] = session
 				webAPISessions.mu.Unlock()
 				go persistSession(s.db, session)
-				log.Printf("[WebAPI] getWebAPISession: DS Video SID %s... validated against DSM as %q", sidPrefix(), account)
+				log.Printf("[WebAPI] getWebAPISession: DS Video SID %s validated against DSM as %q", sidPrefix(), account)
 				return session
 			}
 		}
 
 		if s.cfg.AllowUnvalidatedDSVideo {
 			user := "sid_" + sid
-			userID := "u_" + sanitizeID(user)
-			token, err := s.issueToken(userID, user)
+			userID, err := s.accountKey(r.Context(), user) // TASK-931
+			var token string
+			if err == nil {
+				token, err = s.issueToken(userID, user)
+			}
 			if err == nil {
 				session := &WebAPISession{
 					SID:       sid,
@@ -360,23 +394,18 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 				webAPISessions.sessions[sid] = session
 				webAPISessions.mu.Unlock()
 				go persistSession(s.db, session)
-				log.Printf("[WebAPI] getWebAPISession: accepted UNVALIDATED SID %s... for DS Video UA (AllowUnvalidatedDSVideo=true)", sidPrefix())
+				log.Printf("[WebAPI] getWebAPISession: accepted UNVALIDATED SID %s for DS Video UA (AllowUnvalidatedDSVideo=true)", sidPrefix())
 				return session
 			}
-			log.Printf("[WebAPI] getWebAPISession: DS Video fallback token issue failed for SID %s...: %v", sidPrefix(), err)
+			log.Printf("[WebAPI] getWebAPISession: DS Video fallback token issue failed for SID %s: %v", sidPrefix(), err)
 		} else {
-			log.Printf("[WebAPI] getWebAPISession: DS Video SID %s... failed DSM validation and AllowUnvalidatedDSVideo is off — rejecting", sidPrefix())
+			log.Printf("[WebAPI] getWebAPISession: DS Video SID %s failed DSM validation and AllowUnvalidatedDSVideo is off — rejecting", sidPrefix())
 		}
 	}
 
 	// SID not found in local store — log the prefix for diagnostics.
-	log.Printf("[WebAPI] getWebAPISession: SID %s... not in store (store size=%d), trying DSM",
-		func() string {
-			if len(sid) > 16 {
-				return sid[:16]
-			}
-			return sid
-		}(), func() int {
+	log.Printf("[WebAPI] getWebAPISession: SID %s not in store (store size=%d), trying DSM",
+		sidFingerprint(sid), func() int {
 			webAPISessions.mu.RLock()
 			n := len(webAPISessions.sessions)
 			webAPISessions.mu.RUnlock()
@@ -388,18 +417,17 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 	// Validate against DSM and create a local session if valid.
 	username, err := s.validateDSMSession(sid)
 	if err != nil || username == "" {
-		log.Printf("[WebAPI] getWebAPISession: DSM validation failed for SID %s...: %v",
-			func() string {
-				if len(sid) > 16 {
-					return sid[:16]
-				}
-				return sid
-			}(), err)
+		log.Printf("[WebAPI] getWebAPISession: DSM validation failed for SID %s: %v",
+			sidFingerprint(sid), err)
 		return nil
 	}
 
 	// DSM validated the SID - create a local session for this user
-	userID := "u_" + sanitizeID(username)
+	userID, err := s.accountKey(r.Context(), username) // TASK-931
+	if err != nil {
+		log.Printf("[WebAPI] account key for DSM session user %s: %v", username, err)
+		return nil
+	}
 	token, err := s.issueToken(userID, username)
 	if err != nil {
 		log.Printf("[WebAPI] Failed to issue token for DSM session user %s: %v", username, err)
@@ -419,7 +447,7 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 	webAPISessions.sessions[sid] = session
 	webAPISessions.mu.Unlock()
 
-	log.Printf("[WebAPI] Created session for DSM-authenticated user %s (sid=%s...)", username, sid[:min(16, len(sid))])
+	log.Printf("[WebAPI] Created session for DSM-authenticated user %s (sid=%s)", username, sidFingerprint(sid))
 	return session
 }
 
@@ -906,8 +934,11 @@ func (s *Server) handleWebAPIEntry(w http.ResponseWriter, r *http.Request) {
 				if b, ok2 := v.(loginBinding); ok2 {
 					// Only accept fresh bindings (2 minutes).
 					if time.Since(b.CreatedAt) < 2*time.Minute && webAPISessions.Get(newID) == nil {
-						userID := "u_" + sanitizeID(b.Username)
-						token, tokErr := s.issueToken(userID, b.Username)
+						userID, tokErr := s.accountKey(r.Context(), b.Username) // TASK-931
+						var token string
+						if tokErr == nil {
+							token, tokErr = s.issueToken(userID, b.Username)
+						}
 						if tokErr == nil {
 							sess := &WebAPISession{
 								SID:       newID,
@@ -921,19 +952,9 @@ func (s *Server) handleWebAPIEntry(w http.ResponseWriter, r *http.Request) {
 							webAPISessions.sessions[newID] = sess
 							webAPISessions.mu.Unlock()
 							go persistSession(s.db, sess)
-							log.Printf("[WebAPI] Entry.Request: bound did=%s... to id=%s... (user=%q)",
-								func() string {
-									if len(did) > 16 {
-										return did[:16]
-									}
-									return did
-								}(),
-								func() string {
-									if len(newID) > 16 {
-										return newID[:16]
-									}
-									return newID
-								}(),
+							log.Printf("[WebAPI] Entry.Request: bound did=%s to id=%s (user=%q)",
+								sidFingerprint(did),
+								sidFingerprint(newID),
 								b.Username,
 							)
 						}
@@ -1058,7 +1079,7 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 		if sid == "" {
 			sid = r.FormValue("_sid")
 		}
-		session := webAPISessions.Get(sid)
+		session := s.storedWebAPISession(r.Context(), sid)
 		if session == nil {
 			// SID not in our store. If no session name was given, this is likely
 			// a DSM native session (webman desktop loads without sending session=webman
@@ -1256,8 +1277,11 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 			if username == "" {
 				username = "sid_" + sid
 			}
-			userID := "u_" + sanitizeID(username)
-			token, tokErr := s.issueToken(userID, username)
+			userID, tokErr := s.accountKey(r.Context(), username) // TASK-931
+			var token string
+			if tokErr == nil {
+				token, tokErr = s.issueToken(userID, username)
+			}
 			if tokErr == nil {
 				session := &WebAPISession{
 					SID:       sid,
@@ -1273,17 +1297,12 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 				go persistSession(s.db, session)
 				stored = true
 			} else {
-				log.Printf("[WebAPI] Auth login: failed to issue token for %q (sid=%s...): %v",
-					username, sid[:min(16, len(sid))], tokErr)
+				log.Printf("[WebAPI] Auth login: failed to issue token for %q (sid=%s): %v",
+					username, sidFingerprint(sid), tokErr)
 			}
 		}
-		log.Printf("[WebAPI] Auth login success: account=%q sid=%s... did_present=%v stored=%v",
-			account, func() string {
-				if len(sid) > 16 {
-					return sid[:16]
-				}
-				return sid
-			}(), did != "", stored)
+		log.Printf("[WebAPI] Auth login success: account=%q sid=%s did_present=%v stored=%v",
+			account, sidFingerprint(sid), did != "", stored)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -2615,21 +2634,21 @@ func (s *Server) handleWebAPIWatchStatus(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	s.progressMu.Lock()
-	writeSeq, seqErr := s.incrementSeqErr("progress_seq")
-	if seqErr != nil {
-		s.progressMu.Unlock()
-		writeWebAPIError(w, 100)
-		return
-	}
-
 	// Update progress in database, keyed by the FR-221 profile (FRD-002 FR-230/FR-251) through
 	// upsertProgress, the one home of the write_seq-guarded statement. This was a private
 	// copy keyed ON CONFLICT(item_id, user_id), a key the profiles migration replaced, so
 	// every DS Video app position failed to store on a migrated database. Progress writes
 	// are accepted above the ceiling (FR-231): history is the viewer's own data.
+	//
+	// writeWithSeq allocates the write_seq inside the upsert's transaction and publishes
+	// progress_seq only after commit (TASK-919; see handleProgress for the stale-position
+	// window the old allocate-and-publish-first order opened).
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.upsertProgress(v, internalID, position, totalDuration, now, writeSeq)
+	s.progressMu.Lock()
+	_, err := s.writeWithSeq(context.Background(), "progress_seq", func(tx *sql.Tx, writeSeq int64) error {
+		_, err := s.upsertProgress(tx, v, internalID, position, totalDuration, now, writeSeq)
+		return err
+	})
 	s.progressMu.Unlock()
 
 	if err != nil {

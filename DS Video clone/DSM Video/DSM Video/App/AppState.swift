@@ -1438,7 +1438,9 @@ final class AppState {
   /// Both rails write the Top Shelf snapshot, because the shelf prefers Continue Watching
   /// and falls back to Just Added. Hooking only one meant the shelf went stale exactly when
   /// it mattered — finishing an episode changes Continue Watching, and without this didSet
-  /// the shelf kept offering the thing you just watched.
+  /// the shelf kept offering the thing you just watched. What the shelf may show from these
+  /// rails (e.g. never Continue Watching on an account with a restricted profile) is
+  /// TopShelfPolicy's decision, not the didSet's.
   var homeContinueWatching: [ItemSummary] = [] {
     didSet { writeTopShelfSnapshot() }
   }
@@ -1549,12 +1551,19 @@ final class AppState {
   /// Removes the persisted Top Shelf snapshot from the shared App Group container.
   /// Called on logout/clearHomeState so no cached content survives sign-out (TASK-775).
   func deleteTopShelfSnapshot() {
-    guard let container = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
-    ) else { return }
-    let fileURL = container.appendingPathComponent("topshelf.json")
+    guard let fileURL = topShelfSnapshotURL else { return }
     try? FileManager.default.removeItem(at: fileURL)
   }
+
+  /// Where the Top Shelf snapshot lives: topshelf.json in the app group the extension reads.
+  /// A stored property only so tests can point the writer at a file they own.
+  @ObservationIgnored var topShelfSnapshotURL: URL? = FileManager.default.containerURL(
+    forSecurityApplicationGroupIdentifier: ActiveProfileStore.appGroupID
+  )?.appendingPathComponent("topshelf.json")
+
+  /// The profile list and unrestricted level the shelf policy reads (FR-264). A stored
+  /// property only so tests do not have to mutate the process-wide store.
+  @ObservationIgnored var topShelfProfileStore: ActiveProfileStore = .shared
 
   var homeAllRailsEmpty: Bool {
     homeContinueWatching.isEmpty && homeJustAdded.isEmpty && homeRecentlyWatched.isEmpty
@@ -1655,7 +1664,7 @@ final class AppState {
     CollectionsBrowse.decide(
       collections: homeCollections,
       load: homeCollectionsLoad,
-      isKids: activeProfile?.isKids ?? false,
+      isKids: activeProfile?.kids ?? false,
       isOffline: isDemoMode || isOffline || serverUnreachable)
   }
 
@@ -2250,7 +2259,9 @@ final class AppState {
             """)
           dlog.warn(.library, "library is behind the server — forcing a full resync")
           await LocalStore.shared.setItemSeq(0)
-          cursors = await LocalStore.shared.getSyncCursors()
+          // The pass's own profile, not the active one: a switch mid-pass must not hand
+          // this pass another profile's progress cursor.
+          cursors = await LocalStore.shared.getSyncCursors(profileID: scope.id)
           forceResync = true
         }
       }
@@ -2555,9 +2566,26 @@ final class AppState {
   /// the NAS was unreachable was therefore lost permanently, which is why the server held
   /// zero progress rows while the phone displayed a populated Continue Watching rail, and
   /// why Continue Watching / Recently Watched were empty on every other device.
-  func recordProgress(itemId: String, positionSeconds: Int, durationSeconds: Int) async {
+  ///
+  /// `asProfile`: the profile id the caller captured when playback STARTED. When given and it
+  /// is no longer the active profile (deleted elsewhere, switched), the save is dropped rather
+  /// than filed under whoever is active now. nil = the active profile (no check).
+  ///
+  /// With no profile chosen on a profile account (the unchosen scope) the save is dropped:
+  /// there is nobody to file it under, and it must never land in the legacy bucket that the
+  /// owner claims (FR-233).
+  func recordProgress(itemId: String, positionSeconds: Int, durationSeconds: Int,
+                      asProfile profileID: String? = nil) async {
     guard !isDemoMode else { return }
     let scope = await LocalStore.shared.activeScope
+    if scope.isUnchosen {
+      homeLog.warning("recordProgress: dropped for \(itemId) — no profile is chosen on this profile account")
+      return
+    }
+    if let profileID, profileID != scope.id {
+      homeLog.warning("recordProgress: dropped for \(itemId) — playback began as another profile than the active one")
+      return
+    }
     await LocalStore.shared.upsertSingleProgress(
       itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds,
       profileID: scope.id)
@@ -2571,8 +2599,9 @@ final class AppState {
       homeLog.error("recordProgress: LocalStore unavailable — progress depends on the server write alone")
     }
 
-    // No active profile on a profile server: keep the row pending locally (written above)
-    // rather than let a header-less write land on the most restricted profile (FR-221).
+    // Legacy scope while support is unknown (no list yet): keep the row pending locally
+    // (written above) rather than let a header-less write land on the most restricted
+    // profile (FR-221). It is the owner's once the list proves who that is (FR-233).
     guard ProfileGate.progressSyncAllowed(scope: scope, support: profileSupport) else {
       homeLog.info("recordProgress: server write held for \(itemId) — no active profile yet; queued")
       return
@@ -2611,11 +2640,14 @@ final class AppState {
   /// position == duration reads as finished everywhere (rails, badges, resume), and
   /// writing 0 clears it. Both route through recordProgress, so they inherit its
   /// local-first write and retry outbox and work offline.
-  func setWatched(itemId: String, durationSeconds: Int, watched: Bool) async {
+  /// `asProfile`: as for recordProgress.
+  func setWatched(itemId: String, durationSeconds: Int, watched: Bool,
+                  asProfile profileID: String? = nil) async {
     await recordProgress(
       itemId: itemId,
       positionSeconds: watched ? durationSeconds : 0,
-      durationSeconds: durationSeconds
+      durationSeconds: durationSeconds,
+      asProfile: profileID
     )
     await refreshProgressFromLocal()
   }
@@ -2741,21 +2773,40 @@ final class AppState {
     do {
       let resp = try await api.profiles()
       profileSupport = .supported
-      ActiveProfileStore.shared.setCachedProfiles(resp.profiles)
+      ActiveProfileStore.shared.setCachedProfiles(
+        resp.profiles, unrestrictedLevel: resp.unrestrictedLevel)
       serverMaxProfiles = resp.maxProfiles
       defer { profileRevision += 1 }
+      // A server that lists profiles sends every title's level: re-fetch any title stored
+      // without one. The cursor reset is read by this session's sync: runDeltaSync calls
+      // refreshProfiles BEFORE it reads the cursor, and from any other caller the heartbeat
+      // (every 30s, both platforms) sees item_seq 0 behind the server and starts a sync.
+      if await LocalStore.shared.beginAgeLevelBackfillIfNeeded() {
+        homeLog.info("refreshProfiles: titles without an age level — catalog re-fetch armed")
+      }
       if let owner = resp.profiles.first(where: \.isOwner) {
         await LocalStore.shared.claimLegacyRows(ownerID: owner.id)
+        // FR-206 on this device: a profile the server no longer lists was deleted (here or
+        // on another device while this one was away). Its positions, unsent outbox and
+        // cursor leave this device. Only from a list that names its owner: a list without
+        // one is malformed, and deleting against it could erase live profiles' data.
+        let listed = Set(resp.profiles.map(\.id))
+        for gone in await LocalStore.shared.storedProfileIDs().subtracting(listed) {
+          homeLog.warning("refreshProfiles: profile \(gone) is gone — removing its local progress")
+          await LocalStore.shared.deleteProfileData(profileID: gone)
+        }
       } else {
-        homeLog.error("refreshProfiles: list has no owner — legacy progress left unclaimed")
+        homeLog.error("refreshProfiles: list has no owner — legacy progress left unclaimed, no purge")
       }
       // FR-260: a remembered profile that was deleted is no longer an identity. Drop it and
       // everything shown for it; the picker (or the single-profile auto-enter) takes over.
+      // Reads fall to the unchosen scope (fail closed), never legacy: a save in this window
+      // must not reach the bucket the owner claims.
       if let remembered = ActiveProfileStore.shared.activeProfileID,
          !resp.profiles.contains(where: { $0.id == remembered }) {
         homeLog.warning("refreshProfiles: remembered profile is gone — back to the picker")
         ActiveProfileStore.shared.setActive(nil)
-        await LocalStore.shared.setActiveProfile(.legacy)
+        await LocalStore.shared.setActiveProfile(ActiveProfileStore.shared.activeScope)
         discardProfileScopedHomeState()
       } else if let remembered = ActiveProfileStore.shared.activeProfileID,
                 let fresh = resp.profiles.first(where: { $0.id == remembered }),
@@ -2772,20 +2823,43 @@ final class AppState {
         ActiveProfileStore.shared.setActive(only)
         await LocalStore.shared.setActiveProfile(ProfileScope(profile: only))
       }
+      // Whatever the store now says is the scope reads must use: covers the first list on a
+      // device that was legacy (now unchosen until a profile is chosen), an unchosen ceiling
+      // that moved with the list, and a new ladder top from the server.
+      let wanted = ActiveProfileStore.shared.activeScope
+      let current = await LocalStore.shared.activeScope
+      if current != wanted {
+        await LocalStore.shared.setActiveProfile(wanted)
+        if current.id != wanted.id { discardProfileScopedHomeState() }
+      }
       evaluateProfilePicker(listIsFresh: true)
       await loadAgeLevelsIfNeeded()
       homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(ActiveProfileStore.shared.activeProfileID ?? "none") picker=\(self.needsProfilePicker)")
+      writeTopShelfSnapshot()  // the list sets the shelf's ceiling (FR-264, TopShelfPolicy)
     } catch {
       profileSupport = ProfileGate.support(afterProfilesError: error)
       homeLog.warning("refreshProfiles: failed — \(error.localizedDescription); support=\(String(describing: self.profileSupport))")
     }
   }
 
-  /// Fetches the age ladder's display labels once per session (GET /profiles/age-levels).
+  /// Fetches the age ladder once per session (GET /profiles/age-levels): the display labels,
+  /// and the server's unrated level, persisted in ActiveProfileStore for offline reads. The
+  /// guard is `ageLevels.isEmpty`, cleared only by sign-out, so this runs once per app launch
+  /// (and after every sign-in); refreshProfiles' success path calls it, so the stored unrated
+  /// level is refreshed at least once per launch whenever the server is reachable.
   func loadAgeLevelsIfNeeded() async {
     guard ageLevels.isEmpty, !isDemoMode, sessionToken != nil else { return }
     do {
-      ageLevels = try await api.ageLevels().levels
+      let resp = try await api.ageLevels()
+      ageLevels = resp.levels
+      ActiveProfileStore.shared.setUnratedLevel(resp.unratedLevel)
+      // refreshProfiles hands LocalStore its scope BEFORE calling here, so a changed unrated
+      // level must reach the offline reads now, not at the next list fetch. Same profile, so
+      // nothing shown is discarded.
+      let wanted = ActiveProfileStore.shared.activeScope
+      if await LocalStore.shared.activeScope != wanted {
+        await LocalStore.shared.setActiveProfile(wanted)
+      }
     } catch {
       // Display labels only: empty states and the tier picker fall back to wording that
       // does not name the level. Retried on the next call.
@@ -2973,33 +3047,36 @@ final class AppState {
 
   // MARK: - Top Shelf Snapshot
 
-  /// Writes CONTINUE WATCHING (up to 10 items) to the shared App Group container so the
-  /// Top Shelf extension can display it when the app is focused.
+  /// Writes what the tvOS Top Shelf may show to the shared App Group container, so the
+  /// extension can display it when the app is focused. TopShelfPolicy decides WHAT; this
+  /// only renders it to topshelf.json.
   ///
-  /// Continue Watching, not Just Added. The Top Shelf is the surface you see before opening
-  /// anything, so its job is to get you back into what you were already watching in one
-  /// click — that is what the shelf is for on every other tvOS app, and what was asked for.
-  /// Just Added is discovery, and discovery is what the home screen's rails are for.
+  /// No restricted profile on the account: Continue Watching (up to 10), falling back to Just
+  /// Added. The Top Shelf is the surface you see before opening anything, so its job is to get
+  /// you back into what you were already watching in one click.
   ///
-  /// Falls back to Just Added when nothing is in progress, so a fresh install or a
-  /// fully-caught-up viewer sees content rather than an app icon on an empty shelf.
+  /// Any restricted profile on the account (FR-264, TASK-923): the shelf is the shared TV's
+  /// home screen with no chosen viewer, so it shows only Just Added titles the most restricted
+  /// profile may see, without resume bars. Independent of the active profile, so it holds while
+  /// the picker is pending. Rewritten when the rails change and after every profile list fetch.
   func writeTopShelfSnapshot() {
     // An empty shelf must CLEAR it, not leave the previous contents advertised.
     // The early-return here meant any non-logout path to empty rails (server unreachable,
     // library removed, a failed load that cleared them) left a stale topshelf.json on disk
     // — so the Top Shelf kept offering titles that deep-linked into items the user may no
-    // longer have access to.
-    let usingContinueWatching = !homeContinueWatching.isEmpty
-    let source = usingContinueWatching ? homeContinueWatching : homeJustAdded
-    guard !source.isEmpty else {
+    // longer have access to. The same holds when the ceiling filters everything out.
+    guard let content = TopShelfPolicy.content(
+      continueWatching: homeContinueWatching, justAdded: homeJustAdded,
+      profiles: topShelfProfileStore.cachedProfiles,
+      unrestrictedLevel: topShelfProfileStore.unrestrictedLevel,
+      unratedLevel: topShelfProfileStore.unratedLevel
+    ) else {
       deleteTopShelfSnapshot()
       return
     }
-    guard let container = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel"
-    ) else { return }
+    guard let fileURL = topShelfSnapshotURL else { return }
 
-    let items: [TopShelfItem] = source.prefix(10).compactMap { item in
+    let items: [TopShelfItem] = content.items.map { item in
       // Prefer backdrop for landscape Top Shelf cards, fall back to poster
       let imageID = item.backdropImageId ?? item.posterImageId
       let imageKind: APIClient.ImageKind = item.backdropImageId != nil ? .backdrop : .poster
@@ -3020,30 +3097,31 @@ final class AppState {
       let imageURLString: String? = imageID.flatMap {
         api.imageURL(id: $0, width: 780, kind: imageKind)?.absoluteString
       }
-      // tvOS draws the resume bar from this. Guard the divisor: a zero duration would
-      // produce NaN, and NaN assigned to playbackProgress is not a number tvOS can draw.
-      var progress: Double? = nil
-      if let p = item.progress, p.durationSeconds > 0 {
-        progress = min(1, max(0, Double(p.positionSeconds) / Double(p.durationSeconds)))
-      }
-
       return TopShelfItem(
         id: item.id,
         title: item.title,
         year: item.year,
         imageURL: imageURLString,
         deepLinkURL: "dsvideo://item/\(item.id)",
-        playbackProgress: progress
+        // tvOS draws the resume bar from this; nil under a restricted ceiling (FR-264).
+        playbackProgress: TopShelfPolicy.playbackProgress(for: item, ceiling: content.ceiling),
+        ageLevel: item.ageLevel
       )
     }
 
     let snapshot = TopShelfSnapshot(
-      sectionTitle: usingContinueWatching ? "Continue Watching" : "Just Added",
+      sectionTitle: content.rail.sectionTitle,
+      rail: content.rail,
+      ceiling: content.ceiling,
       items: items
     )
-    let fileURL = container.appendingPathComponent("topshelf.json")
-    guard let data = try? JSONEncoder().encode(snapshot) else { return }
-    try? data.write(to: fileURL, options: .atomic)
+    do {
+      try JSONEncoder().encode(snapshot).write(to: fileURL, options: .atomic)
+    } catch {
+      // Fail closed: a failed write must not leave the PREVIOUS snapshot advertised.
+      homeLog.error("writeTopShelfSnapshot: write failed — \(error.localizedDescription); clearing the shelf")
+      deleteTopShelfSnapshot()
+    }
   }
 }
 

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -411,37 +410,28 @@ func TestAC00223_BackupFailureViaSeamsLeavesDatabaseUntouched(t *testing.T) {
 	}
 }
 
-// AC-002-23 naturally: the directory next to the database is read-only, so VACUUM INTO cannot
-// create the copy. No seam is replaced. The error must name the cause. Skipped only if the OS
-// lets us write into a 0555 directory anyway (running as root).
+// AC-002-23 naturally: VACUUM INTO cannot write the copy. No seam is replaced. The preferred
+// injection is a read-only (0555) database folder; where that cannot bite (running as root, or
+// a filesystem that ignores directory modes) the copy's file name is already taken, which the
+// same backup step refuses. Either way the test RUNS: it never skips. The error must name the
+// cause, and nothing may change.
+// Red if: backupBeforeProfiles stops probing the folder / stops refusing an existing copy, or
+// migrateProfiles proceeds after a failed copy.
 func TestAC00223_BackupFailureNaturalReadOnlyDirectory(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: a 0555 directory is still writable, cannot force the natural failure")
-	}
 	db, path := oldSchemaDB(t)
 	before := schemaDump(t, db)
-	dir := filepath.Dir(path)
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	if f, err := os.Create(filepath.Join(dir, "probe")); err == nil {
-		f.Close()
-		t.Skip("the filesystem ignores directory permissions; cannot force the natural failure")
-	}
+	inj := forceNaturalBackupFailure(t, path, 30*time.Second)
+	t.Logf("injection: %s", inj.how)
 
 	err := migrateProfiles(db, path)
 	if err == nil {
-		t.Fatalf("migration succeeded although the directory is read-only")
+		t.Fatalf("migration succeeded although the pre-migration copy could not be written (%s)", inj.how)
 	}
 	t.Logf("natural failure message: %v", err)
-	for _, w := range []string{"migration not run", "pre-migration copy"} {
+	for _, w := range append([]string{"migration not run", "pre-migration copy"}, inj.wantInErr...) {
 		if !strings.Contains(err.Error(), w) {
 			t.Errorf("error %q does not contain %q", err, w)
 		}
-	}
-	if !strings.Contains(err.Error(), dir) {
-		t.Errorf("error does not name the directory %s that cannot be written: %v", dir, err)
 	}
 	if !reflect.DeepEqual(before, schemaDump(t, db)) {
 		t.Errorf("schema changed despite the failed copy")
@@ -454,56 +444,27 @@ func TestAC00223_BackupFailureNaturalReadOnlyDirectory(t *testing.T) {
 	}
 }
 
-// AC-002-23 end to end: the real binary, started against an old-schema database whose
-// directory is read-only, must exit non-zero with a log line naming the cause, and leave the
-// database unmigrated. Red if main() ignores migrateProfiles' error.
+// AC-002-23 end to end: the real binary, started against an old-schema database whose copy
+// cannot be written, must exit non-zero with a log line naming the cause, and leave the
+// database unmigrated. Runs as root and under -short too (no skip): the injection falls back
+// to an occupied copy name where a 0555 folder cannot bite.
+// Red if main() ignores migrateProfiles' error.
 func TestAC00223_ServerExitsAtStartupWhenCopyCannotBeWritten(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: cannot make the directory unwritable")
-	}
-	if testing.Short() {
-		t.Skip("builds the server binary")
-	}
-	bin := filepath.Join(t.TempDir(), "dsvideo-backend-qa")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
+	bin := buildBackendBinary(t)
 
 	db, path := oldSchemaDB(t) // keep this connection open so the -wal/-shm files persist in the 0555 dir
 	before := schemaDump(t, db)
-	dir := filepath.Dir(path)
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	inj := forceNaturalBackupFailure(t, path, 90*time.Second)
+	t.Logf("injection: %s", inj.how)
 
-	cmd := exec.Command(bin)
-	cmd.Env = append(os.Environ(),
-		"DSVIDEO_DB_PATH="+path,
-		"DSVIDEO_JWT_SECRET=qa-startup-secret-qa-startup-secret",
-		"DSVIDEO_PORT=0",
-	)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	code, out := runBackendUntilExit(t, bin, path, 20)
+	if code == 0 {
+		t.Errorf("server exited 0, want a non-zero exit\n%s", out)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ee.ExitCode() == 0 {
-			t.Errorf("server exited with %v, want a non-zero exit\n%s", err, out.String())
+	for _, w := range append([]string{"migration not run", "pre-migration copy"}, inj.wantInErr...) {
+		if !strings.Contains(out, w) {
+			t.Errorf("startup log does not contain %q:\n%s", w, out)
 		}
-	case <-after(20):
-		_ = cmd.Process.Kill()
-		<-done
-		t.Fatalf("server kept running although the pre-migration copy could not be written\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "migration not run") || !strings.Contains(out.String(), "pre-migration copy") {
-		t.Errorf("startup log does not name the cause:\n%s", out.String())
 	}
 	if !reflect.DeepEqual(before, schemaDump(t, db)) {
 		t.Errorf("database was changed by the failed startup")

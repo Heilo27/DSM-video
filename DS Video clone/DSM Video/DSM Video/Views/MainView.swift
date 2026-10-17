@@ -806,6 +806,9 @@ struct DownloadsView: View {
   @State private var usedByAppBytes: Int64 = 0
   @State private var showPlayer = false
   @State private var playerItem: DownloadedItem?
+  /// The profile that opened `playerItem` (FR-233). Captured on tap and named by every
+  /// position save, so a profile change while the player is up cannot reassign the save.
+  @State private var playerProfileID: String = ""
   /// Progress-write throttle, mirroring PlayerSheet (ItemDetailView).
   /// The player ticks every 0.5s, and each tick here did a full JSON read + decode +
   /// re-encode + atomic write, PLUS a SQLite write and a network POST — unthrottled, in
@@ -826,12 +829,13 @@ struct DownloadsView: View {
     return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
   }
 
+  // FR-262: in-flight rows name a title too, so they are filtered by the same ceiling.
   private var activeDownloadIDs: [String] {
-    Array(downloadManager.activeDownloads.keys).sorted()
+    downloadManager.activeDownloads.keys.filter(downloadManager.isInFlightVisible).sorted()
   }
 
   private var pausedDownloadIDs: [String] {
-    Array(downloadManager.pausedDownloads.keys).sorted()
+    downloadManager.pausedDownloads.keys.filter(downloadManager.isInFlightVisible).sorted()
   }
 
   private var inProgressIDs: [String] {
@@ -842,7 +846,7 @@ struct DownloadsView: View {
 
   // TASK-782: genuinely-failed downloads, shown in their own "Failed" section with retry.
   private var failedDownloadIDs: [String] {
-    Array(downloadManager.failedDownloads.keys).sorted()
+    downloadManager.failedDownloads.keys.filter(downloadManager.isInFlightVisible).sorted()
   }
 
   var body: some View {
@@ -873,10 +877,17 @@ struct DownloadsView: View {
                     // TASK-796: guard against a double-tap setting playerItem twice
                     // before the cover presents.
                     guard !showPlayer else { return }
-                    playerItem = item
+                    // FR-262: re-ask at the moment of playing. The list may predate a
+                    // profile switch; an over-ceiling title must not play from it.
+                    guard let playable = downloadManager.playableDownloadedItem(itemId: item.id) else {
+                      loadDownloads()
+                      return
+                    }
+                    playerProfileID = downloadManager.activeResumeProfileID
+                    playerItem = playable
                     showPlayer = true
                   } label: {
-                    DownloadedItemCell(item: item) {
+                    DownloadedItemCell(item: item, resumeSeconds: downloadManager.resumePosition(of: item)) {
                       deleteDownload(item)
                     }
                   }
@@ -914,20 +925,32 @@ struct DownloadsView: View {
     .onChange(of: downloadManager.failedDownloads.count) { _, _ in
       loadStorageInfo()
     }
+    // FR-262: a profile switch (or a ceiling change) re-filters the list.
+    .onChange(of: appState.activeProfile) { _, _ in
+      loadDownloads()
+    }
+    // FR-262: backfill levels for downloads made before they were stored, and pick up any
+    // re-rating, from the on-device catalog; then re-filter.
+    .task {
+      await downloadManager.refreshAgeLevels()
+      loadDownloads()
+    }
     .fullScreenCover(isPresented: $showPlayer, onDismiss: { showPlayer = false }) {
       if let item = playerItem {
         GestureVideoPlayer(
           url: URL(fileURLWithPath: item.videoPath),
           title: item.title,
-          resumePosition: Double(item.resumePositionSeconds),
+          resumePosition: Double(downloadManager.resumePosition(of: item, profileID: playerProfileID)),
           onDismiss: {
             // TASK-838 pattern (see PlayerSheet): persist the LIVE position on exit, not
             // the throttled one — otherwise every close loses up to 10s of progress.
             let exitPosition = livePosition > 0 ? livePosition : lastSyncedPosition
             let dur = liveDuration > 0 ? liveDuration : item.durationSeconds
             if exitPosition > 0 && dur > 0 {
-              DownloadManager.shared.updateResumePosition(itemId: item.id, positionSeconds: exitPosition)
-              Task { await appState.recordProgress(itemId: item.id, positionSeconds: exitPosition, durationSeconds: dur) }
+              DownloadManager.shared.updateResumePosition(
+                itemId: item.id, positionSeconds: exitPosition, profileID: playerProfileID)
+              Task { await appState.recordProgress(itemId: item.id, positionSeconds: exitPosition, durationSeconds: dur,
+                                                   asProfile: playerProfileID.isEmpty ? nil : playerProfileID) }
             }
             showPlayer = false
           },
@@ -951,7 +974,8 @@ struct DownloadsView: View {
 
             DownloadManager.shared.updateResumePosition(
               itemId: item.id,
-              positionSeconds: pos
+              positionSeconds: pos,
+              profileID: playerProfileID
             )
             // TASK-730: also record through AppState so LocalStore (Continue Watching)
             // and the server are updated. The offline asset's reported duration can be
@@ -959,7 +983,8 @@ struct DownloadsView: View {
             // server write reconciles automatically once the device is back online.
             let dur = duration > 0 ? Int(duration) : item.durationSeconds
             if dur > 0 {
-              Task { await appState.recordProgress(itemId: item.id, positionSeconds: pos, durationSeconds: dur) }
+              Task { await appState.recordProgress(itemId: item.id, positionSeconds: pos, durationSeconds: dur,
+                                                   asProfile: playerProfileID.isEmpty ? nil : playerProfileID) }
             }
           }
         )
@@ -1139,8 +1164,9 @@ struct DownloadsView: View {
 
   // MARK: - Helpers
 
+  /// The downloads the active profile may see (FR-262), not the whole account's manifest.
   private func loadDownloads() {
-    downloads = DownloadManager.shared.getDownloadedItems()
+    downloads = DownloadManager.shared.visibleDownloadedItems()
   }
 
   private func deleteDownload(_ item: DownloadedItem) {
@@ -1273,6 +1299,8 @@ private struct ActiveDownloadCell: View {
 
 private struct DownloadedItemCell: View {
   let item: DownloadedItem
+  /// The ACTIVE profile's position in this title (FR-233), not another profile's.
+  let resumeSeconds: Int
   let onDelete: () -> Void
 
   var body: some View {
@@ -1325,8 +1353,8 @@ private struct DownloadedItemCell: View {
         .padding(.bottom, 8)
 
         // Resume progress bar — only shown when there is a meaningful resume position
-        if item.resumePositionSeconds > 0 && item.durationSeconds > 0 {
-          let frac = min(1.0, Double(item.resumePositionSeconds) / Double(item.durationSeconds))
+        if resumeSeconds > 0 && item.durationSeconds > 0 {
+          let frac = min(1.0, Double(resumeSeconds) / Double(item.durationSeconds))
           if frac < PlaybackProgress.watchedThreshold {
             VStack(spacing: 0) {
               Spacer()

@@ -21,16 +21,33 @@ extension Notification.Name {
   static let downloadWillBeDeleted = Notification.Name("dsm.downloadWillBeDeleted")
 }
 
+/// One title on this device. Downloads belong to the ACCOUNT (FRD-002): every profile shares
+/// the same files and nothing is deleted when a profile is switched or removed. What a profile
+/// may SEE of them (FR-262) and where each profile is in them (FR-233) are per profile.
 struct DownloadedItem: Identifiable, Codable {
   let id: String
   let title: String
   let year: Int?
-  let videoPath: String
-  let posterPath: String?
+  /// `var` so the read path can resolve it in place; a rebuilt copy would have to list every
+  /// field, and one it forgot (an age level, a profile's position) would silently drop.
+  var videoPath: String
+  var posterPath: String?
   let fileSize: Int64
   let downloadedAt: Date
+  /// The single per-device position recorded before profiles existed: the legacy scope's
+  /// bucket (`ProfileScope.legacy`, id ""), and the OWNER's position until the owner records
+  /// one of their own (FR-233). Never erased, so the migration cannot lose it. Profiles read
+  /// and write through `resumePosition(forProfileID:ownerID:)` / `setResumePosition`.
   var resumePositionSeconds: Int
   var durationSeconds: Int
+  /// The title's server-sent age level (FR-241), captured at download time and kept current
+  /// from the local catalog (`DownloadManager.refreshAgeLevels`). nil is UNKNOWN: a download
+  /// made before FR-262, or one the catalog had no level for. `ProfileScope.allows` reads nil
+  /// as unrated, so an unknown title is hidden on every restricted profile (fail closed).
+  var ageLevel: Int?
+  /// Offline resume position per profile id (FR-233). The legacy bucket is not in here; it is
+  /// `resumePositionSeconds`, which keeps the manifest readable by older builds.
+  var resumePositionsByProfile: [String: Int]
 
   // Explicit memberwise init — callers can omit resumePositionSeconds and durationSeconds (both default to 0).
   init(
@@ -42,7 +59,9 @@ struct DownloadedItem: Identifiable, Codable {
     fileSize: Int64,
     downloadedAt: Date,
     resumePositionSeconds: Int = 0,
-    durationSeconds: Int = 0
+    durationSeconds: Int = 0,
+    ageLevel: Int? = nil,
+    resumePositionsByProfile: [String: Int] = [:]
   ) {
     self.id = id
     self.title = title
@@ -53,10 +72,13 @@ struct DownloadedItem: Identifiable, Codable {
     self.downloadedAt = downloadedAt
     self.resumePositionSeconds = resumePositionSeconds
     self.durationSeconds = durationSeconds
+    self.ageLevel = ageLevel
+    self.resumePositionsByProfile = resumePositionsByProfile
   }
 
   // Custom Decodable init for migration: existing persisted JSON may lack newer fields;
-  // fall back to 0 if any key is absent rather than throwing keyNotFound.
+  // fall back to 0 if any key is absent rather than throwing keyNotFound. A missing
+  // ageLevel decodes as nil (unknown, fail closed), never as a default level.
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     id = try c.decode(String.self, forKey: .id)
@@ -68,6 +90,27 @@ struct DownloadedItem: Identifiable, Codable {
     downloadedAt = try c.decode(Date.self, forKey: .downloadedAt)
     resumePositionSeconds = (try c.decodeIfPresent(Int.self, forKey: .resumePositionSeconds)) ?? 0
     durationSeconds = (try c.decodeIfPresent(Int.self, forKey: .durationSeconds)) ?? 0
+    ageLevel = try c.decodeIfPresent(Int.self, forKey: .ageLevel)
+    resumePositionsByProfile = (try c.decodeIfPresent([String: Int].self, forKey: .resumePositionsByProfile)) ?? [:]
+  }
+
+  /// Where `profileID` is in this title offline (FR-233). The legacy scope ("") reads the
+  /// pre-profiles value; the owner reads it too until they have a position of their own,
+  /// which is how that value migrates to the owner without being lost. Any other profile
+  /// starts at 0: it never inherits someone else's place.
+  func resumePosition(forProfileID profileID: String, ownerID: String?) -> Int {
+    if profileID.isEmpty { return resumePositionSeconds }
+    if let own = resumePositionsByProfile[profileID] { return own }
+    return profileID == ownerID ? resumePositionSeconds : 0
+  }
+
+  /// Records `profileID`'s position, touching no other profile's.
+  mutating func setResumePosition(_ seconds: Int, forProfileID profileID: String) {
+    if profileID.isEmpty {
+      resumePositionSeconds = seconds
+    } else {
+      resumePositionsByProfile[profileID] = seconds
+    }
   }
 }
 
@@ -102,6 +145,8 @@ struct FailedDownload: Identifiable {
   let token: String?
   let year: Int?
   let durationSeconds: Int
+  /// FR-262: the level captured when the download started, carried so a retry keeps it.
+  var ageLevel: Int? = nil
   /// Permanent failures (e.g. disk full) can't be retried by a network retry — tell the user.
   let isPermanent: Bool
   let message: String
@@ -136,7 +181,7 @@ final class DownloadManager: NSObject {
 
   private var backgroundSession: URLSession
   private var downloadTasks: [URLSessionDownloadTask: String] = [:]
-  private var pendingDownloadInfo: [String: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?, videoURL: URL?)] = [:]
+  private var pendingDownloadInfo: [String: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?, videoURL: URL?, ageLevel: Int?)] = [:]
   private var lastProgressUpdate: [String: Date] = [:]
 
   private let storageKey = "dsReel.downloadedItems"
@@ -200,8 +245,20 @@ final class DownloadManager: NSObject {
   /// accessors fall back to exactly the URLs they computed before.
   private let containerOverride: URL?
 
+  /// Which profile is watching, and its ceiling (FR-262, FR-233). `shared` reads the app's
+  /// one store (`ActiveProfileStore.shared`); a test manager gets its own, so tests that set
+  /// an active profile cannot race tests written against the pre-profiles legacy scope.
+  private let profileStore: ActiveProfileStore
+
+  /// Resolves a title's age level from the on-device catalog (nil = unknown). Used to keep
+  /// stored levels current and to backfill downloads made before FR-262. Injected so tests
+  /// do not read the app's shared database.
+  private let ageLevelLookup: (String) async -> Int?
+
   override private init() {
     self.containerOverride = nil
+    self.profileStore = .shared
+    self.ageLevelLookup = { await LocalStore.shared.ageLevel(forItemID: $0) }
     // TASK-738: default downloads to Wi-Fi only unless the user opts into cellular.
     UserDefaults.standard.register(defaults: ["dsReel.downloadsWifiOnly": true])
     let config = URLSessionConfiguration.background(withIdentifier: "com.heiloprojects.dsreel.downloads")
@@ -226,8 +283,21 @@ final class DownloadManager: NSObject {
   /// sessions sharing `com.heiloprojects.dsreel.downloads` is undefined behaviour (see the
   /// comment in `init()`), and this instance never starts a transfer — the tests exercise the
   /// bookkeeping and the response gate, both of which are independent of the session.
-  init(containerForTesting container: URL) {
+  ///
+  /// `profileStore` defaults to a fresh, empty store (legacy scope, unrestricted), which is the
+  /// world every pre-profiles download test was written against. `ageLevelLookup` defaults to
+  /// "the catalog knows nothing".
+  init(
+    containerForTesting container: URL,
+    profileStore: ActiveProfileStore? = nil,
+    ageLevelLookup: @escaping (String) async -> Int? = { _ in nil }
+  ) {
     self.containerOverride = container
+    // A UUID suite name is always valid, so the `.standard` fallback is unreachable in
+    // practice; it exists only to avoid a force-unwrap.
+    self.profileStore = profileStore
+      ?? ActiveProfileStore(defaults: UserDefaults(suiteName: "DownloadManagerTests.\(UUID().uuidString)") ?? .standard)
+    self.ageLevelLookup = ageLevelLookup
     backgroundSession = URLSession(configuration: .ephemeral)
     super.init()
   }
@@ -242,6 +312,7 @@ final class DownloadManager: NSObject {
     posterURL: URL?,
     token: String?,
     durationSeconds: Int = 0,
+    ageLevel: Int? = nil,
     playbackSessionID: String? = nil
   ) {
     guard activeDownloads[itemId] == nil else {
@@ -278,7 +349,7 @@ final class DownloadManager: NSObject {
     let task = backgroundSession.downloadTask(with: request)
     downloadTasks[task] = itemId
     if let playbackSessionID { downloadSessionIDs[itemId] = playbackSessionID }
-    pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: token, videoURL: videoURL)
+    pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: token, videoURL: videoURL, ageLevel: ageLevel)
 
     let download = ActiveDownload(id: itemId, title: title, progress: 0, task: task)
     activeDownloads[itemId] = download
@@ -406,7 +477,7 @@ final class DownloadManager: NSObject {
       itemId: itemId,
       info: (title: failure.title, year: failure.year, posterURL: failure.posterURL,
              durationSeconds: failure.durationSeconds, token: failure.token,
-             videoURL: failure.videoURL)
+             videoURL: failure.videoURL, ageLevel: failure.ageLevel)
     )
   }
 
@@ -478,7 +549,7 @@ final class DownloadManager: NSObject {
       failedDownloads[itemId] = FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
         posterURL: info.posterURL, token: nil, year: info.year,
-        durationSeconds: info.durationSeconds, isPermanent: false,
+        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
         message: "This download can't be resumed. Tap to start it again."
       )
     }
@@ -654,37 +725,103 @@ final class DownloadManager: NSObject {
         resolvedPosterPath = nil
       }
 
-      // Return item with the resolved full paths for callers that use them directly
-      return DownloadedItem(
-        id: item.id,
-        title: item.title,
-        year: item.year,
-        videoPath: resolvedPath,
-        posterPath: resolvedPosterPath,
-        fileSize: item.fileSize,
-        downloadedAt: item.downloadedAt,
-        resumePositionSeconds: item.resumePositionSeconds,
-        durationSeconds: item.durationSeconds
-      )
+      // Return item with the resolved full paths for callers that use them directly.
+      // Copy-and-set, not a rebuilt value: every other field (age level, each profile's
+      // position) must survive the read.
+      var resolvedItem = item
+      resolvedItem.videoPath = resolvedPath
+      resolvedItem.posterPath = resolvedPosterPath
+      return resolvedItem
     }
     cachedDownloadedItems = resolved
     return resolved
   }
 
+  /// The account's download for `itemId`, whoever is watching. Bookkeeping only (delete,
+  /// "is it on disk"); anything that SHOWS or PLAYS a download goes through
+  /// `visibleDownloadedItems()` / `playableDownloadedItem(itemId:)`.
   func getDownloadedItem(itemId: String) -> DownloadedItem? {
     getDownloadedItems().first { $0.id == itemId }
   }
 
-  /// Persists the current playback position for an offline item.
+  // MARK: - Profiles (FR-262, FR-233)
+
+  /// The downloads the ACTIVE profile may see (FR-262, AC-002-43). Downloads are the
+  /// account's, but a restricted profile is never shown a title above its ceiling: the local
+  /// file plays with no server in the loop, so this is the only gate there is offline. Uses
+  /// the app's one visibility rule, `ProfileScope.allows`; an unknown level is unrated and
+  /// hidden on every restricted profile.
+  func visibleDownloadedItems() -> [DownloadedItem] {
+    let scope = profileStore.activeScope
+    return getDownloadedItems().filter { scope.allows(ageLevel: $0.ageLevel) }
+  }
+
+  /// The download for `itemId` if the active profile may play it, else nil (FR-262). Every
+  /// path that opens a local file asks this at the moment of playing, online or offline, so a
+  /// profile switch after a list was built cannot carry an over-ceiling title through.
+  func playableDownloadedItem(itemId: String) -> DownloadedItem? {
+    guard let item = getDownloadedItem(itemId: itemId),
+          profileStore.activeScope.allows(ageLevel: item.ageLevel) else { return nil }
+    return item
+  }
+
+  /// Whether an in-flight (downloading, paused or failed) row may be shown to the active
+  /// profile (FR-262): its title is a local read too. Uses the level captured at start;
+  /// unknown fails closed like everything else.
+  func isInFlightVisible(itemId: String) -> Bool {
+    let level = failedDownloads[itemId]?.ageLevel ?? pendingDownloadInfo[itemId]?.ageLevel
+    return profileStore.activeScope.allows(ageLevel: level)
+  }
+
+  /// The profile offline progress is recorded for: the active one, or "" (legacy) when none
+  /// is chosen. A player captures this when it OPENS and passes it to every
+  /// `updateResumePosition` call, so a profile change mid-playback cannot reassign the save.
+  var activeResumeProfileID: String { profileStore.activeScope.id }
+
+  /// Where `profileID` (default: the active profile) is in `item` offline (FR-233).
+  func resumePosition(of item: DownloadedItem, profileID: String? = nil) -> Int {
+    let ownerID = profileStore.cachedProfiles.first(where: \.isOwner)?.id
+    return item.resumePosition(forProfileID: profileID ?? activeResumeProfileID, ownerID: ownerID)
+  }
+
+  /// Persists the current playback position for an offline item, for ONE profile.
   /// Called periodically during playback (same debounce cadence as the online API sync)
-  /// and once more on player dismiss.
-  func updateResumePosition(itemId: String, positionSeconds: Int) {
+  /// and once more on player dismiss. `profileID` nil means the active profile; players pass
+  /// the id they captured on open (`activeResumeProfileID`).
+  func updateResumePosition(itemId: String, positionSeconds: Int, profileID: String? = nil) {
     // Read raw items directly from the metadata file to preserve the filename-only storage invariant.
     // Using getDownloadedItems() would resolve absolute paths and write them back, undoing the fix.
     guard let rawData = try? Data(contentsOf: downloadsMetadataFileURL),
           var rawItems = try? JSONDecoder().decode([DownloadedItem].self, from: rawData),
           let index = rawItems.firstIndex(where: { $0.id == itemId }) else { return }
-    rawItems[index].resumePositionSeconds = positionSeconds
+    rawItems[index].setResumePosition(positionSeconds, forProfileID: profileID ?? activeResumeProfileID)
+    saveDownloadedItems(rawItems)
+    cachedDownloadedItems = nil
+  }
+
+  /// Brings every download's stored age level up to date from the on-device catalog
+  /// (FR-262). Backfills downloads made before levels were stored, and picks up a title the
+  /// server has since re-rated. A title the catalog has no level for keeps what it had; one
+  /// that never had a level stays unknown, which every restricted profile treats as hidden.
+  /// Reads and writes the raw manifest, never the resolved paths (same invariant as
+  /// `updateResumePosition`).
+  func refreshAgeLevels() async {
+    guard case .items(let before) = loadManifest(), !before.isEmpty else { return }
+    var resolved: [String: Int] = [:]
+    for item in before {
+      if let level = await ageLevelLookup(item.id) { resolved[item.id] = level }
+    }
+    guard !resolved.isEmpty else { return }
+    // Re-read after the awaits: a download may have completed, or a position been saved,
+    // meanwhile, and writing `before` back would undo it.
+    guard case .items(var rawItems) = loadManifest() else { return }
+    var changed = false
+    for index in rawItems.indices {
+      guard let level = resolved[rawItems[index].id], rawItems[index].ageLevel != level else { continue }
+      rawItems[index].ageLevel = level
+      changed = true
+    }
+    guard changed else { return }
     saveDownloadedItems(rawItems)
     cachedDownloadedItems = nil
   }
@@ -759,9 +896,10 @@ final class DownloadManager: NSObject {
       let posterURL = meta["posterURL"].flatMap { URL(string: $0) }
       let durationSeconds = meta["durationSeconds"].flatMap { Int($0) } ?? 0
       let videoURL = meta["videoURL"].flatMap { URL(string: $0) }
+      let ageLevel = meta["ageLevel"].flatMap { Int($0) }
       // Restore if we have resume data OR a video URL (to allow fresh-start resume)
       if pausedDownloads[itemId] != nil || videoURL != nil {
-        pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: nil, videoURL: videoURL)
+        pendingDownloadInfo[itemId] = (title: title, year: year, posterURL: posterURL, durationSeconds: durationSeconds, token: nil, videoURL: videoURL, ageLevel: ageLevel)
       }
     }
   }
@@ -787,6 +925,7 @@ final class DownloadManager: NSObject {
       meta["videoURL"] = strippingSid(from: videoURL).absoluteString
     }
     meta["durationSeconds"] = "\(info.durationSeconds)"
+    if let ageLevel = info.ageLevel { meta["ageLevel"] = "\(ageLevel)" }
     store[itemId] = meta
     savePausedMetaToDisk(store)
   }
@@ -881,7 +1020,7 @@ final class DownloadManager: NSObject {
       failedDownloads[itemId] = FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
         posterURL: info.posterURL, token: info.token, year: info.year,
-        durationSeconds: info.durationSeconds, isPermanent: true,
+        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: true,
         message: "Couldn't save the file. Free up space and try again."
       )
       activeDownloads.removeValue(forKey: itemId)
@@ -910,7 +1049,8 @@ final class DownloadManager: NSObject {
       posterPath: nil,
       fileSize: fileSize,
       downloadedAt: Date(),
-      durationSeconds: info.durationSeconds
+      durationSeconds: info.durationSeconds,
+      ageLevel: info.ageLevel
     )
 
     // Read raw items from the metadata file to preserve filename-only storage invariant,
@@ -985,17 +1125,8 @@ final class DownloadManager: NSObject {
           guard let rawData = try? Data(contentsOf: metaURL),
                 var rawItems = try? JSONDecoder().decode([DownloadedItem].self, from: rawData),
                 let idx = rawItems.firstIndex(where: { $0.id == itemId }) else { return }
-          rawItems[idx] = DownloadedItem(
-            id: rawItems[idx].id,
-            title: rawItems[idx].title,
-            year: rawItems[idx].year,
-            videoPath: rawItems[idx].videoPath,
-            posterPath: posterFilename,
-            fileSize: rawItems[idx].fileSize,
-            downloadedAt: rawItems[idx].downloadedAt,
-            resumePositionSeconds: rawItems[idx].resumePositionSeconds,
-            durationSeconds: rawItems[idx].durationSeconds
-          )
+          // Set in place: a rebuilt value would drop any field it failed to list.
+          rawItems[idx].posterPath = posterFilename
           self.saveDownloadedItems(rawItems)
           // Invalidate in-memory cache so next read resolves fresh from disk.
           self.cachedDownloadedItems = nil
@@ -1079,7 +1210,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
   /// the 404 body was written to disk as the movie.
   private func restartWithFreshURL(
     itemId: String,
-    info: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?, videoURL: URL?)
+    info: (title: String, year: Int?, posterURL: URL?, durationSeconds: Int, token: String?, videoURL: URL?, ageLevel: Int?)
   ) {
     guard let urlResolver else {
       // No resolver wired (should not happen in the app; possible in tests). Surface it
@@ -1087,7 +1218,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
       failedDownloads[itemId] = FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
         posterURL: info.posterURL, token: nil, year: info.year,
-        durationSeconds: info.durationSeconds, isPermanent: false,
+        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
         message: "This download can't be restarted right now. Try again."
       )
       return
@@ -1097,7 +1228,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
         failedDownloads[itemId] = FailedDownload(
           id: itemId, title: info.title, videoURL: info.videoURL,
           posterURL: info.posterURL, token: nil, year: info.year,
-          durationSeconds: info.durationSeconds, isPermanent: false,
+          durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
           message: "Couldn't reach the server to restart this download. Try again."
         )
         return
@@ -1111,6 +1242,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
         // info.token is nil after a relaunch — the credential is deliberately not persisted.
         token: info.token ?? tokenProvider?(),
         durationSeconds: info.durationSeconds,
+        ageLevel: info.ageLevel,
         playbackSessionID: resolved.sessionID
       )
     }
@@ -1153,7 +1285,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
       failedDownloads[itemId] = FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
         posterURL: info.posterURL, token: info.token, year: info.year,
-        durationSeconds: info.durationSeconds, isPermanent: false,
+        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
         message: message
       )
       pendingDownloadInfo.removeValue(forKey: itemId)
@@ -1215,7 +1347,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             failedDownloads[itemId] = FailedDownload(
               id: itemId, title: info.title, videoURL: info.videoURL,
               posterURL: info.posterURL, token: info.token, year: info.year,
-              durationSeconds: info.durationSeconds, isPermanent: false,
+              durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
               message: wasCancel
                 ? "This download couldn't be paused and has to start over."
                 : "Download failed. Check your connection and retry."

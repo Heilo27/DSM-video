@@ -38,6 +38,11 @@ const (
 // kidsMaxAgeLevel is the highest ceiling that counts as a kids' profile: Older Kids (FR-270).
 const kidsMaxAgeLevel = 2
 
+// isKidsLevel is THE rule for "is a profile with this ceiling a kids' profile" (FR-270). It
+// decides which collections a profile is offered (FR-274) and is sent to clients as the
+// Profile "kids" field, so no client holds its own copy of the threshold (TASK-921).
+func isKidsLevel(maxAgeLevel int) bool { return maxAgeLevel <= kidsMaxAgeLevel }
+
 // TMDb separates production companies from TV networks, and numbers them independently:
 // company 2 is Walt Disney Pictures, network 2 is ABC. An id without its kind is ambiguous,
 // so a rule entry always names both (FR-271).
@@ -93,7 +98,7 @@ var collectionDefs = []collectionDef{
 // collectionsFor returns the definitions offered to v, in definition order (FR-274): every
 // collection for a kids' profile, only the audience-all ones for Teens and Adult.
 func collectionsFor(v viewer) []collectionDef {
-	kids := v.MaxAgeLevel <= kidsMaxAgeLevel
+	kids := isKidsLevel(v.MaxAgeLevel)
 	out := make([]collectionDef, 0, len(collectionDefs))
 	for _, d := range collectionDefs {
 		if kids || d.Audience == collectionAudienceAll {

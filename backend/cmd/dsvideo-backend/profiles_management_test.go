@@ -120,9 +120,9 @@ func TestAC00215_NoHeaderFallbackAndResponseHeader(t *testing.T) {
 func TestAC00215_TieGoesToEarlierCreated(t *testing.T) {
 	e := newQAEnv(t)
 	e.setOwnerPin(qaAlice, "0420")
-	first := e.mustCreate(qaAlice, "0420", "Zoe", 1, nil)   // name sorts last
-	second := e.mustCreate(qaAlice, "0420", "Abe", 1, nil)  // name sorts first
-	third := e.mustCreate(qaAlice, "0420", "Mid", 2, nil)   // different level
+	first := e.mustCreate(qaAlice, "0420", "Zoe", 1, nil)  // name sorts last
+	second := e.mustCreate(qaAlice, "0420", "Abe", 1, nil) // name sorts first
+	third := e.mustCreate(qaAlice, "0420", "Mid", 2, nil)  // different level
 	_ = third
 
 	get := func() string {
@@ -325,12 +325,35 @@ func TestAC00218_OwnerProfileImmutable(t *testing.T) {
 	e := newQAEnv(t)
 	owner := e.setOwnerPin(qaAlice, "0420")
 	kid := e.mustCreate(qaAlice, "0420", "Kid", 1, nil)
+	// OC-2028: the owner has progress and a watchlist entry that the refused DELETE must not touch.
+	e.seedItem("o1", "", sp("R"))
+	e.seedItem("o2", "", sp("PG"))
+	wantOK(t, e.do(qaAlice, "POST", "/items/o1/progress", jb(map[string]any{"positionSeconds": 1234, "durationSeconds": 3000}), owner), 200)
+	wantOK(t, e.do(qaAlice, "POST", "/watchlist/o2", "", owner), 200)
 
 	wantErr(t, e.do(qaAlice, "PATCH", "/profiles/"+owner, jb(map[string]any{"ownerPin": "0420", "pin": nil}), ""), 409, "owner_profile_immutable")
 	for _, lv := range []int{3, 2, 1} {
 		wantErr(t, e.do(qaAlice, "PATCH", "/profiles/"+owner, jb(map[string]any{"ownerPin": "0420", "maxAgeLevel": lv}), ""), 409, "owner_profile_immutable")
 	}
 	wantErr(t, e.do(qaAlice, "DELETE", "/profiles/"+owner, jb(map[string]any{"ownerPin": "0420"}), ""), 409, "owner_profile_immutable")
+	// OC-2028 full "then": owner's progress AND watchlist unchanged after the refused DELETE,
+	// read back through the API and the table. Red if the delete cascade (progress/watchlist
+	// rows by profile_id) runs before the owner check, or the check is removed.
+	if n := e.count(`SELECT COUNT(*) FROM progress WHERE profile_id=?`, owner); n != 1 {
+		t.Errorf("owner progress rows = %d after refused DELETE, want 1", n)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM watchlist WHERE profile_id=?`, owner); n != 1 {
+		t.Errorf("owner watchlist rows = %d after refused DELETE, want 1", n)
+	}
+	pa := e.do(qaAlice, "GET", "/progress/all", "", owner)
+	if prog, _ := pa.js["progress"].(map[string]any); len(prog) != 1 {
+		t.Errorf("owner /progress/all = %s, want exactly o1", pa.raw)
+	} else if m, _ := prog["o1"].(map[string]any); m == nil || m["positionSeconds"] != float64(1234) {
+		t.Errorf("owner's o1 position = %v, want 1234", prog["o1"])
+	}
+	if got := idsOf(t, e.do(qaAlice, "GET", "/watchlist", "", owner), "items"); len(got) != 1 || !got["o2"] {
+		t.Errorf("owner's watchlist = %v, want only o2", got)
+	}
 
 	var found map[string]any
 	for _, p := range e.profiles(qaAlice) {
@@ -586,7 +609,7 @@ func TestProfileObjectShapeAndListEnvelope(t *testing.T) {
 	if len(ps) != 2 {
 		t.Fatalf("want 2 profiles, got %s", r.raw)
 	}
-	wantKeys := []string{"avatar", "createdAt", "hasPin", "id", "isOwner", "maxAgeLevel", "name"}
+	wantKeys := []string{"avatar", "createdAt", "hasPin", "id", "isOwner", "kids", "maxAgeLevel", "name"}
 	for _, p := range ps {
 		m := p.(map[string]any)
 		var keys []string

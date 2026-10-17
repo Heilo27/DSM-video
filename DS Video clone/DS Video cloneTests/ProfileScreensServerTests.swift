@@ -111,14 +111,29 @@ struct ProfileScreensServerTests {
 
   /// Runs `body` with a signed-in AppState pointed at the stub, then puts back every shared
   /// store it touched (active profile, cached list, LocalStore scope, address, Remember Me).
-  private func withAccount(
+  ///
+  /// Holds ProfileStateGate for the whole run: the stub's routes, ActiveProfileStore.shared and
+  /// LocalStore.shared's scope are process-wide, and ProfileScopeFixTests uses them too.
+  /// Internal (not private) so that suite can borrow it.
+  func withAccount(
     cached: [Profile] = [], active: Profile? = nil,
+    routes: [String: ProfileStubServer.Reply],
+    _ body: (AppState) async -> Void
+  ) async {
+    await ProfileStateGate.shared.run {
+      await runAccount(cached: cached, active: active, routes: routes, body)
+    }
+  }
+
+  private func runAccount(
+    cached: [Profile], active: Profile?,
     routes: [String: ProfileStubServer.Reply],
     _ body: (AppState) async -> Void
   ) async {
     let store = ActiveProfileStore.shared
     let savedActiveID = store.activeProfileID
     let savedCache = store.cachedProfiles
+    let savedLevel = store.unrestrictedLevel
     let savedScope = await LocalStore.shared.activeScope
     let savedActiveProfile = savedCache.first { $0.id == savedActiveID }
     let state = AppState()
@@ -134,7 +149,7 @@ struct ProfileScreensServerTests {
     await body(state)
 
     store.setActive(savedActiveProfile)
-    store.setCachedProfiles(savedCache)
+    store.setCachedProfiles(savedCache, unrestrictedLevel: savedLevel)
     await LocalStore.shared.setActiveProfile(savedScope)
     state.baseURL = savedBase
     state.useHTTPS = savedHTTPS
@@ -381,8 +396,12 @@ struct ProfileScreensServerTests {
   // MARK: AC-002-40 / 40a · picker routing from a fresh list (iOS target)
 
   /// OC: AC-002-40a · a remembered profile that the server no longer lists (deleted on another
-  /// device) is dropped and the picker returns; LocalStore reads fall back to the legacy scope.
-  /// Red if: refreshProfiles keeps the dead id active or leaves needsProfilePicker false.
+  /// device) is dropped and the picker returns; LocalStore reads fall to the UNCHOSEN scope
+  /// (TASK-936: fail closed at the most restricted cached ceiling, never the legacy scope the
+  /// owner claims from).
+  /// Red if: refreshProfiles keeps the dead id active or leaves needsProfilePicker false, or
+  /// drops back to the legacy scope (isLegacy, ceiling 4, a header-less guess) instead of
+  /// the unchosen one.
   @Test func deletedRememberedProfileBringsThePickerBack() async {
     let leoP = profile("pf_leo", "Leo", hasPin: true, level: 3)
     await withAccount(
@@ -395,7 +414,12 @@ struct ProfileScreensServerTests {
       #expect(ActiveProfileStore.shared.activeProfileID == nil)
       #expect(state.needsProfilePicker)
       #expect(state.profiles.map(\.id) == ["pf_ryan", "pf_maya"])
-      #expect(await LocalStore.shared.activeScope.isLegacy, "no stale kid scope left behind")
+      // The fresh list is Ryan (4) and Maya (2): the unchosen ceiling is the lowest, 2.
+      let scope = await LocalStore.shared.activeScope
+      #expect(scope.isUnchosen, "no stale kid scope left behind, and not legacy")
+      #expect(scope.isLegacy == false)
+      #expect(scope.headerValue == nil)
+      #expect(scope.maxAgeLevel == 2)
     }
   }
 

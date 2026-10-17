@@ -56,11 +56,17 @@ Every object that represents a title (`/items` in every mode, `/items/{id}`, `/s
   "name": "Maya",
   "avatar": "fox",
   "maxAgeLevel": 2,
+  "kids": true,
   "hasPin": false,
   "isOwner": false,
   "createdAt": "2026-10-17T19:00:00Z"
 }
 ```
+
+`kids` is computed by the server on every Profile object (list, create, update) and never stored or
+accepted on input: `true` when the profile counts as a kids' profile (FR-270, today `maxAgeLevel ≤ 2`).
+It decides browse mode: kids' profiles get collections in place of the genre list (FR-274). Clients
+read this field and hold no threshold of their own, so moving the threshold needs no client release.
 
 `avatar` is an opaque key from the apps' built-in set: 1–32 characters, letters, digits, `-` and `_` only
 (anything else is `400 invalid_avatar`); `null` clears it. The server stores it as given. The
@@ -76,12 +82,19 @@ Response:
 {
   "maxProfiles": 4,
   "activeProfileId": "pf_owner1",
+  "unrestrictedLevel": 4,
   "profiles": [
-    { "id": "pf_owner1", "name": "Ryan", "avatar": "owl", "maxAgeLevel": 4, "hasPin": true, "isOwner": true, "createdAt": "2026-10-17T19:00:00Z" },
-    { "id": "pf_7Qm2x", "name": "Maya", "avatar": "fox", "maxAgeLevel": 2, "hasPin": false, "isOwner": false, "createdAt": "2026-10-17T19:05:00Z" }
+    { "id": "pf_owner1", "name": "Ryan", "avatar": "owl", "maxAgeLevel": 4, "kids": false, "hasPin": true, "isOwner": true, "createdAt": "2026-10-17T19:00:00Z" },
+    { "id": "pf_7Qm2x", "name": "Maya", "avatar": "fox", "maxAgeLevel": 2, "kids": true, "hasPin": false, "isOwner": false, "createdAt": "2026-10-17T19:05:00Z" }
   ]
 }
 ```
+
+`unrestrictedLevel` is the top of the age ladder: a profile whose `maxAgeLevel` equals it is
+unrestricted (nothing is filtered); any lower ceiling is restricted. Clients compare against this
+value instead of a literal, so adding a tier changes the server only (ADR-001). The level an
+unrated title carries is a separate value, `unratedLevel` on `GET /profiles/age-levels` (equal
+today, both 4).
 
 ### POST `/profiles`
 Create a profile. **Requires the owner PIN** (FR-211), and the owner must already have a PIN (FR-212).
@@ -191,7 +204,7 @@ Response:
 
 ### GET `/collections`
 The active profile's browse collections (FR-270–FR-276). Only collections with at least one title visible
-to this profile are returned, in definition order. Kids' profiles (`maxAgeLevel ≤ 2`) get every
+to this profile are returned, in definition order. Kids' profiles (Profile `kids: true`, `maxAgeLevel ≤ 2`) get every
 collection. Teens and Adult profiles get only `audience: all` (studio and theme) collections.
 
 Response:

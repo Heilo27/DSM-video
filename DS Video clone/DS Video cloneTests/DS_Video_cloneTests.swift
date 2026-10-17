@@ -3171,70 +3171,86 @@ struct SiriTitleMatchingTests {
 @Suite("Top Shelf snapshot")
 @MainActor
 struct TopShelfSnapshotTests {
-  private func entry(_ id: String, progress: Double?) -> TopShelfItem {
+  private func entry(_ id: String, progress: Double?, ageLevel: Int? = 4) -> TopShelfItem {
     TopShelfItem(id: id, title: "Title \(id)", year: 2024,
                  imageURL: "http://nas.local/api/v1/images/\(id)?w=760",
                  deepLinkURL: "dsvideo://item/\(id)",
-                 playbackProgress: progress)
+                 playbackProgress: progress, ageLevel: ageLevel)
   }
+  private let unrestricted = TopShelfCeiling(maxAgeLevel: 4, unrestrictedLevel: 4, unratedLevel: 4)
 
   @Test func snapshotRoundTrips() throws {
     let original = TopShelfSnapshot(
-      sectionTitle: "Continue Watching",
-      items: [entry("a", progress: 0.42), entry("b", progress: nil)]
+      sectionTitle: "Continue Watching", rail: .continueWatching, ceiling: unrestricted,
+      items: [entry("a", progress: 0.42), entry("b", progress: nil, ageLevel: nil)]
     )
     let data = try JSONEncoder().encode(original)
     let decoded = try JSONDecoder().decode(TopShelfSnapshot.self, from: data)
 
     #expect(decoded.sectionTitle == "Continue Watching")
+    #expect(decoded.rail == .continueWatching)
+    #expect(decoded.ceiling == unrestricted)
     #expect(decoded.items.count == 2)
     #expect(decoded.items[0].playbackProgress == 0.42)
     #expect(decoded.items[1].playbackProgress == nil)
+    #expect(decoded.items[0].ageLevel == 4)
+    #expect(decoded.items[1].ageLevel == nil)
     #expect(decoded.items[0].deepLinkURL == "dsvideo://item/a")
   }
 
-  /// An installed build's topshelf.json is a BARE ARRAY, written before the wrapper existed.
-  /// The extension must still read it, or every existing install shows an empty shelf until
-  /// the user happens to open the app — the exact symptom this change set out to fix.
-  ///
-  /// This pins the app-side half of that contract: the legacy payload the extension's
-  /// fallback decoder has to accept is still a valid `[TopShelfItem]`.
-  @Test func legacyBareArrayStillDecodes() throws {
-    let legacyJSON = """
+  /// The wire keys the extension's private copy decodes. Its structs are a separate copy in a
+  /// separate target, so the key names are the whole contract; renaming one here without the
+  /// other blanks the shelf (or, worse, drops the ceiling check).
+  @Test func wireKeysMatchTheExtensionsCopy() throws {
+    let data = try JSONEncoder().encode(TopShelfSnapshot(
+      sectionTitle: "Just Added", rail: .justAdded,
+      ceiling: TopShelfCeiling(maxAgeLevel: 1, unrestrictedLevel: 4, unratedLevel: 4),
+      items: [entry("a", progress: nil, ageLevel: 1)]))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["rail"] as? String == "justAdded")
+    let ceiling = try #require(json["ceiling"] as? [String: Any])
+    #expect(ceiling["maxAgeLevel"] as? Int == 1)
+    #expect(ceiling["unrestrictedLevel"] as? Int == 4)
+    let item = try #require((json["items"] as? [[String: Any]])?.first)
+    #expect(item["ageLevel"] as? Int == 1)
+  }
+
+  /// Replaces the old "legacy bare array still decodes" contract. That array (and the
+  /// unstamped object after it) carries no age levels, so on an account with a restricted
+  /// profile it could put an adult's titles on the shared TV. Neither form may decode as the
+  /// current snapshot: the extension shows nothing until the app writes a stamped one.
+  @Test func olderFormatsDoNotDecodeAsTheCurrentSnapshot() throws {
+    let legacy = Data("""
     [{"id":"x","title":"Old Film","year":2001,
       "imageURL":"http://nas.local/api/v1/images/x?w=760",
       "deepLinkURL":"dsvideo://item/x"}]
-    """.data(using: .utf8)!
-
-    let items = try JSONDecoder().decode([TopShelfItem].self, from: legacyJSON)
-    #expect(items.count == 1)
-    #expect(items[0].id == "x")
-    // Absent in the old format — must decode as nil, not fail the whole file.
-    #expect(items[0].playbackProgress == nil)
-  }
-
-  /// A snapshot with the wrapper must NOT decode as the legacy array, and vice versa —
-  /// otherwise the extension's "try new, then try old" ordering could silently pick wrong.
-  @Test func theTwoFormatsAreDistinguishable() throws {
-    let modern = try JSONEncoder().encode(
-      TopShelfSnapshot(sectionTitle: "Continue Watching", items: [entry("a", progress: 0.1)]))
-    #expect((try? JSONDecoder().decode([TopShelfItem].self, from: modern)) == nil)
-
-    let legacy = try JSONEncoder().encode([entry("a", progress: nil)])
+    """.utf8)
     #expect((try? JSONDecoder().decode(TopShelfSnapshot.self, from: legacy)) == nil)
+
+    let modern = try JSONEncoder().encode(TopShelfSnapshot(
+      sectionTitle: "Continue Watching", rail: .continueWatching, ceiling: unrestricted,
+      items: [entry("a", progress: 0.1)]))
+    #expect((try? JSONDecoder().decode([TopShelfItem].self, from: modern)) == nil)
   }
 
   /// tvOS requires playbackProgress in 0...1. A zero-duration item would make the obvious
   /// position/duration division produce NaN, and NaN is not something tvOS can draw.
+  /// Exercises the writer's own function (TopShelfPolicy), not a copy of the formula.
   @Test func progressIsClampedAndNeverNaN() {
-    func progress(position: Int, duration: Int) -> Double? {
-      guard duration > 0 else { return nil }
-      return min(1, max(0, Double(position) / Double(duration)))
+    func progress(position: Int, duration: Int,
+                  ceiling: TopShelfCeiling = TopShelfCeiling(maxAgeLevel: 4, unrestrictedLevel: 4, unratedLevel: 4)) -> Double? {
+      let item = ItemSummary(id: "i", type: "movie", title: "i", addedAt: "2026-01-01T00:00:00Z",
+                             progress: ItemProgress(positionSeconds: position, durationSeconds: duration,
+                                                    updatedAt: "2026-01-01T00:00:00Z"))
+      return TopShelfPolicy.playbackProgress(for: item, ceiling: ceiling)
     }
     #expect(progress(position: 0, duration: 0) == nil)      // would have been NaN
     #expect(progress(position: 50, duration: 100) == 0.5)
     #expect(progress(position: 200, duration: 100) == 1)    // clamped, not 2.0
     #expect(progress(position: -5, duration: 100) == 0)
+    #expect(progress(position: 50, duration: 100,
+                     ceiling: TopShelfCeiling(maxAgeLevel: 1, unrestrictedLevel: 4, unratedLevel: 4)) == nil,
+            "no resume bar under a restricted ceiling (FR-264)")
   }
 }
 
@@ -3433,14 +3449,17 @@ struct ProfilePickerGateTests {
 @Suite("Profile switch", .serialized)
 @MainActor
 struct ProfileSwitchTests {
-  private func item(_ id: String) -> ItemSummary {
+  private func item(_ id: String, level: Int? = nil) -> ItemSummary {
     ItemSummary(id: id, type: "movie", title: id, year: nil, durationSeconds: nil,
                 addedAt: "2026-01-01T00:00:00Z", rating: nil, posterImageId: nil,
                 backdropImageId: nil, progress: nil, showName: nil, showFolderId: nil,
-                seasonNumber: nil, episodeNumber: nil, libraryId: nil, changeSeq: nil)
+                seasonNumber: nil, episodeNumber: nil, libraryId: nil, changeSeq: nil,
+                ageLevel: level)
   }
+  /// a-ja is level 1 so it is on the Top Shelf before the switch even on this account with a
+  /// restricted profile: the shelf assertion below then has something to lose.
   private var railsA: HomeRails {
-    HomeRails(continueWatching: [item("a-cw")], justAdded: [item("a-ja")],
+    HomeRails(continueWatching: [item("a-cw")], justAdded: [item("a-ja", level: 1)],
               recentlyWatched: [item("a-rw")])
   }
   private let aIDs: Set<String> = ["a-cw", "a-ja", "a-rw", "a-sg", "a-wl"]
@@ -3464,7 +3483,17 @@ struct ProfileSwitchTests {
     #expect(state.homeContinueWatching.map(\.id) == ["a-cw"])
   }
 
-  @Test func switchClearsEverythingFromTheOldProfileAndFencesItsLoads() async {
+  @Test func switchClearsEverythingFromTheOldProfileAndFencesItsLoads() async throws {
+    // ActiveProfileStore.shared / LocalStore.shared's scope are process-wide and the
+    // ProfileStateGate suites rewrite them in parallel with this one: hold the same gate.
+    var failure: Error?
+    await ProfileStateGate.shared.run {
+      do { try await runSwitchScenario() } catch { failure = error }
+    }
+    if let failure { throw failure }
+  }
+
+  private func runSwitchScenario() async throws {
     let store = ActiveProfileStore.shared
     let savedActive = store.activeProfileID
     let savedCache = store.cachedProfiles
@@ -3481,7 +3510,16 @@ struct ProfileSwitchTests {
     await LocalStore.shared.setActiveProfile(ProfileScope(profile: a))
 
     let state = AppState()
+    // A file this test owns, so it neither depends on the app group container existing in
+    // the test host nor races other tests over the real topshelf.json.
+    let shelfURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("ProfileSwitchTests-\(UUID().uuidString)-topshelf.json")
+    state.topShelfSnapshotURL = shelfURL
+    defer { try? FileManager.default.removeItem(at: shelfURL) }
     state.applyRails(railsA, startedAt: state.homeStateGeneration)
+    let shelfBefore = try #require(try? String(contentsOf: shelfURL, encoding: .utf8),
+                                   "precondition: A's Top Shelf snapshot was written")
+    #expect(shelfBefore.contains("a-ja"), "precondition: A's title is on the Top Shelf")
     state.homeSuggested = [item("a-sg")]
     state.watchlistItems = [item("a-wl")]
     #expect(!visibleIDs(state).isDisjoint(with: aIDs), "precondition: A is on screen")
@@ -3499,12 +3537,17 @@ struct ProfileSwitchTests {
     #expect(!state.applyRails(railsA, startedAt: inFlightUnderA))
     #expect(visibleIDs(state).isDisjoint(with: aIDs))
 
-    // Top Shelf must not keep advertising A's titles.
-    if let container = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel") {
-      let shelf = (try? String(contentsOf: container.appendingPathComponent("topshelf.json"), encoding: .utf8)) ?? ""
-      #expect(!aIDs.contains(where: { shelf.contains($0) }), "Top Shelf snapshot still names A's items")
-    }
+    // Top Shelf must not keep advertising A's titles. Checked after B's rails land, so the
+    // file MUST exist: an absent snapshot fails here instead of passing vacuously.
+    #expect(state.applyRails(
+      HomeRails(continueWatching: [item("b-cw", level: 1)], justAdded: [item("b-ja", level: 1)],
+                recentlyWatched: []),
+      startedAt: state.homeStateGeneration))
+    let shelf = try #require(try? String(contentsOf: shelfURL, encoding: .utf8),
+                             "topshelf.json is absent after B's rails loaded")
+    #expect(shelf.contains("b-ja"), "B's Just Added is on the shelf")
+    #expect(!aIDs.contains(where: { shelf.contains($0) }), "Top Shelf snapshot still names A's items")
+    #expect(!shelf.contains("b-cw"), "no Continue Watching on an account with a restricted profile (FR-264)")
     await LocalStore.shared.setActiveProfile(savedScope)
   }
 }

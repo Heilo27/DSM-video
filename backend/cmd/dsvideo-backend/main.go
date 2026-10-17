@@ -194,6 +194,11 @@ type Server struct {
 	cachedItemSeq     atomic.Int64
 	cachedProgressSeq atomic.Int64
 
+	// accountClaimOwners caches account_claims (account key -> owning DSM identity) for the
+	// per-request credential owner check (credentialOwnsAccount). Claims are insert-only,
+	// so a cached owner never goes stale. Zero value is ready to use.
+	accountClaimOwners sync.Map
+
 	// FRD-002 profiles (profiles.go): PIN limiter and the profile-mutation lock. Zero value
 	// is ready to use.
 	profiles profileState
@@ -641,7 +646,6 @@ func main() {
 			// trade — the alternative is keeping every tombstone forever so a device that
 			// has been off for a year can catch up incrementally, which costs every other
 			// device on every sync.
-			const tombstoneRetention = 90 * 24 * time.Hour
 			cutoff := time.Now().UTC().Add(-tombstoneRetention).Format(time.RFC3339)
 			if res, dbErr := s.db.Exec(`DELETE FROM deleted_items WHERE deleted_at < ?`, cutoff); dbErr != nil {
 				log.Printf("[purge] deleted_items cleanup: %v", dbErr)
@@ -687,18 +691,15 @@ func main() {
 			// (the stall path 14e72cf had to work around), and they never expire on their own
 			// because nothing deleted them when the item went away.
 			//
-			// A row is orphaned only when its item_id is absent from items; that is a pure
-			// referential check, so there is no heuristic here and no risk of removing
-			// progress for a title the user still has. Deliberately NOT a foreign key with
-			// ON DELETE CASCADE: the items table is rebuilt by the scanner, and a cascade
-			// would drop progress during a rescan window.
-			if res, dbErr := s.db.Exec(
-				`DELETE FROM progress WHERE item_id NOT IN (SELECT id FROM items)`,
-			); dbErr != nil {
+			// Deliberately NOT a foreign key with ON DELETE CASCADE: the items table is
+			// rebuilt by the scanner, and a cascade would drop progress during a rescan
+			// window. The grace window that keeps a briefly-missing title's progress is
+			// documented on purgeOrphanedProgress (TASK-933).
+			if n, dbErr := s.purgeOrphanedProgress(time.Now()); dbErr != nil {
 				log.Printf("[purge] orphaned progress cleanup: %v", dbErr)
-			} else if n, _ := res.RowsAffected(); n > 0 {
+			} else if n > 0 {
+				// progress_seq was bumped and published inside the purge (writeWithSeq).
 				log.Printf("[purge] removed %d orphaned progress row(s)", n)
-				s.incrementSeq("progress_seq")
 			}
 
 			// Pairing codes — remove expired entries
@@ -856,12 +857,9 @@ func main() {
 	})
 
 	// Catch-all: log any request that doesn't match defined routes.
-	// This helps detect paths DS Video uses that we haven't handled yet.
-	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		body, _ := io.ReadAll(io.LimitReader(req.Body, 200))
-		log.Printf("[WebAPI] UNHANDLED %s %s UA=%q body=%q", req.Method, req.URL.String(), req.Header.Get("User-Agent"), string(body))
-		http.NotFound(w, req)
-	})
+	// This helps detect paths DS Video uses that we haven't handled yet. Method and path
+	// only: no query string, no body (TASK-929, log_redaction.go).
+	r.NotFound(logUnhandledRequest)
 
 	// Advertise via Bonjour/mDNS so iOS and tvOS clients can discover this server
 	// without manual IP entry. Uses the OS dns-sd tool (available on both macOS and
@@ -1662,6 +1660,12 @@ CREATE INDEX IF NOT EXISTS idx_item_keywords_lookup ON item_keywords(keyword_id,
 		return fmt.Errorf("create item tag tables: %w", err)
 	}
 
+	// TASK-931: which DSM user owns each account key (account_identity.go). Additive:
+	// a new table, no existing row touched.
+	if err := migrateAccountClaims(db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1698,9 +1702,17 @@ func (s *Server) incrementSeqErr(key string) (int64, error) {
 	}
 	switch key {
 	case "item_seq":
-		s.cachedItemSeq.Store(newVal)
+		// Not published here. An item_seq is advertised on /sync only after the row
+		// stamped with it is written (publishItemSeq); publishing at allocation opened a
+		// window where a device's cursor passed a row still carrying its old change_seq.
+		// item_seq is allocated through allocItemSeqTx / writeWithItemSeq, not here.
 	case "progress_seq":
-		s.cachedProgressSeq.Store(newVal)
+		// Every progress row write allocates through writeWithSeq, inside its own
+		// transaction, and publishes after commit; nothing in the product calls this for
+		// progress_seq. A caller that does must have committed its change already, so the
+		// autocommit allocation here is already behind it. CAS-max, never a blind Store,
+		// so a slower caller cannot publish a lower value over a higher one.
+		s.publishProgressSeq(newVal)
 	}
 	return newVal, nil
 }
@@ -1811,7 +1823,17 @@ type trueURLKeyType struct{}
 var trueURLKey = trueURLKeyType{}
 
 // sensitiveQueryParams are the query parameters whose VALUES must never reach a log.
-var sensitiveQueryParams = []string{"_sid", "token"}
+//
+// Session tokens (_sid, token) and the Synology WebAPI login credentials the legacy layer
+// forwards to DSM: the password (passwd), the one-time 2FA code (otp_code), and the
+// RSA-encrypted login blob of DSM's encrypted login (__cIpHeRtExT, which carries the
+// password). A GET login puts these in the request line, which chi's Logger prints verbatim.
+//
+// device_id is DSM's trusted-device token: a login that carries it skips the 2FA prompt, so
+// with the password it is a full second factor. DSM hands it out as "did" (login response
+// data, and the did cookie) and takes it back as device_id; this server also forwards it to
+// auth.cgi as did. Both names are redacted.
+var sensitiveQueryParams = []string{"_sid", "token", "passwd", "otp_code", "__cIpHeRtExT", "device_id", "did"}
 
 // redactedQuery returns a copy of the query with sensitive values replaced, and whether
 // anything was actually redacted. Returning the flag lets the caller skip the copy
@@ -2016,7 +2038,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := "u_" + sanitizeID(dsmUser.Username)
+	// TASK-931: the account key comes from account_claims, never straight from sanitizeID,
+	// so two DSM users whose names differ only by punctuation get two accounts.
+	userID, err := s.accountKey(r.Context(), dsmUser.Username)
+	if err != nil {
+		log.Printf("login: account key: %v", err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
 	token, err := s.issueToken(userID, dsmUser.Username)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "token_error")
@@ -2353,6 +2382,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		sub, _ := claims["sub"].(string)
 		usr, _ := claims["usr"].(string)
 		if sub == "" {
+			writeErr(w, http.StatusUnauthorized, "invalid_token")
+			return
+		}
+		// TASK-931: a token issued before account_claims existed can carry a shared account
+		// key that now belongs to a different DSM user. 401 makes the client sign in again
+		// and receive its own key; tokens of the key's owner (and of unclaimed keys) pass.
+		owned, err := s.credentialOwnsAccount(r.Context(), sub, usr)
+		if err != nil {
+			log.Printf("auth: account owner check: %v", err)
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if !owned {
 			writeErr(w, http.StatusUnauthorized, "invalid_token")
 			return
 		}
@@ -4675,24 +4717,22 @@ func (s *Server) updateCodecInfo(itemID string, probe *transcode.ProbeResult) {
 	if probe == nil {
 		return
 	}
-	// incrementSeqErr, not incrementSeq: a flattened 0 would be written into change_seq,
-	// and delta sync filters `change_seq > since` — so the row would be invisible to every
-	// client whose cursor has moved past 0, i.e. all of them. For THIS path that means an
-	// item whose codec was just corrected keeps being transcoded on every device forever.
-	// Better to skip the update and let the next scan retry than to orphan the row.
-	seq, seqErr := s.incrementSeqErr("item_seq")
-	if seqErr != nil || seq <= 0 {
-		log.Printf("updateCodecInfo: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, seqErr)
-		return
-	}
-	_, err := s.db.Exec(
-		`UPDATE items SET video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
-		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
-		probe.VideoCodec, probe.VideoCodecTag, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
-		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
-	)
+	// A failed allocation skips the update rather than writing a 0: delta sync filters
+	// `change_seq > since`, so a 0 row is invisible to every client whose cursor has moved
+	// past 0, i.e. all of them, and an item whose codec was just corrected keeps being
+	// transcoded on every device forever. The next scan retries. writeWithItemSeq allocates
+	// inside the row's transaction and publishes after commit.
+	_, err := s.writeWithItemSeq(context.Background(), func(tx *sql.Tx, seq int64) error {
+		_, err := tx.Exec(
+			`UPDATE items SET video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
+			 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
+			probe.VideoCodec, probe.VideoCodecTag, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
+			int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
+		)
+		return err
+	})
 	if err != nil {
-		log.Printf("Failed to update codec info for %s: %v", itemID, err)
+		log.Printf("updateCodecInfo: codec update for %s not written (%v) — next scan retries", itemID, err)
 	}
 }
 
@@ -4727,36 +4767,30 @@ func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.
 
 	// Different-path conversion → re-key + migrate FK rows in one transaction.
 	if newID != itemID {
-		seq, seqErr := s.incrementSeqErr("item_seq")
-		if seqErr != nil || seq <= 0 {
-			log.Printf("[normalize] could not allocate change_seq for re-key %s -> %s (%v) — deferring", itemID, newID, seqErr)
+		_, err := s.writeWithItemSeq(context.Background(), func(tx *sql.Tx, seq int64) error {
+			return normalize.RekeyAndMigrateTx(tx, itemID, newID, cleanPath, probe, seq)
+		})
+		if err == nil {
 			return
 		}
-		if err := normalize.RekeyAndMigrate(s.db, itemID, newID, cleanPath, probe, seq); err != nil {
-			log.Printf("[normalize] re-key %s -> %s (%s) failed, falling back to path-only repoint: %v",
-				itemID, newID, cleanPath, err)
-			// Fall through to the path-only repoint so the 404 fix still lands even if
-			// re-keying failed. A burned item_seq is harmless — delta-sync only relies
-			// on change_seq monotonicity, not contiguity.
-		} else {
-			return
-		}
+		// Fall through to the path-only repoint so the 404 fix still lands even if
+		// re-keying failed. The rollback returned the sequence; nothing was published.
+		log.Printf("[normalize] re-key %s -> %s (%s) failed, falling back to path-only repoint: %v",
+			itemID, newID, cleanPath, err)
 	}
 
 	// Same-path conversion (or re-key fallback): repoint path + codec on the existing id.
-	seq, seqErr := s.incrementSeqErr("item_seq")
-	if seqErr != nil || seq <= 0 {
-		log.Printf("[normalize] could not allocate change_seq for repoint of %s (%v) — deferring", itemID, seqErr)
-		return
-	}
-	_, err := s.db.Exec(
-		`UPDATE items SET path = ?, video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
-		 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
-		cleanPath, probe.VideoCodec, probe.VideoCodecTag, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
-		int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
-	)
+	_, err := s.writeWithItemSeq(context.Background(), func(tx *sql.Tx, seq int64) error {
+		_, err := tx.Exec(
+			`UPDATE items SET path = ?, video_codec = ?, video_codec_tag = ?, audio_codec = ?, container = ?, needs_transcode = ?, duration_seconds = ?,
+			 video_width = ?, video_height = ?, audio_channels = ?, change_seq = ? WHERE id = ?`,
+			cleanPath, probe.VideoCodec, probe.VideoCodecTag, probe.AudioCodec, probe.Container, probe.NeedsTranscode,
+			int(probe.DurationSecs), probe.Width, probe.Height, probe.AudioChannels, seq, itemID,
+		)
+		return err
+	})
 	if err != nil {
-		log.Printf("Failed to repoint+update codec info for %s -> %s: %v", itemID, cleanPath, err)
+		log.Printf("[normalize] repoint+codec update for %s -> %s not written (%v) — deferring", itemID, cleanPath, err)
 	}
 }
 
@@ -5426,11 +5460,6 @@ func boolToInt(b bool) int {
 // to ffmpeg's -ss, which then seeks past EOF and yields an empty playlist the client
 // reports as "resource unavailable". With no duration to bound against, the only safe
 // answer is to ignore the offset entirely rather than trust it.
-// allocItemSeqTx allocates the next item_seq inside an open transaction.
-//
-// Split out so the stale-purge can distinguish "allocation failed" from "allocated 0",
-// which it previously could not: the error was discarded and a 0 was written into a
-// tombstone that delta sync can never return.
 // publishItemSeq advances the cached item_seq to at most `seq`, never backwards.
 //
 // CompareAndSwap-max rather than a blind Store: concurrent writers exist (the playback
@@ -5443,21 +5472,108 @@ func boolToInt(b bool) int {
 // discards; clients advance their cursor past it and never ask for the items in the gap,
 // which is silent and permanent client-side data loss.
 func (s *Server) publishItemSeq(seq int64) {
+	publishSeqMax(&s.cachedItemSeq, seq)
+}
+
+// publishProgressSeq advertises a committed progress_seq on the heartbeat. Same contract
+// as publishItemSeq, for the same reasons: CompareAndSwap-max because progress writes (REST,
+// WebAPI WatchStatus) and the orphan purge commit concurrently, and only AFTER the
+// transaction that allocated seq has committed. A device that sees a new progressSeq
+// fetches /progress/all and stores the number as its cursor; if the number is visible
+// before the row, the device fetches the old position, records the new number, and keeps
+// the stale position until some unrelated progress write bumps the counter again.
+func (s *Server) publishProgressSeq(seq int64) {
+	publishSeqMax(&s.cachedProgressSeq, seq)
+}
+
+// publishSeqMax raises c to seq, never lowers it. The one home of the publish loop shared
+// by publishItemSeq and publishProgressSeq.
+func publishSeqMax(c *atomic.Int64, seq int64) {
 	if seq <= 0 {
 		return
 	}
 	for {
-		cur := s.cachedItemSeq.Load()
-		if seq <= cur || s.cachedItemSeq.CompareAndSwap(cur, seq) {
+		cur := c.Load()
+		if seq <= cur || c.CompareAndSwap(cur, seq) {
 			return
 		}
 	}
 }
 
+// allocItemSeqTx allocates the next item_seq inside an open transaction.
+//
+// Split out so the stale-purge can distinguish "allocation failed" from "allocated 0",
+// which it previously could not: the error was discarded and a 0 was written into a
+// tombstone that delta sync can never return.
+//
+// Every item_seq allocation goes through a transaction that also writes the row stamped
+// with it. SQLite admits one writer at a time, so a sequence allocated inside the writing
+// transaction cannot be overtaken: no later sequence can be allocated, committed and
+// published while this row is uncommitted. An autocommit allocation followed by a separate
+// write lost that guarantee: another writer could commit and publish a higher sequence in
+// between, a device's cursor passed this row's sequence before the row existed at it, and
+// the change never reached that device.
 func allocItemSeqTx(ctx context.Context, tx *sql.Tx, out *int64) error {
+	return allocSeqTx(ctx, tx, "item_seq", out)
+}
+
+// allocSeqTx allocates the next value of the sync_state counter key inside an open
+// transaction. See allocItemSeqTx for why allocation belongs in the writing transaction;
+// the same holds for progress_seq.
+func allocSeqTx(ctx context.Context, tx *sql.Tx, key string, out *int64) error {
 	return tx.QueryRowContext(ctx,
-		`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
+		`UPDATE sync_state SET value = value + 1 WHERE key = ? RETURNING value`, key,
 	).Scan(out)
+}
+
+// seqPublisher returns the after-commit publisher for a sync counter writeWithSeq can
+// allocate, or nil for a key it does not know.
+func (s *Server) seqPublisher(key string) func(int64) {
+	switch key {
+	case "item_seq":
+		return s.publishItemSeq
+	case "progress_seq":
+		return s.publishProgressSeq
+	}
+	return nil
+}
+
+// writeWithSeq runs write in one transaction with a freshly allocated value of the sync
+// counter key ("item_seq" or "progress_seq"), commits, and only then publishes the value
+// (allocSeqTx, seqPublisher). On any failure the transaction rolls back, the value is
+// returned to the counter by the rollback, and nothing is published. Returns the committed
+// value. write must do all its database work through tx: SQLite admits one writer, so a
+// write through s.db from inside write waits on this transaction until busy_timeout.
+func (s *Server) writeWithSeq(ctx context.Context, key string, write func(tx *sql.Tx, seq int64) error) (int64, error) {
+	publish := s.seqPublisher(key)
+	if publish == nil {
+		return 0, fmt.Errorf("writeWithSeq: unknown sync counter %q", key)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var seq int64
+	if err := allocSeqTx(ctx, tx, key, &seq); err != nil {
+		return 0, err
+	}
+	if seq <= 0 {
+		return 0, fmt.Errorf("%s allocated %d", key, seq)
+	}
+	if err := write(tx, seq); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	publish(seq)
+	return seq, nil
+}
+
+// writeWithItemSeq is writeWithSeq for item_seq.
+func (s *Server) writeWithItemSeq(ctx context.Context, write func(tx *sql.Tx, seq int64) error) (int64, error) {
+	return s.writeWithSeq(ctx, "item_seq", write)
 }
 
 // trustedRealIP rewrites RemoteAddr from forwarded headers ONLY when the immediate peer
@@ -5954,24 +6070,26 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	// `WHERE excluded.write_seq > progress.write_seq` race against every existing row,
 	// so a transient DB error would silently discard the write while still answering
 	// {"ok":true}. 500 instead, and let the client's outbox retry.
-	writeSeq, seqErr := s.incrementSeqErr("progress_seq")
-	if seqErr != nil {
-		s.progressMu.Unlock()
-		writeErr(w, http.StatusInternalServerError, "db_error")
-		return
-	}
-	// upsertProgress is the one home for this statement; its WHERE clause is the write_seq
-	// guard described above.
-	res, err := s.upsertProgress(v, itemID, req.PositionSeconds, req.DurationSeconds, watchedAt, writeSeq)
+	//
+	// The write_seq is a progress_seq value, allocated by writeWithSeq INSIDE the upsert's
+	// transaction and published to the heartbeat only after it commits (TASK-919). It was
+	// allocated in autocommit and published at allocation, before the upsert ran: a device
+	// whose heartbeat landed in between fetched the old position, stored the new number as
+	// its cursor, and kept the stale position until an unrelated progress write. The
+	// autocommit allocation also let another writer commit and publish a higher number
+	// first. Allocation or upsert failure answers 500 and the client's outbox retries.
 	var rowsAffected int64
-	if err == nil {
+	_, err := s.writeWithSeq(context.Background(), "progress_seq", func(tx *sql.Tx, writeSeq int64) error {
+		// upsertProgress is the one home for this statement; its WHERE clause is the
+		// write_seq guard described above.
+		res, err := s.upsertProgress(tx, v, itemID, req.PositionSeconds, req.DurationSeconds, watchedAt, writeSeq)
+		if err != nil {
+			return err
+		}
 		rowsAffected, _ = res.RowsAffected()
-	}
+		return nil
+	})
 	s.progressMu.Unlock()
-	// NOTE: progress_seq is now bumped ABOVE, before the write, because the value doubles as
-	// this row's write_seq — it must be allocated before the statement that stores it. The
-	// previous FIX-14 comment described bumping it afterwards purely as a sync-cursor tick;
-	// that second bump is gone, so a write no longer advances the counter twice.
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -6581,9 +6699,24 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	// settings remain writable by their owner. Gate before touching the DB so a low-priv
 	// user can neither swap the global key nor trigger the rescan-DoS.
 	globalSettingKeys := map[string]bool{"tmdb_api_key": true}
+	writesGlobal := false
 	for key := range req.Settings {
 		if globalSettingKeys[key] && !s.isAdmin(u) {
 			writeErr(w, http.StatusForbidden, "admin_required")
+			return
+		}
+		writesGlobal = writesGlobal || globalSettingKeys[key]
+	}
+	// TASK-932 (FR-250): a global key is an admin action, so a restricted profile on an
+	// admin account is refused exactly as on /admin/*. requireUnrestricted is reused, not
+	// re-implemented: it writes its own 403 profile_restricted (or 500) when it refuses.
+	// Per-user keys stay writable by any profile.
+	if writesGlobal {
+		unrestricted := false
+		s.requireUnrestricted(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			unrestricted = true
+		})).ServeHTTP(w, r)
+		if !unrestricted {
 			return
 		}
 	}
@@ -7437,6 +7570,10 @@ func (s *Server) scanAll(ctx context.Context) error {
 }
 
 func (s *Server) scanAllWithClient(ctx context.Context, tmdbClient *metadata.TMDbClient) error {
+	// A scan adds, removes and (through its TMDb fetches) re-rates items, so the cached
+	// Just Added rails are stale the moment it ends — even one that stopped early, since
+	// the libraries before the failure were still rewritten (TASK-934).
+	defer s.justAdded.invalidate()
 	libs := configuredLibraries(s.cfg)
 	if len(libs) == 0 {
 		// No-op scan; still mark timestamp.
@@ -7446,6 +7583,13 @@ func (s *Server) scanAllWithClient(ctx context.Context, tmdbClient *metadata.TMD
 		return nil
 	}
 
+	// One library's failure does not stop the pass. This loop used to return at the first
+	// error, so a single unreadable root (an unmounted share, a permissions change) silently
+	// skipped every library configured after it, on every scan, for as long as it stayed
+	// broken. Each library is independent: scanLibraryWithClient makes its own keep/purge
+	// decision and returns BEFORE any purge when its root or walk is unreadable (TASK-933),
+	// so continuing past a failed library cannot delete anything that library owns.
+	var libErrs []error
 	for _, lib := range libs {
 		path, _ := lib["path"].(string)
 		libID, _ := lib["id"].(string)
@@ -7454,10 +7598,17 @@ func (s *Server) scanAllWithClient(ctx context.Context, tmdbClient *metadata.TMD
 			continue
 		}
 		if err := s.scanLibraryWithClient(ctx, libID, kind, path, tmdbClient); err != nil {
-			return err
+			if ctx.Err() != nil {
+				// Cancelled (shutdown): every remaining library would fail the same way.
+				return errors.Join(append(libErrs, err)...)
+			}
+			log.Printf("[scan] library %s failed, continuing with the rest: %v", libID, err)
+			libErrs = append(libErrs, fmt.Errorf("library %s: %w", libID, err))
 		}
 	}
 
+	// Stamped even when a library failed: the pass visited every library, and leaving it
+	// unstamped made every GET /libraries start another full scan while the root stayed broken.
 	s.mu.Lock()
 	s.lastScanAt = time.Now()
 	s.mu.Unlock()
@@ -7468,7 +7619,7 @@ func (s *Server) scanAllWithClient(ctx context.Context, tmdbClient *metadata.TMD
 		log.Printf("post-scan checkpoint: %v", err)
 	}
 
-	return nil
+	return errors.Join(libErrs...)
 }
 
 func (s *Server) scanLibrary(ctx context.Context, libraryID, kind, root string) error {
@@ -7484,6 +7635,123 @@ type metaPendingItem struct {
 	parsed metadata.ParsedFilename
 	typ    string
 }
+
+// libraryItemPath is one existing items row of the library being scanned.
+type libraryItemPath struct{ id, path string }
+
+// stalePurgePlan is what the scan's stale-purge is allowed to delete.
+type stalePurgePlan struct {
+	staleIDs []string
+	// keptUnreadable counts rows kept only because they sit under a folder the walk
+	// could not read.
+	keptUnreadable int
+	// emptyWalkGuard is set when the walk saw no video file at all while the library
+	// still has rows. Nothing is deleted.
+	emptyWalkGuard bool
+}
+
+// planStalePurge decides which existing rows of a library a finished walk may delete
+// (TASK-933). The rule: a row goes only when the walk could see where its file should
+// be and did not find it. Anything the walk could not see is kept.
+//
+//   - A row under an unreadable folder is kept. Its file's fate is unknown, and the
+//     purge's deletion is not reversible on clients (the tombstone propagates) nor for
+//     progress (the orphan purge follows).
+//   - A walk that found no video at all while the library has rows deletes nothing. The
+//     root guard in scanLibraryWithClient only catches a root that is ABSENT; an
+//     unmounted volume usually leaves its mount point behind as an empty directory,
+//     which reads fine and lists nothing. "Every file vanished at once" is far likelier
+//     to be that than a user emptying a library, and the cost of being wrong the other
+//     way is the whole library plus every profile's progress. A library genuinely
+//     emptied keeps its rows until the operator removes the library from settings.
+func planStalePurge(rows []libraryItemPath, seen map[string]struct{}, unreadableDirs []string) stalePurgePlan {
+	var plan stalePurgePlan
+	if len(seen) == 0 && len(rows) > 0 {
+		plan.emptyWalkGuard = true
+		return plan
+	}
+	prefixes := make([]string, 0, len(unreadableDirs))
+	for _, d := range unreadableDirs {
+		prefixes = append(prefixes, strings.TrimSuffix(d, string(filepath.Separator))+string(filepath.Separator))
+	}
+rowLoop:
+	for _, r := range rows {
+		if _, ok := seen[r.path]; ok {
+			continue
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(r.path, p) {
+				plan.keptUnreadable++
+				continue rowLoop
+			}
+		}
+		plan.staleIDs = append(plan.staleIDs, r.id)
+	}
+	return plan
+}
+
+// tombstoneRetention is how long a deleted_items row lives. 90 days is the delta-sync
+// contract: a client offline longer than this must do a full resync (see the purge loop).
+const tombstoneRetention = 90 * 24 * time.Hour
+
+// orphanProgressGrace is how long progress outlives its item's deletion (TASK-933).
+//
+// Progress is keyed by item id, and an item's id is derived from its path, so a file that
+// comes back where it was (a USB drive re-plugged, a nested share remounted, a folder whose
+// permissions were fixed) gets its old id and its old progress back, but only if the row
+// is still there. The scan guards cover the failures they can detect; this covers the ones
+// they cannot, such as a nested mount point that reads as an ordinary empty folder.
+//
+// 30 days: long enough for a drive left unplugged over a holiday, short enough that the
+// stale rows the purge exists to clear (renames, real deletions) still go within a month.
+// It MUST stay below tombstoneRetention: the grace is measured from the tombstone, and
+// once the tombstone is gone the row is purged as a plain orphan.
+const orphanProgressGrace = 30 * 24 * time.Hour
+
+// purgeOrphanedProgress deletes progress rows whose item is gone and has been gone for
+// longer than orphanProgressGrace. A row with no tombstone at all (an item deleted before
+// tombstones existed, or one whose tombstone has already expired) is an orphan of unknown
+// age and is purged, as before.
+//
+// Measured on a live server: 45 of 201 rows (22%) referenced items that had been deleted
+// or renamed. They are served to every client by /progress/all on every sync and sit in
+// each client's outbox where the server permanently 404s them (the stall 14e72cf worked
+// around), so they do need to go eventually.
+//
+// A purge that removes rows bumps progress_seq in the same transaction and publishes it
+// after commit (writeWithSeq), so devices refetch /progress/all and drop the rows. The bump
+// used to be a separate autocommit after the DELETE: a failure in between left devices
+// never told, and its blind Store could publish a lower value over a concurrent write's
+// higher one. A purge that removes nothing rolls back and leaves the counter alone.
+func (s *Server) purgeOrphanedProgress(now time.Time) (int64, error) {
+	recent := now.UTC().Add(-orphanProgressGrace).Format(time.RFC3339)
+	var n int64
+	_, err := s.writeWithSeq(context.Background(), "progress_seq", func(tx *sql.Tx, _ int64) error {
+		res, err := tx.Exec(`
+		DELETE FROM progress
+		WHERE item_id NOT IN (SELECT id FROM items)
+		  AND item_id NOT IN (SELECT item_id FROM deleted_items WHERE deleted_at >= ?)`, recent)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		if n == 0 {
+			return errNothingPurged
+		}
+		return nil
+	})
+	if errors.Is(err, errNothingPurged) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// errNothingPurged rolls back purgeOrphanedProgress's transaction, and its progress_seq
+// allocation, when no row qualified.
+var errNothingPurged = errors.New("no orphaned progress to purge")
 
 func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, root string, tmdbClient *metadata.TMDbClient) error {
 	root = filepath.Clean(root)
@@ -7592,6 +7860,9 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 	var metaPending []metaPendingItem
 	// Track every path seen during the walk so we can remove stale DB entries afterward.
 	seenPaths := make(map[string]struct{})
+	// Folders the walk could not read (TASK-933). What sits under them is UNKNOWN, not
+	// gone, so the stale-purge keeps every row beneath them — see planStalePurge.
+	var unreadableDirs []string
 
 	// Batch upserts into transactions of batchSize files. This keeps write lock
 	// duration short so concurrent HTTP readers are not blocked during a full scan.
@@ -7675,20 +7946,28 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		// self-heal path calls updateCodecInfo in its own goroutine) can interleave, and a
 		// blind Store could publish the LOWER of two sequences last, under-reporting the
 		// counter and stranding every change in between.
-		if maxSeq > 0 {
-			for {
-				cur := s.cachedItemSeq.Load()
-				if maxSeq <= cur || s.cachedItemSeq.CompareAndSwap(cur, maxSeq) {
-					break
-				}
-			}
-		}
+		s.publishItemSeq(maxSeq)
 		batch = batch[:0]
 		return nil
 	}
 
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		// A read failure must resolve toward KEEPING rows, never deleting them (TASK-933).
+		//
+		// This used to be a bare `return nil`, which made an unreadable folder look exactly
+		// like an empty one: its files never reached seenPaths, the stale-purge below
+		// deleted them and wrote a tombstone per item (so every client dropped them too),
+		// and the periodic orphaned-progress purge then erased every profile's watch
+		// position for those titles. One permissions hiccup or flaky disk sector on a
+		// season folder was enough.
 		if err != nil {
+			if path == root {
+				// The root listing itself failed. Abort this library before the purge
+				// can run against a view that saw nothing.
+				return fmt.Errorf("scan: library root %q unreadable (skipping to protect existing rows): %w", root, err)
+			}
+			log.Printf("scan: library %s: cannot read folder %q: %v — keeping every existing item under it", libraryID, path, err)
+			unreadableDirs = append(unreadableDirs, path)
 			return nil
 		}
 		select {
@@ -7723,6 +8002,14 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 
 		info, err := d.Info()
 		if err != nil {
+			// ENOENT means the file left between the directory listing and this stat (a
+			// rename, a finished normalize swap): it is genuinely gone, let the purge drop
+			// it. Any other failure (EIO, EACCES) says nothing about whether it still
+			// exists, so keep its row as-is and try again next scan.
+			if !errors.Is(err, fs.ErrNotExist) {
+				log.Printf("scan: library %s: cannot stat %q: %v — keeping its existing item", libraryID, path, err)
+				seenPaths[path] = struct{}{}
+			}
 			return nil
 		}
 
@@ -7919,16 +8206,30 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 	// This handles files that were renamed or deleted (e.g. .mp4 → .mkv).
 	staleRows, err := s.db.QueryContext(ctx, `SELECT id, path FROM items WHERE library_id = ?`, libraryID)
 	if err == nil {
-		var staleIDs []string
+		var libRows []libraryItemPath
 		for staleRows.Next() {
-			var sid, spath string
-			if staleRows.Scan(&sid, &spath) == nil {
-				if _, seen := seenPaths[spath]; !seen {
-					staleIDs = append(staleIDs, sid)
-				}
+			var r libraryItemPath
+			if staleRows.Scan(&r.id, &r.path) == nil {
+				libRows = append(libRows, r)
 			}
 		}
+		listErr := staleRows.Err()
 		staleRows.Close()
+		var staleIDs []string
+		if listErr != nil {
+			// A half-read listing is not a basis for deleting anything.
+			log.Printf("scan: library %s: reading existing items failed (%v) — skipping stale-purge this pass", libraryID, listErr)
+		} else {
+			plan := planStalePurge(libRows, seenPaths, unreadableDirs)
+			if plan.emptyWalkGuard {
+				log.Printf("scan: WARNING library %s: walk of %q found no video files but the database holds %d — "+
+					"treating the root as unmounted or unreadable and deleting nothing", libraryID, root, len(libRows))
+			}
+			if plan.keptUnreadable > 0 {
+				log.Printf("scan: library %s: kept %d item(s) under %d unreadable folder(s)", libraryID, plan.keptUnreadable, len(unreadableDirs))
+			}
+			staleIDs = plan.staleIDs
+		}
 		if len(staleIDs) > 0 {
 			log.Printf("scan: removing %d stale items from library %s", len(staleIDs), libraryID)
 			staleTx, err := s.db.BeginTx(ctx, nil)
@@ -8097,17 +8398,23 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	// (APIClient.imageURL(id:width:version:)), so even a corrected poster kept serving the
 	// stale cached URL. The codec-update path (updateCodecInfo) and the show-level TMDb fix
 	// already do this correctly; the per-item enrichment path never did.
-	metaSeq, metaSeqErr := s.incrementSeqErr("item_seq")
-	if metaSeqErr != nil || metaSeq <= 0 {
-		log.Printf("metadata: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, metaSeqErr)
-		return
-	}
+	//
+	// Allocated INSIDE the row's transaction and published only after it commits (see
+	// publishItemSeq). Allocating through incrementSeqErr advertised the new item_seq on
+	// /sync before this UPDATE committed: a device syncing in that window moved its cursor
+	// past a sequence whose row still carried its old change_seq, and never fetched the new
+	// metadata (TASK-919 shift 1 finding).
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		log.Printf("Failed to begin metadata tx for %s: %v", itemID, err)
 		return
 	}
 	defer tx.Rollback()
+	var metaSeq int64
+	if seqErr := allocItemSeqTx(ctx, tx, &metaSeq); seqErr != nil || metaSeq <= 0 {
+		log.Printf("metadata: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, seqErr)
+		return
+	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE items SET
 			tmdb_id = ?,
@@ -8152,6 +8459,7 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	if err != nil {
 		log.Printf("Failed to store metadata for %s: %v", itemID, err)
 	} else {
+		s.publishItemSeq(metaSeq)
 		log.Printf("Fetched metadata for: %s", meta.Title)
 	}
 }
@@ -8334,6 +8642,11 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	now := time.Now().UTC().Format(time.RFC3339)
+	// The re-match rewrites title, artwork and content_rating, so the row takes a fresh
+	// change_seq like every other metadata write (the show fix, the scan's fetch, the
+	// backfill). Without it devices kept the old rating, and so the old age gate, until
+	// some unrelated change happened to touch the row (TASK-934).
+	var fixSeq int64
 
 	if body.Type == "tv" {
 		details, err := client.GetTVDetails(ctx, body.TMDbID)
@@ -8367,7 +8680,12 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback()
-		_, err = tx.ExecContext(ctx, `
+		seq, ok := allocItemFixSeq(ctx, w, tx, id)
+		if !ok {
+			return
+		}
+		fixSeq = seq
+		res, err := tx.ExecContext(ctx, `
 			UPDATE items SET
 				tmdb_id = ?,
 				title = ?,
@@ -8381,14 +8699,14 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 				cast_names = ?,
 				content_rating = ?,
 				tmdb_extras_checked_at = ?,
-				metadata_fetched_at = ?
+				metadata_fetched_at = ?,
+				change_seq = ?
 			WHERE id = ?`,
 			details.ID, details.Name, details.OriginalName, details.Overview,
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
-			genres, cast, nullableString(details.USContentRating()), now, now, id,
+			genres, cast, nullableString(details.USContentRating()), now, now, seq, id,
 		)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+		if !itemFixApplied(w, res, err) {
 			return
 		}
 		if err := replaceItemTags(ctx, tx, id, details.Extras()); err != nil {
@@ -8439,7 +8757,12 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback()
-		_, err = tx.ExecContext(ctx, `
+		seq, ok := allocItemFixSeq(ctx, w, tx, id)
+		if !ok {
+			return
+		}
+		fixSeq = seq
+		res, err := tx.ExecContext(ctx, `
 			UPDATE items SET
 				tmdb_id = ?,
 				imdb_id = ?,
@@ -8456,15 +8779,15 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 				duration_seconds = COALESCE(?, duration_seconds),
 				content_rating = ?,
 				tmdb_extras_checked_at = ?,
-				metadata_fetched_at = ?
+				metadata_fetched_at = ?,
+				change_seq = ?
 			WHERE id = ?`,
 			details.ID, details.IMDbID, details.Title, details.OriginalTitle, details.Overview,
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
 			genres, director, cast, nullableInt(details.Runtime*60),
-			nullableString(details.USCertification()), now, now, id,
+			nullableString(details.USCertification()), now, now, seq, id,
 		)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+		if !itemFixApplied(w, res, err) {
 			return
 		}
 		if err := replaceItemTags(ctx, tx, id, details.Extras()); err != nil {
@@ -8478,7 +8801,39 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Published only after the commit — see publishItemSeq.
+	s.publishItemSeq(fixSeq)
+	// The rating may have moved past a kids' ceiling; the Just Added rail must not keep
+	// serving the title from its cache (FR-250).
+	s.justAdded.invalidate()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// allocItemFixSeq allocates the change_seq a single-item TMDb re-match stamps on its row.
+// On failure it has already written the 500 and reports false: a row rewritten without a
+// new change_seq is invisible to delta sync, so the fix must not half-apply.
+func allocItemFixSeq(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, id string) (int64, bool) {
+	var seq int64
+	if err := allocItemSeqTx(ctx, tx, &seq); err != nil || seq <= 0 {
+		log.Printf("tmdb-fix: could not allocate change_seq for %s (%v)", id, err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return 0, false
+	}
+	return seq, true
+}
+
+// itemFixApplied checks the re-match UPDATE: an error is a 500, and zero rows means the id
+// names no item, a 404 (the caller's deferred Rollback returns the allocated sequence).
+func itemFixApplied(w http.ResponseWriter, res sql.Result, err error) bool {
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return false
+	}
+	if n, aErr := res.RowsAffected(); aErr == nil && n == 0 {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return false
+	}
+	return true
 }
 
 // handleTVShowTMDbSearch returns top-5 TMDb TV candidates for a show folder.
@@ -8695,6 +9050,8 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publishItemSeq(maxShowSeq)
+	// Every episode took the show's rating; drop the cached Just Added rails (FR-250).
+	s.justAdded.invalidate()
 
 	// Background: re-fetch per-episode TMDb metadata (titles, episode numbers, thumbnails)
 	// using the newly assigned tmdbID. This runs asynchronously so the HTTP response is fast.
@@ -8739,24 +9096,27 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			var seq int64
-			_ = s.db.QueryRowContext(bgCtx,
-				`UPDATE sync_state SET value = value + 1 WHERE key = 'item_seq' RETURNING value`,
-			).Scan(&seq)
-			if seq > 0 {
-				s.cachedItemSeq.Store(seq)
+			// Allocated inside the row's transaction and published after commit
+			// (writeWithItemSeq). This used to publish at allocation with a blind Store,
+			// before the row was written: a device syncing in between moved its cursor past
+			// an episode still at its old change_seq; a failed allocation wrote change_seq 0;
+			// and the Store could move the published counter backwards.
+			if _, err := s.writeWithItemSeq(bgCtx, func(tx *sql.Tx, seq int64) error {
+				_, err := tx.ExecContext(bgCtx, `
+					UPDATE items SET
+						episode_title = ?,
+						episode_number = ?,
+						season_number = ?,
+						poster_path = COALESCE(NULLIF(?, ''), poster_path),
+						change_seq = ?
+					WHERE id = ?`,
+					epDetails.Name, epDetails.EpisodeNumber, epDetails.SeasonNumber,
+					epDetails.StillPath, seq, ep.id,
+				)
+				return err
+			}); err != nil {
+				log.Printf("tmdb-fix: episode %s not updated: %v", ep.id, err)
 			}
-			_, _ = s.db.ExecContext(bgCtx, `
-				UPDATE items SET
-					episode_title = ?,
-					episode_number = ?,
-					season_number = ?,
-					poster_path = COALESCE(NULLIF(?, ''), poster_path),
-					change_seq = ?
-				WHERE id = ?`,
-				epDetails.Name, epDetails.EpisodeNumber, epDetails.SeasonNumber,
-				epDetails.StillPath, seq, ep.id,
-			)
 		}
 		log.Printf("tmdb-fix: re-fetched episode metadata for %d episodes (show tmdb_id=%d)", len(episodes), tmdbID)
 	}()
@@ -8874,6 +9234,9 @@ func titleFromFilename(name string) string {
 	return base
 }
 
+// sanitizeID is NOT injective ("ryan.p", "ryan_p" and "ryan-p" all give "ryan_p"; an
+// all-non-ASCII name gives ""). Never turn a username into an account key with it
+// directly: accountKey (account_identity.go) is the one mapping (TASK-931).
 func sanitizeID(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.Map(func(r rune) rune {

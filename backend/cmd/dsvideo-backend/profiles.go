@@ -102,14 +102,19 @@ type profileJSON struct {
 	Name        string `json:"name"`
 	Avatar      string `json:"avatar"`
 	MaxAgeLevel int    `json:"maxAgeLevel"`
-	HasPin      bool   `json:"hasPin"`
-	IsOwner     bool   `json:"isOwner"`
-	CreatedAt   string `json:"createdAt"`
+	// Kids is computed, never stored: isKidsLevel (collections.go) is its one home, so the
+	// client switches browse mode on the server's answer instead of its own threshold.
+	Kids      bool   `json:"kids"`
+	HasPin    bool   `json:"hasPin"`
+	IsOwner   bool   `json:"isOwner"`
+	CreatedAt string `json:"createdAt"`
 }
 
+// json is the only way a Profile object is built for the wire (list, create, update), so
+// every response carries the same computed fields.
 func (p profileRow) json() profileJSON {
 	return profileJSON{ID: p.ID, Name: p.Name, Avatar: p.Avatar, MaxAgeLevel: p.MaxAgeLevel,
-		HasPin: p.hasPin(), IsOwner: p.IsOwner, CreatedAt: p.CreatedAt}
+		Kids: isKidsLevel(p.MaxAgeLevel), HasPin: p.hasPin(), IsOwner: p.IsOwner, CreatedAt: p.CreatedAt}
 }
 
 // loadProfiles returns the account's profiles (at most 4), oldest first.
@@ -525,9 +530,10 @@ func (s *Server) requireUnrestricted(next http.Handler) http.Handler {
 
 // upsertProgress is the one progress write. The write_seq guard is the same as the
 // pre-profiles statement (see handleProgress): a lower or equal write_seq never overwrites.
-// The caller allocates writeSeq and holds s.progressMu, as today.
-func (s *Server) upsertProgress(v viewer, itemID string, pos, dur int, updatedAt string, writeSeq int64) (sql.Result, error) {
-	return s.db.Exec(
+// The caller holds s.progressMu and runs this inside writeWithSeq(…, "progress_seq", …),
+// which allocates writeSeq in the same transaction and publishes it only after commit.
+func (s *Server) upsertProgress(tx *sql.Tx, v viewer, itemID string, pos, dur int, updatedAt string, writeSeq int64) (sql.Result, error) {
+	return tx.Exec(
 		"INSERT INTO progress(item_id, user_id, profile_id, position_seconds, duration_seconds, updated_at, write_seq) VALUES(?,?,?,?,?,?,?) "+
 			"ON CONFLICT(item_id, profile_id) DO UPDATE SET "+
 			"position_seconds=excluded.position_seconds, "+
@@ -766,7 +772,11 @@ func (s *Server) handleProfilesList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"maxProfiles":     maxProfilesPerAccount,
 		"activeProfileId": v.ProfileID,
-		"profiles":        out,
+		// The ceiling at which nothing is filtered: rating.Restricted is "below MaxLevel",
+		// so a client comparing maxAgeLevel < unrestrictedLevel agrees with the server and
+		// a new tier needs no client release (ADR-001, TASK-922).
+		"unrestrictedLevel": rating.MaxLevel,
+		"profiles":          out,
 	})
 }
 
@@ -1118,8 +1128,20 @@ func (s *Server) handleOwnerPinReset(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if dsmUser == nil || "u_"+sanitizeID(dsmUser.Username) != u.ID {
-		// The password must belong to THIS account, not merely to some DSM user.
+	if dsmUser == nil {
+		writeErr(w, http.StatusForbidden, "password_incorrect")
+		return
+	}
+	// The password must belong to THIS account's DSM user, not merely to some DSM user.
+	// TASK-931: compared through account_claims (the DSM username that owns the key), not
+	// sanitizeID, which gave "ryan-p" the key of "ryan_p" and so their owner PIN.
+	ownerKey, err := s.accountKey(r.Context(), dsmUser.Username)
+	if err != nil {
+		log.Printf("owner PIN reset: account key: %v", err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	if ownerKey != u.ID {
 		writeErr(w, http.StatusForbidden, "password_incorrect")
 		return
 	}

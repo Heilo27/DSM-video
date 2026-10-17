@@ -2,7 +2,9 @@ import TVServices
 import os.log
 
 // MARK: - Shared model (local copy for the extension process)
-// Keep in sync with TopShelfItem.swift in the main app target.
+// Mirror of DSM Video/Models/TopShelfItem.swift. This file is the ONLY source in the
+// "DSM Video Top Shelf" target, so the app's types cannot be imported here: the JSON shape is
+// the contract. Change one copy, change the other.
 
 private struct TopShelfItem: Codable {
     let id: String
@@ -10,19 +12,41 @@ private struct TopShelfItem: Codable {
     let year: Int?
     let imageURL: String?
     let deepLinkURL: String
-    /// 0...1, or nil when unwatched. Optional so a snapshot written by an older build
-    /// still decodes — a schema mismatch here blanks the entire shelf.
+    /// 0...1, or nil when unwatched.
     var playbackProgress: Double?
+    /// The server's age level (FR-241); nil = unknown, which counts as `ceiling.unratedLevel`.
+    var ageLevel: Int?
 }
 
-/// The snapshot file, including which rail the app chose to write.
+private enum TopShelfRail: String, Codable {
+    case continueWatching
+    case justAdded
+}
+
+/// The ceiling the app filtered the snapshot at. Restricted = the account has a restricted
+/// profile, so the shelf is the shared TV's home screen with no chosen viewer (FR-264).
+private struct TopShelfCeiling: Codable {
+    let maxAgeLevel: Int
+    let unrestrictedLevel: Int
+    /// What a title with no level counts as. A separate server value from unrestrictedLevel.
+    let unratedLevel: Int
+    var isRestricted: Bool { maxAgeLevel < unrestrictedLevel }
+
+    /// Mirrors ProfileScope.allows(ageLevel:) (FR-242). Copied, not shared, because this
+    /// target compiles only this file and cannot compile ProfileModels.swift. Change both.
+    func allows(ageLevel: Int?) -> Bool { (ageLevel ?? unratedLevel) <= maxAgeLevel }
+}
+
+/// The snapshot file, including which rail the app chose to write and the ceiling it applied.
 ///
-/// The heading has to come from the app, not be guessed here. The app writes Continue
-/// Watching, or falls back to Just Added when nothing is in progress — so a constant label
-/// in this file would be wrong half the time, and inferring it from "do the items have
-/// progress?" would be a second rule to keep in sync with the first.
+/// The heading comes from the app, not guessed here. `rail` and `ceiling` are REQUIRED: a
+/// file from an older build (the legacy bare array, or the object without them) does not
+/// decode and the shelf shows nothing until the app writes a stamped one. Those files carry no
+/// age levels, so nothing here could check them before putting them on a shared TV.
 private struct TopShelfSnapshot: Codable {
     let sectionTitle: String
+    let rail: TopShelfRail
+    let ceiling: TopShelfCeiling
     let items: [TopShelfItem]
 }
 
@@ -99,15 +123,14 @@ class TopShelfProvider: TVTopShelfContentProvider {
 
     // MARK: - Private
 
-    /// Reads the snapshot, accepting BOTH the current object form and the legacy bare array.
+    /// Reads the snapshot and re-checks it against the ceiling it is stamped with.
     ///
-    /// The file gained a wrapper when the shelf switched from Just Added to Continue
-    /// Watching, because the heading now comes from the app. An installed build's existing
-    /// topshelf.json is still the old array, and the app only rewrites it after a home load
-    /// — so decoding strictly would blank the shelf for everyone until they opened the app,
-    /// which is precisely the symptom this change is meant to fix.
-    private func loadSnapshot() -> TopShelfSnapshot {
-        let empty = TopShelfSnapshot(sectionTitle: "", items: [])
+    /// The app already filtered it (TopShelfPolicy); this is the second check, so a file that
+    /// is stale, hand-edited or written by a buggy build still cannot put a title above the
+    /// ceiling, or any watch history, on a shared TV's home screen. Anything unreadable or
+    /// unstamped is shown as nothing: an empty shelf is safe, a wrong one is not.
+    private func loadSnapshot() -> (sectionTitle: String, items: [TopShelfItem]) {
+        let empty = (sectionTitle: "", items: [TopShelfItem]())
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroupID
         ) else {
@@ -121,16 +144,32 @@ class TopShelfProvider: TVTopShelfContentProvider {
             return empty
         }
 
-        let decoder = JSONDecoder()
-        if let snapshot = try? decoder.decode(TopShelfSnapshot.self, from: data) {
-            log.notice("decoded \(snapshot.items.count) item(s), section \(snapshot.sectionTitle, privacy: .public)")
-            return snapshot
+        guard let snapshot = try? JSONDecoder().decode(TopShelfSnapshot.self, from: data) else {
+            // Includes every file written before the ceiling stamp existed (legacy bare array,
+            // unstamped object). Ignored on purpose: it cannot be checked.
+            log.error("topshelf.json is \(data.count) bytes but is not a stamped snapshot (older build, or schema drift) — showing nothing until the app rewrites it")
+            return empty
         }
-        if let legacy = try? decoder.decode([TopShelfItem].self, from: data) {
-            log.notice("decoded \(legacy.count) item(s) in the LEGACY array format")
-            return TopShelfSnapshot(sectionTitle: "Just Added", items: legacy)
+        log.notice("decoded \(snapshot.items.count) item(s), section \(snapshot.sectionTitle, privacy: .public), ceiling \(snapshot.ceiling.maxAgeLevel)/\(snapshot.ceiling.unrestrictedLevel), unrated \(snapshot.ceiling.unratedLevel)")
+
+        guard snapshot.ceiling.isRestricted else {
+            return (snapshot.sectionTitle, snapshot.items)
         }
-        log.error("topshelf.json is \(data.count) bytes but decodes as neither format — schema drift between the app and this extension")
-        return empty
+        // Restricted account: Just Added only, no resume bars, every title the ceiling allows
+        // (TopShelfCeiling.allows, the mirror of ProfileScope.allows).
+        guard snapshot.rail == .justAdded else {
+            log.error("restricted snapshot carries \(snapshot.rail.rawValue, privacy: .public) — watch history is never shown on a restricted account; showing nothing")
+            return empty
+        }
+        let allowed: [TopShelfItem] = snapshot.items.compactMap { entry in
+            guard snapshot.ceiling.allows(ageLevel: entry.ageLevel) else { return nil }
+            var shown = entry
+            shown.playbackProgress = nil
+            return shown
+        }
+        if allowed.count != snapshot.items.count {
+            log.error("dropped \(snapshot.items.count - allowed.count) item(s) above the ceiling")
+        }
+        return (snapshot.sectionTitle, allowed)
     }
 }

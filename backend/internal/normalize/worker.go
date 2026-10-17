@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -549,8 +550,18 @@ func (w *NormalizeWorker) StartRetentionReaper(ctx context.Context, retentionDay
 	}()
 }
 
-// reapBackups walks backupDir and removes files older than retentionDays by mtime,
-// then prunes any directories left empty. Errors are logged, never fatal.
+// backupMinKeep is how many of the newest backups the reaper keeps whatever their age
+// (TASK-937). The age window assumes conversions keep arriving, so the newest originals
+// are always younger than it. A server that converts nothing for longer than the window
+// (idle library, owner away) would otherwise reap every original, including those of the
+// most recent conversions: the ones a user is least likely to have watched and checked
+// yet. Keeping the newest few costs a bounded amount of disk (at most this many files
+// past the window) and is released as soon as newer conversions take their place.
+const backupMinKeep = 3
+
+// reapBackups walks backupDir and removes files older than retentionDays by mtime, except
+// the backupMinKeep newest, then prunes any directories left empty. Errors are logged,
+// never fatal.
 func (w *NormalizeWorker) reapBackups(retentionDays int) {
 	if w.backupDir == "" {
 		return
@@ -559,23 +570,36 @@ func (w *NormalizeWorker) reapBackups(retentionDays int) {
 		return // nothing backed up yet
 	}
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
-	var removed int
+	type backupFile struct {
+		path string
+		mod  time.Time
+	}
+	var files []backupFile
 	_ = filepath.Walk(w.backupDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil {
+		if err != nil || info == nil || info.IsDir() {
 			return nil
 		}
-		if info.IsDir() {
-			return nil
-		}
-		if info.ModTime().Before(cutoff) {
-			if err := os.Remove(path); err != nil {
-				log.Printf("[normalize] retention: failed to delete %s: %v", path, err)
-			} else {
-				removed++
-			}
-		}
+		files = append(files, backupFile{path, info.ModTime()})
 		return nil
 	})
+	// Newest first; the path breaks mtime ties so the kept set is deterministic.
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].mod.Equal(files[j].mod) {
+			return files[i].mod.After(files[j].mod)
+		}
+		return files[i].path < files[j].path
+	})
+	var removed int
+	for i, f := range files {
+		if i < backupMinKeep || !f.mod.Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(f.path); err != nil {
+			log.Printf("[normalize] retention: failed to delete %s: %v", f.path, err)
+		} else {
+			removed++
+		}
+	}
 	if removed > 0 {
 		log.Printf("[normalize] retention: reclaimed %d expired backup file(s) older than %dd", removed, retentionDays)
 		pruneEmptyDirs(w.backupDir)

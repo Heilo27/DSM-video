@@ -75,8 +75,10 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
   let changeSeq: Int?
   /// US certification, display only (FR-240). Clients never derive anything from it.
   let contentRating: String?
-  /// 1...4, computed by the server (FR-241). nil = an older server; treated as 4, unrated.
-  /// The only client check is `ProfileScope.allows(ageLevel:)`.
+  /// A level on the server's ladder, computed by the server (FR-241). nil = an older server;
+  /// treated as unrated (the server's unrated level, ActiveProfileStore.unratedLevel). The client
+  /// check runs in LocalStore.sqlVisibleToScope (offline reads) and its Swift twin
+  /// ProfileScope.allows(ageLevel:) (downloads, Top Shelf); see ProfileModels.swift.
   let ageLevel: Int?
 
   nonisolated init(id: String, type: String, title: String, year: Int? = nil,

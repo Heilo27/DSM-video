@@ -61,7 +61,10 @@ picker, no PIN prompt, nothing filtered.
 **FR-206 [DESIGN, DESTRUCTIVE]** Deleting a profile permanently deletes that profile's progress, watch
 history and watchlist. Nothing else is touched: no media, no other profile's data, no downloads. Before
 deleting, the app confirms with wording that names what is lost. A device whose active profile was deleted
-returns to the profile picker on its next request (`unknown_profile`).
+returns to the profile picker on its next request (`unknown_profile`). Every other device removes its own
+local copy of the deleted profile's positions and pending uploads the next time it loads the profile list;
+downloads are never touched (they belong to the account). [2026-10-17, TASK-935, destructive: device-local
+copy only, the server copy is already gone]
 
 **FR-207 [DESIGN]** Lowering a profile's maximum age level **hides** progress and watchlist entries that are
 now above it. It never deletes them, and raising the level brings them back.
@@ -97,7 +100,8 @@ server restart resetting it is acceptable, because a viewer cannot trigger a res
 account has one), checked against DSM exactly as at sign-in and subject to the sign-in rate limit. This
 keeps DSM as the only identity (A4). If DSM cannot be reached or gives no usable answer, the reset is
 refused with `dsm_unavailable` (503), never `password_incorrect`: an unreachable NAS service is not a wrong
-password. If the account has two-factor sign-in and no OTP was sent, the reset is refused with
+password. The password must belong to the DSM user who owns the account (FR-224), not merely to a DSM user
+whose name maps to it. If the account has two-factor sign-in and no OTP was sent, the reset is refused with
 `otp_required` (403), never `password_incorrect`: the password may be right, and the app must ask for the
 code. A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
 
@@ -130,6 +134,13 @@ served for, so a client and a test can see what the server resolved.
 
 **FR-223 [DESIGN]** The server does not ask for proof of PIN entry on each request. The PIN gates the
 **apps'** profile selection (FR-213). §11 sets out what that does and does not protect.
+
+**FR-224 [DESIGN] One DSM user, one account.** Two DSM users are always two DSVideo accounts, even when
+their names differ only by punctuation or letter case (`john.smith` and `john_smith`). An existing account
+belongs to the first DSM user to sign in to it after this rule shipped; a later, different DSM user whose
+name maps to the same account gets a new, empty account of their own. No existing data is moved or deleted.
+A sign-in issued before the rule to a DSM user who turns out not to own the account stops working and must
+sign in again; the owner's own sign-ins keep working. [2026-10-17, TASK-931]
 
 ## 5. Per-profile data and migration
 
@@ -167,6 +178,13 @@ load, or a sync that started before the list loaded), it neither uploads nor dow
 or changes the watchlist: that traffic waits, and positions stay on the device, until a profile is active
 or the server proves it has no profiles. Stored positions reach the owner only by that explicit hand-over,
 never by a request without a profile, which FR-221 would serve for the most restricted profile.
+On an account with profiles where no profile is chosen (the picker is pending, or the active profile was
+deleted on another device), the device shows only titles allowed to the most restricted profile and saves
+no progress: there is nobody to file it under, and it never goes to the owner. A position saved by a
+player belongs to the profile that started playback; if that profile is no longer active when the save
+happens, the save is dropped. Offline resume positions on downloaded files are per profile too; the single
+position stored before profiles becomes the owner's. A device never learns of a position change before the
+server has saved it. [2026-10-17, TASK-936]
 
 ## 6. Age ratings
 
@@ -209,7 +227,11 @@ Matching ignores case and surrounding whitespace.
 spelling as `NULL`), or **any string not in the table above**, is **unrated**. Its age level is **4**: hidden on every restricted profile, visible on
 Adult profiles. Unknown strings fail closed. The server sends unrated titles as `ageLevel: 4` with
 `contentRating: null`, so a client's whole visibility check is `item.ageLevel <= profile.maxAgeLevel`. That
-one comparison is all a client may do, and the unrated rule lives only on the server.
+one comparison is all a client may do, and the unrated rule lives only on the server. The server also
+tells clients the top level (`unrestrictedLevel` on `GET /profiles`: a profile below it is restricted) and
+the level of an unrated title (`unratedLevel` on `GET /profiles/age-levels`); apps store both for offline
+use and hard-code neither, so adding a tier needs no app release (ADR-001). An older server that sends
+neither is treated as 4 for both. [2026-10-17, TASK-922]
 
 *Why this ladder:* it is Friday's proposal, kept because it matches the US maturity tiers Netflix uses
 (Little Kids / Older Kids / Teens / Mature), which most parents already know. Refinements: TV-G sits with G
@@ -218,7 +240,8 @@ explicitly with TV-Y7 rather than left to fail closed. Four tiers is the smalles
 three common child stages from adult, and the unrated rule needs nothing more than "restricted vs not".
 
 **FR-244 [DESIGN]** Changing the ladder is a server migration. It must bump the change sequence of every
-item whose level changes, or devices keep the old levels in their cache.
+item whose level changes, or devices keep the old levels in their cache. [Not yet implemented: the
+server records no ladder version, so nothing bumps the sequence when the ladder changes. TASK-939.]
 
 **Known consequence [RYAN rule, flagged]:** home videos, and anything TMDb has no US certification for, are
 hidden on restricted profiles. Until a manual rating override exists (deferred, §13), a family's own home
@@ -230,13 +253,19 @@ videos are invisible to the kids.
 route's class is listed in `docs/api/ProfilesAPI.md` §"Enforcement by route". The classes are:
 - **Filtered listing.** Titles above the ceiling are left out. Totals, counts, genre counts and pagination
   reflect only the visible set (FRD-001 FR-082). Covers: items, search, Just Added, Suggested, shows, TV
-  shows, genres, library summary, watchlist, progress, playlists, downloads, collections.
+  shows, genres, library summary, watchlist, progress, playlists, downloads, collections. A listing
+  never lags a rating change: after a re-match or a finished scan, the next request (Just Added included)
+  reflects the new levels, and a re-match changes the title's sequence so devices pick up the new level.
+  Ryan, 2026-10-17: "new arrivals needs to have the extra filter so adult movies or shows are not let
+  through just cause they are the newest additions." The filter is applied before the newest titles are
+  chosen, so a kids' rail is full of kids' titles, not a trimmed adult one. [TASK-934]
 - **Refused if above.** Opening a title above the ceiling directly (detail, playback, seasons and episodes
   of a hidden show, trickplay, watchlist add, playlist add, download mark) is refused with
   `content_restricted` (403). A title the viewer reached by deep link, Siri or a stale cache gets an error
   naming the real cause, never a "not found" that blames the library (S2, FRD-001 FR-002).
-- **Unrestricted only.** Metadata fixes (`tmdb-search` and `tmdb-fix` for items and shows) and `/admin/*`
-  are refused on restricted profiles with `profile_restricted`. Otherwise a viewer could re-match a hidden
+- **Unrestricted only.** Metadata fixes (`tmdb-search` and `tmdb-fix` for items and shows), `/admin/*` and
+  writing a server-wide setting (such as the TMDb key) are refused on restricted profiles with
+  `profile_restricted`. Otherwise a viewer could re-match a hidden
   title to a child-rated one and unhide the file. These routes stay under the existing server-admin rule as
   well.
 - **Account-scoped replication.** `/sync/items`, `/sync/deleted`, `/sync/status` and `/sync/heartbeat`
@@ -284,7 +313,12 @@ grids. Nothing from the previous profile stays visible, not even briefly (FRD-00
 
 **FR-262 [RYAN/DESIGN]** The app's offline and local fallback (the on-device catalog) applies the same
 ceiling on **every** read, using each item's server-sent `ageLevel`. A local query that skips the filter is
-a defect, even though the server would still refuse playback.
+a defect, even though the server would still refuse playback. This includes the Downloads tab: a
+downloaded title above the ceiling is not listed (including downloads still in progress, paused or failed)
+and cannot be played offline, and on the title's page it shows as not downloaded. A download with no
+known level is treated as unrated until the device learns its level. Switching profiles never deletes a
+download. Devices upgraded from before age levels fill in levels for titles they already hold without any
+action from the user. [2026-10-17, TASK-927, TASK-935]
 
 **FR-263 [DESIGN]** Offline: the cached profile list is shown. Profiles without a PIN can be entered. A
 PIN-protected profile cannot be entered offline, and the picker says why ("Your NAS needs to be reachable
@@ -293,6 +327,10 @@ to check this PIN"). A profile already active stays active through a connection 
 **FR-264 [DESIGN]** The Top Shelf extension, widgets and Siri/App Intents (PlayVideoIntent,
 ShowInAppSearchResultsIntent) act for the active profile, shared through the app group, and never surface a
 title above its ceiling. With no known active profile they show nothing profile-specific.
+**Top Shelf on an account with any restricted profile** shows only Just Added titles allowed to the most
+restricted profile, with no Continue Watching and no resume bars, at all times: the Apple TV home screen
+is shared and has no chosen viewer between sessions. An account with no restricted profile keeps the
+active profile's Continue Watching. [Friday, 2026-10-17, TASK-923/928; Ryan may revise]
 
 **FR-265 [DESIGN]** On a restricted profile, an empty grid, rail or collection caused by the ceiling says
 so, naming the profile's level ("No Little Kids titles in Movies yet"). That message is distinct from
@@ -309,7 +347,8 @@ family account, so a tvOS-only release would lock owners out of their own librar
 ## 9. Kids' collections
 
 **FR-270 [RYAN]** Kids' profiles (maximum age level ≤ 2) browse by **collections** (studio and theme
-groupings plus kid-friendly genres) **instead of** the adult genre list.
+groupings plus kid-friendly genres) **instead of** the adult genre list. The server marks each profile
+`kids` from its one threshold; apps read the flag and hold no threshold of their own. [2026-10-17, TASK-921]
 
 **FR-271 [RYAN/DESIGN]** Collections are defined **once, server-side, as data**: id, title, kind
 (`studio` | `theme` | `genre`), membership rule, audience. A title is a member if it has **any** of the
@@ -385,7 +424,9 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | `profile_limit_reached` | 409 | The account already has 4 profiles. |
 | `owner_pin_not_set` | 409 | Creating a second profile before the owner has a PIN. |
 | `owner_profile_immutable` | 409 | Deleting the owner profile, lowering its age level, or clearing its PIN while other profiles exist. |
-| `unknown_collection` | 404 | Collection id not defined, or hidden for this profile. |
+| `unknown_collection` | 404 | Collection id not defined, or not offered to this profile's tier. An offered collection with no visible titles is an empty page, not this error (FR-275). |
+| `invalid_avatar` | 400 | Avatar key outside 1–32 letters, digits, `-` and `_` (FR-203). |
+| `dsm_unavailable` | 503 | Owner PIN reset when DSM cannot be reached or gives no usable answer (FR-216). |
 
 ## 11. Threat model (what this does and does not protect)
 
@@ -399,6 +440,10 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
   values is trivial.
 - **If that ever needs closing:** selecting a profile would issue a profile-scoped token, so the server
   enforces the PIN. That change is to ADR-001 and the API, not to this FRD's behaviour.
+- **Accepted residual (2026-10-17):** a device upgraded from a build without profiles, launched offline
+  before it has ever loaded the profile list, does not yet know the account has profiles, so its offline
+  catalog is unfiltered until it first reaches the server. It cannot be closed on the device, because the
+  device has never been told profiles exist.
 
 ## 12. Truth Test per FR
 
@@ -411,6 +456,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | FR-216 owner PIN reset via DSM | S5 | A4 holds (DSM stays the identity) | none | KEEP |
 | FR-217 no 401 for PIN errors | S2 (errors name the real cause) | — | none | KEEP |
 | FR-220–223 active profile | S5 | S1 | none | KEEP |
+| FR-224 one DSM user, one account | S5 (each DSM user already has their own account) | A4 (DSM stays the identity) | none | KEEP |
 | FR-230, 231, 233 per-profile data | S5 | S1, S3 | none | KEEP |
 | FR-232 migration envelope | S3 (data survives) | — | none | KEEP (required if the feature ships) |
 | FR-240 certification storage | P1 (enriched detail: the existing FR-085 "rating" field gets a real value) | S1 | none | KEEP |
@@ -482,7 +528,7 @@ Collections (TASK-918)
 - **AC-002-61** Given titles tagged company 3, network 2, keyword 207317, keyword 3335 and genre "Kids", then they fall in `pixar`, no collection (network 2 is not Disney), `holiday`, `halloween` and `family` respectively. (FR-271, FR-272)
 - **AC-002-62** Given an R-rated Walt Disney Pictures title, it is neither returned nor counted in `disney` for a kids' profile. (FR-273)
 - **AC-002-63** Given a show in a collection, it is listed once, and none of its episodes is listed individually. (FR-271)
-- **AC-002-64** Given an undefined collection id, or one hidden for the profile, `/collections/{id}/items` returns `404 unknown_collection`. (FR-275)
+- **AC-002-64** Given an undefined collection id, or one not offered to the profile's tier, `/collections/{id}/items` returns `404 unknown_collection`; given an offered collection with no visible titles, it returns `200` with an empty page. (FR-275)
 - **AC-002-65** Given a kids' profile on tvOS, browse shows collections in place of genres. With none visible, it says there are no collections yet, distinct from a load failure. (FR-270, FR-276)
 - **AC-002-66** Given the server source, collection ids, rules and titles are defined in exactly one place. (FR-271)
 

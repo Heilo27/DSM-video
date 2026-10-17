@@ -46,8 +46,11 @@ struct ItemDetailView: View {
   @Namespace private var actionNamespace
   #endif
 
+  /// A download THIS profile may play (FR-262). A title above the active profile's ceiling
+  /// is not "downloaded" from its point of view: no offline badge, no offline play, and no
+  /// delete of a file it is not allowed to see. Downloads stay the account's (FRD-002).
   private var isDownloaded: Bool {
-    downloadManager.isDownloaded(itemId: itemID)
+    downloadManager.playableDownloadedItem(itemId: itemID) != nil
   }
 
   private var isDownloading: Bool {
@@ -1189,6 +1192,11 @@ struct ItemDetailView: View {
         posterURL = appState.api.imageURL(id: posterId, width: 400)
       }
 
+      // FR-262: capture the title's server-sent level with the download, so the Downloads
+      // tab can gate it with no server in reach. From the local catalog: ItemDetail does not
+      // carry ageLevel. nil (not synced yet) is stored as unknown, which fails closed on
+      // restricted profiles until DownloadManager.refreshAgeLevels resolves it.
+      let ageLevel = await LocalStore.shared.ageLevel(forItemID: itemID)
       downloadManager.startDownload(
         itemId: itemID,
         title: shownTitle,
@@ -1197,6 +1205,7 @@ struct ItemDetailView: View {
         posterURL: posterURL,
         token: appState.sessionToken,
         durationSeconds: detail?.durationSeconds ?? 0,
+        ageLevel: ageLevel,
         playbackSessionID: info.resolvedSessionID
       )
     } catch {
@@ -1407,6 +1416,13 @@ private struct PlayerSheet: View {
   // From the playback response's durationSeconds, falling back to the item's own.
   @State private var playbackDuration: Double = 0
   @State private var isOffline: Bool = false
+  /// The profile that opened the local file (FR-233). Every offline position save names it,
+  /// so a profile change while the player is up cannot hand the save to someone else.
+  @State private var offlineProfileID: String = ""
+  /// The profile active when playback started, online or offline (FR-233). Every progress
+  /// save passes it, so a save after a switch or a delete elsewhere is dropped rather than
+  /// filed under whoever is active by then.
+  @State private var playbackProfileID: String?
   @State private var chapters: [Chapter] = []
   // TASK-828: semantic subtitle metadata (full/forced/image + autoEnable) from the
   // playback response, handed to the player so it can auto-enable the forced
@@ -1478,7 +1494,8 @@ private struct PlayerSheet: View {
               // Persist final position locally for resume-on-reopen
               DownloadManager.shared.updateResumePosition(
                 itemId: itemID,
-                positionSeconds: exitPosition
+                positionSeconds: exitPosition,
+                profileID: offlineProfileID
               )
             }
             // Route through appState.recordProgress so LocalStore is updated (TASK-361).
@@ -1489,7 +1506,8 @@ private struct PlayerSheet: View {
               await appState.recordProgress(
                 itemId: itemID,
                 positionSeconds: positionAtDismiss,
-                durationSeconds: durationAtDismiss
+                durationSeconds: durationAtDismiss,
+                asProfile: playbackProfileID
               )
             }
             dismiss()
@@ -1536,7 +1554,8 @@ private struct PlayerSheet: View {
               // Persist position locally for resume-on-reopen
               DownloadManager.shared.updateResumePosition(
                 itemId: itemID,
-                positionSeconds: positionInt
+                positionSeconds: positionInt,
+                profileID: offlineProfileID
               )
             }
             // Route through appState.recordProgress so LocalStore is updated (TASK-361).
@@ -1544,7 +1563,8 @@ private struct PlayerSheet: View {
               await appState.recordProgress(
                 itemId: itemID,
                 positionSeconds: positionInt,
-                durationSeconds: durationInt
+                durationSeconds: durationInt,
+                asProfile: playbackProfileID
               )
             }
           },
@@ -1663,7 +1683,7 @@ private struct PlayerSheet: View {
         let pos = max(livePosition, lastSyncedPosition)
         let dur = lastKnownDuration
         if isOffline {
-          DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos)
+          DownloadManager.shared.updateResumePosition(itemId: itemID, positionSeconds: pos, profileID: offlineProfileID)
         }
         // TASK-719 / TASK-270: flush progress when backgrounding so a force-kill
         // doesn't lose position. recordProgress writes LocalStore first (the
@@ -1673,7 +1693,8 @@ private struct PlayerSheet: View {
         let itemSnapshot = itemID
         Task { @MainActor in
           let bgID = UIApplication.shared.beginBackgroundTask(withName: "FlushProgress")
-          await appState.recordProgress(itemId: itemSnapshot, positionSeconds: pos, durationSeconds: dur)
+          await appState.recordProgress(itemId: itemSnapshot, positionSeconds: pos, durationSeconds: dur,
+                                       asProfile: playbackProfileID)
           if bgID != .invalid { UIApplication.shared.endBackgroundTask(bgID) }
         }
       }
@@ -1780,6 +1801,7 @@ private struct PlayerSheet: View {
     // and shift every recorded position by it.
     playlistTimeOffset = 0
     isOffline = false
+    playbackProfileID = await LocalStore.shared.activeScope.id
 
     // TASK-719: if a failure-recovery snapshot exists, seed the trackers so an
     // immediate dismiss after recovery still flushes (vs. the 0/0 guard eating it).
@@ -1800,13 +1822,23 @@ private struct PlayerSheet: View {
       return
     }
 
-    // Check if we have a downloaded version first
-    if let downloaded = DownloadManager.shared.getDownloadedItem(itemId: itemID) {
+    // Check if we have a downloaded version first — one THIS profile may play (FR-262). A
+    // download above the ceiling falls through to streaming, where the server refuses it.
+    // A legacy download with no stored level is resolved from the catalog first, so a title
+    // the profile is allowed is not refused just for predating FR-262.
+    let downloads = DownloadManager.shared
+    if downloads.getDownloadedItem(itemId: itemID) != nil,
+       downloads.playableDownloadedItem(itemId: itemID) == nil {
+      await downloads.refreshAgeLevels()
+    }
+    if let downloaded = downloads.playableDownloadedItem(itemId: itemID) {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)
       if FileManager.default.fileExists(atPath: downloaded.videoPath) {
         isOffline = true
+        // FR-233: progress is the profile's. Saves go to the profile that opened the file.
+        offlineProfileID = downloads.activeResumeProfileID
         resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
-          positionSeconds: downloaded.resumePositionSeconds,
+          positionSeconds: downloads.resumePosition(of: downloaded, profileID: offlineProfileID),
           durationSeconds: downloaded.durationSeconds))
         playbackDuration = Double(downloaded.durationSeconds)
         playbackURL = localURL

@@ -273,6 +273,20 @@ not hidden and do not break the library view.
 **FR-100 [INFERRED]** — Titles with unusual names (quotes, ampersands, non-ASCII, very long) list, open,
 and are findable by search.
 
+**FR-143 [DESIGN, DESTRUCTIVE, 2026-10-17, TASK-933/937]** — *A server scan resolves doubt toward keeping.*
+A folder the server cannot read keeps every title already known under it, and the failure is logged with
+the folder and the reason. A library whose folder shows no videos at all (for example an unmounted volume)
+while titles are known for it deletes nothing; clearing such a library is done by removing it in settings.
+One library that fails to scan does not stop the others, and every failed library is reported. Watch
+progress for a title that really was removed is kept for 30 days before it is erased, so a folder that
+comes back restores its positions. Of the original files kept after a video is converted, the newest 3 are
+kept whatever their age; older ones follow the retention window. (Each change narrows a deletion path;
+flagged to Ryan.)
+
+**FR-144 [DESIGN, 2026-10-17, TASK-929]** — *Secrets never reach the server log.* Request logging records
+method and path only: no query string, no body. Passwords, one-time codes, session ids, tokens and DSM's
+trusted-device token are redacted wherever a request is logged.
+
 ---
 
 ## 7. Auth (sign in, QuickConnect, pairing, session, sign out)

@@ -184,12 +184,17 @@ func TestReapBackups(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(old), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{old, fresh} {
+	// Three more fresh files so "old" falls outside the newest-3 floor (TASK-937) and is
+	// still subject to the age window.
+	fresh2 := filepath.Join(backup, "sub", "fresh2.mkv")
+	fresh3 := filepath.Join(backup, "sub", "fresh3.mkv")
+	fresh4 := filepath.Join(backup, "sub", "fresh4.mkv")
+	for _, p := range []string{old, fresh, fresh2, fresh3, fresh4} {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Backdate "old" 8 days; leave "fresh" at now.
+	// Backdate "old" 8 days; leave the fresh files at now.
 	eightDaysAgo := time.Now().Add(-8 * 24 * time.Hour)
 	if err := os.Chtimes(old, eightDaysAgo, eightDaysAgo); err != nil {
 		t.Fatal(err)

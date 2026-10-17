@@ -26,8 +26,11 @@ const justAddedCacheSize = 24
 // the query is a single indexed ORDER BY over `items`, so the cost is trivial, but there is
 // no reason to pay it per request when the answer changes a handful of times a week.
 //
-// The cache is ALSO refreshed on demand when it is empty or older than this, so a freshly
-// started server answers correctly without waiting for the first tick.
+// The timer is only the backstop. A request recomputes on demand whenever the cache is
+// stale (see fresh): never computed, older than this, invalidated by a scan or a rating
+// change, or behind the library's item_seq. That last one is what makes a re-rated title
+// leave a kids' rail at once (FR-250): every write that changes what a client sees,
+// content_rating included, takes a new change_seq, so the cache cannot outlive it.
 const justAddedRefreshInterval = 12 * time.Hour
 
 // justAddedCache holds the precomputed rail, per library and per age ceiling.
@@ -55,6 +58,37 @@ type justAddedCache struct {
 	mu         sync.RWMutex
 	byLibrary  map[string][]map[string]any // key: justAddedKey(maxLevel, libraryID)
 	computedAt time.Time
+	// gen counts invalidations; builtGen is the gen the stored rails were computed under.
+	// A refresh that was already running when invalidate() fired stores what it read but
+	// stays stale, so the next request recomputes instead of trusting pre-change rows.
+	gen, builtGen uint64
+	// builtItemSeq is the library's item_seq when the stored rails were computed.
+	builtItemSeq int64
+
+	// flight is non-nil while an on-demand refresh runs, and is closed when it ends.
+	// Concurrent misses wait on it rather than each running their own 4 × libraries
+	// queries (singleflight; TASK-934).
+	flightMu sync.Mutex
+	flight   chan struct{}
+}
+
+// invalidate marks every cached rail stale. Safe on a nil cache (test servers build none).
+func (c *justAddedCache) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.gen++
+	c.mu.Unlock()
+}
+
+// fresh reports whether the stored rails may be served as-is, given the library's current
+// item_seq. Caller holds c.mu (read or write).
+func (c *justAddedCache) fresh(itemSeq int64) bool {
+	return !c.computedAt.IsZero() &&
+		c.builtGen == c.gen &&
+		itemSeq <= c.builtItemSeq &&
+		time.Since(c.computedAt) <= justAddedRefreshInterval
 }
 
 func justAddedKey(maxLevel int, libraryID string) string {
@@ -80,6 +114,13 @@ func (s *Server) startJustAddedRefresher() {
 
 // refreshJustAdded recomputes and stores the rail for every library.
 func (s *Server) refreshJustAdded() {
+	// Read the staleness markers BEFORE the queries: anything that changes after this
+	// point leaves the result marked stale rather than being silently missed.
+	s.justAdded.mu.RLock()
+	startGen := s.justAdded.gen
+	s.justAdded.mu.RUnlock()
+	startSeq := s.cachedItemSeq.Load()
+
 	libs, err := s.db.Query(`SELECT DISTINCT library_id FROM items WHERE library_id != ''`)
 	if err != nil {
 		log.Printf("[justAdded] library scan failed: %v", err)
@@ -95,12 +136,14 @@ func (s *Server) refreshJustAdded() {
 	libs.Close()
 
 	next := map[string][]map[string]any{}
+	failed := false
 	// The empty library is the all-libraries rail, which is what the home screen asks for.
 	for level := agerating.MinLevel; level <= agerating.MaxLevel; level++ {
 		for _, id := range append(libraryIDs, "") {
 			rows, err := s.queryJustAdded(id, level)
 			if err != nil {
 				log.Printf("[justAdded] compute failed for library %q, ceiling %d: %v", id, level, err)
+				failed = true
 				continue
 			}
 			next[justAddedKey(level, id)] = rows
@@ -110,6 +153,13 @@ func (s *Server) refreshJustAdded() {
 	s.justAdded.mu.Lock()
 	s.justAdded.byLibrary = next
 	s.justAdded.computedAt = time.Now()
+	if failed {
+		// Serve what was computed, but stay stale so the next request retries the rest
+		// instead of serving a missing rail as empty for 12 hours.
+		s.justAdded.computedAt = time.Time{}
+	}
+	s.justAdded.builtGen = startGen
+	s.justAdded.builtItemSeq = startSeq
 	s.justAdded.mu.Unlock()
 	log.Printf("[justAdded] refreshed %d librar(ies) at %d ceilings", len(libraryIDs)+1, agerating.MaxLevel-agerating.MinLevel+1)
 }
@@ -271,11 +321,54 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 	return out, nil
 }
 
+// ensureJustAddedFresh recomputes the rails if they are stale, running at most one refresh
+// at a time. A caller that finds a refresh already running waits for it and then checks
+// again, because that refresh may have started before the change the caller must see.
+// Bounded so a write storm (the backfill re-rating titles) cannot pin a request here.
+func (s *Server) ensureJustAddedFresh() {
+	c := s.justAdded
+	for attempt := 0; attempt < 3; attempt++ {
+		c.mu.RLock()
+		ok := c.fresh(s.cachedItemSeq.Load())
+		c.mu.RUnlock()
+		if ok {
+			return
+		}
+		c.flightMu.Lock()
+		if wait := c.flight; wait != nil {
+			c.flightMu.Unlock()
+			<-wait
+			continue
+		}
+		// Re-check under flightMu: a refresh can finish between the check above and here,
+		// and the leader clears c.flight only after storing its result.
+		c.mu.RLock()
+		ok = c.fresh(s.cachedItemSeq.Load())
+		c.mu.RUnlock()
+		if ok {
+			c.flightMu.Unlock()
+			return
+		}
+		done := make(chan struct{})
+		c.flight = done
+		c.flightMu.Unlock()
+
+		s.refreshJustAdded()
+
+		c.flightMu.Lock()
+		c.flight = nil
+		c.flightMu.Unlock()
+		close(done)
+	}
+}
+
 // handleJustAdded serves the precomputed rail.
 //
-// Answers from cache, and recomputes on demand when the cache is empty or stale — so a
-// server that has just started, or one whose library changed since the last tick, still
-// gives a correct answer rather than an old one. The client no longer decides what is new.
+// Answers from cache, recomputing first when the cache is stale (see justAddedCache.fresh):
+// never computed, past the 12-hour backstop, invalidated by a finished scan or a TMDb
+// re-match, or behind the library's item_seq. A libraryId the cache does not hold, on a
+// fresh cache, is simply an empty rail; it no longer forces a recompute per request. The
+// client no longer decides what is new.
 func (s *Server) handleJustAdded(w http.ResponseWriter, r *http.Request) {
 	libraryID := strings.TrimSpace(r.URL.Query().Get("libraryId"))
 	limit := clampInt(parseInt(r.URL.Query().Get("limit"), 16), 1, justAddedCacheSize)
@@ -286,17 +379,10 @@ func (s *Server) handleJustAdded(w http.ResponseWriter, r *http.Request) {
 	}
 	key := justAddedKey(v.MaxAgeLevel, libraryID)
 
+	s.ensureJustAddedFresh()
 	s.justAdded.mu.RLock()
-	items, ok := s.justAdded.byLibrary[key]
-	age := time.Since(s.justAdded.computedAt)
+	items := s.justAdded.byLibrary[key]
 	s.justAdded.mu.RUnlock()
-
-	if !ok || age > justAddedRefreshInterval {
-		s.refreshJustAdded()
-		s.justAdded.mu.RLock()
-		items = s.justAdded.byLibrary[key]
-		s.justAdded.mu.RUnlock()
-	}
 
 	if len(items) > limit {
 		items = items[:limit]

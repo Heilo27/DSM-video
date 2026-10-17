@@ -26,8 +26,12 @@ nonisolated enum ProfileGate {
   /// `claimLegacyRows` later hands to the owner (FR-233). So with no active profile, the
   /// traffic is held until either a profile is active, or the server has proved it has no
   /// profiles at all. Held rows stay pending locally: nothing is lost, only delayed.
+  ///
+  /// The unchosen scope (a profile account with no profile chosen on this device) never
+  /// syncs, whatever the support: it has no identity to sync as, and records nothing.
   static func progressSyncAllowed(scope: ProfileScope, support: ProfileSupport) -> Bool {
-    !scope.isLegacy || support == .unsupported
+    if scope.isUnchosen { return false }
+    return !scope.isLegacy || support == .unsupported
   }
 
   /// What a failed `GET /profiles` proves. Only a 404 proves the server predates profiles.
