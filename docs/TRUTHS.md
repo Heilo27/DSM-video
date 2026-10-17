@@ -48,6 +48,14 @@ Source: M5 final bullet, FRD-001 FR-123.
 Falsifier: if a feature the user wants can only work through a third-party relay we operate, this truth and
 that feature collide, and Ryan decides.
 
+**S5. Kid-safe on the family TV.** It is Ryan's account, but his kids use the Apple TV app too. Each
+viewer can have their own profile (own history, own age ceiling), and the owner decides what a kid's
+profile can see. Source: Ryan, 2026-10-17.
+→ serves P1: on a shared Apple TV, "plays and resumes" is only true per person, and the library is only
+"findable" by a kid if what they find is appropriate.
+Falsifier: if profiles get used for adults wanting separate accounts (sharing, permissions, guests) rather
+than for kid safety, that pressure is A4/household scope and needs Ryan, not a quiet extension.
+
 ## Anti-truths
 
 **A1. Not a file organizer.** The app adapts to the folders that exist. It never requires the user to
@@ -76,18 +84,12 @@ confirm.
 
 ## Pending escalation (Ryan's call)
 
-- **2026-10-17 · FRD-002 Profiles and age ratings · ESCALATE (truth gap).** Ryan decided the feature
-  (2026-10-17). It violates no anti-truth, but it serves no truth above either: FRD-000 describes one
-  viewer ("my NAS", "the position the TV resumes from"), with no household and no children. Under the
-  doctrine, "serves nothing" is CUT, and a direct decision from Ryan is not something an agent cuts. So
-  the truths, not the feature, are the likely gap.
-  **Proposed amendment (Ryan's to accept, edit or reject):** add
-  *"S5. One account serves a household. Each viewer gets their own place in the library, and the account
-  owner decides what each viewer may see."* → serves P1: on a shared Apple TV, "plays and resumes" is only
-  true per person. That makes five secondaries, one over the cap of four. If Ryan wants to stay at four,
-  the cleanest merge is folding S3 into S2 ("honest" already covers "never silently loses your data").
-  Until Ryan rules, FRD-002 is specified but its verdict stays ESCALATE.
+- (none open)
 
 ## Amendment log
 
-- (none yet: this is the initial draft)
+- **2026-10-17 · Ryan · S5 added (narrowed from the proposed "household" wording).** Ryan: "it's still
+  for my account. but on apple TV, my kids use the app too, and creating a kid friendly profile makes
+  sense." The product stays single-account; it does not grow into a household or multi-user platform. The
+  FRD-002 Truth Test verdict moves from ESCALATE to KEEP. This makes five secondaries, one over the cap of
+  four. Ryan was not asked to merge any, so none were merged.

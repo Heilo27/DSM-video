@@ -9,15 +9,13 @@ carry them out are tagged **[DESIGN]**; those can be revised without going back 
 **Amends:** FRD-001 FR-008 (new), FR-013, FR-095.
 
 ## Truth Test
-- Serves: none of P1, S1–S4 as drafted. FRD-000 describes one viewer and no household. Would serve the
-  proposed **S5** "one account serves a household" (see TRUTHS.md, Pending escalation).
+- Serves: **S5** "Kid-safe on the family TV" (Ryan, 2026-10-17).
 - Supports: S1 (each viewer's position is one server-held truth on every device), S2 (Continue Watching
   stops showing someone else's position), S3 (migration keeps every existing position).
 - Violates: none. Checked against A4 "not a second login system": a profile PIN works only inside a session
   DSM already authenticated and never grants server access by itself, so it is a lock, not a login.
-- Verdict: **ESCALATE (truth gap).** Ryan decided the feature and it violates no anti-truth, but no drafted
-  truth covers it. Ryan rules on the S5 amendment. Per-FR verdicts are in §12. A few FRs serve existing
-  truths on their own and are KEEP regardless of how Ryan rules.
+- Verdict: **KEEP.** Ryan ruled on 2026-10-17 and added S5, in narrowed form: the product is still one
+  account, and profiles exist for kid safety on the shared Apple TV.
 
 ---
 
@@ -140,8 +138,11 @@ never offers them.
 profile, and every existing progress and watchlist row is assigned to it. No row is deleted, and no position
 or watchlist entry changes value. Safety envelope, all required:
 1. Before migrating, the server writes a full copy of the database file next to the original and logs its
-   path. If that copy cannot be written, the migration does not run, and the server keeps serving on the
-   old schema with profiles unavailable.
+   path. If that copy cannot be written, the migration does not run and the server does not start. It
+   logs the real cause (for example, "Profiles migration needs N MB free next to the database; X MB
+   available") so DSM shows the package as failed to start. There is no dual-schema serving mode (Friday,
+   2026-10-17: running both schemas would double every progress and watchlist query, to cover a disk-full
+   case that breaks the NAS anyway).
 2. Rows are copied, never moved in place. The migration counts rows before and after, per table and per
    account. On any mismatch it rolls back, and the old tables stay authoritative.
 3. The pre-migration tables are kept under a renamed name. Dropping them is a separate, deliberate change
@@ -241,9 +242,14 @@ effect at the next session, not mid-segment.
 
 ## 8. The apps
 
-**FR-260 [DESIGN]** If the account has more than one profile, the app shows the profile picker after
-sign-in or pairing, at every cold launch, and when it returns from the background after more than
-**30 minutes** (one named constant, both platforms). On tvOS the flow is pairing → picker → home.
+**FR-260 [RYAN, 2026-10-17]** If the account has more than one profile:
+- **tvOS** asks every time the app starts: the picker shows after pairing, at every cold launch, and when
+  the app returns from the background after more than **30 minutes** (one named constant). The flow is
+  pairing → picker → home.
+- **iOS/iPadOS** shows the picker after sign-in, then **remembers the selection** across launches, so the
+  user does not pick every time. "Switch profile" is always available. A remembered profile that requires a
+  PIN is not re-prompted at launch on the same device. A remembered profile that was deleted, or that is no
+  longer valid, falls back to showing the picker.
 
 **FR-261 [DESIGN]** Switching profile reloads Continue Watching, the watchlist, the rails and the library
 grids. Nothing from the previous profile stays visible, not even briefly (FRD-001 FR-004, FR-005).
@@ -267,7 +273,7 @@ so, naming the profile's level ("No Little Kids titles in Movies yet"). That mes
 **FR-266 [DESIGN]** Profile management in the app asks for the owner PIN first, and confirms deletion under
 FR-206. A failed PIN shows the real cause: wrong PIN, locked (with time remaining), or NAS unreachable.
 
-**FR-267 [DESIGN, scope growth flagged] Both platforms in one release.** iOS/iPadOS and tvOS both ship the
+**FR-267 [RYAN, 2026-10-17] Both platforms in one release.** iOS/iPadOS and tvOS both ship the
 picker and send `X-DSVideo-Profile` in the same release that turns on server enforcement (FRD-000 standard
 of done 3). Under FR-221 an iPhone build without the header is held to the most restricted profile in any
 family account, so a tvOS-only release would lock owners out of their own library on the phone.
@@ -369,19 +375,19 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 
 | FRs | Serves | Supports | Violates | Verdict |
 |---|---|---|---|---|
-| FR-200–207 profiles | S5 (pending) | S1, S2 | none | ESCALATE (truth gap) |
-| FR-210–215 PINs, management | S5 (pending) | S4 | none (A4: lock, not login) | ESCALATE (truth gap) |
-| FR-216 owner PIN reset via DSM | S5 (pending) | A4 holds (DSM stays the identity) | none | ESCALATE (truth gap) |
+| FR-200–207 profiles | S5 | S1, S2 | none | KEEP |
+| FR-210–215 PINs, management | S5 | S4 | none (A4: lock, not login) | KEEP |
+| FR-216 owner PIN reset via DSM | S5 | A4 holds (DSM stays the identity) | none | KEEP |
 | FR-217 no 401 for PIN errors | S2 (errors name the real cause) | — | none | KEEP |
-| FR-220–223 active profile | S5 (pending) | S1 | none | ESCALATE (truth gap) |
-| FR-230, 231, 233 per-profile data | S5 (pending) | S1, S3 | none | ESCALATE (truth gap) |
+| FR-220–223 active profile | S5 | S1 | none | KEEP |
+| FR-230, 231, 233 per-profile data | S5 | S1, S3 | none | KEEP |
 | FR-232 migration envelope | S3 (data survives) | — | none | KEEP (required if the feature ships) |
 | FR-240 certification storage | P1 (enriched detail: the existing FR-085 "rating" field gets a real value) | S1 | none | KEEP |
-| FR-241, 242, 244 ladder, unrated rule | S5 (pending) | S1 (one server home) | none | ESCALATE (truth gap) |
-| FR-250–252 enforcement | S5 (pending) | S2 (`content_restricted` names the cause) | none | ESCALATE (truth gap) |
-| FR-260–266 apps | S5 (pending) | S2 | none | ESCALATE (truth gap) |
+| FR-241, 242, 244 ladder, unrated rule | S5 | S1 (one server home) | none | KEEP |
+| FR-250–252 enforcement | S5 | S2 (`content_restricted` names the cause) | none | KEEP |
+| FR-260–266 apps | S5 | S2 | none | KEEP |
 | FR-267 both platforms | FRD-000 standard 3 | S1 | none | KEEP (if the feature ships) |
-| FR-270, 273 (kids' scope), 276 kids' collections | S5 (pending) | S2 | none | ESCALATE (truth gap) |
+| FR-270, 273 (kids' scope), 276 kids' collections | S5 | S2 | none | KEEP |
 | FR-271, 272, 274 (adult row), 275 collections for Teens/Adult | P1 (findable: browse that reflects what the user is looking for, M2) | S1 | A1/A3: none (reads TMDb metadata only) | KEEP |
 
 No CUTs. Nothing proposed during this work serves nothing or violates an anti-truth.
@@ -408,7 +414,7 @@ Storage (TASK-915)
 Server (TASK-916)
 - **AC-002-10** Given each certification in the FR-241 table, in any letter case and with surrounding whitespace, then the API returns that row's `ageLevel`. Given `NULL`, then `ageLevel` is 4 and `contentRating` is `null`. Given an unknown string (`X`, `M`, `18`), then `ageLevel` is 4. (FR-241, FR-242)
 - **AC-002-11** Given an account with 4 profiles, when a fifth is created, then the response is `409 profile_limit_reached` and no profile is created. (FR-200)
-- **AC-002-12** Given profiles A and B in one account, when progress and watchlist entries are written under A, then none of them appear under B in `/progress`, `/progress/all`, `/items?section=continueWatching`, `/watchlist` or `/suggested`. (FR-201, FR-230)
+- **AC-002-12** Given profiles A and B in one account, when progress and watchlist entries are written under A, then none of them appear under B in `/progress`, `/progress/all`, `/items?filter=justWatched`, `/watchlist` or `/suggested`. (FR-201, FR-230)
 - **AC-002-13** Given a restricted profile at level L and a library with titles at every level plus unrated ones, then every route marked F in ProfilesAPI.md returns no title with `ageLevel` > L, with totals equal to the visible count, and every route marked R returns `403 content_restricted` for a title above L. (FR-250)
 - **AC-002-14** Given an Adult profile, then unrated titles appear in listings and search and start playback. (FR-242)
 - **AC-002-15** Given a request without `X-DSVideo-Profile`: with no restricted profile in the account it is served for the owner; with restricted profiles at levels 3 and 1 it is served for the level-1 profile; with two level-1 profiles, the earlier-created one. In every case the response header names the profile used. (FR-221, FR-222)
@@ -419,7 +425,7 @@ Server (TASK-916)
 - **AC-002-20** Given a profile with PIN `0420`, then neither the database nor any response contains `0420`, and `GET /profiles` shows only `hasPin: true`. (FR-203, FR-214)
 - **AC-002-21** Given the correct DSM password, `POST /profiles/owner/pin/reset` sets the new owner PIN. Given a wrong password, it returns `403 password_incorrect`, not 401. (FR-216, FR-217)
 - **AC-002-22** Given a copy of a live database, after migration every account has exactly one owner profile; progress and watchlist row counts per account match before and after, with identical values; a full pre-migration database copy exists; and the pre-migration tables are kept. (FR-232)
-- **AC-002-23** Given the pre-migration copy cannot be written, then the migration does not run and the server keeps serving on the old schema. (FR-232)
+- **AC-002-23** Given the pre-migration copy cannot be written, then the migration does not run, the database is unchanged, and the server exits at startup with a log line naming the cause. (FR-232)
 - **AC-002-24** Given a restricted profile, `tmdb-search`, `tmdb-fix` (items and shows) and `/admin/*` return `403 profile_restricted`. (FR-250)
 - **AC-002-25** Given a restricted profile and a title above its level, a progress write is accepted and stored, and a watchlist add returns `403 content_restricted`. (FR-231)
 - **AC-002-26** Given a profile with progress and watchlist entries at level 3, lowering it to level 1 hides them, and raising it back shows them unchanged. (FR-207)
@@ -428,7 +434,8 @@ Server (TASK-916)
 - **AC-002-29** Given any profile, `/sync/items` returns every account item, those above the ceiling included, each with `ageLevel`. (FR-250)
 
 tvOS (TASK-917)
-- **AC-002-40** Given an account with more than one profile, the picker appears after pairing, at cold launch, and on return from more than 30 minutes in the background. Given a single-profile account, the app goes straight to home. (FR-205, FR-260)
+- **AC-002-40** Given an account with more than one profile, on tvOS the picker appears after pairing, at every cold launch, and on return from more than 30 minutes in the background. Given a single-profile account, the app goes straight to home. (FR-205, FR-260)
+- **AC-002-40a** Given an account with more than one profile on iOS, the picker appears after sign-in. A relaunch opens straight into the remembered profile without asking again. "Switch profile" opens the picker. A remembered profile that has been deleted brings back the picker. (FR-260)
 - **AC-002-41** Given a PIN-protected profile, entering it requires a PIN the server accepts. A wrong PIN says so, a lockout shows the time remaining, and an unreachable NAS is named as the cause. (FR-213, FR-266)
 - **AC-002-42** Given a switch from profile A to profile B, no rail, grid or watchlist entry from A is visible at any point after the switch. (FR-261)
 - **AC-002-43** Given a restricted profile offline, no local read shows a title above its level. Given a PIN-protected profile offline, it cannot be entered, and the picker explains why. (FR-262, FR-263)
