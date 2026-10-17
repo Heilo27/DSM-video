@@ -1132,6 +1132,8 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		// reaped by timeout rather than closed when the client stops watching.
 		r.Get("/genres", s.handleGenres)
 		r.Get("/suggested", s.handleSuggested)
+		r.Get("/collections", s.handleCollections)
+		r.Get("/collections/{id}/items", s.handleCollectionItems)
 		r.Get("/just-added", s.handleJustAdded)
 		r.Get("/libraries/summary", s.handleLibrariesSummary)
 		r.Get("/items", s.handleItems)

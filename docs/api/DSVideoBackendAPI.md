@@ -265,7 +265,7 @@ contract worth describing by hand, and it is deliberately not the whole route ta
 For completeness, every route the server registers is listed below, with ✅ marking the ones
 documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 
-**80 routes total: 69 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
+**87 routes total: 76 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
 
 ### Client-facing
 
@@ -281,6 +281,8 @@ documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 | `/auth/pairing/generate` | POST | ✅ |
 | `/auth/quickconnect/resolve` | POST | ✅ |
 | `/auth/refresh` | POST | — |
+| `/collections` | GET | — |
+| `/collections/{id}/items` | GET | — |
 | `/downloads` | GET | — |
 | `/downloads/{itemId}` | DELETE, POST | — |
 | `/dsvideo` | GET | — |
@@ -308,6 +310,11 @@ documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 | `/playlists/{id}` | DELETE, GET | — |
 | `/playlists/{id}/items` | POST | — |
 | `/playlists/{id}/items/{itemId}` | DELETE | — |
+| `/profiles` | GET, POST | — |
+| `/profiles/age-levels` | GET | — |
+| `/profiles/owner/pin/reset` | POST | — |
+| `/profiles/{id}` | DELETE, PATCH | — |
+| `/profiles/{id}/pin/verify` | POST | — |
 | `/progress` | GET | — |
 | `/progress/all` | GET | — |
 | `/search` | GET | ✅ |

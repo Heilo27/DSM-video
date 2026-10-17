@@ -208,12 +208,30 @@ Response:
 The titles in one collection, with the rating filter applied. Movies and shows appear once each; episodes
 are never listed individually.
 
-Query: `sort` (`title` default | `year` | `addedAt` | `rating`), `order`, `offset` / `limit`, the same
-meaning as `/items`.
+Query:
+- `sort`: `title` (default) | `year` | `addedAt` | `rating`. `title` sorts ascending; the other three default
+  to descending (newest / highest first). Titles with no year or rating sort last in either direction.
+- `order`: `asc` | `desc`, overriding the key's default. Unrecognised `sort` / `order` values fall back to the
+  defaults rather than erroring. Ties break on title, then id, so paging is stable.
+- `offset` / `limit`: as `/items` (`limit` default and maximum 10000).
 
-Response: the same shape as `GET /items` (`total` is the visible total).
+Response: `{ "total": <visible total>, "items": [...] }`, the same envelope as `GET /items`, with the item
+fields above (`contentRating`, `ageLevel`) and `libraryId`. `progress` is not included. The ceiling is applied
+in the query before paging, so `total` and every page describe only what the profile may see.
 
-Errors: `404 unknown_collection` (not defined, or not offered to this profile).
+A **show is one entry**, represented the way `/just-added` represents it: an `episode`-typed item whose `id`
+and artwork are one of the show's episodes (the first with a poster), `title` and `showName` the show's name,
+`year` the earliest and `addedAt` the newest across its episodes. Open it by `showName`. Its episodes are never
+listed individually (AC-002-63).
+
+Errors: `404 unknown_collection` (not defined, or not offered to this profile: a Teens or Adult profile asking
+for `animation` or `family`). A collection the profile *is* offered but that currently has no visible titles
+answers `200` with `total: 0` and `items: []`; clients get the list of what to show from `GET /collections`.
+
+Membership is defined once, in `backend/cmd/dsvideo-backend/collections.go` (`collectionDefs`). A title is a
+member if it has any of the rule's `(kind, id)` company entries, any of its keyword ids, or any of its genre
+names. `kind` is `company` or `network`; TMDb numbers them separately (company 2 is Walt Disney Pictures, network
+2 is ABC), so a network never matches a company rule.
 
 ## Enforcement by route
 

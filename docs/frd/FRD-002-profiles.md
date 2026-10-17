@@ -342,7 +342,9 @@ for the active profile is hidden**: not listed, not shown empty.
 
 **FR-275 [DESIGN]** The server returns a profile's visible collections, with visible counts, from one
 endpoint, and each collection's titles from a second, paged in the same shape as the item listing
-(ProfilesAPI.md). Collection titles are data from the server definition. Studio names are proper nouns;
+(ProfilesAPI.md). A collection the profile is offered but that has no visible titles at the moment of the
+second call answers an empty page, not an error; only an undefined id, or one not offered to the profile's
+tier, is `unknown_collection`. Collection titles are data from the server definition. Studio names are proper nouns;
 the two theme names are the only copy, and they have one home in the definition.
 
 **FR-276 [DESIGN]** If no collection has a visible title (for example, no TMDb key is configured, so no
