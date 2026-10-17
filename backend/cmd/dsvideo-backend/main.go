@@ -2731,6 +2731,18 @@ func (s *Server) handleLibrariesSummary(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"libraries": summaries})
 }
 
+// putRating stamps the FRD-002 item fields (FR-240/241/242) on an item payload: the stored
+// US certification (null when unrated) and the server-computed age level (unrated is 4).
+// The one place a list or detail handler turns a content_rating column into the wire pair.
+func putRating(item map[string]any, contentRating sql.NullString) {
+	var cr *string
+	if contentRating.Valid {
+		cr = &contentRating.String
+	}
+	item["contentRating"] = cr
+	item["ageLevel"] = agerating.LevelPtr(cr)
+}
+
 func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 	libraryID := r.URL.Query().Get("libraryId")
 	filter := r.URL.Query().Get("filter")
@@ -2857,7 +2869,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		        i.poster_path, i.backdrop_path, i.overview,
 		        i.show_name, i.season_number, i.episode_number,
 		        p.position_seconds, p.duration_seconds, p.updated_at,
-		        i.show_folder_id
+		        i.show_folder_id, i.content_rating
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 `+where+` `+orderBy+` LIMIT ? OFFSET ?`,
@@ -2877,13 +2889,13 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		var posterPath, backdropPath, overview, showName sql.NullString
 		var progPos, progDur sql.NullInt64
 		var progUpdatedAt sql.NullString
-		var showFolderIDCol sql.NullString
+		var showFolderIDCol, contentRating sql.NullString
 
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath, &overview,
 			&showName, &seasonNumber, &episodeNumber,
 			&progPos, &progDur, &progUpdatedAt,
-			&showFolderIDCol); err != nil {
+			&showFolderIDCol, &contentRating); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
@@ -2908,6 +2920,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 			"posterImageId":   nil,
 			"backdropImageId": nil,
 		}
+		putRating(item, contentRating)
 
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id
@@ -2974,7 +2987,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		        i.poster_path, i.backdrop_path,
-		        p.position_seconds, p.duration_seconds, p.updated_at
+		        p.position_seconds, p.duration_seconds, p.updated_at, i.content_rating
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`+visFrag+`
@@ -2993,13 +3006,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		var id, typ, title, addedAt string
 		var year, duration sql.NullInt64
 		var rating sql.NullFloat64
-		var posterPath, backdropPath sql.NullString
+		var posterPath, backdropPath, contentRating sql.NullString
 		var progPos, progDur sql.NullInt64
 		var progUpdatedAt sql.NullString
 
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath,
-			&progPos, &progDur, &progUpdatedAt); err != nil {
+			&progPos, &progDur, &progUpdatedAt, &contentRating); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
@@ -3024,6 +3037,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			"posterImageId":   nil,
 			"backdropImageId": nil,
 		}
+		putRating(item, contentRating)
 
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id
@@ -3121,7 +3135,7 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 	}
 
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.overview
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.overview, i.content_rating
 		 FROM items i
 		 INNER JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE 1=1 `+where+` ORDER BY p.updated_at DESC LIMIT ? OFFSET ?`,
@@ -3138,11 +3152,12 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		year, duration                     sql.NullInt64
 		rating                             sql.NullFloat64
 		posterPath, backdropPath, overview sql.NullString
+		contentRating                      sql.NullString
 	}
 	var rawRows []jwRow
 	for rows.Next() {
 		var r jwRow
-		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.year, &r.duration, &r.addedAt, &r.rating, &r.posterPath, &r.backdropPath, &r.overview); err != nil {
+		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.year, &r.duration, &r.addedAt, &r.rating, &r.posterPath, &r.backdropPath, &r.overview, &r.contentRating); err != nil {
 			rows.Close()
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
@@ -3171,6 +3186,7 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 			"posterImageId":   nil,
 			"backdropImageId": nil,
 		}
+		putRating(item, r.contentRating)
 
 		if r.posterPath.Valid && r.posterPath.String != "" {
 			item["posterImageId"] = r.id
@@ -3260,7 +3276,6 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		"originalTitle":   nullStringToAny(originalTitle),
 		"year":            nullIntToAny(year),
 		"durationSeconds": nullIntToAny(duration),
-		"contentRating":   nullStringToAny(contentRating),
 		"summary":         nullStringToAny(overview),
 		"rating":          nullFloatToAny(rating),
 		"genres":          genreList,
@@ -3279,6 +3294,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		"height":        nullIntToAny(videoHeight),
 		"audioChannels": nullIntToAny(audioChannels),
 	}
+	putRating(resp, contentRating)
 
 	// Add TV-specific fields
 	if typ == "episode" {
@@ -3370,9 +3386,22 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		FROM items WHERE `+matchWhere+` AND library_id = 'lib_tv'`, matchArgs...).Scan(
 		&year, &rating, &posterPath, &backdropPath, &overview, &genres, &director)
 
+	// The show's certification is its representative episode's (first with a poster, as for
+	// the artwork below). Absent rows leave it unrated, which is what putRating reports.
+	var showRating sql.NullString
+	if err := s.db.QueryRow(`
+		SELECT content_rating FROM items
+		WHERE `+matchWhere+` AND library_id = 'lib_tv'
+		ORDER BY CASE WHEN poster_path IS NOT NULL AND poster_path != '' THEN 0 ELSE 1 END, path
+		LIMIT 1`, matchArgs...).Scan(&showRating); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("show detail rating: %v", err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+
 	// Get all episodes grouped by season
 	rows, err := s.db.Query(`
-		SELECT id, title, season_number, episode_number, episode_title, duration_seconds, poster_path
+		SELECT id, title, season_number, episode_number, episode_title, duration_seconds, poster_path, content_rating
 		FROM items
 		WHERE `+matchWhere+` AND library_id = 'lib_tv'
 		ORDER BY COALESCE(season_number, 0), COALESCE(episode_number, 0)`,
@@ -3406,6 +3435,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		epTitle    sql.NullString
 		episodeNum sql.NullInt64
 		duration   sql.NullInt64
+		rating     sql.NullString
 		season     int
 	}
 	var pending []pendingEpisode
@@ -3413,9 +3443,9 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, title string
 		var seasonNum, episodeNum, duration sql.NullInt64
-		var epTitle, epPoster sql.NullString
+		var epTitle, epPoster, epRating sql.NullString
 
-		if err := rows.Scan(&id, &title, &seasonNum, &episodeNum, &epTitle, &duration, &epPoster); err != nil {
+		if err := rows.Scan(&id, &title, &seasonNum, &episodeNum, &epTitle, &duration, &epPoster, &epRating); err != nil {
 			continue
 		}
 
@@ -3426,7 +3456,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		seasonSet[sn] = true
 
 		pending = append(pending, pendingEpisode{
-			id: id, epTitle: epTitle, episodeNum: episodeNum, duration: duration, season: sn,
+			id: id, epTitle: epTitle, episodeNum: episodeNum, duration: duration, rating: epRating, season: sn,
 		})
 	}
 	// Release the connection before issuing the batch query below.
@@ -3459,6 +3489,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 			"watched":         watched,
 			"progress":        p,
 		}
+		putRating(ep, pe.rating)
 
 		episodes = append(episodes, episode{data: ep, season: pe.season})
 	}
@@ -3567,6 +3598,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		"images":   images,
 		"seasons":  seasons,
 	}
+	putRating(resp, showRating)
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -6717,7 +6749,7 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	// Get items in playlist; titles above the ceiling are left out (FR-250).
 	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.content_rating
 		 FROM playlist_items pi
 		 INNER JOIN items i ON i.id = pi.item_id
 		 WHERE pi.playlist_id = ?`+visFrag+`
@@ -6735,9 +6767,9 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 		var id, typ, itemTitle, addedAt string
 		var year, duration sql.NullInt64
 		var rating sql.NullFloat64
-		var posterPath, backdropPath sql.NullString
+		var posterPath, backdropPath, contentRating sql.NullString
 
-		if err := rows.Scan(&id, &typ, &itemTitle, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath); err != nil {
+		if err := rows.Scan(&id, &typ, &itemTitle, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath, &contentRating); err != nil {
 			continue
 		}
 
@@ -6750,6 +6782,7 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 			"posterImageId":   nil,
 			"backdropImageId": nil,
 		}
+		putRating(item, contentRating)
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id
 		}
@@ -6882,7 +6915,7 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.content_rating
 		 FROM downloads d
 		 INNER JOIN items i ON i.id = d.item_id
 		 WHERE d.user_id = ?`+visFrag+`
@@ -6900,9 +6933,9 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 		var id, typ, title, addedAt string
 		var year, duration sql.NullInt64
 		var rating sql.NullFloat64
-		var posterPath, backdropPath sql.NullString
+		var posterPath, backdropPath, contentRating sql.NullString
 
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath); err != nil {
+		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath, &contentRating); err != nil {
 			continue
 		}
 
@@ -6917,6 +6950,7 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 			"posterImageId":   nil,
 			"backdropImageId": nil,
 		}
+		putRating(item, contentRating)
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id
 		}
@@ -6989,7 +7023,7 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		        i.poster_path, i.backdrop_path, i.library_id,
-		        p.position_seconds, p.duration_seconds, p.updated_at
+		        p.position_seconds, p.duration_seconds, p.updated_at, i.content_rating
 		 FROM watchlist w
 		 JOIN items i ON i.id = w.item_id
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
@@ -7008,13 +7042,13 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		var id, typ, title, addedAt, libraryID string
 		var year, duration sql.NullInt64
 		var rating sql.NullFloat64
-		var posterPath, backdropPath sql.NullString
+		var posterPath, backdropPath, contentRating sql.NullString
 		var progPos, progDur sql.NullInt64
 		var progUpdatedAt sql.NullString
 
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath, &libraryID,
-			&progPos, &progDur, &progUpdatedAt); err != nil {
+			&progPos, &progDur, &progUpdatedAt, &contentRating); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
@@ -7031,6 +7065,7 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 			"backdropImageId": nil,
 			"libraryId":       libraryID,
 		}
+		putRating(item, contentRating)
 		if posterPath.Valid && posterPath.String != "" {
 			item["posterImageId"] = id
 		}
@@ -8944,7 +8979,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	}
 	visFrag, visArgs := v.andVisibleFrag("content_rating")
 	rows, err := s.db.Query(`
-		SELECT id, path, show_name, year, poster_path, season_number, added_at, change_seq
+		SELECT id, path, show_name, year, poster_path, season_number, added_at, change_seq, content_rating
 		FROM items WHERE library_id = 'lib_tv'`+visFrag+`
 		ORDER BY season_number ASC, path ASC`, visArgs...)
 	if err != nil {
@@ -8963,6 +8998,12 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		seasons      map[int]bool
 		newestAdded  string // ISO8601 — MAX(added_at) across episodes
 		maxChangeSeq int64  // max change_seq across episodes — used as image cache-buster
+		// The show's certification is its representative episode's: the first one with a
+		// poster, as for the artwork and as /just-added and collections do. ratingFromPoster
+		// marks that a poster-bearing episode has already claimed it.
+		contentRating    sql.NullString
+		ratingFromPoster bool
+		ratingSeen       bool
 	}
 
 	// folder → merged group key. lastWatched was keyed by the BARE folder name while the
@@ -8990,6 +9031,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		seasonNum  sql.NullInt64
 		addedAt    sql.NullString
 		changeSeq  sql.NullInt64
+		rating     sql.NullString
 		folderName string
 	}
 	var eps []epRow
@@ -8998,7 +9040,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var e epRow
 		if err := rows.Scan(&e.id, &e.path, &e.showName, &e.year, &e.posterPath,
-			&e.seasonNum, &e.addedAt, &e.changeSeq); err != nil {
+			&e.seasonNum, &e.addedAt, &e.changeSeq, &e.rating); err != nil {
 			continue
 		}
 		e.folderName = showFolderFromPath(e.path, tvRoot)
@@ -9049,8 +9091,13 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		if year.Valid && (!info.year.Valid || year.Int64 < info.year.Int64) {
 			info.year = year
 		}
-		if posterPath.Valid && posterPath.String != "" && info.firstID == "" {
+		hasPoster := posterPath.Valid && posterPath.String != ""
+		if hasPoster && info.firstID == "" {
 			info.firstID = id
+		}
+		if !info.ratingSeen || (hasPoster && !info.ratingFromPoster) {
+			info.contentRating, info.ratingSeen = e.rating, true
+			info.ratingFromPoster = hasPoster
 		}
 		if addedAt.Valid && addedAt.String > info.newestAdded {
 			info.newestAdded = addedAt.String
@@ -9169,6 +9216,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			"addedAt":         nil,
 			"metadataVersion": info.maxChangeSeq,
 		}
+		putRating(show, info.contentRating)
 		if info.firstID != "" {
 			show["posterImageId"] = info.firstID
 		}
@@ -9383,7 +9431,7 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT id, type, title, episode_title, year, duration_seconds, added_at, rating,
-		       poster_path, backdrop_path, season_number, episode_number
+		       poster_path, backdrop_path, season_number, episode_number, content_rating
 		FROM items WHERE `+where+`
 		ORDER BY COALESCE(season_number, 1), COALESCE(episode_number, 0)`,
 		args...)
@@ -9401,12 +9449,13 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		year, duration, seasonNum, episodeNum  sql.NullInt64
 		rating                                 sql.NullFloat64
 		posterPath, backdropPath, episodeTitle sql.NullString
+		contentRating                          sql.NullString
 	}
 	var rawRows []episodeRow
 	for rows.Next() {
 		var r episodeRow
 		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.episodeTitle, &r.year, &r.duration, &r.addedAt, &r.rating,
-			&r.posterPath, &r.backdropPath, &r.seasonNum, &r.episodeNum); err != nil {
+			&r.posterPath, &r.backdropPath, &r.seasonNum, &r.episodeNum, &r.contentRating); err != nil {
 			continue
 		}
 		rawRows = append(rawRows, r)
@@ -9479,6 +9528,7 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 			"seasonNumber":    nullIntToAny(r.seasonNum),
 			"episodeNumber":   nullIntToAny(r.episodeNum),
 		}
+		putRating(item, r.contentRating)
 		if r.posterPath.Valid && r.posterPath.String != "" {
 			item["posterImageId"] = r.id
 		}

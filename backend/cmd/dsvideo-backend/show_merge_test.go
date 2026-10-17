@@ -36,7 +36,7 @@ CREATE TABLE items(
   year INT, path TEXT, duration_seconds INT, added_at TEXT, updated_at TEXT,
   rating REAL, poster_path TEXT, backdrop_path TEXT, overview TEXT, genres TEXT,
   director TEXT, show_name TEXT, season_number INT, episode_number INT,
-  change_seq INT, show_folder_id TEXT, tmdb_id INT);
+  change_seq INT, show_folder_id TEXT, tmdb_id INT, content_rating TEXT);
 ` + profilesSchemaSQL + profilesDataTablesSQL // production profiles/progress/watchlist DDL
 
 const testTVRoot = "/tv"

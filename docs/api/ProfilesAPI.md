@@ -28,8 +28,9 @@ string IDs, ISO-8601 UTC). In addition:
 
 ## Item fields (added to every item payload)
 
-Every object that represents a title (`/items`, `/items/{id}`, `/search`, `/just-added`, `/suggested`,
-`/shows*`, `/tv/shows*`, `/watchlist`, `/collections/{id}/items`, and **`/sync/items`**) gains:
+Every object that represents a title (`/items` in every mode, `/items/{id}`, `/search`, `/just-added`, `/suggested`,
+`/shows*`, `/tv/shows*` including `/tv/shows/{showId}/episodes`, `/watchlist`, `/downloads`, `/playlists/{id}`,
+`/collections/{id}/items`, and **`/sync/items`**) gains:
 
 ```json
 {
@@ -42,6 +43,10 @@ Every object that represents a title (`/items`, `/items/{id}`, `/search`, `/just
   Clients never derive anything from it.
 - `ageLevel`: integer 1–4 computed by the server (FR-241). **Unrated titles are `4`** (FR-242). A client's
   entire visibility check is `item.ageLevel <= activeProfile.maxAgeLevel`.
+- A **show** object (`/shows`, `/tv/shows`, the show itself in `/shows/{showName}`) carries the rating of its
+  representative episode, the first with a poster, the same episode that supplies its artwork. Its episodes
+  carry their own. Progress maps (`/progress`, `/progress/all`) and season summaries are not title objects and
+  carry neither field.
 
 ## Profile object
 
