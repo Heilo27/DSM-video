@@ -40,13 +40,22 @@ const (
 // TMDbClient handles communication with The Movie Database API.
 type TMDbClient struct {
 	apiKey     string
+	baseURL    string
 	httpClient *http.Client
 }
 
 // NewTMDbClient creates a new TMDb API client.
 func NewTMDbClient(apiKey string) *TMDbClient {
+	return NewTMDbClientWithBaseURL(apiKey, tmdbBaseURL)
+}
+
+// NewTMDbClientWithBaseURL is NewTMDbClient against a different API root. Production uses
+// NewTMDbClient; this exists so tests can point the client at a local fake and assert on
+// the exact requests it makes.
+func NewTMDbClientWithBaseURL(apiKey, baseURL string) *TMDbClient {
 	return &TMDbClient{
-		apiKey: apiKey,
+		apiKey:  apiKey,
+		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -104,6 +113,11 @@ type MovieDetails struct {
 	IMDbID        string  `json:"imdb_id"`
 	Genres        []Genre `json:"genres"`
 	Credits       *Credits `json:"credits,omitempty"`
+	// ProductionCompanies, ReleaseDates and Keywords ride along on the detail call via
+	// append_to_response (no extra request).
+	ProductionCompanies []Company     `json:"production_companies"`
+	ReleaseDates        *ReleaseDates `json:"release_dates,omitempty"`
+	Keywords            *KeywordList  `json:"keywords,omitempty"`
 }
 
 // TVDetails contains detailed information about a TV show.
@@ -126,6 +140,11 @@ type TVDetails struct {
 	Genres          []Genre   `json:"genres"`
 	Networks        []Network `json:"networks"`
 	Credits         *Credits  `json:"credits,omitempty"`
+	// ProductionCompanies, ContentRatings and Keywords ride along on the detail call via
+	// append_to_response (no extra request). Networks is a base field of the response.
+	ProductionCompanies []Company       `json:"production_companies"`
+	ContentRatings      *ContentRatings `json:"content_ratings,omitempty"`
+	Keywords            *KeywordList    `json:"keywords,omitempty"`
 }
 
 // TVEpisode contains information about a TV episode.
@@ -140,6 +159,104 @@ type TVEpisode struct {
 	VoteAverage    float64 `json:"vote_average"`
 	VoteCount      int     `json:"vote_count"`
 	Runtime        int     `json:"runtime"`
+}
+
+// ReleaseDates is TMDb's per-country movie release list. It is the shape of both the
+// `release_dates` block appended to /movie/{id} and the standalone /movie/{id}/release_dates
+// response, so one type parses either.
+type ReleaseDates struct {
+	Results []ReleaseDatesCountry `json:"results"`
+}
+
+// ReleaseDatesCountry is one country's releases of a movie.
+type ReleaseDatesCountry struct {
+	ISO3166_1    string        `json:"iso_3166_1"`
+	ReleaseDates []ReleaseDate `json:"release_dates"`
+}
+
+// ReleaseDate is a single release of a movie in one country. Type is TMDb's enum:
+// 1 Premiere, 2 Theatrical (limited), 3 Theatrical, 4 Digital, 5 Physical, 6 TV.
+type ReleaseDate struct {
+	Certification string `json:"certification"`
+	Type          int    `json:"type"`
+	ReleaseDate   string `json:"release_date"`
+}
+
+// ContentRatings is TMDb's per-country TV rating list. Same dual role as ReleaseDates:
+// the appended block on /tv/{id} and the standalone /tv/{id}/content_ratings response.
+type ContentRatings struct {
+	Results []ContentRatingEntry `json:"results"`
+}
+
+// ContentRatingEntry is one country's rating of a TV show.
+type ContentRatingEntry struct {
+	ISO3166_1 string `json:"iso_3166_1"`
+	Rating    string `json:"rating"`
+}
+
+// Company is a TMDb production company. TMDb's company ids and network ids are SEPARATE id
+// spaces (company 2 is Walt Disney Pictures, network 2 is ABC), so a Company must always be
+// stored alongside which kind of list it came from.
+type Company struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Keyword is a TMDb keyword (theme tag), e.g. "christmas".
+type Keyword struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// KeywordList parses TMDb's keyword block. The two media types spell it differently:
+// movies as {"keywords":[...]}, TV as {"results":[...]}. Exactly one is populated.
+type KeywordList struct {
+	Keywords []Keyword `json:"keywords"`
+	Results  []Keyword `json:"results"`
+}
+
+// All returns whichever list the response carried.
+func (k *KeywordList) All() []Keyword {
+	if k == nil {
+		return nil
+	}
+	if len(k.Keywords) > 0 {
+		return k.Keywords
+	}
+	return k.Results
+}
+
+// Extras is everything beyond core metadata that the detail call carries for free: the US
+// rating plus the studio and theme tags used for browsing by collection. It is also what the
+// backfill fetches for a title that was enriched before these existed.
+type Extras struct {
+	ContentRating string // raw US certification; "" = none (unrated)
+	Companies     []Company
+	Networks      []Company // TV only
+	Keywords      []Keyword
+}
+
+// Extras gathers the movie's rating, studios and keywords.
+func (d *MovieDetails) Extras() Extras {
+	return Extras{
+		ContentRating: d.USCertification(),
+		Companies:     d.ProductionCompanies,
+		Keywords:      d.Keywords.All(),
+	}
+}
+
+// Extras gathers the show's rating, studios, networks and keywords.
+func (d *TVDetails) Extras() Extras {
+	nets := make([]Company, 0, len(d.Networks))
+	for _, n := range d.Networks {
+		nets = append(nets, Company{ID: n.ID, Name: n.Name})
+	}
+	return Extras{
+		ContentRating: d.USContentRating(),
+		Companies:     d.ProductionCompanies,
+		Networks:      nets,
+		Keywords:      d.Keywords.All(),
+	}
 }
 
 // Genre represents a genre.
@@ -205,7 +322,7 @@ func (c *TMDbClient) SearchMovies(ctx context.Context, query string, year int) (
 		params.Set("year", strconv.Itoa(year))
 	}
 
-	reqURL := fmt.Sprintf("%s/search/movie?%s", tmdbBaseURL, params.Encode())
+	reqURL := fmt.Sprintf("%s/search/movie?%s", c.baseURL, params.Encode())
 
 	var resp searchMoviesResponse
 	if err := c.doRequest(ctx, reqURL, &resp); err != nil {
@@ -225,7 +342,7 @@ func (c *TMDbClient) SearchTV(ctx context.Context, query string, year int) ([]TV
 		params.Set("first_air_date_year", strconv.Itoa(year))
 	}
 
-	reqURL := fmt.Sprintf("%s/search/tv?%s", tmdbBaseURL, params.Encode())
+	reqURL := fmt.Sprintf("%s/search/tv?%s", c.baseURL, params.Encode())
 
 	var resp searchTVResponse
 	if err := c.doRequest(ctx, reqURL, &resp); err != nil {
@@ -239,9 +356,9 @@ func (c *TMDbClient) SearchTV(ctx context.Context, query string, year int) ([]TV
 func (c *TMDbClient) GetMovieDetails(ctx context.Context, tmdbID int) (*MovieDetails, error) {
 	params := url.Values{
 		"api_key":            {c.apiKey},
-		"append_to_response": {"credits"},
+		"append_to_response": {"credits,release_dates,keywords"},
 	}
-	reqURL := fmt.Sprintf("%s/movie/%d?%s", tmdbBaseURL, tmdbID, params.Encode())
+	reqURL := fmt.Sprintf("%s/movie/%d?%s", c.baseURL, tmdbID, params.Encode())
 
 	var details MovieDetails
 	if err := c.doRequest(ctx, reqURL, &details); err != nil {
@@ -255,9 +372,9 @@ func (c *TMDbClient) GetMovieDetails(ctx context.Context, tmdbID int) (*MovieDet
 func (c *TMDbClient) GetTVDetails(ctx context.Context, tmdbID int) (*TVDetails, error) {
 	params := url.Values{
 		"api_key":            {c.apiKey},
-		"append_to_response": {"credits"},
+		"append_to_response": {"credits,content_ratings,keywords"},
 	}
-	reqURL := fmt.Sprintf("%s/tv/%d?%s", tmdbBaseURL, tmdbID, params.Encode())
+	reqURL := fmt.Sprintf("%s/tv/%d?%s", c.baseURL, tmdbID, params.Encode())
 
 	var details TVDetails
 	if err := c.doRequest(ctx, reqURL, &details); err != nil {
@@ -267,12 +384,41 @@ func (c *TMDbClient) GetTVDetails(ctx context.Context, tmdbID int) (*TVDetails, 
 	return &details, nil
 }
 
+// GetMovieExtras fetches a movie's rating, studios and keywords WITHOUT credits: the
+// lightweight call the backfill makes for a title enriched before these were captured.
+// One request, because release_dates and keywords are appended to the detail call.
+func (c *TMDbClient) GetMovieExtras(ctx context.Context, tmdbID int) (Extras, error) {
+	params := url.Values{
+		"api_key":            {c.apiKey},
+		"append_to_response": {"release_dates,keywords"},
+	}
+	var d MovieDetails
+	if err := c.doRequest(ctx, fmt.Sprintf("%s/movie/%d?%s", c.baseURL, tmdbID, params.Encode()), &d); err != nil {
+		return Extras{}, err
+	}
+	return d.Extras(), nil
+}
+
+// GetTVExtras is GetMovieExtras for a show: rating, studios, networks and keywords in one
+// request, without credits.
+func (c *TMDbClient) GetTVExtras(ctx context.Context, tmdbID int) (Extras, error) {
+	params := url.Values{
+		"api_key":            {c.apiKey},
+		"append_to_response": {"content_ratings,keywords"},
+	}
+	var d TVDetails
+	if err := c.doRequest(ctx, fmt.Sprintf("%s/tv/%d?%s", c.baseURL, tmdbID, params.Encode()), &d); err != nil {
+		return Extras{}, err
+	}
+	return d.Extras(), nil
+}
+
 // GetTVEpisode fetches information about a specific TV episode.
 func (c *TMDbClient) GetTVEpisode(ctx context.Context, tvID, season, episode int) (*TVEpisode, error) {
 	params := url.Values{
 		"api_key": {c.apiKey},
 	}
-	reqURL := fmt.Sprintf("%s/tv/%d/season/%d/episode/%d?%s", tmdbBaseURL, tvID, season, episode, params.Encode())
+	reqURL := fmt.Sprintf("%s/tv/%d/season/%d/episode/%d?%s", c.baseURL, tvID, season, episode, params.Encode())
 
 	var ep TVEpisode
 	if err := c.doRequest(ctx, reqURL, &ep); err != nil {
@@ -282,12 +428,124 @@ func (c *TMDbClient) GetTVEpisode(ctx context.Context, tvID, season, episode int
 	return &ep, nil
 }
 
+// ratingRegion is the only certification region DSVideo reads. A title with no entry for it
+// is stored as NULL, which means "unrated" — never a guess from another country's scheme.
+const ratingRegion = "US"
+
+// releaseTypePriority ranks a TMDb release type for certification purposes: theatrical
+// releases carry the rating the MPA actually assigned, so they win over digital, physical
+// and TV releases, which are frequently re-certified or left blank. Unknown types rank last.
+func releaseTypePriority(t int) int {
+	switch t {
+	case 3: // Theatrical
+		return 0
+	case 2: // Theatrical (limited)
+		return 1
+	case 1: // Premiere
+		return 2
+	case 4: // Digital
+		return 3
+	case 5: // Physical
+		return 4
+	case 6: // TV
+		return 5
+	default:
+		return 6
+	}
+}
+
+// NormalizeCertification is the single home for cleaning a raw TMDb certification before it
+// is stored or compared. It trims whitespace and maps the placeholders TMDb uses for "no
+// rating" ("NR", "Not Rated", "Unrated", any case, or empty) to "", which callers store as
+// NULL meaning unrated. A placeholder is not a rating: leaving "NR" in the column would make
+// an unrated title look like it had a (never-matching) rating instead of none.
+func NormalizeCertification(raw string) string {
+	c := strings.TrimSpace(raw)
+	switch strings.ToLower(c) {
+	case "", "nr", "not rated", "unrated":
+		return ""
+	}
+	return c
+}
+
+// USMovieCertification picks the US certification (e.g. "PG-13") from a movie's release
+// list, or "" if there is none.
+//
+// A movie has several US releases and they do not all carry a certification: TMDb often
+// lists a Premiere with an empty string next to the real Theatrical entry. Empty entries
+// are skipped; among the rest the best release type wins (see releaseTypePriority), and
+// within a type the earliest release date wins, so a later re-release with a changed
+// rating does not displace the original. Ties beyond that keep TMDb's order. The string is
+// returned trimmed but otherwise raw: mapping it to an age level is not this package's job.
+func USMovieCertification(rd *ReleaseDates) string {
+	if rd == nil {
+		return ""
+	}
+	best := ""
+	bestPri := 0
+	bestDate := ""
+	found := false
+	for _, country := range rd.Results {
+		if !strings.EqualFold(country.ISO3166_1, ratingRegion) {
+			continue
+		}
+		for _, r := range country.ReleaseDates {
+			cert := NormalizeCertification(r.Certification)
+			if cert == "" {
+				continue
+			}
+			pri := releaseTypePriority(r.Type)
+			better := !found || pri < bestPri ||
+				(pri == bestPri && r.ReleaseDate != "" && (bestDate == "" || r.ReleaseDate < bestDate))
+			if better {
+				best, bestPri, bestDate, found = cert, pri, r.ReleaseDate, true
+			}
+		}
+	}
+	return best
+}
+
+// USTVContentRating picks the US rating (e.g. "TV-MA") from a show's content ratings, or ""
+// if there is none. Empty entries are skipped. The string is returned trimmed but raw.
+func USTVContentRating(cr *ContentRatings) string {
+	if cr == nil {
+		return ""
+	}
+	for _, e := range cr.Results {
+		if !strings.EqualFold(e.ISO3166_1, ratingRegion) {
+			continue
+		}
+		if rating := NormalizeCertification(e.Rating); rating != "" {
+			return rating
+		}
+	}
+	return ""
+}
+
+// USCertification is the movie's US certification, or "" if TMDb has none.
+func (d *MovieDetails) USCertification() string { return USMovieCertification(d.ReleaseDates) }
+
+// USContentRating is the show's US rating, or "" if TMDb has none.
+func (d *TVDetails) USContentRating() string { return USTVContentRating(d.ContentRatings) }
+
 // GetImageURL constructs a full URL for a TMDb image.
 func GetImageURL(path string, size ImageSize) string {
 	if path == "" {
 		return ""
 	}
 	return fmt.Sprintf("%s/%s%s", tmdbImageURL, size, path)
+}
+
+// APIError is a non-200 answer from TMDb. It is a type, not a bare string, so callers can
+// tell "this title does not exist" (404, permanent) from "try again later" (429, 5xx, a bad
+// key) — the content-rating backfill must never record the second kind as a finished check.
+type APIError struct {
+	Status int
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("tmdb api error: %d - %s", e.Status, e.Body)
 }
 
 // doRequest performs an HTTP request and decodes the JSON response.
@@ -307,7 +565,7 @@ func (c *TMDbClient) doRequest(ctx context.Context, reqURL string, result interf
 		// TASK-823: cap the error-body read — a misbehaving upstream must not be able
 		// to make us buffer an unbounded error string. 64 KiB is ample for any API error.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return fmt.Errorf("tmdb api error: %d - %s", resp.StatusCode, string(body))
+		return &APIError{Status: resp.StatusCode, Body: string(body)}
 	}
 
 	// TASK-823: bound the JSON body too. TMDb detail/search responses are well under
@@ -336,7 +594,15 @@ type VideoMetadata struct {
 	Genres       []string
 	Cast         []string // Top cast names
 	Director     string
+	// ContentRating is the raw US certification ("PG-13", "TV-MA"). Empty means TMDb has
+	// no US certification for the title: stored as NULL, meaning unrated.
 	ContentRating string
+
+	// Studio and theme tags for browsing by collection. For an episode these are the
+	// SHOW's: TMDb tags shows, not episodes.
+	Companies []Company
+	Networks  []Company // TV only
+	Keywords  []Keyword
 
 	// TV-specific
 	SeasonNumber  int
@@ -543,6 +809,9 @@ func (c *TMDbClient) FetchMovieMetadata(ctx context.Context, title string, year 
 		Rating:        details.VoteAverage,
 		RatingCount:   details.VoteCount,
 		Runtime:       details.Runtime,
+		ContentRating: details.USCertification(),
+		Companies:     details.ProductionCompanies,
+		Keywords:      details.Keywords.All(),
 	}
 
 	// Extract year from release date
@@ -645,7 +914,11 @@ func (c *TMDbClient) FetchTVMetadataWithFallback(ctx context.Context, showName, 
 		RatingCount:   showDetails.VoteCount,
 		SeasonNumber:  season,
 		EpisodeNumber: episode,
+		// An episode inherits its show's rating: TMDb rates shows, not episodes.
+		ContentRating: showDetails.USContentRating(),
 	}
+	showExtras := showDetails.Extras()
+	meta.Companies, meta.Networks, meta.Keywords = showExtras.Companies, showExtras.Networks, showExtras.Keywords
 
 	// Extract year from first air date
 	if len(showDetails.FirstAirDate) >= 4 {

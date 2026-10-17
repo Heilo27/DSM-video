@@ -139,7 +139,7 @@ Response (movie example):
   "originalTitle": null,
   "year": 2009,
   "durationSeconds": 30,
-  "contentRating": null,
+  "contentRating": "PG-13",
   "summary": null,
   "genres": [],
   "cast": [
@@ -151,6 +151,13 @@ Response (movie example):
   }
 }
 ```
+
+`contentRating` is the title's US certification as TMDb reports it, for example `"G"`, `"PG-13"`,
+`"R"` for movies and `"TV-14"`, `"TV-MA"` for shows (an episode carries its show's rating). It is
+populated for new scans and, over time, for existing libraries by a paced background backfill.
+`null` means **unrated**: TMDb has no US certification for the title, or it is a placeholder such
+as `NR`, `Not Rated` or `Unrated`. A `null` can also mean the backfill has not reached that
+title yet; clients should treat both as "no rating known" and must not infer an age level from it.
 
 ### GET `/search`
 Query:

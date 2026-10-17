@@ -746,6 +746,10 @@ func main() {
 		}
 	}()
 
+	// TASK-915: fill content_rating for items enriched before it was fetched. Paced and
+	// resumable; see content_rating_backfill.go.
+	s.startContentRatingBackfill(bgCtx)
+
 	// TASK-755: start the auto-normalize worker goroutine and its hourly retention
 	// reaper. Gated on the worker having been constructed above (auto-normalize on +
 	// ffmpeg/ffprobe found). Both run for the process lifetime on a background context.
@@ -1397,6 +1401,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
 		{"director", "ALTER TABLE items ADD COLUMN director TEXT"},
 		{"cast_names", "ALTER TABLE items ADD COLUMN cast_names TEXT"},
 		{"content_rating", "ALTER TABLE items ADD COLUMN content_rating TEXT"},
+		// TASK-915: when TMDb was last asked for this row's rating/studio/keyword extras.
+		// content_rating NULL alone cannot tell "never checked" from "checked, TMDb has no US
+		// cert" (legitimate and permanent for plenty of titles); without this marker the
+		// backfill would re-ask about those titles forever.
+		{"tmdb_extras_checked_at", "ALTER TABLE items ADD COLUMN tmdb_extras_checked_at TEXT"},
 		{"original_title", "ALTER TABLE items ADD COLUMN original_title TEXT"},
 		{"show_name", "ALTER TABLE items ADD COLUMN show_name TEXT"},
 		{"season_number", "ALTER TABLE items ADD COLUMN season_number INTEGER"},
@@ -1569,6 +1578,38 @@ CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);
 `)
 	if err != nil {
 		return fmt.Errorf("create revoked_tokens: %w", err)
+	}
+
+	// Step 6 (TASK-915): studio and theme tags, normalized, for browsing by collection
+	// ("Pixar", "Holiday"). One row per item per tag; an episode carries its SHOW's tags.
+	//
+	// item_companies.kind separates TMDb production companies ('company') from TV networks
+	// ('network') because they are different id spaces: company 2 is Walt Disney Pictures but
+	// network 2 is ABC, so a bare company_id lookup for "Disney" would also return ABC shows.
+	//
+	// No foreign keys: this database runs with foreign_keys off, and the scanner rebuilds
+	// items rows. The only place items are deleted is the stale purge, which removes these
+	// rows in the same transaction.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS item_companies (
+  item_id    TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'company',
+  company_id INTEGER NOT NULL,
+  name       TEXT NOT NULL,
+  PRIMARY KEY (item_id, kind, company_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_item_companies_lookup ON item_companies(kind, company_id, item_id);
+
+CREATE TABLE IF NOT EXISTS item_keywords (
+  item_id    TEXT NOT NULL,
+  keyword_id INTEGER NOT NULL,
+  name       TEXT NOT NULL,
+  PRIMARY KEY (item_id, keyword_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_item_keywords_lookup ON item_keywords(keyword_id, item_id);
+`)
+	if err != nil {
+		return fmt.Errorf("create item tag tables: %w", err)
 	}
 
 	return nil
@@ -7624,6 +7665,8 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 						maxPurgeSeq = seq
 					}
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, sid)
+					_, _ = staleTx.ExecContext(ctx, `DELETE FROM item_companies WHERE item_id = ?`, sid)
+					_, _ = staleTx.ExecContext(ctx, `DELETE FROM item_keywords WHERE item_id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx,
 						`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,?)`,
 						sid, seq, now)
@@ -7771,7 +7814,13 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 		log.Printf("metadata: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, metaSeqErr)
 		return
 	}
-	_, err = s.db.Exec(`
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("Failed to begin metadata tx for %s: %v", itemID, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 		UPDATE items SET
 			tmdb_id = ?,
 			imdb_id = ?,
@@ -7790,6 +7839,8 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 			season_number = ?,
 			episode_number = ?,
 			episode_title = ?,
+			content_rating = ?,
+			tmdb_extras_checked_at = ?,
 			metadata_fetched_at = ?,
 			change_seq = ?
 		WHERE id = ?`,
@@ -7797,8 +7848,18 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 		meta.Year, meta.PosterPath, meta.BackdropPath, meta.Rating, genres,
 		meta.Director, cast, nullableInt(meta.Runtime*60), // runtime in seconds
 		meta.ShowName, nullableInt(meta.SeasonNumber), nullableInt(meta.EpisodeNumber),
-		meta.EpisodeTitle, now, metaSeq, itemID,
+		meta.EpisodeTitle, nullableString(meta.ContentRating), now, now, metaSeq, itemID,
 	)
+	if err == nil {
+		// Same transaction as the row: a row stamped tmdb_extras_checked_at must never be
+		// left without the tags that stamp says were fetched.
+		err = replaceItemTags(ctx, tx, itemID, metadata.Extras{
+			Companies: meta.Companies, Networks: meta.Networks, Keywords: meta.Keywords,
+		})
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
 
 	if err != nil {
 		log.Printf("Failed to store metadata for %s: %v", itemID, err)
@@ -8012,7 +8073,13 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 		cast := strings.Join(castNames, ",")
 
-		_, err = s.db.Exec(`
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		defer tx.Rollback()
+		_, err = tx.ExecContext(ctx, `
 			UPDATE items SET
 				tmdb_id = ?,
 				title = ?,
@@ -8024,13 +8091,24 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 				rating = ?,
 				genres = ?,
 				cast_names = ?,
+				content_rating = ?,
+				tmdb_extras_checked_at = ?,
 				metadata_fetched_at = ?
 			WHERE id = ?`,
 			details.ID, details.Name, details.OriginalName, details.Overview,
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
-			genres, cast, now, id,
+			genres, cast, nullableString(details.USContentRating()), now, now, id,
 		)
 		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if err := replaceItemTags(ctx, tx, id, details.Extras()); err != nil {
+			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if err := tx.Commit(); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
@@ -8067,7 +8145,13 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 		cast := strings.Join(castNames, ",")
 
-		_, err = s.db.Exec(`
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		defer tx.Rollback()
+		_, err = tx.ExecContext(ctx, `
 			UPDATE items SET
 				tmdb_id = ?,
 				imdb_id = ?,
@@ -8082,13 +8166,25 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 				director = ?,
 				cast_names = ?,
 				duration_seconds = COALESCE(?, duration_seconds),
+				content_rating = ?,
+				tmdb_extras_checked_at = ?,
 				metadata_fetched_at = ?
 			WHERE id = ?`,
 			details.ID, details.IMDbID, details.Title, details.OriginalTitle, details.Overview,
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
-			genres, director, cast, nullableInt(details.Runtime*60), now, id,
+			genres, director, cast, nullableInt(details.Runtime*60),
+			nullableString(details.USCertification()), now, now, id,
 		)
 		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if err := replaceItemTags(ctx, tx, id, details.Extras()); err != nil {
+			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if err := tx.Commit(); err != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
@@ -8226,6 +8322,9 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	}
 	cast := strings.Join(castNames, ",")
 	now := time.Now().UTC().Format(time.RFC3339)
+	// Every episode in the show takes the show's rating (TMDb rates shows, not episodes).
+	showExtras := details.Extras()
+	showRating := nullableString(showExtras.ContentRating)
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	folderPrefix := tvRoot + escapedShowID + "/"
@@ -8284,13 +8383,20 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 				rating = ?,
 				genres = ?,
 				cast_names = ?,
+				content_rating = ?,
+				tmdb_extras_checked_at = ?,
 				metadata_fetched_at = ?,
 				change_seq = ?
 			WHERE id = ?`,
 			details.ID, details.Name, details.Overview,
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
-			genres, cast, now, seq, id,
+			genres, cast, showRating, now, now, seq, id,
 		); err != nil {
+			writeErr(w, http.StatusInternalServerError, "db_error")
+			return
+		}
+		if err := replaceItemTags(ctx, tx, id, showExtras); err != nil {
+			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
