@@ -3366,3 +3366,145 @@ struct LegacyProgressAttributionTests {
     #expect(owner.count == 1 && owner.first?.positionSeconds == 900)
   }
 }
+
+// MARK: - TASK-917 · Profile switch, FR-261 fence, FR-260 picker gate
+
+/// FR-260 / AC-002-40 / AC-002-40a as a decision table. The platform is an input, so both
+/// the tvOS and the iOS rows run on this (iOS-hosted) test target.
+@Suite("Profile picker gate")
+struct ProfilePickerGateTests {
+  private let family = ["p-owner", "p-kid", "p-teen"]
+
+  private func show(_ platform: ProfilePickerPlatform, _ trigger: ProfilePickerTrigger?,
+                    ids: [String]? = nil, active: String? = "p-owner") -> Bool {
+    ProfileGate.shouldShowPicker(platform: platform, trigger: trigger,
+                                 profileIDs: ids ?? family, activeID: active)
+  }
+
+  @Test func tvOSAsksAtLaunchAfterPairingAndOnSwitch() {
+    #expect(show(.tvOS, .coldLaunch), "every cold launch, even with a remembered profile")
+    #expect(show(.tvOS, .signedIn), "after pairing")
+    #expect(show(.tvOS, .switchRequested))
+    #expect(!show(.tvOS, nil), "no moment, valid profile: stay put")
+  }
+
+  @Test func tvOSBackgroundRuleIsStrictlyMoreThanThirtyMinutes() {
+    let limit = ProfileGate.tvOSPickerBackgroundThreshold
+    #expect(limit == 30 * 60)
+    #expect(!show(.tvOS, .returnedFromBackground(away: 60)))
+    #expect(!show(.tvOS, .returnedFromBackground(away: limit)), "exactly 30 minutes is not MORE than")
+    #expect(show(.tvOS, .returnedFromBackground(away: limit + 1)))
+    #expect(show(.tvOS, .returnedFromBackground(away: 6 * 3600)))
+  }
+
+  @Test func iOSRemembersTheSelection() {
+    #expect(!show(.iOS, .coldLaunch), "relaunch opens straight into the remembered profile")
+    #expect(!show(.iOS, .returnedFromBackground(away: 6 * 3600)), "iOS has no background rule")
+    #expect(!show(.iOS, nil))
+    #expect(show(.iOS, .switchRequested), "Switch profile always opens it")
+    // After sign-in nothing is remembered (sign-out clears it), so the picker appears.
+    #expect(show(.iOS, .signedIn, active: nil))
+  }
+
+  @Test func aMissingOrDeletedProfileBringsThePickerBackOnBothPlatforms() {
+    for platform in [ProfilePickerPlatform.iOS, .tvOS] {
+      for trigger in [nil, ProfilePickerTrigger.coldLaunch, .returnedFromBackground(away: 5)] {
+        #expect(show(platform, trigger, active: "p-deleted"), "\(platform) \(String(describing: trigger)) deleted")
+        #expect(show(platform, trigger, active: nil), "\(platform) \(String(describing: trigger)) none chosen")
+      }
+    }
+  }
+
+  @Test func aSingleProfileAccountNeverSeesIt() {
+    let triggers: [ProfilePickerTrigger?] = [nil, .coldLaunch, .signedIn,
+                                             .returnedFromBackground(away: 99_999), .switchRequested]
+    for platform in [ProfilePickerPlatform.iOS, .tvOS] {
+      for trigger in triggers {
+        #expect(!show(platform, trigger, ids: ["p-owner"]), "single profile, \(platform)")
+        #expect(!show(platform, trigger, ids: ["p-owner"], active: nil), "single, not yet entered")
+        #expect(!show(platform, trigger, ids: [], active: nil), "no list known (old server)")
+      }
+    }
+  }
+}
+
+/// FR-261 / AC-002-42: after a switch from A to B nothing from A is visible, and a load that
+/// started under A cannot land afterwards. Serialized: it drives the shared profile store.
+@Suite("Profile switch", .serialized)
+@MainActor
+struct ProfileSwitchTests {
+  private func item(_ id: String) -> ItemSummary {
+    ItemSummary(id: id, type: "movie", title: id, year: nil, durationSeconds: nil,
+                addedAt: "2026-01-01T00:00:00Z", rating: nil, posterImageId: nil,
+                backdropImageId: nil, progress: nil, showName: nil, showFolderId: nil,
+                seasonNumber: nil, episodeNumber: nil, libraryId: nil, changeSeq: nil)
+  }
+  private var railsA: HomeRails {
+    HomeRails(continueWatching: [item("a-cw")], justAdded: [item("a-ja")],
+              recentlyWatched: [item("a-rw")])
+  }
+  private let aIDs: Set<String> = ["a-cw", "a-ja", "a-rw", "a-sg", "a-wl"]
+
+  private func visibleIDs(_ s: AppState) -> Set<String> {
+    Set((s.homeContinueWatching + s.homeJustAdded + s.homeRecentlyWatched
+         + s.homeSuggested + s.watchlistItems).map(\.id))
+  }
+
+  /// A stale result is dropped; a current one still applies (the guard must not wedge).
+  @Test func staleRailResultIsDiscarded() {
+    let state = AppState()
+    let startedUnderA = state.homeStateGeneration
+    state.clearHomeState()  // the fence a switch or sign-out raises
+    #expect(!state.homeResultIsCurrent(startedUnderA, "test"))
+    #expect(!state.applyRails(railsA, startedAt: startedUnderA))
+    #expect(visibleIDs(state).isDisjoint(with: aIDs), "late result from A must not render")
+
+    #expect(state.applyRails(railsA, startedAt: state.homeStateGeneration),
+            "a result from the current generation still lands")
+    #expect(state.homeContinueWatching.map(\.id) == ["a-cw"])
+  }
+
+  @Test func switchClearsEverythingFromTheOldProfileAndFencesItsLoads() async {
+    let store = ActiveProfileStore.shared
+    let savedActive = store.activeProfileID
+    let savedCache = store.cachedProfiles
+    let savedScope = await LocalStore.shared.activeScope
+    defer {
+      store.setActive(savedCache.first(where: { $0.id == savedActive }))
+      store.setCachedProfiles(savedCache)
+    }
+
+    let a = Profile(id: "p-a", name: "A", avatar: "fox", maxAgeLevel: 4, hasPin: false, isOwner: true)
+    let b = Profile(id: "p-b", name: "B", avatar: "owl", maxAgeLevel: 1, hasPin: false, isOwner: false)
+    store.setCachedProfiles([a, b])
+    store.setActive(a)
+    await LocalStore.shared.setActiveProfile(ProfileScope(profile: a))
+
+    let state = AppState()
+    state.applyRails(railsA, startedAt: state.homeStateGeneration)
+    state.homeSuggested = [item("a-sg")]
+    state.watchlistItems = [item("a-wl")]
+    #expect(!visibleIDs(state).isDisjoint(with: aIDs), "precondition: A is on screen")
+    let inFlightUnderA = state.homeStateGeneration
+
+    await state.switchProfile(to: b)
+
+    #expect(store.activeProfileID == "p-b")
+    #expect(await LocalStore.shared.activeScope.id == "p-b", "local reads now scoped to B")
+    #expect(!state.needsProfilePicker)
+    #expect(visibleIDs(state).isDisjoint(with: aIDs), "no rail, Suggested or watchlist entry from A")
+    #expect(!state.watchlistLoadFailed)
+
+    // A's load finishing after the switch must not repopulate the screen.
+    #expect(!state.applyRails(railsA, startedAt: inFlightUnderA))
+    #expect(visibleIDs(state).isDisjoint(with: aIDs))
+
+    // Top Shelf must not keep advertising A's titles.
+    if let container = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: "group.HeiloProjects.DSReel") {
+      let shelf = (try? String(contentsOf: container.appendingPathComponent("topshelf.json"), encoding: .utf8)) ?? ""
+      #expect(!aIDs.contains(where: { shelf.contains($0) }), "Top Shelf snapshot still names A's items")
+    }
+    await LocalStore.shared.setActiveProfile(savedScope)
+  }
+}

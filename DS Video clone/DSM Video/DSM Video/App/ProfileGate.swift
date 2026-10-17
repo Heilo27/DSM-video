@@ -45,3 +45,66 @@ nonisolated enum ProfileGate {
     }
   }
 }
+
+/// The platform rule in FR-260 differs by device, so the decision takes it as an input
+/// rather than reading `#if os` itself: both rows of the table stay testable on one target.
+nonisolated enum ProfilePickerPlatform: Equatable, Sendable {
+  case iOS
+  case tvOS
+
+  static var current: ProfilePickerPlatform {
+    #if os(tvOS)
+    return .tvOS
+    #else
+    return .iOS
+    #endif
+  }
+}
+
+/// What just happened that might call for the picker (FR-260).
+nonisolated enum ProfilePickerTrigger: Equatable, Sendable {
+  /// The app process started with a session already stored.
+  case coldLaunch
+  /// A session was just created: sign-in on iOS, pairing on tvOS.
+  case signedIn
+  /// The app came back to the foreground after this many seconds in the background.
+  case returnedFromBackground(away: TimeInterval)
+  /// The user asked for "Switch profile".
+  case switchRequested
+}
+
+extension ProfileGate {
+  /// FR-260: tvOS asks again when the app returns after MORE than this long in the background.
+  nonisolated static let tvOSPickerBackgroundThreshold: TimeInterval = 30 * 60
+
+  /// Whether the views must show the profile picker (FR-260, AC-002-40, AC-002-40a).
+  ///
+  /// - `profileIDs`: the account's profiles as last known (fresh list, else the cached one).
+  ///   Empty means no list is known (old server, or offline with nothing cached).
+  /// - `activeID`: the remembered/active profile, if any.
+  /// - `trigger`: nil for a plain validity check, e.g. after a fresh list load.
+  ///
+  /// A single-profile account (or no known list) never sees it. With several profiles, a
+  /// missing or no-longer-listed active profile always brings it back, on both platforms.
+  /// Otherwise tvOS asks at every launch, after pairing and after a long absence, while iOS
+  /// keeps the remembered profile until the user asks to switch.
+  nonisolated static func shouldShowPicker(
+    platform: ProfilePickerPlatform,
+    trigger: ProfilePickerTrigger?,
+    profileIDs: [String],
+    activeID: String?
+  ) -> Bool {
+    guard profileIDs.count > 1 else { return false }
+    guard let activeID, profileIDs.contains(activeID) else { return true }
+    switch trigger {
+    case nil:
+      return false
+    case .switchRequested:
+      return true
+    case .coldLaunch, .signedIn:
+      return platform == .tvOS
+    case .returnedFromBackground(let away):
+      return platform == .tvOS && away > tvOSPickerBackgroundThreshold
+    }
+  }
+}

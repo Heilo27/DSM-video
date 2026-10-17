@@ -142,6 +142,17 @@ final class AppState {
   /// after sign-out, moved only by `refreshProfiles()`. Read through `progressSyncAllowed`.
   var profileSupport: ProfileSupport = .unknown
 
+  /// True while the views must show the profile picker instead of home (FR-260). Set only by
+  /// `evaluateProfilePicker` from `ProfileGate.shouldShowPicker`; cleared by `switchProfile`.
+  /// While it is set, `homeLoad` loads nothing, so no rail from the remembered profile renders
+  /// behind the picker.
+  private(set) var needsProfilePicker: Bool = false
+  /// The last picker moment not yet settled against a FRESH profile list. Kept because the
+  /// moment (pairing, launch) usually arrives before `GET /profiles` answers.
+  private var pendingPickerTrigger: ProfilePickerTrigger?
+  /// When the app last went to the background, for the tvOS 30-minute rule.
+  private var enteredBackgroundAt: Date?
+
   /// Set when the on-disk store could not be opened, so local persistence is dead and the
   /// server write is the only copy of a watch position. Surfaced as a banner; nil when healthy.
   var localStoreUnavailableMessage: String?
@@ -173,6 +184,11 @@ final class AppState {
         }
       } else {
         Self.deleteFromKeychain(account: Keys.keychainAccountToken)
+      }
+      // A new session (sign-in, pairing) is a picker moment (FR-260). A token refresh is not:
+      // it replaces a token, never starts from none.
+      if oldValue == nil, sessionToken != nil {
+        notePickerTrigger(.signedIn)
       }
       updateAPI()
     }
@@ -315,6 +331,12 @@ final class AppState {
     dlog.info(.app, "── launch: \(platform) v\(v) (\(b)) \(ProcessInfo.processInfo.operatingSystemVersionString) ──")
     dlog.info(.app, "server=\(baseURL) https=\(useHTTPS) port=\(defaultPort) user='\(username)'")
     dlog.info(.app, "token=\(DiagnosticLog.redact(sessionToken)) lan='\(lanAddress)' wan='\(wanAddress)'")
+
+    // didSet does not run in init, so a stored session is registered as a launch here. The
+    // cached list decides at once (tvOS asks before any rail renders); a fresh list settles it.
+    if sessionToken != nil, !isDemoMode {
+      notePickerTrigger(.coldLaunch)
+    }
   }
 
   #if DEBUG
@@ -828,6 +850,9 @@ final class AppState {
     // send this account's profile id.
     profileSupport = .unknown
     ActiveProfileStore.shared.clearAll()
+    needsProfilePicker = false
+    pendingPickerTrigger = nil
+    enteredBackgroundAt = nil
     // TASK-807: purge on-device content so a shared device leaves no cross-user residue.
     // Downloads are @MainActor (sync); the SQLite cache is an actor (async).
     DownloadManager.shared.clearAll()
@@ -1435,27 +1460,46 @@ final class AppState {
     }
     return true
   }
-  /// Bumped by clearHomeState(). Detached rail computations capture it and drop their
-  /// result if it changed while they were running.
-  private var homeStateGeneration: UInt64 = 0
+  /// Bumped by clearHomeState() and by a profile change. Every async home load captures it
+  /// before its first await and drops its result if it changed meanwhile (FR-261).
+  private(set) var homeStateGeneration: UInt64 = 0
+
+  /// Whether a home result that started at `generation` may still be applied. False once the
+  /// state was cleared or the profile changed while it was in flight: its data belongs to a
+  /// previous session or profile and must never render (FR-261, AC-002-42).
+  func homeResultIsCurrent(_ generation: UInt64, _ site: StaticString) -> Bool {
+    guard generation == homeStateGeneration else {
+      homeLog.info("\(site): stale result dropped (state cleared or profile switched mid-flight)")
+      return false
+    }
+    return true
+  }
 
   func clearHomeState() {
-    // Invalidate any in-flight off-actor rail computation. Cancelling
-    // homeBackgroundFetchTask is not enough — recomputeHomeRails runs in a detached task
-    // that is never stored, so it cannot be cancelled and must be fenced instead.
-    homeStateGeneration &+= 1
+    // Cancelling homeBackgroundFetchTask is not enough on its own — recomputeHomeRails runs
+    // in a detached task that is never stored, so it is fenced by the generation instead.
     homeBackgroundFetchTask?.cancel()
     homeBackgroundFetchTask = nil
+    discardProfileScopedHomeState()
     homeLibraries = []
+    homeIsLoading = false
+    homeIsCacheDecoding = false
+    homeIsBackgroundRefreshing = false
+    homeError = nil
+  }
+
+  /// Fences every in-flight home load and empties everything that belongs to one profile:
+  /// rails, Suggested, watchlist and the Top Shelf snapshot. Shared by sign-out
+  /// (clearHomeState) and a profile change, so the two can never drift apart.
+  private func discardProfileScopedHomeState() {
+    homeStateGeneration &+= 1
     homeContinueWatching = []
     homeJustAdded = []
     homeRecentlyWatched = []
     homeSuggested = []
     homeSuggestedGenre = ""
-    homeIsLoading = false
-    homeIsCacheDecoding = false
-    homeIsBackgroundRefreshing = false
-    homeError = nil
+    watchlistItems = []
+    watchlistLoadFailed = false
     // SECURITY (TASK-775): explicitly delete the Top Shelf snapshot on logout/clear.
     // Setting homeJustAdded = [] above triggers writeTopShelfSnapshot()'s didSet, but that
     // function early-returns on empty state and never overwrites/removes the file — so a
@@ -1542,7 +1586,9 @@ final class AppState {
   ///
   /// Suggested is fired and not awaited: it is a network call, and the three local rails
   /// must render immediately rather than waiting on it.
-  private func applyRails(_ rails: HomeRails) {
+  @discardableResult
+  func applyRails(_ rails: HomeRails, startedAt generation: UInt64) -> Bool {
+    guard homeResultIsCurrent(generation, "applyRails") else { return false }
     homeContinueWatching = rails.continueWatching
     // The local value is a FALLBACK, shown immediately so the rail is never blank, then
     // replaced by the server's answer below. See loadJustAddedRail.
@@ -1550,6 +1596,7 @@ final class AppState {
     homeRecentlyWatched = rails.recentlyWatched
     Task { await loadJustAddedRail() }
     Task { await loadSuggestedRail() }
+    return true
   }
 
   /// Replaces Just Added with the server's own answer.
@@ -1568,8 +1615,10 @@ final class AppState {
   func loadJustAddedRail() async {
     guard !isDemoMode, sessionToken != nil else { return }
     let apiSnapshot = api
+    let generation = homeStateGeneration
     do {
       let resp = try await apiSnapshot.justAdded(limit: 16)
+      guard homeResultIsCurrent(generation, "justAdded") else { return }
       guard !resp.items.isEmpty else {
         homeLog.info("justAdded: server returned an empty rail — keeping the local fallback")
         return
@@ -1585,6 +1634,7 @@ final class AppState {
 
   func loadSuggestedRail() async {
     let apiSnapshot = api
+    let generation = homeStateGeneration
     let libraryID = homeLibraries.first(where: { $0.kind != "tv" })?.id ?? homeLibraries.first?.id
 
     // Preferred path: one request, seeded server-side from the progress table. That matters
@@ -1592,6 +1642,7 @@ final class AppState {
     // from its own stale rails and suggest against something watched weeks ago.
     do {
       let resp = try await apiSnapshot.suggested(libraryId: libraryID, limit: 16)
+      guard homeResultIsCurrent(generation, "suggested") else { return }
       if !resp.items.isEmpty {
         homeSuggested = resp.items
         homeSuggestedGenre = resp.genre
@@ -1604,6 +1655,7 @@ final class AppState {
       homeSuggestedGenre = ""
       return
     } catch let err as APIError {
+      guard homeResultIsCurrent(generation, "suggested") else { return }
       // Only a MISSING endpoint justifies the fallback. Any other failure (auth, timeout,
       // a real server error) should leave the rail empty rather than quietly doing twice
       // the work against a server that is already struggling.
@@ -1615,6 +1667,7 @@ final class AppState {
       }
       homeLog.info("suggested: server has no /suggested endpoint — using the client fallback")
     } catch {
+      guard homeResultIsCurrent(generation, "suggested") else { return }
       homeLog.warning("suggested: server request failed — \(error.localizedDescription)")
       homeSuggested = []
       homeSuggestedGenre = ""
@@ -1640,12 +1693,14 @@ final class AppState {
       let resp = try await apiSnapshot.items(
         libraryId: seed.libraryId ?? libraryID ?? "lib_movies",
         limit: 60, genres: [genre], genreMode: .any)
+      guard homeResultIsCurrent(generation, "suggested fallback") else { return }
       let exclude = Set(seedPool.map(\.id) + homeJustAdded.map(\.id))
       let picks = resp.items.filter { !exclude.contains($0.id) }.shuffled().prefix(16)
       homeSuggested = Array(picks)
       homeSuggestedGenre = genre
       homeLog.info("suggested: \(picks.count) item(s) for genre \(genre) (client fallback)")
     } catch {
+      guard homeResultIsCurrent(generation, "suggested fallback") else { return }
       homeLog.warning("suggested: could not build rail — \(error.localizedDescription)")
       homeSuggested = []
       homeSuggestedGenre = ""
@@ -1740,6 +1795,12 @@ final class AppState {
 
   func homeLoad() async {
     let callID = Int.random(in: 1000...9999)
+    // FR-260: while the picker is up, no profile is chosen yet, so there is nothing to load.
+    // Loading here would render the remembered profile's rails behind the picker.
+    guard !needsProfilePicker else {
+      homeLog.info("homeLoad[\(callID)]: held — profile picker is showing")
+      return
+    }
     homeLog.info("homeLoad[\(callID)]: called — isLoading=\(self.homeIsLoading) isCacheDecoding=\(self.homeIsCacheDecoding) isBackgroundRefreshing=\(self.homeIsBackgroundRefreshing)")
     guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else {
       homeLog.warning("homeLoad[\(callID)]: already loading/syncing, bailing")
@@ -1777,6 +1838,7 @@ final class AppState {
     // Cold start — load SQLite first (fast), then sync from network
     homeIsCacheDecoding = true
     defer { homeIsCacheDecoding = false }
+    let generation = homeStateGeneration
     // Ensure setup has completed before any store access (TASK-420).
     await LocalStore.shared.ensureReady()
     let hasLocal = await Task.detached(priority: .userInitiated) {
@@ -1789,7 +1851,7 @@ final class AppState {
       let rails = await Task.detached(priority: .userInitiated) {
         await LocalStore.shared.queryRails()
       }.value
-      applyRails(rails)
+      applyRails(rails, startedAt: generation)
       homeIsCacheDecoding = false
       // Skip background network sync when offline — cached content is already shown
       // and network calls will fail anyway (TASK-291).
@@ -1968,6 +2030,8 @@ final class AppState {
     }
 
     let apiSnapshot = api
+    // FR-261: a pass that started under one profile never writes another profile's screen.
+    let generation = homeStateGeneration
     homeLog.info("runDeltaSync: background=\(background)")
 
     // Learn profile support BEFORE any progress traffic, so a sync that starts ahead of the
@@ -2034,7 +2098,7 @@ final class AppState {
 
       // Step 2: Fetch libraries (always fast, small payload)
       let libs = try await apiSnapshot.libraries().libraries
-      homeLibraries = libs
+      if homeResultIsCurrent(generation, "runDeltaSync libraries") { homeLibraries = libs }
       // Library names and counts. If a library the user expects is absent here, the problem
       // is server-side indexing, not the client — which saves a round of client debugging.
       if libs.isEmpty {
@@ -2187,7 +2251,7 @@ final class AppState {
             // After first page on cold start, show rails immediately
             if !background && pageCount == 1 {
               let rails = await LocalStore.shared.queryRails()
-              applyRails(rails)
+              applyRails(rails, startedAt: generation)
             }
             if !page.hasMore {
               reachedEndOfChanges = true
@@ -2267,8 +2331,10 @@ final class AppState {
 
       // Step 5: Recompute rails from local store and update UI
       let rails = await LocalStore.shared.queryRails()
-      applyRails(rails)
       clearNetworkError()
+      // Cursors and the store are account-wide and already committed above; only the
+      // screen belongs to the profile, so a superseded pass stops here.
+      guard applyRails(rails, startedAt: generation) else { return }
       homeLog.info("runDeltaSync: done — CW=\(rails.continueWatching.count) JA=\(rails.justAdded.count) RW=\(rails.recentlyWatched.count)")
       // Step 6: Refresh watchlist so it stays current with server state
       await loadWatchlist()
@@ -2284,7 +2350,7 @@ final class AppState {
         return
       }
       handleConnectionFailure(error)
-      if homeAllRailsEmpty && homeLibraries.isEmpty {
+      if homeResultIsCurrent(generation, "runDeltaSync error"), homeAllRailsEmpty && homeLibraries.isEmpty {
         homeError = (error as? APIError)?.userMessage ?? "Could not connect to server."
       }
     }
@@ -2370,12 +2436,13 @@ final class AppState {
   /// Called when player dismisses — recomputes rails from local SQLite immediately.
   func refreshProgressFromLocal() async {
     guard !isDemoMode else { return }
+    let generation = homeStateGeneration
     let rails = await LocalStore.shared.queryRails()
     // Via applyRails so Suggested refreshes too. This is the site where it matters most:
     // the viewer has just finished something, which is precisely when the seed — and so
     // the suggestion — should change. Assigning the three rails directly here would leave
     // Suggested recommending against the PREVIOUS film until something else recomputed.
-    applyRails(rails)
+    applyRails(rails, startedAt: generation)
   }
 
   /// Optimistic progress write: update the local store immediately (durability), mark it
@@ -2580,16 +2647,94 @@ final class AppState {
       } else {
         homeLog.error("refreshProfiles: list has no owner — legacy progress left unclaimed")
       }
+      // FR-260: a remembered profile that was deleted is no longer an identity. Drop it and
+      // everything shown for it; the picker (or the single-profile auto-enter) takes over.
+      if let remembered = ActiveProfileStore.shared.activeProfileID,
+         !resp.profiles.contains(where: { $0.id == remembered }) {
+        homeLog.warning("refreshProfiles: remembered profile is gone — back to the picker")
+        ActiveProfileStore.shared.setActive(nil)
+        await LocalStore.shared.setActiveProfile(.legacy)
+        discardProfileScopedHomeState()
+      }
       if ActiveProfileStore.shared.activeProfileID == nil, resp.profiles.count == 1,
          let only = resp.profiles.first {
         ActiveProfileStore.shared.setActive(only)
         await LocalStore.shared.setActiveProfile(ProfileScope(profile: only))
       }
-      homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(ActiveProfileStore.shared.activeProfileID ?? "none")")
+      evaluateProfilePicker(listIsFresh: true)
+      homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(ActiveProfileStore.shared.activeProfileID ?? "none") picker=\(self.needsProfilePicker)")
     } catch {
       profileSupport = ProfileGate.support(afterProfilesError: error)
       homeLog.warning("refreshProfiles: failed — \(error.localizedDescription); support=\(String(describing: self.profileSupport))")
     }
+  }
+
+  // MARK: - Profile picker gate (FR-260)
+
+  /// Records a picker moment and decides at once from the list already known (FR-260).
+  /// The screens slice calls this with `.switchRequested`; the app wires the others.
+  func notePickerTrigger(_ trigger: ProfilePickerTrigger) {
+    pendingPickerTrigger = trigger
+    evaluateProfilePicker(listIsFresh: false)
+  }
+
+  /// Call when the scene enters the background.
+  func noteEnteredBackground(at date: Date = Date()) {
+    enteredBackgroundAt = date
+  }
+
+  /// Call when the scene returns to the foreground. tvOS asks again after more than
+  /// `ProfileGate.tvOSPickerBackgroundThreshold`; iOS never does on its own.
+  func noteReturnedToForeground(at date: Date = Date()) {
+    guard let left = enteredBackgroundAt, sessionToken != nil, !isDemoMode else { return }
+    enteredBackgroundAt = nil
+    notePickerTrigger(.returnedFromBackground(away: date.timeIntervalSince(left)))
+  }
+
+  /// Sets `needsProfilePicker` from `ProfileGate.shouldShowPicker`, using the cached list
+  /// (kept fresh by refreshProfiles). A trigger that did not open the picker is settled only
+  /// against a fresh list: the cached one may predate a deletion, or be empty after pairing.
+  func evaluateProfilePicker(listIsFresh: Bool) {
+    let store = ActiveProfileStore.shared
+    let show = ProfileGate.shouldShowPicker(
+      platform: .current, trigger: pendingPickerTrigger,
+      profileIDs: store.cachedProfiles.map(\.id), activeID: store.activeProfileID)
+    if show {
+      needsProfilePicker = true
+    } else if listIsFresh {
+      // A fresh list can also close it: the account is down to one profile, auto-entered.
+      pendingPickerTrigger = nil
+      needsProfilePicker = false
+    }
+  }
+
+  /// Makes `profile` the active profile and reloads home for it (FR-261, AC-002-42).
+  ///
+  /// Order matters. Everything profile-scoped is emptied and fenced BEFORE the identity
+  /// changes, so no frame shows the old profile's rails under the new name, and fenced again
+  /// AFTER the scope change, because a load that started during the store's await would
+  /// otherwise have captured the in-between generation. Only then does home reload.
+  /// The caller has already checked the PIN; this does no authorisation.
+  func switchProfile(to profile: Profile) async {
+    let wasActive = ActiveProfileStore.shared.activeProfileID == profile.id
+    needsProfilePicker = false
+    pendingPickerTrigger = nil
+    // Re-choosing the profile already on screen (tvOS asks at launch and after 30 minutes)
+    // is not a switch: keep what is shown and let homeLoad refresh it.
+    if wasActive && !homeAllRailsEmpty {
+      await homeLoad()
+      return
+    }
+    clearHomeState()
+    ActiveProfileStore.shared.setActive(profile)
+    await LocalStore.shared.setActiveProfile(ProfileScope(profile: profile))
+    // Rows recorded in the legacy bucket since the last refresh still belong to the owner
+    // (FR-233). Claiming is idempotent, so doing it on every switch is safe.
+    if let owner = ActiveProfileStore.shared.cachedProfiles.first(where: \.isOwner) {
+      await LocalStore.shared.claimLegacyRows(ownerID: owner.id)
+    }
+    discardProfileScopedHomeState()
+    await homeLoad()
   }
 
   // MARK: - Watchlist
@@ -2612,6 +2757,7 @@ final class AppState {
 
   func loadWatchlist() async {
     guard !isDemoMode, sessionToken != nil else { return }
+    let generation = homeStateGeneration
     // Header-less, this would show the most restricted profile's list (FR-221).
     guard ProfileGate.progressSyncAllowed(
       scope: await LocalStore.shared.activeScope, support: profileSupport) else {
@@ -2620,9 +2766,11 @@ final class AppState {
     }
     do {
       let resp = try await api.watchlist()
+      guard homeResultIsCurrent(generation, "loadWatchlist") else { return }
       watchlistItems = resp.items
       watchlistLoadFailed = false
     } catch {
+      guard homeResultIsCurrent(generation, "loadWatchlist") else { return }
       // Still non-fatal — the watchlist is supplementary and must not block the home load.
       // But it is no longer silent:
       //  - TASK-850: every other failure path in this file logs; an empty catch left a
@@ -2647,6 +2795,9 @@ final class AppState {
     }
     // TASK-820: optimistic update, but revert on server failure so the UI can't
     // diverge silently from the server until the next full sync.
+    // FR-261: the rollback edits the list it started on. After a switch, watchlistItems is
+    // the NEW profile's list, and re-inserting the old profile's item would leak it there.
+    let generation = homeStateGeneration
     let alreadyIn = watchlistItems.contains(where: { $0.id == item.id })
     if alreadyIn {
       let removedIndex = watchlistItems.firstIndex(where: { $0.id == item.id })
@@ -2654,6 +2805,7 @@ final class AppState {
       do {
         try await api.removeFromWatchlist(id: item.id)
       } catch {
+        guard homeResultIsCurrent(generation, "toggleWatchlist rollback") else { return }
         // Restore at the original position (clamped) so ordering is preserved.
         let insertAt = min(removedIndex ?? 0, watchlistItems.count)
         watchlistItems.insert(item, at: insertAt)
@@ -2666,6 +2818,7 @@ final class AppState {
       do {
         try await api.addToWatchlist(id: item.id)
       } catch {
+        guard homeResultIsCurrent(generation, "toggleWatchlist rollback") else { return }
         watchlistItems.removeAll(where: { $0.id == item.id })
         handleConnectionFailure(error)
       }
