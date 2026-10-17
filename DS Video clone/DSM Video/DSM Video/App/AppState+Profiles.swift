@@ -8,6 +8,11 @@ import Foundation
 // checks them (FR-213); nothing here keeps one.
 
 extension AppState {
+  /// Whether the picker and management screens offer "Add Profile": the account holds fewer
+  /// profiles than the server's limit (4 today). The one home for that rule; the server
+  /// still refuses a fifth with `profile_limit_reached`.
+  var canAddProfile: Bool { profiles.count < maxProfiles }
+
   /// FR-213: asks the server to check `pin` for `profile`, every time it is entered.
   func verifyProfilePin(_ profile: Profile, pin: String) async -> Result<Void, Error> {
     do {

@@ -119,19 +119,26 @@ private enum ProfileMetrics {
 /// The picker/management tile: avatar lifts and gains a white ring when focused (tvOS) or
 /// pressed (iOS). A custom style rather than `.plain` so tvOS draws OUR focus treatment.
 private struct ProfileTileButtonStyle: ButtonStyle {
+  /// false for tiles drawn by `ProfileTileLabel`, which lifts only its artwork: scaling the
+  /// whole label pushed the focused tile's name and PIN caption below its neighbours'.
+  var scalesLabel = true
+
   func makeBody(configuration: Configuration) -> some View {
-    TileBody(configuration: configuration)
+    TileBody(configuration: configuration, scalesLabel: scalesLabel)
   }
 
   private struct TileBody: View {
     let configuration: Configuration
+    let scalesLabel: Bool
     @Environment(\.isFocused) private var isFocused
 
     var body: some View {
       let lifted = isFocused || configuration.isPressed
+      let scale: CGFloat = isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1)
       configuration.label
-        .scaleEffect(isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1))
+        .scaleEffect(scalesLabel ? scale : 1)
         .environment(\.profileTileLifted, lifted)
+        .environment(\.profileTileScale, scale)
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isFocused)
         .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -139,10 +146,15 @@ private struct ProfileTileButtonStyle: ButtonStyle {
 }
 
 private struct ProfileTileLiftedKey: EnvironmentKey { static let defaultValue = false }
+private struct ProfileTileScaleKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
 private extension EnvironmentValues {
   var profileTileLifted: Bool {
     get { self[ProfileTileLiftedKey.self] }
     set { self[ProfileTileLiftedKey.self] = newValue }
+  }
+  var profileTileScale: CGFloat {
+    get { self[ProfileTileScaleKey.self] }
+    set { self[ProfileTileScaleKey.self] = newValue }
   }
 }
 
@@ -153,6 +165,7 @@ private struct ProfileTileLabel<Art: View>: View {
   var captionSymbol: String?
   @ViewBuilder let art: () -> Art
   @Environment(\.profileTileLifted) private var lifted
+  @Environment(\.profileTileScale) private var scale
 
   var body: some View {
     VStack(spacing: 18) {
@@ -161,6 +174,7 @@ private struct ProfileTileLabel<Art: View>: View {
           RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)
             .strokeBorder(.white, lineWidth: lifted ? ProfileMetrics.tile * 0.03 : 0))
         .shadow(color: .black.opacity(lifted ? 0.6 : 0), radius: 24, y: 12)
+        .scaleEffect(scale)
       Text(title)
         .font(ProfileMetrics.tileName)
         .foregroundStyle(lifted ? Color.white : Color.dsTextSecondary)
@@ -284,18 +298,18 @@ struct ProfilePickerView: View {
                               size: ProfileMetrics.tile)
         }
       }
-      .buttonStyle(ProfileTileButtonStyle())
+      .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
       .focused($focusedProfile, equals: profile.id)
       .accessibilityLabel(profile.name)
       .accessibilityHint(profile.hasPin ? "Protected by a PIN" : "Opens this profile")
       .accessibilityIdentifier("profilePicker.profile.\(profile.name)")
     }
     let add = Group {
-      if profiles.count < appState.maxProfiles {
+      if appState.canAddProfile {
         Button { management = .add } label: {
           ProfileTileLabel(title: "Add Profile") { AddTileArt() }
         }
-        .buttonStyle(ProfileTileButtonStyle())
+        .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
         .focused($focusedProfile, equals: Self.addTileID)
         .accessibilityHint("Requires the owner's PIN")
         .accessibilityIdentifier("profilePicker.add")
@@ -643,7 +657,7 @@ struct ProfileManagementView: View {
 
   private func unlock(with pin: String) {
     ownerPin = pin
-    if startWithAdd, appState.profiles.count < appState.maxProfiles {
+    if startWithAdd, appState.canAddProfile {
       editing = .create
     }
   }
@@ -692,16 +706,16 @@ struct ProfileManagementView: View {
                   }
               }
             }
-            .buttonStyle(ProfileTileButtonStyle())
+            .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
             .focused($focusedProfile, equals: profile.id)
             .accessibilityLabel("Edit \(profile.name)")
             .accessibilityIdentifier("profileManage.profile.\(profile.name)")
           }
-          if profiles.count < appState.maxProfiles {
+          if appState.canAddProfile {
             Button { editing = .create } label: {
               ProfileTileLabel(title: "Add Profile") { AddTileArt() }
             }
-            .buttonStyle(ProfileTileButtonStyle())
+            .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
             .focused($focusedProfile, equals: Self.addTileID)
             .accessibilityIdentifier("profileManage.add")
           }
@@ -821,7 +835,17 @@ struct ProfileEditorView: View {
           }
 
           sectionLabel("PIN")
+          // tvOS: the focus engine moves only to a control directly below the current one.
+          // The level row ends at the right and the PIN and action rows start at the left, so
+          // without full-width focus sections Down stalled on the last level and Save, Cancel
+          // and Delete were unreachable (TVProfileEditorReachabilityTests).
+          #if os(tvOS)
           pinControls
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .focusSection()
+          #else
+          pinControls
+          #endif
 
           if let error {
             Text(error)
@@ -859,6 +883,9 @@ struct ProfileEditorView: View {
             }
           }
           .font(ProfileMetrics.body.weight(.semibold))
+          #if os(tvOS)
+          .focusSection()
+          #endif
         }
         .padding(.horizontal, 80)
         .padding(.vertical, 60)
