@@ -1140,8 +1140,10 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Get("/progress/all", s.handleProgressAll)
 		r.Get("/progress", s.handleProgressBatch)
 		r.Post("/items/{id}/progress", s.handleProgress)
-		r.Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
-		r.Post("/items/{id}/tmdb-fix", s.handleItemTMDbFix)
+		// FR-250 unrestricted-only: a restricted profile could re-match a hidden title to a
+		// child-rated one and unhide the file. The server-admin rule still applies inside.
+		r.With(s.requireUnrestricted).Get("/items/{id}/tmdb-search", s.handleItemTMDbSearch)
+		r.With(s.requireUnrestricted).Post("/items/{id}/tmdb-fix", s.handleItemTMDbFix)
 
 		// TV Shows
 		r.Get("/shows", s.handleShowsList)
@@ -1149,8 +1151,8 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Get("/tv/shows", s.handleTVShowsList)
 		r.Get("/tv/shows/{showId}/seasons", s.handleTVShowSeasons)
 		r.Get("/tv/shows/{showId}/episodes", s.handleTVShowEpisodes)
-		r.Get("/tv/shows/{showId}/tmdb-search", s.handleTVShowTMDbSearch)
-		r.Post("/tv/shows/{showId}/tmdb-fix", s.handleTVShowTMDbFix)
+		r.With(s.requireUnrestricted).Get("/tv/shows/{showId}/tmdb-search", s.handleTVShowTMDbSearch)
+		r.With(s.requireUnrestricted).Post("/tv/shows/{showId}/tmdb-fix", s.handleTVShowTMDbFix)
 
 		// Settings
 		r.Get("/settings", s.handleGetSettings)
@@ -1175,10 +1177,14 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Post("/watchlist/{itemId}", s.handleWatchlistAdd)
 		r.Delete("/watchlist/{itemId}", s.handleWatchlistRemove)
 
-		r.Get("/admin/status", s.handleAdminStatus)
-		r.Get("/admin/normalize/status", s.handleAdminNormalizeStatus)
-		r.Post("/admin/scan", s.handleAdminScan)
-		r.Post("/admin/metadata/refresh", s.handleAdminMetadataRefresh)
+		// FR-250 unrestricted-only, on top of the existing server-admin rule.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireUnrestricted)
+			r.Get("/admin/status", s.handleAdminStatus)
+			r.Get("/admin/normalize/status", s.handleAdminNormalizeStatus)
+			r.Post("/admin/scan", s.handleAdminScan)
+			r.Post("/admin/metadata/refresh", s.handleAdminMetadataRefresh)
+		})
 		r.Get("/search", s.handleSearch)
 	})
 }
@@ -2001,6 +2007,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := s.ensureOwnerProfile(r.Context(), userID, ownerName); err != nil {
 		log.Printf("login: ensure owner profile: %v", err)
 	}
+	if err := s.adoptOwnerDisplayName(r.Context(), userID, ownerName); err != nil {
+		log.Printf("login: adopt owner display name: %v", err)
+	}
 
 	var resp loginResponse
 	resp.Token = token
@@ -2666,10 +2675,16 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
 // DB query. Used by the iOS client for incremental cache refresh — one request detects
 // additions, removals, and rescans without fetching any item data.
 func (s *Server) handleLibrariesSummary(w http.ResponseWriter, r *http.Request) {
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	// Counts are visible counts (FR-250).
+	where, args := v.andVisible("", nil, "content_rating")
 	rows, err := s.db.QueryContext(r.Context(),
 		`SELECT library_id, COUNT(*) as count, MAX(updated_at) as last_updated_at
-		 FROM items
-		 GROUP BY library_id`)
+		 FROM items `+where+`
+		 GROUP BY library_id`, args...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -2699,17 +2714,14 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 	limit := clampInt(parseInt(r.URL.Query().Get("limit"), 10000), 1, 10000)
 	offset := clampInt(parseInt(r.URL.Query().Get("offset"), 0), 0, 1_000_000)
 
-	u := userFromCtx(r.Context())
-
-	// Handle "byFolder" filter - returns folder listing
-	if filter == "byFolder" && folder == "" && libraryID != "" {
-		s.handleItemsByFolder(w, r, libraryID, u)
+	// Progress is per profile (FRD-002 FR-230); the ceiling applies to every mode (FR-250).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
 		return
 	}
 
-	// Progress is per profile (FRD-002 FR-230).
-	v, ok := s.requestViewer(w, r)
-	if !ok {
+	if filter == "byFolder" && folder == "" && libraryID != "" {
+		s.handleItemsByFolder(w, r, libraryID, v)
 		return
 	}
 
@@ -2802,6 +2814,9 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// FR-250: the ceiling narrows the total and the rows alike.
+	where, args = v.andVisible(where, args, "i.content_rating")
 
 	countSQL := "SELECT COUNT(*) FROM items i " + where
 	var total int
@@ -2920,11 +2935,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// ESCAPE clause must appear on BOTH queries below: if the COUNT and the row query
 	// disagree, the reported total contradicts the rows actually returned.
 	pattern := "%" + escapeLike(q) + "%"
+	visFrag, visArgs := v.andVisibleFrag("i.content_rating") // FR-250, on both queries
 
 	var total int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM items i WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`,
-		pattern,
+		`SELECT COUNT(*) FROM items i WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`+visFrag,
+		append([]any{pattern}, visArgs...)...,
 	).Scan(&total); err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -2937,10 +2953,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		        p.position_seconds, p.duration_seconds, p.updated_at
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
-		 WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'
+		 WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`+visFrag+`
 		 ORDER BY i.title ASC, i.id ASC
 		 LIMIT ? OFFSET ?`,
-		v.ProfileID, pattern, limit, offset,
+		append(append([]any{v.ProfileID, pattern}, visArgs...), limit, offset)...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -3004,7 +3020,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
 }
 
-func (s *Server) handleItemsByFolder(w http.ResponseWriter, r *http.Request, libraryID string, u authedUser) {
+func (s *Server) handleItemsByFolder(w http.ResponseWriter, r *http.Request, libraryID string, v viewer) {
 	// Get the library root path to compute relative folders
 	var libRoot string
 	switch libraryID {
@@ -3017,7 +3033,9 @@ func (s *Server) handleItemsByFolder(w http.ResponseWriter, r *http.Request, lib
 		return
 	}
 
-	rows, err := s.db.Query("SELECT path FROM items WHERE library_id = ?", libraryID)
+	// Folder counts are visible counts (FR-250).
+	visFrag, visArgs := v.andVisibleFrag("content_rating")
+	rows, err := s.db.Query("SELECT path FROM items WHERE library_id = ?"+visFrag, append([]any{libraryID}, visArgs...)...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -3065,6 +3083,9 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		where = "AND i.library_id = ?"
 		args = append(args, libraryID)
 	}
+	visFrag, visArgs := v.andVisibleFrag("i.content_rating") // FR-250
+	where += visFrag
+	args = append(args, visArgs...)
 
 	countSQL := `SELECT COUNT(*) FROM items i
 		INNER JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
@@ -3144,6 +3165,10 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 	row := s.db.QueryRow(`
 		SELECT id, library_id, type, title, year, duration_seconds,
 		       original_title, overview, rating, genres, director, cast_names,
@@ -3171,6 +3196,10 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "db_error")
+		return
+	}
+	if v.above(contentRating) { // FR-250: refused, naming the real cause
+		writeContentRestricted(w)
 		return
 	}
 
@@ -3299,6 +3328,13 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		matchWhere += gw
 		matchArgs = append(matchArgs, ga...)
 	}
+	// FR-250: a show above the ceiling is refused; otherwise only visible episodes count.
+	visFrag, visArgs, ok := s.gateShow(w, r, v, matchWhere+" AND library_id = 'lib_tv'", matchArgs)
+	if !ok {
+		return
+	}
+	matchWhere += visFrag
+	matchArgs = append(append([]any{}, matchArgs...), visArgs...)
 
 	// Get show-level metadata from first episode with data
 	var year sql.NullInt64
@@ -3693,6 +3729,10 @@ func (s *Server) handleTMDbImageProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "id")
+	// FR-250 refused-if-above; for playback the gate is session creation (FR-252).
+	if v, ok := s.requestViewer(w, r); !ok || !s.refuseAboveCeiling(w, r, v, itemID) {
+		return
+	}
 
 	// Query item with codec info
 	var path string
@@ -4941,6 +4981,10 @@ func (s *Server) generateTrickplayOnce(ctx context.Context, itemID, path, outDir
 // simply shows no scrub preview.
 func (s *Server) handleTrickplayVTT(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
+	// FR-250 refused-if-above.
+	if v, ok := s.requestViewer(w, r); !ok || !s.refuseAboveCeiling(w, r, v, itemID) {
+		return
+	}
 	var path string
 	var duration sql.NullInt64
 	if err := s.db.QueryRow("SELECT path, duration_seconds FROM items WHERE id = ?", itemID).Scan(&path, &duration); err != nil {
@@ -4978,6 +5022,10 @@ func (s *Server) handleTrickplayVTT(w http.ResponseWriter, r *http.Request) {
 // handleTrickplaySprite serves the previously generated sprite sheet.
 func (s *Server) handleTrickplaySprite(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
+	// FR-250 refused-if-above.
+	if v, ok := s.requestViewer(w, r); !ok || !s.refuseAboveCeiling(w, r, v, itemID) {
+		return
+	}
 	spritePath := filepath.Join(s.trickplayDir(itemID), "trickplay.jpg")
 	if _, err := os.Stat(spritePath); err != nil {
 		writeErr(w, http.StatusNotFound, "not_found")
@@ -6212,9 +6260,11 @@ func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// FR-207/FR-250: rows above the ceiling are hidden on read, never deleted.
+	visFrag, visArgs := v.visibleItemFrag("progress.item_id")
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ?",
-		v.ProfileID,
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ?"+visFrag,
+		append([]any{v.ProfileID}, visArgs...)...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6271,8 +6321,11 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		args = append(args, id)
 	}
+	// FR-207/FR-250: rows above the ceiling are hidden on read, never deleted.
+	visFrag, visArgs := v.visibleItemFrag("progress.item_id")
+	args = append(args, visArgs...)
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")",
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")"+visFrag,
 		args...,
 	)
 	if err != nil {
@@ -6493,16 +6546,22 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	// Playlists stay per account (FR-230); itemCount is the visible count (FR-250).
+	visFrag, visArgs := v.visibleItemFrag("pi.item_id")
 
 	// Single query with LEFT JOIN COUNT to avoid N+1 per-playlist count query (TASK-528).
 	rows, err := s.db.Query(`
 		SELECT p.id, p.title, p.created_at, p.updated_at, COUNT(pi.playlist_id) AS item_count
 		FROM playlists p
-		LEFT JOIN playlist_items pi ON pi.playlist_id = p.id
+		LEFT JOIN playlist_items pi ON pi.playlist_id = p.id`+visFrag+`
 		WHERE p.user_id = ?
 		GROUP BY p.id, p.title, p.created_at, p.updated_at
 		ORDER BY p.updated_at DESC`,
-		u.ID,
+		append(visArgs, u.ID)...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6570,6 +6629,10 @@ func (s *Server) handleCreatePlaylist(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	playlistID := chi.URLParam(r, "id")
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 
 	var title, createdAt, updatedAt string
 	err := s.db.QueryRow(
@@ -6585,14 +6648,15 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get items in playlist
+	// Get items in playlist; titles above the ceiling are left out (FR-250).
+	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path
 		 FROM playlist_items pi
 		 INNER JOIN items i ON i.id = pi.item_id
-		 WHERE pi.playlist_id = ?
+		 WHERE pi.playlist_id = ?`+visFrag+`
 		 ORDER BY pi.position ASC, pi.added_at ASC`,
-		playlistID,
+		append([]any{playlistID}, visArgs...)...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6686,6 +6750,10 @@ func (s *Server) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing_itemId")
 		return
 	}
+	// FR-250: adding a title above the ceiling is refused.
+	if v, ok := s.requestViewer(w, r); !ok || !s.refuseAboveCeiling(w, r, v, req.ItemID) {
+		return
+	}
 
 	// Get next position
 	var maxPos int
@@ -6740,14 +6808,20 @@ func (s *Server) handleRemovePlaylistItem(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	// Download marks stay per account (FR-230); titles above the ceiling are left out (FR-250).
+	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path
 		 FROM downloads d
 		 INNER JOIN items i ON i.id = d.item_id
-		 WHERE d.user_id = ?
+		 WHERE d.user_id = ?`+visFrag+`
 		 ORDER BY d.marked_at DESC`,
-		u.ID,
+		append([]any{u.ID}, visArgs...)...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6804,6 +6878,10 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
+	// FR-250: marking a title above the ceiling for download is refused.
+	if v, ok := s.requestViewer(w, r); !ok || !s.refuseAboveCeiling(w, r, v, itemID) {
+		return
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
@@ -6838,6 +6916,9 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// FR-207/FR-250: entries above the ceiling are hidden, never deleted; raising the
+	// ceiling shows them again unchanged.
+	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
@@ -6846,9 +6927,9 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		 FROM watchlist w
 		 JOIN items i ON i.id = w.item_id
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
-		 WHERE w.profile_id = ?
+		 WHERE w.profile_id = ?`+visFrag+`
 		 ORDER BY w.added_at DESC`,
-		v.ProfileID, v.ProfileID,
+		append([]any{v.ProfileID, v.ProfileID}, visArgs...)...,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6938,6 +7019,10 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// FR-231: adds above the ceiling are refused (progress writes are not).
+	if !s.refuseAboveCeiling(w, r, v, itemID) {
 		return
 	}
 
@@ -7167,6 +7252,14 @@ func (s *Server) handleGenres(w http.ResponseWriter, r *http.Request) {
 		query += ` AND library_id = ?`
 		args = append(args, libraryID)
 	}
+	// Counts are visible counts (FR-250).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	visFrag, visArgs := v.andVisibleFrag("content_rating")
+	query += visFrag
+	args = append(args, visArgs...)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -8777,10 +8870,17 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
+	// FR-250: a show is visible iff its rating is. Every episode row carries the show's
+	// certification, so filtering rows leaves out hidden shows and keeps counts visible.
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	visFrag, visArgs := v.andVisibleFrag("content_rating")
 	rows, err := s.db.Query(`
 		SELECT id, path, show_name, year, poster_path, season_number, added_at, change_seq
-		FROM items WHERE library_id = 'lib_tv'
-		ORDER BY season_number ASC, path ASC`)
+		FROM items WHERE library_id = 'lib_tv'`+visFrag+`
+		ORDER BY season_number ASC, path ASC`, visArgs...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -9117,15 +9217,28 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 		return out, nil
 	}
 
-	seasons, err := querySeasons(folderWhere, folderArgs...)
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	// FR-250: a show above the ceiling is refused; otherwise only visible episodes count.
+	visFrag, visArgs, ok := s.gateShow(w, r, v, folderWhere+" AND library_id = 'lib_tv'", folderArgs)
+	if !ok {
+		return
+	}
+	seasons, err := querySeasons(folderWhere+visFrag, append(append([]any{}, folderArgs...), visArgs...)...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
 	// Fallback: if showID came from showName (TMDb title) rather than folder name,
-	// path LIKE won't match — retry by show_name column.
+	// path LIKE won't match — retry by show_name column (gated the same way).
 	if len(seasons) == 0 {
-		seasons, _ = querySeasons("show_name = ?", showID)
+		nameFrag, nameArgs, ok := s.gateShow(w, r, v, "show_name = ? AND library_id = 'lib_tv'", []any{showID})
+		if !ok {
+			return
+		}
+		seasons, _ = querySeasons("show_name = ?"+nameFrag, append([]any{showID}, nameArgs...)...)
 	}
 	if seasons == nil {
 		seasons = []map[string]any{}
@@ -9179,8 +9292,18 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		baseArgs = []any{showID}
 	}
 
-	where := baseWhere
-	args := baseArgs
+	// FR-250: a show above the ceiling is refused; otherwise only visible episodes list.
+	ceilV, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	visFrag, visArgs, ok := s.gateShow(w, r, ceilV, baseWhere, baseArgs)
+	if !ok {
+		return
+	}
+
+	where := baseWhere + visFrag
+	args := append(append([]any{}, baseArgs...), visArgs...)
 
 	if seasonStr != "" {
 		if sn, err := strconv.Atoi(seasonStr); err == nil {

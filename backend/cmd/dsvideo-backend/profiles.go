@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -210,6 +211,37 @@ func (s *Server) ensureOwnerProfile(ctx context.Context, userID, displayName str
 	return nil
 }
 
+// adoptOwnerDisplayName gives a migrated owner profile the DSM display name at sign-in
+// (FR-204). The migration ran without a DSM session, so the owner may carry the user-id
+// fallback name (defaultOwnerName("", userID)); only a profile still holding exactly that
+// name is renamed, so a name the owner chose is never overwritten.
+func (s *Server) adoptOwnerDisplayName(ctx context.Context, userID, displayName string) error {
+	fallback := defaultOwnerName("", userID)
+	want := defaultOwnerName(displayName, userID)
+	if want == fallback {
+		return nil
+	}
+	s.profiles.mu.Lock()
+	defer s.profiles.mu.Unlock()
+	rows, err := s.loadProfiles(ctx, userID)
+	if err != nil {
+		return err
+	}
+	owner, ok := ownerOf(rows)
+	if !ok || owner.Name != fallback {
+		return nil
+	}
+	others := make([]profileRow, 0, len(rows))
+	for _, p := range rows {
+		if p.ID != owner.ID {
+			others = append(others, p)
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE profiles SET name = ? WHERE id = ? AND name = ?`,
+		uniqueProfileName(want, others), owner.ID, fallback)
+	return err
+}
+
 // uniqueProfileName returns base, or base with " 2", " 3", … appended (base shortened to keep
 // the 20-rune limit) when another profile in the account already uses it in any letter case.
 func uniqueProfileName(base string, existing []profileRow) string {
@@ -349,7 +381,7 @@ func (s *Server) requestViewer(w http.ResponseWriter, r *http.Request) (viewer, 
 	return v, true
 }
 
-// ── Ceiling helpers for the enforcement work (FR-250); not yet wired to routes ──────────
+// ── Ceiling helpers for the enforcement work (FR-250) ───────────────────────────────────
 
 // itemAboveCeiling reports whether itemID's age level is above v's ceiling. A missing item
 // is (false, nil) so the caller's own not-found path answers.
@@ -365,11 +397,34 @@ func (s *Server) itemAboveCeiling(ctx context.Context, v viewer, itemID string) 
 	if err != nil {
 		return false, err
 	}
+	return v.above(cert), nil
+}
+
+// above reports whether a title with stored certification cert is above v's ceiling. For
+// handlers that already selected content_rating, so the gate costs no extra query.
+func (v viewer) above(cert sql.NullString) bool {
+	if !rating.Restricted(v.MaxAgeLevel) {
+		return false
+	}
 	var p *string
 	if cert.Valid {
 		p = &cert.String
 	}
-	return rating.LevelPtr(p) > v.MaxAgeLevel, nil
+	return rating.LevelPtr(p) > v.MaxAgeLevel
+}
+
+// andVisible appends v's ceiling on column col to where, which is "" or starts with "WHERE".
+// Unrestricted viewers get where and args back unchanged. Listings apply FR-250 through
+// this (or VisibleClause) so the unrated rule stays in package rating.
+func (v viewer) andVisible(where string, args []any, col string) (string, []any) {
+	clause, cargs := v.VisibleClause(col)
+	if clause == "" {
+		return where, args
+	}
+	if strings.TrimSpace(where) == "" {
+		return "WHERE " + clause, append(args, cargs...)
+	}
+	return where + " AND " + clause, append(args, cargs...)
 }
 
 // andVisibleFrag is andVisible for queries that already have a WHERE: it returns
@@ -380,6 +435,68 @@ func (v viewer) andVisibleFrag(col string) (string, []any) {
 		return "", nil
 	}
 	return " AND " + clause, cargs
+}
+
+// visibleItemFrag is " AND EXISTS (…)" keeping only rows whose itemCol names a title v may
+// see, for tables (progress) that are read without joining items. A row whose item is gone
+// has no level and is hidden (unknown fails closed, FR-242). Unrestricted viewers get "",
+// so their reads, orphan rows included, are exactly as before. itemCol is spliced into SQL
+// and must be a programmer-written identifier.
+func (v viewer) visibleItemFrag(itemCol string) (string, []any) {
+	if !sqlIdentRe.MatchString(itemCol) {
+		panic("visibleItemFrag: column is not a plain identifier: " + itemCol)
+	}
+	clause, cargs := v.VisibleClause("vis_i.content_rating")
+	if clause == "" {
+		return "", nil
+	}
+	return " AND EXISTS (SELECT 1 FROM items vis_i WHERE vis_i.id = " + itemCol + " AND " + clause + ")", cargs
+}
+
+var sqlIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$`)
+
+// refuseAboveCeiling is the "refused if above" gate (FR-250) for a single title: it answers
+// 403 content_restricted (or 500 db_error) and returns false when the handler must stop. A
+// missing item passes, so the handler's own not-found answer is unchanged.
+func (s *Server) refuseAboveCeiling(w http.ResponseWriter, r *http.Request, v viewer, itemID string) bool {
+	above, err := s.itemAboveCeiling(r.Context(), v, itemID)
+	if err != nil {
+		log.Printf("ceiling check %s: %v", itemID, err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return false
+	}
+	if above {
+		writeContentRestricted(w)
+		return false
+	}
+	return true
+}
+
+// gateShow is "refused if above" for a whole show (FR-250: a show is visible iff its rating
+// is; the content-rating backfill writes the show's certification onto every episode row).
+// where/args select the show's rows (no leading WHERE). If the show has rows and the viewer
+// may see none of them it answers 403 content_restricted and returns ok=false. Otherwise it
+// returns the " AND …" fragment and args that keep the handler's episode queries to visible
+// rows (empty for an unrestricted viewer, who pays no extra query).
+func (s *Server) gateShow(w http.ResponseWriter, r *http.Request, v viewer, where string, args []any) (frag string, fargs []any, ok bool) {
+	clause, cargs := v.VisibleClause("content_rating")
+	if clause == "" {
+		return "", nil, true
+	}
+	var total, visible int
+	qargs := append(append([]any{}, cargs...), args...)
+	if err := s.db.QueryRowContext(r.Context(),
+		"SELECT COUNT(*), COALESCE(SUM(CASE WHEN "+clause+" THEN 1 ELSE 0 END), 0) FROM items WHERE "+where,
+		qargs...).Scan(&total, &visible); err != nil {
+		log.Printf("show ceiling check: %v", err)
+		writeErr(w, http.StatusInternalServerError, "db_error")
+		return "", nil, false
+	}
+	if total > 0 && visible == 0 {
+		writeContentRestricted(w)
+		return "", nil, false
+	}
+	return " AND " + clause, cargs, true
 }
 
 // writeContentRestricted is the "refused above the ceiling" answer (FR-250): it names the
@@ -986,9 +1103,14 @@ func (s *Server) handleOwnerPinReset(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("owner PIN reset: DSM check failed (username redacted): %v", err)
 		var perm *dsmPermissionError
+		var tfa *dsmTwoFactorError
 		switch {
 		case errors.As(err, &perm):
 			writeErr(w, http.StatusForbidden, "permission_denied")
+		case errors.As(err, &tfa):
+			// FR-216: two-factor account, no (usable) OTP sent. The password may be right;
+			// blaming it would send the owner down the wrong path.
+			writeErr(w, http.StatusForbidden, "otp_required")
 		case isDSMUnavailable(err):
 			writeErr(w, http.StatusServiceUnavailable, "dsm_unavailable")
 		default:

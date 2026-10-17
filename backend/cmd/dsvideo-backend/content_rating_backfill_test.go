@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"dsvideo/backend/internal/metadata"
+	agerating "dsvideo/backend/internal/rating"
 
 	"github.com/go-chi/chi/v5"
 
@@ -781,6 +782,9 @@ func TestItemDetailReportsBackfilledRatingAndNullForUnrated(t *testing.T) {
 		rctx.URLParams.Add("id", id)
 		req := httptest.NewRequest(http.MethodGet, "/items/"+id, nil)
 		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		// FR-250: detail applies the viewer's ceiling; an unrestricted owner sees both titles.
+		req = req.WithContext(context.WithValue(req.Context(), viewerKey, viewer{
+			UserID: "u1", ProfileID: "p1", MaxAgeLevel: agerating.MaxLevel, IsOwner: true}))
 		rec := httptest.NewRecorder()
 		s.handleItemDetail(rec, req)
 		if rec.Code != http.StatusOK {

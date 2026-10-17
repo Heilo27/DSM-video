@@ -160,7 +160,8 @@ Response:
 { "ok": true }
 ```
 
-Errors: `403 password_incorrect` (wrong password or OTP; deliberately not 401), `403 permission_denied`
+Errors: `403 password_incorrect` (wrong password or OTP; deliberately not 401), `403 otp_required` (the
+DSM account has two-factor sign-in and no `otp` was sent; ask for the code), `403 permission_denied`
 (DSM account no longer allowed to use the app, as at login), `503 dsm_unavailable` (DSM could not be
 reached or gave no usable answer; the password is never blamed for that), `400 invalid_pin_format`.
 
@@ -271,6 +272,7 @@ filtered). **X** = exempt.
 | `pin_incorrect` | 403 | `attemptsRemaining` |
 | `pin_locked` | 429 | `retryAfterSeconds` |
 | `password_incorrect` | 403 | — |
+| `otp_required` | 403 | — |
 | `invalid_pin_format` | 400 | — |
 | `invalid_profile_name` | 400 | — |
 | `duplicate_profile_name` | 409 | — |

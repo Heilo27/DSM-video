@@ -48,7 +48,10 @@ maximum age level, and whether a PIN is set. The PIN itself is never returned by
 key is 1–32 characters of letters, digits, `-` and `_`; anything else is refused with `invalid_avatar`.
 
 **FR-204 [DESIGN]** Every account has exactly one owner profile, created automatically: at migration for
-existing accounts (§5) and at first sign-in for new ones. Its name defaults to the DSM display name. Its
+existing accounts (§5) and at first sign-in for new ones. Its name defaults to the DSM display name. The
+migration runs without a DSM session, so it uses the DSM username the server already holds for the account
+(else the account id), and the next sign-in replaces that name with the DSM display name unless the owner
+has renamed the profile. Its
 maximum age level is fixed at 4 (Adult) and cannot be lowered, because the owner manages profiles and must
 be able to see every title it manages. It cannot be deleted (`owner_profile_immutable`).
 
@@ -94,7 +97,9 @@ server restart resetting it is acceptable, because a viewer cannot trigger a res
 account has one), checked against DSM exactly as at sign-in and subject to the sign-in rate limit. This
 keeps DSM as the only identity (A4). If DSM cannot be reached or gives no usable answer, the reset is
 refused with `dsm_unavailable` (503), never `password_incorrect`: an unreachable NAS service is not a wrong
-password. A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
+password. If the account has two-factor sign-in and no OTP was sent, the reset is refused with
+`otp_required` (403), never `password_incorrect`: the password may be right, and the app must ask for the
+code. A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
 
 **FR-217 [DESIGN]** PIN and profile errors are **never** HTTP 401. The apps treat 401 as an expired session
 and sign out (APIClient, DownloadManager), so a wrong PIN answered with 401 would sign the user out and
@@ -357,6 +362,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | `pin_incorrect` | 403 | Wrong PIN (profile verify or owner PIN). Body includes `attemptsRemaining`. |
 | `pin_locked` | 429 | Too many failures (FR-215). Body includes `retryAfterSeconds`. |
 | `password_incorrect` | 403 | Owner PIN reset with a wrong DSM password or OTP. |
+| `otp_required` | 403 | Owner PIN reset on a two-factor DSM account without an OTP (FR-216). |
 | `invalid_pin_format` | 400 | PIN is not exactly 4 ASCII digits. |
 | `invalid_profile_name` | 400 | Name empty or longer than 20 characters after trimming. |
 | `duplicate_profile_name` | 409 | Another profile in the account already has the name (ignoring case). |

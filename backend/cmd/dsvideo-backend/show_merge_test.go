@@ -136,7 +136,7 @@ func listShows(t *testing.T, s *Server, userID string) []listedShow {
 // The merged list: ONE show, the counts summed across BOTH folders.
 func TestSplitShowListsOnceWithMergedCounts(t *testing.T) {
 	s := newShowMergeServer(t)
-	shows := listShows(t, s, "")
+	shows := listShows(t, s, "u1") // FR-250: catalog routes need a viewer
 
 	if len(shows) != 1 {
 		t.Fatalf("shows = %d, want 1 (the two folders are one show)", len(shows))
@@ -167,11 +167,11 @@ func TestSplitShowListsOnceWithMergedCounts(t *testing.T) {
 // emits, the detail must agree with the count the list reported.
 func TestShowDetailMatchesTheMergedCount(t *testing.T) {
 	s := newShowMergeServer(t)
-	listed := listShows(t, s, "")[0]
+	listed := listShows(t, s, "u1")[0] // FR-250: catalog routes need a viewer
 
 	// Episodes: must be all 3, not the 2 (or 1) in the single named folder.
 	rec := httptest.NewRecorder()
-	req := authedReq("GET", "/tv/shows/"+listed.ID+"/episodes", "")
+	req := authedReq("GET", "/tv/shows/"+listed.ID+"/episodes", "u1") // FR-250: catalog routes need a viewer
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("showId", listed.ID)
 	s.handleTVShowEpisodes(rec, req.WithContext(
@@ -199,7 +199,7 @@ func TestShowDetailMatchesTheMergedCount(t *testing.T) {
 
 	// Seasons: must be both seasons, one per folder.
 	rec = httptest.NewRecorder()
-	req = authedReq("GET", "/tv/shows/"+listed.ID+"/seasons", "")
+	req = authedReq("GET", "/tv/shows/"+listed.ID+"/seasons", "u1") // FR-250: catalog routes need a viewer
 	rctx = chi.NewRouteContext()
 	rctx.URLParams.Add("showId", listed.ID)
 	s.handleTVShowSeasons(rec, req.WithContext(
@@ -355,7 +355,7 @@ func TestShowNameFallbackStillFires(t *testing.T) {
 
 	// Request by the TMDb display name, which matches NO folder on disk.
 	rec := httptest.NewRecorder()
-	req := authedReq("GET", "/tv/shows/The%20Bear/episodes", "")
+	req := authedReq("GET", "/tv/shows/The%20Bear/episodes", "u1") // FR-250: catalog routes need a viewer
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("showId", "The Bear")
 	s.handleTVShowEpisodes(rec, req.WithContext(

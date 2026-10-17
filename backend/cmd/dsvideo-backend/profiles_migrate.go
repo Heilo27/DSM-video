@@ -103,6 +103,17 @@ func fileSize(path string) int64 {
 	return fi.Size()
 }
 
+// dirWritable creates and removes a temporary file in dir.
+func dirWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".dsvideo-write-check-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	f.Close()
+	return os.Remove(name)
+}
+
 // backupBeforeProfiles writes <dbPath>.pre-profiles-<UTC stamp>.db with VACUUM INTO. On any
 // failure the partial file is removed and the returned error names the cause.
 func backupBeforeProfiles(db *sql.DB, dbPath string) (string, error) {
@@ -110,6 +121,11 @@ func backupBeforeProfiles(db *sql.DB, dbPath string) (string, error) {
 		return "", fmt.Errorf("database path %q is not a file; cannot write the pre-migration copy", dbPath)
 	}
 	dir := filepath.Dir(dbPath)
+	// FR-232 asks for the real cause in the log. SQLite reports a read-only folder as a bare
+	// "unable to open database file", so probe the folder first and name it.
+	if err := dirWritable(dir); err != nil {
+		return "", fmt.Errorf("the database folder %s is not writable, so the pre-migration copy cannot be written: %w", dir, err)
+	}
 	need := uint64(fileSize(dbPath)+fileSize(dbPath+"-wal")) + backupMarginBytes
 	free, err := profilesFreeBytes(dir)
 	if err != nil {
@@ -277,7 +293,7 @@ UNION SELECT user_id FROM settings  WHERE user_id <> ''`)
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO profiles(id, user_id, name, avatar, max_age_level, pin_hash, is_owner, created_at)
 			 VALUES(?, ?, ?, '', 4, NULL, 1, ?)`,
-			id, u, defaultOwnerName("", u), now); err != nil {
+			id, u, defaultOwnerName(migratedDisplayName(ctx, tx, u), u), now); err != nil {
 			return "", fmt.Errorf("creating owner profile for %s: %w", u, err)
 		}
 	}
@@ -413,6 +429,22 @@ func truncateRunes(s string, n int) string {
 	}
 	r := []rune(s)
 	return string(r[:n])
+}
+
+// migratedDisplayName is the best DSM name the database already holds for an account at
+// migration time (FR-204), when no DSM session exists: the case-preserved DSM username a
+// Synology WebAPI sign-in recorded in webapi_sessions. "" when there is none (or the table
+// cannot be read), and the caller falls back to the user id; sign-in then adopts DSM's
+// display name (adoptOwnerDisplayName).
+func migratedDisplayName(ctx context.Context, tx *sql.Tx, userID string) string {
+	var name string
+	err := tx.QueryRowContext(ctx,
+		`SELECT username FROM webapi_sessions WHERE user_id = ? AND TRIM(username) <> ''
+		 ORDER BY created_at DESC LIMIT 1`, userID).Scan(&name)
+	if err != nil {
+		return ""
+	}
+	return name
 }
 
 // defaultOwnerName is the owner profile's starting name (FR-204): the DSM display name when
