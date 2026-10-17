@@ -73,6 +73,11 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
   // Delta sync metadata — nil when decoded from legacy API responses
   let libraryId: String?
   let changeSeq: Int?
+  /// US certification, display only (FR-240). Clients never derive anything from it.
+  let contentRating: String?
+  /// 1...4, computed by the server (FR-241). nil = an older server; treated as 4, unrated.
+  /// The only client check is `ProfileScope.allows(ageLevel:)`.
+  let ageLevel: Int?
 
   nonisolated init(id: String, type: String, title: String, year: Int? = nil,
                    durationSeconds: Int? = nil, addedAt: String, rating: Double? = nil,
@@ -80,7 +85,8 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
                    progress: ItemProgress? = nil, showName: String? = nil,
                    showFolderId: String? = nil,
                    seasonNumber: Int? = nil, episodeNumber: Int? = nil,
-                   libraryId: String? = nil, changeSeq: Int? = nil) {
+                   libraryId: String? = nil, changeSeq: Int? = nil,
+                   contentRating: String? = nil, ageLevel: Int? = nil) {
     self.id = id
     self.type = type
     self.title = title
@@ -97,6 +103,8 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
     self.episodeNumber = episodeNumber
     self.libraryId = libraryId
     self.changeSeq = changeSeq
+    self.contentRating = contentRating
+    self.ageLevel = ageLevel
   }
 }
 
@@ -111,7 +119,8 @@ extension ItemSummary {
                 backdropImageId: backdropImageId, progress: progress,
                 showName: showName, showFolderId: showFolderId,
                 seasonNumber: seasonNumber, episodeNumber: episodeNumber,
-                libraryId: libraryId, changeSeq: changeSeq)
+                libraryId: libraryId, changeSeq: changeSeq,
+                contentRating: contentRating, ageLevel: ageLevel)
   }
 }
 

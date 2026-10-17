@@ -28,10 +28,20 @@ struct HomeRails: Sendable {
 /// All public methods are nonisolated-safe to call from any context.
 actor LocalStore {
   static let shared: LocalStore = {
-    let store = LocalStore()
+    let store = LocalStore(scope: ActiveProfileStore.shared.activeScope)
     Task { await store.setupLogged() }
     return store
   }()
+
+  /// The profile every read is filtered by and every progress write defaults to (FR-233,
+  /// FR-262). Seeded from ActiveProfileStore at launch; changed only by setActiveProfile.
+  private(set) var activeScope: ProfileScope
+
+  /// Switches the profile reads are filtered by. AppState calls this on every profile
+  /// change, BEFORE reloading anything, so no read can return the previous profile's rows.
+  func setActiveProfile(_ scope: ProfileScope) {
+    activeScope = scope
+  }
 
   private var db: OpaquePointer?
   private var isReady: Bool = false
@@ -168,8 +178,9 @@ actor LocalStore {
   /// Deliberately NOT `#if DEBUG`: the shipping code path must be the code path under test.
   private let databaseURLOverride: URL?
 
-  private init(databaseURLOverride: URL? = nil) {
+  private init(databaseURLOverride: URL? = nil, scope: ProfileScope = .legacy) {
     self.databaseURLOverride = databaseURLOverride
+    self.activeScope = scope
   }
 
   /// TEST SEAM (R4). Builds a store backed by `url` instead of the app container, and
@@ -474,6 +485,75 @@ actor LocalStore {
       execIgnoringErrors("CREATE INDEX IF NOT EXISTS idx_progress_pending ON progress(pending_sync) WHERE pending_sync = 1")
       setUserVersion(2)
     }
+    if version < 3 {
+      try migrateToV3()
+      setUserVersion(3)
+    }
+  }
+
+  /// v3 (FRD-002 FR-233, FR-262): progress per profile, age level per item.
+  ///
+  /// - progress gains `profile_id`, and the primary key becomes (profile_id, item_id). SQLite
+  ///   cannot change a primary key in place, so rows are COPIED into a new table, counted,
+  ///   and only then is the old table dropped, all in one transaction. A count mismatch
+  ///   rolls the whole thing back and leaves the v2 table untouched.
+  /// - Existing rows go to the legacy bucket `''`. They belong to the owner (FR-233), whose
+  ///   id is not known until /profiles answers; `claimLegacyRows(ownerID:)` moves them then.
+  /// - The global `progress_seq` cursor becomes the legacy bucket's cursor `progress_seq:`.
+  /// - items gain `age_level` (NULL = unrated = 4, fail closed) and `content_rating`.
+  private func migrateToV3() throws {
+    try execThrows("BEGIN IMMEDIATE")
+    do {
+      let before = scalarInt("SELECT COUNT(*) FROM progress") ?? -1
+      try execThrows("""
+        CREATE TABLE progress_v3 (
+          profile_id       TEXT NOT NULL DEFAULT '',
+          item_id          TEXT NOT NULL,
+          position_seconds INTEGER NOT NULL,
+          duration_seconds INTEGER NOT NULL,
+          updated_at       TEXT NOT NULL,
+          pending_sync     INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY (profile_id, item_id)
+        );
+        INSERT INTO progress_v3(profile_id, item_id, position_seconds, duration_seconds, updated_at, pending_sync)
+          SELECT '', item_id, position_seconds, duration_seconds, updated_at, pending_sync FROM progress;
+      """)
+      let after = scalarInt("SELECT COUNT(*) FROM progress_v3") ?? -2
+      guard before == after else {
+        throw LocalStoreError.execFailed("v3 migration: copied \(after) progress rows of \(before); rolled back")
+      }
+      try execThrows("""
+        DROP TABLE progress;
+        ALTER TABLE progress_v3 RENAME TO progress;
+        CREATE INDEX IF NOT EXISTS idx_progress_updated ON progress(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_progress_pending ON progress(pending_sync) WHERE pending_sync = 1;
+        CREATE INDEX IF NOT EXISTS idx_progress_profile ON progress(profile_id, updated_at DESC);
+        DELETE FROM sync_cursors WHERE key = 'progress_seq:';
+        UPDATE sync_cursors SET key = 'progress_seq:' WHERE key = 'progress_seq';
+      """)
+      // Additive; a column that already exists is not an error worth failing the upgrade for.
+      execIgnoringErrors("ALTER TABLE items ADD COLUMN age_level INTEGER")
+      execIgnoringErrors("ALTER TABLE items ADD COLUMN content_rating TEXT")
+      try execThrows("COMMIT")
+      log.info("v3 migration: \(after) progress row(s) moved to per-profile storage")
+    } catch {
+      exec("ROLLBACK")
+      log.error("v3 migration failed, rolled back: \(error.localizedDescription)")
+      throw error
+    }
+  }
+
+  private func scalarInt(_ sql: String) -> Int? {
+    guard let db else { return nil }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+    defer { sqlite3_finalize(stmt) }
+    return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : nil
+  }
+
+  /// `progress_seq:<profileId>`: the progress cursor is per profile (FR-233).
+  private static func progressCursorKey(_ profileID: String) -> String {
+    "progress_seq:" + profileID
   }
 
   private func userVersion() -> Int {
@@ -512,8 +592,8 @@ actor LocalStore {
     let sql = """
       INSERT INTO items(id, library_id, type, title, year, duration_seconds, added_at,
                         rating, poster_image_id, backdrop_image_id, show_name, show_folder_id,
-                        season_number, episode_number, change_seq)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        season_number, episode_number, change_seq, age_level, content_rating)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
         library_id=excluded.library_id,
         type=excluded.type,
@@ -528,7 +608,9 @@ actor LocalStore {
         show_folder_id=excluded.show_folder_id,
         season_number=excluded.season_number,
         episode_number=excluded.episode_number,
-        change_seq=excluded.change_seq
+        change_seq=excluded.change_seq,
+        age_level=excluded.age_level,
+        content_rating=excluded.content_rating
     """
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -569,6 +651,9 @@ actor LocalStore {
       if let sn = item.seasonNumber { sqlite3_bind_int64(stmt, 13, Int64(sn)) } else { sqlite3_bind_null(stmt, 13) }
       if let en = item.episodeNumber { sqlite3_bind_int64(stmt, 14, Int64(en)) } else { sqlite3_bind_null(stmt, 14) }
       sqlite3_bind_int64(stmt, 15, Int64(item.changeSeq ?? 0))
+      // NULL when the server sent no level (an older server): every read treats it as 4.
+      if let a = item.ageLevel { sqlite3_bind_int64(stmt, 16, Int64(a)) } else { sqlite3_bind_null(stmt, 16) }
+      if let c = item.contentRating { sqlite3_bind_text(stmt, 17, c, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 17) }
       let rc = sqlite3_step(stmt)
       if rc != SQLITE_DONE {
         let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
@@ -604,8 +689,11 @@ actor LocalStore {
 
   // MARK: - Progress
 
-  func upsertProgress(_ progress: [String: ItemProgress]) {
+  /// `profileID` nil = the active profile. Sync passes the profile it fetched for, so a
+  /// switch mid-request can never file one profile's positions under another (FR-201).
+  func upsertProgress(_ progress: [String: ItemProgress], profileID: String? = nil) {
     guard !progress.isEmpty, let db else { return }
+    let pid = profileID ?? activeScope.id
     exec("BEGIN TRANSACTION")
     // TASK-840: conflict resolution is now ownership-based, NOT a wall-clock comparison.
     //
@@ -630,9 +718,9 @@ actor LocalStore {
     // Both sides of that test are local facts. No clock is consulted, so no amount of skew can
     // suppress an update permanently.
     let sql = """
-      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync)
-      VALUES(?,?,?,?,0)
-      ON CONFLICT(item_id) DO UPDATE SET
+      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync, profile_id)
+      VALUES(?,?,?,?,0,?)
+      ON CONFLICT(profile_id, item_id) DO UPDATE SET
         position_seconds=CASE WHEN pending_sync = 1 THEN position_seconds ELSE excluded.position_seconds END,
         duration_seconds=CASE WHEN pending_sync = 1 THEN duration_seconds ELSE excluded.duration_seconds END,
         updated_at=CASE WHEN pending_sync = 1 THEN updated_at ELSE excluded.updated_at END
@@ -651,6 +739,7 @@ actor LocalStore {
       sqlite3_bind_int64(stmt, 2, Int64(p.positionSeconds))
       sqlite3_bind_int64(stmt, 3, Int64(p.durationSeconds))
       sqlite3_bind_text(stmt, 4, p.updatedAt, -1, SQLITE_TRANSIENT)
+      sqlite3_bind_text(stmt, 5, pid, -1, SQLITE_TRANSIENT)
       // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
       let rc = sqlite3_step(stmt)
       if rc != SQLITE_DONE {
@@ -663,13 +752,15 @@ actor LocalStore {
 
   /// Writes progress locally and marks it pending upload. `pending_sync` is cleared only by
   /// `markProgressSynced(_:)` after the server has actually accepted the value.
-  func upsertSingleProgress(itemId: String, positionSeconds: Int, durationSeconds: Int) {
+  func upsertSingleProgress(itemId: String, positionSeconds: Int, durationSeconds: Int,
+                            profileID: String? = nil) {
     guard let db else { return }
+    let pid = profileID ?? activeScope.id
     var stmt: OpaquePointer?
     let sql = """
-      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync)
-      VALUES(?,?,?,?,1)
-      ON CONFLICT(item_id) DO UPDATE SET
+      INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync, profile_id)
+      VALUES(?,?,?,?,1,?)
+      ON CONFLICT(profile_id, item_id) DO UPDATE SET
         position_seconds=excluded.position_seconds,
         duration_seconds=excluded.duration_seconds,
         updated_at=excluded.updated_at,
@@ -685,6 +776,7 @@ actor LocalStore {
     sqlite3_bind_int64(stmt, 2, Int64(positionSeconds))
     sqlite3_bind_int64(stmt, 3, Int64(durationSeconds))
     sqlite3_bind_text(stmt, 4, now, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_text(stmt, 5, pid, -1, SQLITE_TRANSIENT)
     // FIX-3: Check return code — SQLITE_BUSY under contention was silently swallowed.
     let rc = sqlite3_step(stmt)
     if rc != SQLITE_DONE {
@@ -719,19 +811,23 @@ actor LocalStore {
   /// Progress rows the server has not yet confirmed, oldest first so the flush replays in
   /// the order the user actually watched. Bounded: a device offline for a long stretch
   /// should not fire an unbounded burst at the NAS on reconnect.
-  func pendingProgress(limit: Int = 200) -> [PendingProgress] {
+  /// One profile's unsynced rows (nil = active). The outbox flushes them with that
+  /// profile's header, so each row reaches the server as the profile that watched it.
+  func pendingProgress(limit: Int = 200, profileID: String? = nil) -> [PendingProgress] {
     guard let db else { return [] }
+    let pid = profileID ?? activeScope.id
     var stmt: OpaquePointer?
     let sql = """
       SELECT item_id, position_seconds, duration_seconds, updated_at
       FROM progress
-      WHERE pending_sync = 1
+      WHERE pending_sync = 1 AND profile_id = ?
       ORDER BY updated_at ASC
       LIMIT ?
     """
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
     defer { sqlite3_finalize(stmt) }
-    sqlite3_bind_int64(stmt, 1, Int64(limit))
+    sqlite3_bind_text(stmt, 1, pid, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int64(stmt, 2, Int64(limit))
     var out: [PendingProgress] = []
     while sqlite3_step(stmt) == SQLITE_ROW {
       guard let idC = sqlite3_column_text(stmt, 0) else { continue }
@@ -750,18 +846,21 @@ actor LocalStore {
   /// The position/duration guard matters: if the user kept watching while the flush was in
   /// flight, the row now holds a NEWER position than the one just uploaded. Clearing
   /// unconditionally would drop that newer value from the outbox and it would never be sent.
-  func markProgressSynced(itemId: String, positionSeconds: Int, durationSeconds: Int) {
+  func markProgressSynced(itemId: String, positionSeconds: Int, durationSeconds: Int,
+                          profileID: String? = nil) {
     guard let db else { return }
+    let pid = profileID ?? activeScope.id
     var stmt: OpaquePointer?
     let sql = """
       UPDATE progress SET pending_sync = 0
-      WHERE item_id = ? AND position_seconds = ? AND duration_seconds = ?
+      WHERE item_id = ? AND position_seconds = ? AND duration_seconds = ? AND profile_id = ?
     """
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
     defer { sqlite3_finalize(stmt) }
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
     sqlite3_bind_int64(stmt, 2, Int64(positionSeconds))
     sqlite3_bind_int64(stmt, 3, Int64(durationSeconds))
+    sqlite3_bind_text(stmt, 4, pid, -1, SQLITE_TRANSIENT)
     if sqlite3_step(stmt) != SQLITE_DONE {
       let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
       log.error("markProgressSynced: step failed for \(itemId): \(msg)")
@@ -779,12 +878,14 @@ actor LocalStore {
   /// whose position advanced mid-flush never cleared, so the flush "dropped" it in the log
   /// and then retried it forever on the next pass — reintroducing the same stall under
   /// concurrent playback.
-  func dropPendingProgress(itemId: String) {
+  func dropPendingProgress(itemId: String, profileID: String? = nil) {
     guard let db else { return }
+    let pid = profileID ?? activeScope.id
     var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, "UPDATE progress SET pending_sync = 0 WHERE item_id = ?", -1, &stmt, nil) == SQLITE_OK else { return }
+    guard sqlite3_prepare_v2(db, "UPDATE progress SET pending_sync = 0 WHERE item_id = ? AND profile_id = ?", -1, &stmt, nil) == SQLITE_OK else { return }
     defer { sqlite3_finalize(stmt) }
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_text(stmt, 2, pid, -1, SQLITE_TRANSIENT)
     if sqlite3_step(stmt) != SQLITE_DONE {
       let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
       log.error("dropPendingProgress: step failed for \(itemId): \(msg)")
@@ -792,11 +893,12 @@ actor LocalStore {
   }
 
   /// Count of unsynced rows — for diagnostics and to skip a no-op flush cheaply.
-  func pendingProgressCount() -> Int {
+  func pendingProgressCount(profileID: String? = nil) -> Int {
     guard let db else { return 0 }
     var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM progress WHERE pending_sync = 1", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+    guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM progress WHERE pending_sync = 1 AND profile_id = ?", -1, &stmt, nil) == SQLITE_OK else { return 0 }
     defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, profileID ?? activeScope.id, -1, SQLITE_TRANSIENT)
     return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
   }
 
@@ -809,10 +911,18 @@ actor LocalStore {
   func getProgressSeconds(itemId: String) -> Int {
     guard let db else { return 0 }
     var stmt: OpaquePointer?
-    let sql = "SELECT position_seconds, duration_seconds FROM progress WHERE item_id=? LIMIT 1"
+    // Active profile only, and only for a title within its ceiling (FR-201, FR-262).
+    let sql = """
+      SELECT p.position_seconds, p.duration_seconds
+      FROM progress p
+      LEFT JOIN items i ON i.id = p.item_id
+      WHERE p.item_id = ?3 AND p.profile_id = ?1 AND \(Self.sqlVisibleToScope)
+      LIMIT 1
+    """
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
     defer { sqlite3_finalize(stmt) }
-    sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
+    bindScope(stmt)
+    sqlite3_bind_text(stmt, 3, itemId, -1, SQLITE_TRANSIENT)
     guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
     let position = Int(sqlite3_column_int(stmt, 0))
     let duration = Int(sqlite3_column_int(stmt, 1))
@@ -855,8 +965,24 @@ actor LocalStore {
     i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
     i.added_at, i.rating, i.poster_image_id, i.backdrop_image_id,
     i.show_name, i.show_folder_id, i.season_number, i.episode_number, i.change_seq,
-    p.position_seconds, p.duration_seconds, p.updated_at
+    p.position_seconds, p.duration_seconds, p.updated_at,
+    i.age_level, i.content_rating
     """
+
+  // MARK: Profile filter (FR-201, FR-262)
+  //
+  // Every query that returns titles or positions binds the active scope as ?1 (profile id)
+  // and ?2 (max age level). Progress joins carry `p.profile_id = ?1` IN THE JOIN, so a LEFT
+  // JOIN still returns the title with no progress rather than another profile's. The age
+  // rule is ProfileScope.allows(ageLevel:) in SQL: a NULL level is unrated, which is 4.
+  private static let sqlProgressForScope = "p.profile_id = ?1"
+  private static let sqlVisibleToScope =
+    "COALESCE(i.age_level, \(ProfileScope.unrestrictedLevel)) <= ?2"
+
+  private func bindScope(_ stmt: OpaquePointer?) {
+    sqlite3_bind_text(stmt, 1, activeScope.id, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int64(stmt, 2, Int64(activeScope.maxAgeLevel))
+  }
 
   func queryRails() -> HomeRails {
     HomeRails(
@@ -870,8 +996,9 @@ actor LocalStore {
     let sql = """
       SELECT \(Self.itemSelectColumns)
       FROM items i
-      JOIN progress p ON p.item_id = i.id
+      JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
       WHERE p.duration_seconds > 0
+        AND \(Self.sqlVisibleToScope)
         -- FIX-11: unified 5% lower threshold matches iOS computeHomeRails (was 0.02, tvOS diverged)
         -- TASK-841: upper bound now excludes the 90s-remaining case as well as the 95% ratio,
         -- so this rail agrees with PlaybackProgress.isFinished / getProgressSeconds.
@@ -894,10 +1021,11 @@ actor LocalStore {
     let sql = """
       SELECT \(Self.itemSelectColumns)
       FROM items i
-      LEFT JOIN progress p ON p.item_id = i.id
-      WHERE p.item_id IS NULL
+      LEFT JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
+      WHERE (p.item_id IS NULL
          OR p.duration_seconds = 0
-         OR \(Self.sqlRatio) < \(PlaybackProgress.startedThreshold)
+         OR \(Self.sqlRatio) < \(PlaybackProgress.startedThreshold))
+        AND \(Self.sqlVisibleToScope)
       ORDER BY i.added_at DESC
       LIMIT 500
     """
@@ -931,8 +1059,9 @@ actor LocalStore {
     let sql = """
       SELECT \(Self.itemSelectColumns)
       FROM items i
-      JOIN progress p ON p.item_id = i.id
+      JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
       WHERE p.duration_seconds > 0
+        AND \(Self.sqlVisibleToScope)
         -- TASK-841: strictly > 0.95 (was >=, which overlapped Continue Watching's inclusive
         -- upper bound and put an item at exactly 0.95 in both rails), plus the 90s-remaining
         -- clause so this matches PlaybackProgress.isFinished exactly.
@@ -948,6 +1077,7 @@ actor LocalStore {
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
     defer { sqlite3_finalize(stmt) }
+    bindScope(stmt)
 
     var results: [ItemSummary] = []
     var seenShows = Set<String>()
@@ -975,16 +1105,18 @@ actor LocalStore {
     let sql = """
       SELECT \(Self.itemSelectColumns)
       FROM items i
-      LEFT JOIN progress p ON p.item_id = i.id
-      WHERE i.library_id = ?
+      LEFT JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
+      WHERE i.library_id = ?3
+        AND \(Self.sqlVisibleToScope)
       ORDER BY i.added_at DESC
-      LIMIT ?
+      LIMIT ?4
     """
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
     defer { sqlite3_finalize(stmt) }
-    sqlite3_bind_text(stmt, 1, libraryId, -1, SQLITE_TRANSIENT)
-    sqlite3_bind_int(stmt, 2, Int32(limit))
+    bindScope(stmt)
+    sqlite3_bind_text(stmt, 3, libraryId, -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int64(stmt, 4, Int64(limit))
     var results: [ItemSummary] = []
     while sqlite3_step(stmt) == SQLITE_ROW {
       results.append(itemFromStatement(stmt))
@@ -1024,8 +1156,10 @@ actor LocalStore {
 
   // MARK: - Sync Cursors
 
-  func getSyncCursors() -> SyncCursors {
+  /// The catalog cursor (account-wide) and one profile's progress cursor (nil = active).
+  func getSyncCursors(profileID: String? = nil) -> SyncCursors {
     guard let db else { return SyncCursors(itemSeq: 0, progressSeq: 0) }
+    let progressKey = Self.progressCursorKey(profileID ?? activeScope.id)
     var stmt: OpaquePointer?
     guard sqlite3_prepare_v2(db, "SELECT key, value FROM sync_cursors", -1, &stmt, nil) == SQLITE_OK else {
       return SyncCursors(itemSeq: 0, progressSeq: 0)
@@ -1037,7 +1171,7 @@ actor LocalStore {
       let key = String(cString: sqlite3_column_text(stmt, 0))
       let val = Int(sqlite3_column_int64(stmt, 1))
       if key == "item_seq" { itemSeq = val }
-      else if key == "progress_seq" { progressSeq = val }
+      else if key == progressKey { progressSeq = val }
     }
     return SyncCursors(itemSeq: itemSeq, progressSeq: progressSeq)
   }
@@ -1074,13 +1208,90 @@ actor LocalStore {
     }
   }
 
-  func setProgressSeq(_ seq: Int) {
+  func setProgressSeq(_ seq: Int, profileID: String? = nil) {
     guard let db else { return }
     var stmt: OpaquePointer?
-    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('progress_seq', ?)", -1, &stmt, nil) == SQLITE_OK else { return }
+    guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO sync_cursors(key, value) VALUES(?, ?)", -1, &stmt, nil) == SQLITE_OK else { return }
     defer { sqlite3_finalize(stmt) }
-    sqlite3_bind_int64(stmt, 1, Int64(seq))
-    sqlite3_step(stmt)
+    sqlite3_bind_text(stmt, 1, Self.progressCursorKey(profileID ?? activeScope.id), -1, SQLITE_TRANSIENT)
+    sqlite3_bind_int64(stmt, 2, Int64(seq))
+    if sqlite3_step(stmt) != SQLITE_DONE {
+      log.error("setProgressSeq: write failed — \(String(cString: sqlite3_errmsg(db)))")
+    }
+  }
+
+  // MARK: - Profiles
+
+  /// Moves progress recorded before profiles existed (the legacy bucket '') to the owner
+  /// (FR-233), once the owner's id is known. Where the owner already has a row for the same
+  /// title, an unsent local write wins (same ownership rule as upsertProgress); otherwise
+  /// the owner's row stands. The legacy cursor is dropped, so the owner's next sync
+  /// re-fetches its progress in full rather than trusting a cursor kept for another bucket.
+  func claimLegacyRows(ownerID: String) {
+    guard !ownerID.isEmpty, let db else { return }
+    exec("BEGIN TRANSACTION")
+    var stmt: OpaquePointer?
+    let sql = """
+      INSERT INTO progress(profile_id, item_id, position_seconds, duration_seconds, updated_at, pending_sync)
+        SELECT ?1, item_id, position_seconds, duration_seconds, updated_at, pending_sync
+        FROM progress WHERE profile_id = ''
+      ON CONFLICT(profile_id, item_id) DO UPDATE SET
+        position_seconds=CASE WHEN excluded.pending_sync = 1 THEN excluded.position_seconds ELSE position_seconds END,
+        duration_seconds=CASE WHEN excluded.pending_sync = 1 THEN excluded.duration_seconds ELSE duration_seconds END,
+        updated_at=CASE WHEN excluded.pending_sync = 1 THEN excluded.updated_at ELSE updated_at END,
+        pending_sync=MAX(pending_sync, excluded.pending_sync)
+    """
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+      log.error("claimLegacyRows: prepare failed — \(String(cString: sqlite3_errmsg(db)))")
+      exec("ROLLBACK")
+      return
+    }
+    sqlite3_bind_text(stmt, 1, ownerID, -1, SQLITE_TRANSIENT)
+    let rc = sqlite3_step(stmt)
+    sqlite3_finalize(stmt)
+    guard rc == SQLITE_DONE else {
+      log.error("claimLegacyRows: copy failed [\(rc)] — legacy rows kept")
+      exec("ROLLBACK")
+      return
+    }
+    exec("DELETE FROM progress WHERE profile_id = ''")
+    exec("DELETE FROM sync_cursors WHERE key = 'progress_seq:'")
+    exec("COMMIT")
+  }
+
+  /// Local mirror of FR-206: a deleted profile's positions and cursor leave this device.
+  /// Touches nothing else: no items, no other profile.
+  func deleteProfileData(profileID: String) {
+    guard !profileID.isEmpty, let db else { return }
+    exec("BEGIN TRANSACTION")
+    for sql in ["DELETE FROM progress WHERE profile_id = ?", "DELETE FROM sync_cursors WHERE key = ?"] {
+      var stmt: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { continue }
+      let value = sql.contains("progress WHERE") ? profileID : Self.progressCursorKey(profileID)
+      sqlite3_bind_text(stmt, 1, value, -1, SQLITE_TRANSIENT)
+      if sqlite3_step(stmt) != SQLITE_DONE {
+        log.error("deleteProfileData: step failed — \(String(cString: sqlite3_errmsg(db)))")
+      }
+      sqlite3_finalize(stmt)
+    }
+    exec("COMMIT")
+  }
+
+  /// Items synced before the server sent `ageLevel` have NULL levels, which every read
+  /// treats as 4: a restricted profile would see nothing until each item changed. The first
+  /// time the server proves it supports profiles, re-fetch the catalog once. Resetting the
+  /// cursor alone is safe (see homeForceRefresh): upsertItems is idempotent and the library
+  /// stays usable throughout. Returns true when it reset the cursor.
+  func beginAgeLevelBackfillIfNeeded() -> Bool {
+    guard db != nil else { return false }
+    let done = scalarInt("SELECT value FROM sync_cursors WHERE key = 'age_level_backfill'") ?? 0
+    guard done == 0 else { return false }
+    exec("BEGIN TRANSACTION")
+    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', 0)")
+    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('age_level_backfill', 1)")
+    exec("COMMIT")
+    log.info("age-level backfill: item cursor reset so every item is re-fetched with its level")
+    return true
   }
 
   // MARK: - Clear
@@ -1091,7 +1302,8 @@ actor LocalStore {
     exec("DELETE FROM items")
     exec("DELETE FROM progress")
     exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('item_seq', 0)")
-    exec("INSERT OR REPLACE INTO sync_cursors(key, value) VALUES('progress_seq', 0)")
+    // Every profile's progress cursor goes with the rows (sign-out: nothing survives).
+    exec("DELETE FROM sync_cursors WHERE key LIKE 'progress_seq%'")
     exec("COMMIT")
   }
 
@@ -1113,6 +1325,8 @@ actor LocalStore {
     let season      = colOptInt(stmt, 12)
     let episode     = colOptInt(stmt, 13)
     let changeSeq   = Int(sqlite3_column_int64(stmt, 14))
+    let ageLevel    = colOptInt(stmt, 18)
+    let contentRating = colText(stmt, 19)
 
     var progress: ItemProgress? = nil
     if sqlite3_column_type(stmt, 15) != SQLITE_NULL {
@@ -1128,7 +1342,8 @@ actor LocalStore {
       posterImageId: poster, backdropImageId: backdrop,
       progress: progress, showName: showName, showFolderId: showFolderId,
       seasonNumber: season, episodeNumber: episode,
-      libraryId: libId, changeSeq: changeSeq
+      libraryId: libId, changeSeq: changeSeq,
+      contentRating: contentRating, ageLevel: ageLevel
     )
   }
 

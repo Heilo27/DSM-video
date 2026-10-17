@@ -5,6 +5,18 @@ struct APIClient {
   let token: String?
   /// When true, adds `Cookie: type=tunnel` to every request — required for QuickConnect relay mode.
   var usesTunnelCookie: Bool = false
+  /// Where `X-DSVideo-Profile` comes from (FR-220). The default reads ActiveProfileStore at
+  /// the moment each request is built, so the ~dozen places that construct an APIClient
+  /// never carry a profile id that can go stale. Work that must stay with ONE profile even
+  /// if the user switches mid-flight (progress sync, the outbox) pins it with `pinned(to:)`.
+  var profileHeader: ProfileHeaderSource = .activeProfile
+
+  /// A copy whose requests always name `profileID` (nil = send no header).
+  func pinned(to profileID: String?) -> APIClient {
+    var copy = self
+    copy.profileHeader = .pinned(profileID)
+    return copy
+  }
 
   /// Request timeout tiers.
   ///
@@ -487,6 +499,69 @@ struct APIClient {
     )
   }
 
+  // MARK: - Profiles (docs/api/ProfilesAPI.md)
+  //
+  // Profile routes send NO profile header: they work whatever the active profile is (the
+  // picker needs them), and a stale id from a deleted profile must not lock the picker out.
+  // PIN-bearing calls use `request`, never `requestWithRetry`: a silent retry after a
+  // timeout could spend a second attempt against the shared failure counter (FR-215).
+
+  func profiles() async throws -> ProfilesResponse {
+    try await pinned(to: nil).requestWithRetry(
+      path: "/api/v1/profiles", method: "GET", body: Optional<Int>.none,
+      response: ProfilesResponse.self, timeoutInterval: Timeout.interactive)
+  }
+
+  func ageLevels() async throws -> AgeLevelsResponse {
+    try await pinned(to: nil).requestWithRetry(
+      path: "/api/v1/profiles/age-levels", method: "GET", body: Optional<Int>.none,
+      response: AgeLevelsResponse.self, timeoutInterval: Timeout.interactive)
+  }
+
+  func createProfile(_ body: CreateProfileRequest) async throws -> Profile {
+    try await pinned(to: nil).request(
+      path: "/api/v1/profiles", method: "POST", body: body,
+      response: Profile.self, timeoutInterval: Timeout.interactive)
+  }
+
+  func updateProfile(id: String, _ body: UpdateProfileRequest) async throws -> Profile {
+    try await pinned(to: nil).request(
+      path: "/api/v1/profiles/\(Self.pathSegment(id))", method: "PATCH", body: body,
+      response: Profile.self, timeoutInterval: Timeout.interactive)
+  }
+
+  /// DESTRUCTIVE (FR-206): the server permanently deletes the profile's progress, history
+  /// and watchlist. Callers confirm with the user first.
+  func deleteProfile(id: String, ownerPin: String) async throws {
+    _ = try await pinned(to: nil).request(
+      path: "/api/v1/profiles/\(Self.pathSegment(id))", method: "DELETE",
+      body: OwnerPinBody(ownerPin: ownerPin),
+      response: EmptyDecodable.self, timeoutInterval: Timeout.interactive)
+  }
+
+  /// FR-213: the server checks the PIN every time a protected profile is entered.
+  func verifyPin(profileID: String, pin: String) async throws {
+    _ = try await pinned(to: nil).request(
+      path: "/api/v1/profiles/\(Self.pathSegment(profileID))/pin/verify", method: "POST",
+      body: PinBody(pin: pin),
+      response: EmptyDecodable.self, timeoutInterval: Timeout.interactive)
+  }
+
+  /// FR-216: a forgotten owner PIN is reset with the DSM password (and OTP, if any).
+  func resetOwnerPin(password: String, otp: String?, newPin: String) async throws {
+    _ = try await pinned(to: nil).request(
+      path: "/api/v1/profiles/owner/pin/reset", method: "POST",
+      body: OwnerPinResetRequest(password: password, otp: otp, newPin: newPin),
+      response: EmptyDecodable.self, timeoutInterval: Timeout.auth)
+  }
+
+  /// One path segment: "/" is escaped too, so an id can never step into another route.
+  private static func pathSegment(_ id: String) -> String {
+    var allowed = CharacterSet.urlPathAllowed
+    allowed.remove("/")
+    return id.addingPercentEncoding(withAllowedCharacters: allowed) ?? id
+  }
+
   // MARK: - Watchlist
 
   func watchlist() async throws -> ItemsResponse {
@@ -591,8 +666,14 @@ struct APIClient {
     var req = URLRequest(url: url, timeoutInterval: timeoutInterval)
     req.httpMethod = method
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    var sentProfileID: String?
     if authorized, let token {
       req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      switch profileHeader {
+      case .activeProfile: sentProfileID = ActiveProfileStore.shared.activeProfileID
+      case .pinned(let id): sentProfileID = id
+      }
+      ActiveProfileStore.setHeader(sentProfileID, on: &req)
     }
     if usesTunnelCookie {
       req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
@@ -652,7 +733,15 @@ struct APIClient {
       // Keychain. Preserving the status here is what makes those handlers fire.
       if let apiErr = try? Self.decoder.decode(APIErrorResponse.self, from: data) {
         dlog.error(.network, "\(endpoint) → HTTP \(httpResp.statusCode) \(apiErr.error) (\(ms)ms)")
-        throw APIError.server(apiErr.error, status: httpResp.statusCode)
+        if apiErr.error == "unknown_profile" {
+          // The profile this request named is gone (deleted, or another account's). The
+          // app returns to the picker (FR-206); AppState decides whether it was the active one.
+          let rejected = sentProfileID
+          Task { @MainActor in
+            NotificationCenter.default.post(name: .activeProfileRejected, object: rejected)
+          }
+        }
+        throw APIError.server(apiErr.error, status: httpResp.statusCode, detail: apiErr.detail)
       }
       dlog.error(.network, "\(endpoint) → HTTP \(httpResp.statusCode), no error body (\(ms)ms)")
       throw APIError.http(httpResp.statusCode)
@@ -712,7 +801,7 @@ enum APIError: Error {
   /// needed because the backend returns a JSON body on EVERY error including 401, so
   /// matching on the message alone cannot distinguish an auth failure from any other
   /// server-side rejection. Defaulted so existing construction sites keep compiling.
-  case server(String, status: Int = 0)
+  case server(String, status: Int = 0, detail: APIErrorDetail? = nil)
   case invalidURL
   // The server is currently converting this title to a smooth-playback format
   // (auto-normalize). Not a failure — an informational, transient state.
@@ -780,9 +869,42 @@ enum APIError: Error {
       default:
         return "The server rejected the request (\(code))."
       }
-    case .server(let msg, _):
+    case .server(let msg, _, let detail):
       // Map known server error codes to friendly, actionable text.
       switch msg {
+
+      // ── Profiles and PINs (FRD-002 §10) ───────────────────────────────────────
+      // None of these is a session problem (FR-217): they never say "sign in again".
+      case "unknown_profile":
+        return "That profile no longer exists. Choose a profile to continue."
+      case "content_restricted":
+        return "This title is above this profile's age rating."
+      case "profile_restricted":
+        return "This profile has an age limit, so it can't change library details. Switch to an Adult profile to do this."
+      case "owner_pin_required":
+        return "Enter the owner's PIN to manage profiles."
+      case "pin_incorrect":
+        return Self.incorrectPinMessage(attemptsRemaining: detail?.attemptsRemaining)
+      case "pin_locked":
+        return Self.pinLockedMessage(retryAfterSeconds: detail?.retryAfterSeconds)
+      case "password_incorrect":
+        return "Incorrect DSM password or verification code."
+      case "invalid_pin_format":
+        return "A PIN must be exactly 4 digits."
+      case "invalid_profile_name":
+        return "A profile name needs 1 to 20 characters."
+      case "duplicate_profile_name":
+        return "Another profile already has that name."
+      case "invalid_age_level":
+        return "That age rating isn't one this app supports. Choose one from the list."
+      case "profile_limit_reached":
+        return "This account already has the most profiles allowed. Delete one to add another."
+      case "owner_pin_not_set":
+        return "Set a PIN on the owner profile before adding other profiles."
+      case "owner_profile_immutable":
+        return "The owner profile can't be deleted or given an age limit, and keeps its PIN while other profiles exist."
+      case "unknown_collection":
+        return "That collection isn't available on this profile."
 
       // ── Account / access ──────────────────────────────────────────────────────
       case "permission_denied":
@@ -885,7 +1007,7 @@ enum APIError: Error {
     switch self {
     case .http(let code):
       return code == 401
-    case .server(let msg, let status):
+    case .server(let msg, let status, _):
       if status == 401 { return true }
       return ["missing_token", "invalid_token", "token_revoked"].contains(msg)
     default:
@@ -897,7 +1019,7 @@ enum APIError: Error {
   /// (DSM Application Privileges) or is disabled. Re-authentication cannot resolve either —
   /// only a change on the server can — so these must NOT drive the session-expiry path.
   var isAccountStateFailure: Bool {
-    if case .server(let msg, _) = self {
+    if case .server(let msg, _, _) = self {
       return msg == "permission_denied" || msg == "account_disabled"
     }
     return false
@@ -917,7 +1039,7 @@ enum APIError: Error {
     switch self {
     case .http(let code):
       return code == 400 || code == 404 || code == 410 || code == 422
-    case .server(let msg, let status):
+    case .server(let msg, let status, _):
       if status == 400 || status == 404 || status == 410 || status == 422 { return true }
       return ["not_found", "invalid_progress", "item_not_found"].contains(msg)
     default:
@@ -940,6 +1062,64 @@ enum APIError: Error {
 
 struct APIErrorResponse: Decodable {
   let error: String
+  /// `pin_incorrect` only: tries left before the profile locks (FR-215).
+  let attemptsRemaining: Int?
+  /// `pin_locked` only: seconds until PIN checks are accepted again (FR-215).
+  let retryAfterSeconds: Int?
+
+  var detail: APIErrorDetail? {
+    guard attemptsRemaining != nil || retryAfterSeconds != nil else { return nil }
+    return APIErrorDetail(attemptsRemaining: attemptsRemaining, retryAfterSeconds: retryAfterSeconds)
+  }
+}
+
+/// Extra fields some error bodies carry (ProfilesAPI.md, FRD-002 §10).
+nonisolated struct APIErrorDetail: Equatable, Sendable {
+  var attemptsRemaining: Int?
+  var retryAfterSeconds: Int?
+}
+
+/// Where APIClient takes `X-DSVideo-Profile` from. See `APIClient.profileHeader`.
+nonisolated enum ProfileHeaderSource: Equatable, Sendable {
+  /// Read ActiveProfileStore when the request is built.
+  case activeProfile
+  /// Always this id; nil sends no header.
+  case pinned(String?)
+}
+
+extension APIError {
+  /// The server's structured extras, when the error carried any.
+  var detail: APIErrorDetail? {
+    if case .server(_, _, let detail) = self { return detail }
+    return nil
+  }
+
+  /// The server's error code, when it sent one.
+  var serverCode: String? {
+    if case .server(let code, _, _) = self { return code }
+    return nil
+  }
+
+  nonisolated static func incorrectPinMessage(attemptsRemaining: Int?) -> String {
+    guard let left = attemptsRemaining else { return "Incorrect PIN." }
+    switch left {
+    case ...0: return "Incorrect PIN. No tries left, so PIN entry for this profile is locked for a while."
+    case 1: return "Incorrect PIN. 1 try left before this profile locks."
+    default: return "Incorrect PIN. \(left) tries left before this profile locks."
+    }
+  }
+
+  nonisolated static func pinLockedMessage(retryAfterSeconds: Int?) -> String {
+    let base = "Too many incorrect PINs."
+    guard let seconds = retryAfterSeconds, seconds > 0 else {
+      return base + " Wait a few minutes and try again."
+    }
+    if seconds < 60 {
+      return base + " Try again in \(seconds) second\(seconds == 1 ? "" : "s")."
+    }
+    let minutes = (seconds + 59) / 60   // round up: never promise it unlocks sooner than it does
+    return base + " Try again in \(minutes) minute\(minutes == 1 ? "" : "s")."
+  }
 }
 
 /// 409 body from /playback when the server is mid-converting the title to a

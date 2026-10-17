@@ -38,6 +38,9 @@ struct Trickplay {
       var r = URLRequest(url: url, timeoutInterval: 20)
       if !url.absoluteString.contains("_sid="), let token {
         r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        // Trickplay is refused above the active profile's ceiling (FR-250), so it must
+        // name the profile like every other request.
+        ActiveProfileStore.shared.applyHeader(to: &r)
       }
       if usesTunnelCookie {
         r.setValue("type=tunnel", forHTTPHeaderField: "Cookie")

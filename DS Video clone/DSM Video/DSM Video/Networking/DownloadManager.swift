@@ -264,6 +264,8 @@ final class DownloadManager: NSObject {
     // For the REST API backend, attach the Bearer token as a header.
     if !videoURL.absoluteString.contains("_sid="), let token {
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      // FR-220: a download is opened for the active profile, like every other request.
+      ActiveProfileStore.shared.applyHeader(to: &request)
     }
     if usesTunnelCookieProvider?() == true {
       request.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
