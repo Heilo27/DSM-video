@@ -22,6 +22,9 @@ string IDs, ISO-8601 UTC). In addition:
 - **Errors** keep the server's existing shape: `{ "error": "<code>" }`, with the extra fields noted per code.
   **No profile or PIN error is ever 401.** 401 keeps its one meaning, "your session is invalid" (FR-217).
 - **PINs** are strings of exactly 4 ASCII digits (`"0420"`, not `420`).
+- `/profiles*` routes are exempt from `unknown_profile`: an unknown or deleted id falls back to FR-221 so a
+  device holding a deleted profile id can still load the picker; the response header names the profile
+  actually used.
 
 ## Item fields (added to every item payload)
 
@@ -54,7 +57,8 @@ Every object that represents a title (`/items`, `/items/{id}`, `/search`, `/just
 }
 ```
 
-`avatar` is an opaque key (≤ 32 characters) from the apps' built-in set; the server stores it as given. The
+`avatar` is an opaque key from the apps' built-in set: 1–32 characters, letters, digits, `-` and `_` only
+(anything else is `400 invalid_avatar`); `null` clears it. The server stores it as given. The
 PIN is never returned, only `hasPin`.
 
 ## Profiles
@@ -85,7 +89,7 @@ Request:
 Response `201`: the new profile object.
 
 Errors: `owner_pin_required`, `pin_incorrect`, `pin_locked`, `owner_pin_not_set`, `profile_limit_reached`,
-`invalid_profile_name`, `duplicate_profile_name`, `invalid_age_level`, `invalid_pin_format`.
+`invalid_profile_name`, `duplicate_profile_name`, `invalid_avatar`, `invalid_age_level`, `invalid_pin_format`.
 
 ### PATCH `/profiles/{id}`
 Edit any profile, the owner's included. **Requires the owner PIN.** Only the fields present change.
@@ -157,7 +161,8 @@ Response:
 ```
 
 Errors: `403 password_incorrect` (wrong password or OTP; deliberately not 401), `403 permission_denied`
-(DSM account no longer allowed to use the app, as at login), `400 invalid_pin_format`.
+(DSM account no longer allowed to use the app, as at login), `503 dsm_unavailable` (DSM could not be
+reached or gave no usable answer; the password is never blamed for that), `400 invalid_pin_format`.
 
 ### GET `/profiles/age-levels`
 The ladder, for display on the profile editor ("Older Kids: PG, TV-Y7, TV-PG"). Clients display this and
@@ -273,4 +278,6 @@ filtered). **X** = exempt.
 | `profile_limit_reached` | 409 | — |
 | `owner_pin_not_set` | 409 | — |
 | `owner_profile_immutable` | 409 | — |
+| `invalid_avatar` | 400 | — |
+| `dsm_unavailable` | 503 | — |
 | `unknown_collection` | 404 | — |

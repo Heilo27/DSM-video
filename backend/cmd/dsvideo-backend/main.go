@@ -35,6 +35,8 @@ import (
 
 	"dsvideo/backend/internal/metadata"
 	"dsvideo/backend/internal/normalize"
+	// Aliased: main.go uses `rating` as a local name for the TMDb score in many handlers.
+	agerating "dsvideo/backend/internal/rating"
 	"dsvideo/backend/internal/transcode"
 
 	"github.com/go-chi/chi/v5"
@@ -191,6 +193,12 @@ type Server struct {
 	// Updated by incrementSeq and by inline item_seq updates during scan.
 	cachedItemSeq     atomic.Int64
 	cachedProgressSeq atomic.Int64
+
+	// FRD-002 profiles (profiles.go): PIN limiter and the profile-mutation lock. Zero value
+	// is ready to use.
+	profiles profileState
+	// Test seam for DSM password checks (login, owner-PIN reset); nil in production.
+	dsmAuthOverride func(ctx context.Context, username, password, otp, did string) (*dsmUserInfo, error)
 }
 
 // authRateEntry tracks per-IP attempt counts for auth endpoints.
@@ -272,6 +280,11 @@ func main() {
 
 	if err := migrate(db); err != nil {
 		log.Fatalf("migrate: %v", err)
+	}
+	// FRD-002 FR-232: backs the database up, then moves progress and watchlist to
+	// per-profile keys. A failure exits here with the cause in the log line.
+	if err := migrateProfiles(db, cfg.DBPath); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	// Purge expired revoked token rows from a previous run, then warm the in-memory
@@ -1074,6 +1087,13 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
+
+		// FRD-002 §4: /profiles* resolve leniently (a stale profile id still loads the
+		// picker); every other authenticated route refuses an unknown id with
+		// 403 unknown_profile. Both set the X-DSVideo-Profile response header.
+		registerProfileRoutes(r, s)
+		r = r.With(s.profileResolver(true))
+
 		r.Get("/sync/heartbeat", s.handleSyncHeartbeat)
 
 		// TASK-740: trick-play scrubbing previews. The .vtt request lazily generates
@@ -1952,7 +1972,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Authenticate against Synology DSM WebAPI
-	dsmUser, err := s.authenticateDSM(r.Context(), req.Username, req.Password, req.OTP, "")
+	dsmUser, err := s.dsmAuth(r.Context(), req.Username, req.Password, req.OTP, "")
 	if err != nil {
 		log.Printf("DSM auth failed (username redacted): %v", err)
 		// Distinguish a permission denial (correct password, account not authorized
@@ -1971,6 +1991,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "token_error")
 		return
+	}
+	// FR-204: every account has an owner profile from its first sign-in. A failure here is
+	// logged, not fatal: the profile resolver creates it lazily on the next request.
+	ownerName := dsmUser.DisplayName
+	if strings.TrimSpace(ownerName) == "" {
+		ownerName = dsmUser.Username
+	}
+	if err := s.ensureOwnerProfile(r.Context(), userID, ownerName); err != nil {
+		log.Printf("login: ensure owner profile: %v", err)
 	}
 
 	var resp loginResponse
@@ -2678,9 +2707,15 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Progress is per profile (FRD-002 FR-230).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+
 	// Handle "justWatched" filter
 	if filter == "justWatched" {
-		s.handleItemsJustWatched(w, r, libraryID, u, limit, offset)
+		s.handleItemsJustWatched(w, r, libraryID, v, limit, offset)
 		return
 	}
 
@@ -2776,7 +2811,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// JOIN progress in the main query to avoid N+1 SELECT calls.
-	joinArgs := append([]any{u.ID}, args...)
+	joinArgs := append([]any{v.ProfileID}, args...)
 	joinArgs = append(joinArgs, limit, offset)
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
@@ -2785,7 +2820,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		        p.position_seconds, p.duration_seconds, p.updated_at,
 		        i.show_folder_id
 		 FROM items i
-		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 `+where+` `+orderBy+` LIMIT ? OFFSET ?`,
 		joinArgs...,
 	)
@@ -2875,7 +2910,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r) // progress is per profile (FR-230)
+	if !ok {
+		return
+	}
 	// ESCAPED. q is END-USER text, and % and _ are LIKE metacharacters: searching "%"
 	// returned the ENTIRE library and "50% Off" silently over-matched. Six other LIKE
 	// sites already escaped; this — the only one taking user input — did not. The
@@ -2898,11 +2936,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		        i.poster_path, i.backdrop_path,
 		        p.position_seconds, p.duration_seconds, p.updated_at
 		 FROM items i
-		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'
 		 ORDER BY i.title ASC, i.id ASC
 		 LIMIT ? OFFSET ?`,
-		u.ID, pattern, limit, offset,
+		v.ProfileID, pattern, limit, offset,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -3018,18 +3056,18 @@ func (s *Server) handleItemsByFolder(w http.ResponseWriter, r *http.Request, lib
 	writeJSON(w, http.StatusOK, map[string]any{"folders": folders})
 }
 
-func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, libraryID string, u authedUser, limit, offset int) {
+func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, libraryID string, v viewer, limit, offset int) {
 	var where string
 	var args []any
 
-	args = append(args, u.ID)
+	args = append(args, v.ProfileID)
 	if libraryID != "" {
 		where = "AND i.library_id = ?"
 		args = append(args, libraryID)
 	}
 
 	countSQL := `SELECT COUNT(*) FROM items i
-		INNER JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		INNER JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		WHERE 1=1 ` + where
 	var total int
 	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
@@ -3040,7 +3078,7 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.overview
 		 FROM items i
-		 INNER JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		 INNER JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE 1=1 `+where+` ORDER BY p.updated_at DESC LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...,
 	)
@@ -3073,7 +3111,7 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 	for i, r := range rawRows {
 		ids[i] = r.id
 	}
-	progressMap := s.getProgressBatch(u.ID, ids)
+	progressMap := s.getProfileProgressBatch(v.ProfileID, ids)
 
 	items := make([]map[string]any, 0, len(rawRows))
 	for _, r := range rawRows {
@@ -3241,7 +3279,10 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r) // episode progress is per profile (FR-230)
+	if !ok {
+		return
+	}
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
 	// Match by folder PATH, never by the show_name column — show_name is not unique across
@@ -3335,7 +3376,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	for _, pe := range pending {
 		episodeIDs = append(episodeIDs, pe.id)
 	}
-	progressByID := s.getProgressBatch(u.ID, episodeIDs)
+	progressByID := s.getProfileProgressBatch(v.ProfileID, episodeIDs)
 
 	for _, pe := range pending {
 		p := progressByID[pe.id]
@@ -3930,7 +3971,14 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Persist alongside the in-memory entry so the session survives a restart. Best
 	// effort: a failure here costs restart-resumption, not playback.
 	s.persistPlaySession(sessionID, ps, u.ID)
-	resume, _ := s.getProgress(u.ID, itemID)
+	// Resume point is the viewing profile's (FR-230). Best effort like the lookup itself:
+	// the session is already registered, so a profiles failure starts at 0 rather than 500.
+	var resume map[string]any
+	if pv, err := s.viewerFor(r); err != nil {
+		log.Printf("[playback] viewer for resume: %v", err)
+	} else {
+		resume, _ = s.getProfileProgress(pv.ProfileID, itemID)
+	}
 	var resumePos any = 0
 	if resume != nil {
 		if v, ok := resume["positionSeconds"].(int); ok {
@@ -5708,7 +5756,12 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
-	u := userFromCtx(r.Context())
+	// Resolved before progressMu is taken: the profiles lookup is a DB read and must not
+	// run under the lock. Progress is stored per profile (FRD-002 FR-230).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Prefer the client's watch time over receive time — see progressRequest.WatchedAt.
@@ -5761,16 +5814,9 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	res, err := s.db.Exec(
-		"INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq) VALUES(?,?,?,?,?,?) "+
-			"ON CONFLICT(item_id, user_id) DO UPDATE SET "+
-			"position_seconds=excluded.position_seconds, "+
-			"duration_seconds=excluded.duration_seconds, "+
-			"updated_at=excluded.updated_at, "+
-			"write_seq=excluded.write_seq "+
-			"WHERE excluded.write_seq > progress.write_seq",
-		itemID, u.ID, req.PositionSeconds, req.DurationSeconds, watchedAt, writeSeq,
-	)
+	// upsertProgress is the one home for this statement; its WHERE clause is the write_seq
+	// guard described above.
+	res, err := s.upsertProgress(v, itemID, req.PositionSeconds, req.DurationSeconds, watchedAt, writeSeq)
 	var rowsAffected int64
 	if err == nil {
 		rowsAffected, _ = res.RowsAffected()
@@ -5844,7 +5890,11 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		limit = 500
 	}
 
-	u := userFromCtx(r.Context())
+	// Each item row carries the viewing profile's progress (FR-230/FR-233).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 
 	// Select the right query variant based on since/afterRowid:
 	//   since=0 → use >= so pre-scan rows with change_seq=0 are included
@@ -5853,9 +5903,9 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
 		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		WHERE i.change_seq > ? AND i.rowid > ?
 		ORDER BY i.change_seq ASC, i.rowid ASC
 		LIMIT ?`
@@ -5863,9 +5913,9 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
 		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		WHERE i.change_seq > ?
 		ORDER BY i.change_seq ASC, i.rowid ASC
 		LIMIT ?`
@@ -5873,9 +5923,9 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
 		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		WHERE i.change_seq >= ? AND i.rowid > ?
 		ORDER BY i.change_seq ASC, i.rowid ASC
 		LIMIT ?`
@@ -5883,9 +5933,9 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
 		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
 		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id
+		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
 		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
+		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		WHERE i.change_seq >= ?
 		ORDER BY i.change_seq ASC, i.rowid ASC
 		LIMIT ?`
@@ -5894,13 +5944,13 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch {
 	case since == 0 && afterRowid > 0:
-		rows, err = s.db.Query(queryGTEWithRowid, u.ID, since, afterRowid, limit+1)
+		rows, err = s.db.Query(queryGTEWithRowid, v.ProfileID, since, afterRowid, limit+1)
 	case since == 0:
-		rows, err = s.db.Query(queryGTE, u.ID, since, limit+1)
+		rows, err = s.db.Query(queryGTE, v.ProfileID, since, limit+1)
 	case afterRowid > 0:
-		rows, err = s.db.Query(queryGTWithRowid, u.ID, since, afterRowid, limit+1)
+		rows, err = s.db.Query(queryGTWithRowid, v.ProfileID, since, afterRowid, limit+1)
 	default:
-		rows, err = s.db.Query(queryGT, u.ID, since, limit+1)
+		rows, err = s.db.Query(queryGT, v.ProfileID, since, limit+1)
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -5925,6 +5975,10 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		EpisodeNumber   *int            `json:"episodeNumber,omitempty"`
 		ChangeSeq       int64           `json:"changeSeq"`
 		Progress        *map[string]any `json:"progress,omitempty"`
+		// FRD-002 FR-240/241, ADR-001 §4: sync is account-scoped and unfiltered; every item
+		// carries its level so the device filters each local read. Unrated → null / 4.
+		ContentRating *string `json:"contentRating"`
+		AgeLevel      int     `json:"ageLevel"`
 	}
 
 	items := make([]syncItem, 0, limit)
@@ -5936,16 +5990,21 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		var rating sql.NullFloat64
 		var poster, backdrop, showName, showFolderIDCol sql.NullString
 		var seasonNum, episodeNum sql.NullInt64
-		var progUpdatedAt sql.NullString
+		var progUpdatedAt, contentRating sql.NullString
 
 		if err := rows.Scan(
 			&rowid, &item.ID, &item.LibraryID, &item.Type, &item.Title, &year, &dur,
 			&item.AddedAt, &rating, &poster, &backdrop,
 			&showName, &seasonNum, &episodeNum, &item.ChangeSeq,
-			&posSeconds, &durSeconds, &progUpdatedAt, &showFolderIDCol,
+			&posSeconds, &durSeconds, &progUpdatedAt, &showFolderIDCol, &contentRating,
 		); err != nil {
 			continue
 		}
+		if contentRating.Valid {
+			cr := contentRating.String
+			item.ContentRating = &cr
+		}
+		item.AgeLevel = agerating.LevelPtr(item.ContentRating)
 		if rowid > maxRowid {
 			maxRowid = rowid
 		}
@@ -6147,12 +6206,15 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProgressAll — GET /api/v1/progress/all
-// Returns all progress rows for the authenticated user in a single query.
+// Returns all progress rows for the viewing profile (FR-230) in a single query.
 func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ?",
-		u.ID,
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ?",
+		v.ProfileID,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6176,9 +6238,12 @@ func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProgressBatch — GET /api/v1/progress?ids=id1,id2,...
-// Returns progress for multiple items in a single query.
+// Returns the viewing profile's progress (FR-230) for multiple items in a single query.
 func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 	raw := r.URL.Query().Get("ids")
 	if raw == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"progress": map[string]any{}})
@@ -6202,12 +6267,12 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 	placeholders := strings.Repeat("?,", len(ids))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(ids)+1)
-	args = append(args, u.ID)
+	args = append(args, v.ProfileID)
 	for _, id := range ids {
 		args = append(args, id)
 	}
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ? AND item_id IN ("+placeholders+")",
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")",
 		args...,
 	)
 	if err != nil {
@@ -6240,8 +6305,9 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (s *Server) getProgress(userID, itemID string) (map[string]any, error) {
-	row := s.db.QueryRow("SELECT position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ? AND item_id = ?", userID, itemID)
+// getProfileProgress returns one profile's progress for itemID, or (nil, nil) if it has none.
+func (s *Server) getProfileProgress(profileID, itemID string) (map[string]any, error) {
+	row := s.db.QueryRow("SELECT position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id = ?", profileID, itemID)
 	var pos, dur int
 	var updatedAt string
 	if err := row.Scan(&pos, &dur, &updatedAt); err != nil {
@@ -6253,9 +6319,25 @@ func (s *Server) getProgress(userID, itemID string) (map[string]any, error) {
 	return map[string]any{"positionSeconds": pos, "durationSeconds": dur, "updatedAt": updatedAt}, nil
 }
 
-// getProgressBatch returns progress for a slice of itemIDs in a single query.
-// Returns a map of itemID → progress map; missing items are absent from the map.
+// getProgressBatch is the no-header path (the WebAPI layer, which cannot send
+// X-DSVideo-Profile): progress for the account's FR-221 default profile (FR-251). Handlers
+// that have a viewer call getProfileProgressBatch directly. A profiles lookup failure yields
+// an empty map, the same degraded answer as a failed progress query.
 func (s *Server) getProgressBatch(userID string, itemIDs []string) map[string]map[string]any {
+	if len(itemIDs) == 0 {
+		return map[string]map[string]any{}
+	}
+	v, err := s.defaultViewer(context.Background(), userID)
+	if err != nil {
+		log.Printf("getProgressBatch: default profile for %s: %v", userID, err)
+		return map[string]map[string]any{}
+	}
+	return s.getProfileProgressBatch(v.ProfileID, itemIDs)
+}
+
+// getProfileProgressBatch returns one profile's progress for a slice of itemIDs in a single
+// query. Returns a map of itemID → progress map; missing items are absent from the map.
+func (s *Server) getProfileProgressBatch(profileID string, itemIDs []string) map[string]map[string]any {
 	result := make(map[string]map[string]any, len(itemIDs))
 	if len(itemIDs) == 0 {
 		return result
@@ -6263,12 +6345,12 @@ func (s *Server) getProgressBatch(userID string, itemIDs []string) map[string]ma
 	placeholders := strings.Repeat("?,", len(itemIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, 0, len(itemIDs)+1)
-	args = append(args, userID)
+	args = append(args, profileID)
 	for _, id := range itemIDs {
 		args = append(args, id)
 	}
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE user_id = ? AND item_id IN ("+placeholders+")",
+		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")",
 		args...,
 	)
 	if err != nil {
@@ -6752,7 +6834,10 @@ func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
 // -------------------------
 
 func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r) // the watchlist is per profile (FR-230)
+	if !ok {
+		return
+	}
 
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
@@ -6760,10 +6845,10 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		        p.position_seconds, p.duration_seconds, p.updated_at
 		 FROM watchlist w
 		 JOIN items i ON i.id = w.item_id
-		 LEFT JOIN progress p ON p.item_id = i.id AND p.user_id = ?
-		 WHERE w.user_id = ?
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
+		 WHERE w.profile_id = ?
 		 ORDER BY w.added_at DESC`,
-		u.ID, u.ID,
+		v.ProfileID, v.ProfileID,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6822,12 +6907,15 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWatchlistCheck(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r) // the watchlist is per profile (FR-230)
+	if !ok {
+		return
+	}
 	itemID := chi.URLParam(r, "itemId")
 
 	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM watchlist WHERE item_id = ? AND user_id = ?", itemID, u.ID).Scan(&count); err != nil {
-		log.Printf("[handleWatchlistCheck] db error for item %q user %q: %v", itemID, u.ID, err)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM watchlist WHERE item_id = ? AND profile_id = ?", itemID, v.ProfileID).Scan(&count); err != nil {
+		log.Printf("[handleWatchlistCheck] db error for item %q profile %q: %v", itemID, v.ProfileID, err)
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
@@ -6835,7 +6923,10 @@ func (s *Server) handleWatchlistCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r) // the watchlist is per profile (FR-230)
+	if !ok {
+		return
+	}
 	itemID := chi.URLParam(r, "itemId")
 
 	// TASK-797: only watchlist real items.
@@ -6851,8 +6942,8 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO watchlist(item_id, user_id) VALUES (?, ?)`,
-		itemID, u.ID,
+		`INSERT OR IGNORE INTO watchlist(item_id, user_id, profile_id) VALUES (?, ?, ?)`,
+		itemID, v.UserID, v.ProfileID,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
@@ -6862,10 +6953,13 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWatchlistRemove(w http.ResponseWriter, r *http.Request) {
-	u := userFromCtx(r.Context())
+	v, ok := s.requestViewer(w, r) // the watchlist is per profile (FR-230)
+	if !ok {
+		return
+	}
 	itemID := chi.URLParam(r, "itemId")
 
-	res, err := s.db.Exec("DELETE FROM watchlist WHERE item_id = ? AND user_id = ?", itemID, u.ID)
+	res, err := s.db.Exec("DELETE FROM watchlist WHERE item_id = ? AND profile_id = ?", itemID, v.ProfileID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
@@ -8806,15 +8900,24 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build per-show lastWatchedAt from progress table when a user is authenticated.
-	// Single query: find MAX(updated_at) for each item path under the TV root for this user.
+	// Single query: find MAX(updated_at) for each item path under the TV root for the viewing
+	// profile (progress is per profile, FR-230). Best effort, like the query itself: a
+	// profiles lookup failure leaves lastWatchedAt unset rather than failing the list.
 	showLastWatched := map[string]string{} // merged group key → ISO8601 timestamp
+	var lwViewer viewer
 	if u.ID != "" {
+		var vErr error
+		if lwViewer, vErr = s.viewerFor(r); vErr != nil {
+			log.Printf("[tvshows] viewer for lastWatchedAt: %v", vErr)
+		}
+	}
+	if lwViewer.ProfileID != "" {
 		progressRows, pErr := s.db.Query(`
 			SELECT i.path, MAX(p.updated_at)
 			FROM progress p
 			JOIN items i ON i.id = p.item_id
-			WHERE i.library_id = 'lib_tv' AND p.user_id = ?
-			GROUP BY i.path`, u.ID)
+			WHERE i.library_id = 'lib_tv' AND p.profile_id = ?
+			GROUP BY i.path`, lwViewer.ProfileID)
 		if pErr == nil {
 			defer progressRows.Close()
 			for progressRows.Next() {
@@ -9121,9 +9224,18 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close() // release connection before any further DB calls
 
-	// Batch-fetch progress for all episodes in one query.
+	// Batch-fetch progress for all episodes in one query. Progress is the viewing profile's
+	// (FR-230); a profiles lookup failure leaves episodes without progress, the same
+	// degraded answer as a failed progress query, but logged.
 	progressMap := map[string]map[string]any{}
+	var epViewer viewer
 	if u.ID != "" && len(rawRows) > 0 {
+		var vErr error
+		if epViewer, vErr = s.viewerFor(r); vErr != nil {
+			log.Printf("[tvshows] viewer for episode progress: %v", vErr)
+		}
+	}
+	if epViewer.ProfileID != "" {
 		ids := make([]string, len(rawRows))
 		for i, r := range rawRows {
 			ids[i] = r.id
@@ -9140,7 +9252,7 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 			if hi > len(ids) {
 				hi = len(ids)
 			}
-			for id, pm := range s.getProgressBatch(u.ID, ids[off:hi]) {
+			for id, pm := range s.getProfileProgressBatch(epViewer.ProfileID, ids[off:hi]) {
 				progressMap[id] = pm
 			}
 		}

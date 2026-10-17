@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"dsvideo/backend/internal/rating"
+
 	"github.com/go-chi/chi/v5"
 	_ "modernc.org/sqlite"
 )
@@ -35,10 +37,7 @@ CREATE TABLE items(
   rating REAL, poster_path TEXT, backdrop_path TEXT, overview TEXT, genres TEXT,
   director TEXT, show_name TEXT, season_number INT, episode_number INT,
   change_seq INT, show_folder_id TEXT, tmdb_id INT);
-CREATE TABLE progress(
-  item_id TEXT, user_id TEXT, position_seconds INT, duration_seconds INT,
-  updated_at TEXT, write_seq INT, PRIMARY KEY(item_id, user_id));
-`
+` + profilesSchemaSQL + profilesDataTablesSQL // production profiles/progress/watchlist DDL
 
 const testTVRoot = "/tv"
 
@@ -55,6 +54,7 @@ func newShowMergeServer(t *testing.T) *Server {
 	if _, err := db.Exec(showMergeSchema); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
+	seedOwnerProfile(t, db, "u1")
 
 	ins := `INSERT INTO items(id, library_id, type, title, path, show_name, season_number,
 	        episode_number, added_at, change_seq) VALUES(?,?,?,?,?,?,?,?,?,?)`
@@ -78,10 +78,37 @@ func newShowMergeServer(t *testing.T) *Server {
 	return &Server{cfg: Config{TVPath: testTVRoot}, db: db}
 }
 
+// authedReq builds a request as authMiddleware + profileResolver leave it: the account in
+// userKey and, for a signed-in account, its owner profile as the viewer (no header sent, an
+// account with only its owner profile, FR-221). userID "" is an anonymous request.
 func authedReq(method, target, userID string) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
-	return req.WithContext(context.WithValue(req.Context(), userKey,
-		authedUser{ID: userID, Username: userID}))
+	ctx := context.WithValue(req.Context(), userKey, authedUser{ID: userID, Username: userID})
+	if userID != "" {
+		ctx = context.WithValue(ctx, viewerKey, viewer{
+			UserID: userID, ProfileID: testOwnerProfileID(userID),
+			MaxAgeLevel: rating.MaxLevel, IsOwner: true,
+		})
+	}
+	return req.WithContext(ctx)
+}
+
+// testOwnerProfileID is the id seedOwnerProfile gives userID's owner profile. Deliberately
+// not the user id, so a query keyed on the wrong column finds nothing.
+func testOwnerProfileID(userID string) string { return "prof-owner-" + userID }
+
+// seedOwnerProfile inserts userID's unrestricted owner profile (FR-204) into a fixture
+// database built from the production profiles DDL and returns its id.
+func seedOwnerProfile(t *testing.T, db *sql.DB, userID string) string {
+	t.Helper()
+	id := testOwnerProfileID(userID)
+	if _, err := db.Exec(
+		`INSERT INTO profiles(id, user_id, name, avatar, max_age_level, pin_hash, is_owner, created_at)
+		 VALUES(?, ?, ?, '', ?, NULL, 1, '2026-01-01T00:00:00Z')`,
+		id, userID, userID, rating.MaxLevel); err != nil {
+		t.Fatalf("seed owner profile for %s: %v", userID, err)
+	}
+	return id
 }
 
 type listedShow struct {
@@ -205,9 +232,9 @@ func TestLastWatchedReflectsEitherFolder(t *testing.T) {
 
 	// Watch an episode in the SECOND folder only — the one the old code could not see.
 	if _, err := s.db.Exec(
-		`INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq)
-		 VALUES(?,?,?,?,?,?)`,
-		"ep_b1", "u1", 600, 1800, "2024-06-01T12:00:00Z", 1); err != nil {
+		`INSERT INTO progress(item_id, user_id, profile_id, position_seconds, duration_seconds, updated_at, write_seq)
+		 VALUES(?,?,?,?,?,?,?)`,
+		"ep_b1", "u1", testOwnerProfileID("u1"), 600, 1800, "2024-06-01T12:00:00Z", 1); err != nil {
 		t.Fatalf("progress insert: %v", err)
 	}
 
@@ -226,13 +253,14 @@ func TestLastWatchedReflectsEitherFolder(t *testing.T) {
 // The MOST RECENT watch in either folder wins, not whichever folder sorts first.
 func TestLastWatchedTakesTheMostRecentAcrossFolders(t *testing.T) {
 	s := newShowMergeServer(t)
-	ins := `INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq)
-	        VALUES(?,?,?,?,?,?)`
+	ins := `INSERT INTO progress(item_id, user_id, profile_id, position_seconds, duration_seconds, updated_at, write_seq)
+	        VALUES(?,?,?,?,?,?,?)`
+	owner := testOwnerProfileID("u1")
 	// First folder watched in January, second folder watched in June.
-	if _, err := s.db.Exec(ins, "ep_a1", "u1", 300, 1800, "2024-01-15T08:00:00Z", 1); err != nil {
+	if _, err := s.db.Exec(ins, "ep_a1", "u1", owner, 300, 1800, "2024-01-15T08:00:00Z", 1); err != nil {
 		t.Fatalf("progress a1: %v", err)
 	}
-	if _, err := s.db.Exec(ins, "ep_b1", "u1", 900, 1800, "2024-06-20T22:30:00Z", 2); err != nil {
+	if _, err := s.db.Exec(ins, "ep_b1", "u1", owner, 900, 1800, "2024-06-20T22:30:00Z", 2); err != nil {
 		t.Fatalf("progress b1: %v", err)
 	}
 

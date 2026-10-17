@@ -135,8 +135,8 @@ func TestSuggestedCompletesOnASingleConnection(t *testing.T) {
 		t.Fatalf("insert seed: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at, write_seq)
-		 VALUES('seed', 'u1', 300, 6000, '2026-09-15T21:00:00Z', 1)`,
+		`INSERT INTO progress(item_id, user_id, profile_id, position_seconds, duration_seconds, updated_at, write_seq)
+		 VALUES('seed', 'u1', ?, 300, 6000, '2026-09-15T21:00:00Z', 1)`, testOwnerProfileID("u1"),
 	); err != nil {
 		t.Fatalf("insert progress: %v", err)
 	}

@@ -64,6 +64,11 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}
+	// Seeded from, and excluding, the viewing profile's progress (FR-230).
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
 
 	// The seed: the most recently watched item that actually has genres. Ordering by
 	// progress.updated_at is what makes this track real viewing — the same column the home
@@ -74,9 +79,9 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		SELECT i.genres
 		FROM progress p
 		JOIN items i ON i.id = p.item_id
-		WHERE p.user_id = ? AND i.genres IS NOT NULL AND i.genres != ''
+		WHERE p.profile_id = ? AND i.genres IS NOT NULL AND i.genres != ''
 		ORDER BY p.updated_at DESC
-		LIMIT 1`, u.ID).Scan(&seedGenres)
+		LIMIT 1`, v.ProfileID).Scan(&seedGenres)
 	if err != nil {
 		// No progress at all is the ordinary first-run case, not an error: answer with an
 		// empty rail rather than a status the client has to special-case.
@@ -100,8 +105,8 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		args = append(args, libraryID)
 	}
 	// Never suggest something already being watched — that is Continue Watching's job.
-	where += " AND i.id NOT IN (SELECT item_id FROM progress WHERE user_id = ?)"
-	args = append(args, u.ID)
+	where += " AND i.id NOT IN (SELECT item_id FROM progress WHERE profile_id = ?)"
+	args = append(args, v.ProfileID)
 
 	// RANDOM() so the rail differs between launches instead of showing the same
 	// alphabetical head forever.

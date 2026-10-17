@@ -39,13 +39,11 @@ CREATE TABLE items(
   rating REAL, poster_path TEXT, backdrop_path TEXT, overview TEXT, genres TEXT,
   director TEXT, show_name TEXT, season_number INT, episode_number INT,
   change_seq INT, show_folder_id TEXT, tmdb_id INT);
-CREATE TABLE progress(
-  item_id TEXT, user_id TEXT, position_seconds INT, duration_seconds INT,
-  updated_at TEXT, write_seq INT, PRIMARY KEY(item_id, user_id));
-`
+` + profilesSchemaSQL + profilesDataTablesSQL // production profiles/progress/watchlist DDL
 
 // singleConnServer builds a server whose pool holds exactly ONE connection, seeded with
-// `episodes` episodes of one show, each carrying a progress row.
+// `episodes` episodes of one show, each carrying a progress row for u1's owner profile (the
+// only profile, so also u1's FR-221 default — what the no-header WebAPI path reads).
 func singleConnServer(t *testing.T, episodes int) *Server {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:cursorpool?mode=memory&cache=shared")
@@ -61,6 +59,7 @@ func singleConnServer(t *testing.T, episodes int) *Server {
 	if _, err := db.Exec(cursorPoolSchema); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
+	owner := seedOwnerProfile(t, db, "u1")
 	for i := 1; i <= episodes; i++ {
 		id := "ep" + string(rune('A'+i-1))
 		if _, err := db.Exec(
@@ -72,8 +71,8 @@ func singleConnServer(t *testing.T, episodes int) *Server {
 			t.Fatalf("insert item: %v", err)
 		}
 		if _, err := db.Exec(
-			`INSERT INTO progress(item_id, user_id, position_seconds, duration_seconds, updated_at)
-			 VALUES(?, 'u1', 1800, 3600, '2026-01-01T00:00:00Z')`, id,
+			`INSERT INTO progress(item_id, user_id, profile_id, position_seconds, duration_seconds, updated_at)
+			 VALUES(?, 'u1', ?, 1800, 3600, '2026-01-01T00:00:00Z')`, id, owner,
 		); err != nil {
 			t.Fatalf("insert progress: %v", err)
 		}

@@ -1,6 +1,6 @@
 # FRD-002 — Profiles, Age Ratings and Kids' Collections
 
-**Status:** Specified 2026-10-17 (TASK-914). Not implemented.
+**Status:** Specified 2026-10-17 (TASK-914). Server part A in progress (TASK-916).
 **Authority:** Ryan's decisions of 2026-10-17 are tagged **[RYAN]** and are binding. Design calls made to
 carry them out are tagged **[DESIGN]**; those can be revised without going back to Ryan.
 **Truths:** `docs/TRUTHS.md` (draft). **Mission:** `docs/frd/FRD-000-mission.md`.
@@ -44,7 +44,8 @@ same account never sees, resumes from or changes them.
 
 **FR-203 [DESIGN]** A profile has: a name (1–20 characters after trimming, unique within the account
 regardless of case), an avatar key chosen from a fixed set built into the apps (no image uploads), a
-maximum age level, and whether a PIN is set. The PIN itself is never returned by any endpoint.
+maximum age level, and whether a PIN is set. The PIN itself is never returned by any endpoint. An avatar
+key is 1–32 characters of letters, digits, `-` and `_`; anything else is refused with `invalid_avatar`.
 
 **FR-204 [DESIGN]** Every account has exactly one owner profile, created automatically: at migration for
 existing accounts (§5) and at first sign-in for new ones. Its name defaults to the DSM display name. Its
@@ -91,8 +92,9 @@ server restart resetting it is acceptable, because a viewer cannot trigger a res
 
 **FR-216 [DESIGN]** A forgotten owner PIN is reset by re-entering the **DSM password** (and OTP, if the
 account has one), checked against DSM exactly as at sign-in and subject to the sign-in rate limit. This
-keeps DSM as the only identity (A4). A forgotten PIN on any other profile is cleared or changed by the owner
-under FR-211.
+keeps DSM as the only identity (A4). If DSM cannot be reached or gives no usable answer, the reset is
+refused with `dsm_unavailable` (503), never `password_incorrect`: an unreachable NAS service is not a wrong
+password. A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
 
 **FR-217 [DESIGN]** PIN and profile errors are **never** HTTP 401. The apps treat 401 as an expired session
 and sign out (APIClient, DownloadManager), so a wrong PIN answered with 401 would sign the user out and
@@ -104,7 +106,9 @@ blame the session (FRD-001 FR-002, FR-121). Wrong DSM password during a PIN rese
 **FR-220 [DESIGN]** A client names the active profile with the request header `X-DSVideo-Profile:
 <profileId>`. The server checks that the profile belongs to the token's account. An unknown id, or an id
 from another account, is refused with `unknown_profile` (403). Both cases get the same answer, so the error
-reveals nothing about other accounts.
+reveals nothing about other accounts. The profile management routes (`/profiles*`) are the exception: an
+unknown or deleted id falls back to FR-221, so a device holding a deleted profile can still load the picker,
+and the response names the profile actually used.
 
 **FR-221 [RYAN]** A request **without** the header (shipped app builds, the `/web` player, the Synology
 WebAPI compatibility layer, any client that predates profiles) resolves as follows:
