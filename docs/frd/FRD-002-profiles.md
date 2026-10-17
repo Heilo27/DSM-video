@@ -255,6 +255,11 @@ route's class is listed in `docs/api/ProfilesAPI.md` §"Enforcement by route". T
   session id alone. The WebAPI layer speaks for its FR-221 profile, so it refuses (error 105) a stream
   started for any other profile. Sessions started before this rule existed are treated as started by the
   owner profile. Stopping a session is never refused: it serves nothing.
+  Accepted residual risk (Friday, 2026-10-17): a request that names no profile is served on the session id
+  alone. The id is a 128-bit random secret, held only by the device that started the session, and the app
+  drops it when switching profile (FR-261). Reaching an adult's stream would take a leaked id. For a family
+  TV that is acceptable. Putting a profile-bound token in playback URLs would close it, and is the remedy if
+  that ever changes.
 
 **FR-251 [DESIGN]** The Synology WebAPI compatibility layer has no way to send the header. It resolves the
 profile by FR-221 and applies the same filter to its library, list and stream calls. If it skipped the
