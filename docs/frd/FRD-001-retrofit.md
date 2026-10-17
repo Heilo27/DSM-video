@@ -89,6 +89,11 @@ labels; text scales at larger accessibility sizes without controls becoming unre
 animation is skipped when Reduce Motion is enabled.
 *Derivation:* iOS release notes, ACCESSIBILITY section.
 
+**FR-008 [AMENDED 2026-10-17, FRD-002]** — *Visibility is per profile.* Wherever this FRD says "the whole
+library", "every title", "all titles" or a count of titles (FR-082, FR-089, FR-094 and the rest), it means the
+titles visible to the **active profile** under its age ceiling (FRD-002 §6–§7). Titles hidden by the
+ceiling are not "missing", and an empty view caused by the ceiling says so (FRD-002 FR-265).
+
 ---
 
 ## 3. Progress (watch position)
@@ -98,8 +103,12 @@ it to Continue Watching.
 **FR-011 [STATED]** — Reopening a title with a resume point resumes at that position, not at the start.
 **FR-012 [INFERRED]** — Resume positions survive app termination and are correct after a cold start,
 read from durable storage.
-**FR-013 [STATED]** — Progress is shared across devices: a position advanced on one device is the
-position offered on another.
+**FR-013 [STATED; AMENDED 2026-10-17, FRD-002]** — Progress is shared across devices **per profile**: a
+position advanced on one device under a profile is the position offered on every other device under the
+**same** profile, and it is never offered to a different profile. A request that names no profile (an app
+build without profile support) reads and writes progress as the account's most restricted profile if one
+exists, otherwise as the owner profile (FRD-002 FR-221). An account with only its owner profile behaves
+exactly as before. FR-014–FR-024 apply per profile.
 **FR-014 [INFERRED]** — Conflict resolution is last-watch-wins; a device must not overwrite a newer
 position from elsewhere with its own older one.
 **FR-015 [INFERRED]** — A position recorded while the server is unreachable is retained locally and
@@ -251,8 +260,9 @@ relaunch.
 **FR-094 [INFERRED]** — Sorting never changes the item count; filtering shows only matching items and
 reports the matching count; a filter matching nothing presents a filter-attributable empty state with a
 way to clear it.
-**FR-095 [STATED]** — A watchlist exists, is reachable on iPad, and appears on the tvOS Home screen;
-saved items must be viewable on every supported platform.
+**FR-095 [STATED; AMENDED 2026-10-17, FRD-002]** — A watchlist exists **per profile**, is reachable on iPad,
+and appears on the tvOS Home screen; a profile's saved items must be viewable under that profile on every
+supported platform. Entries above the profile's age ceiling are hidden, never deleted (FRD-002 FR-207).
 **FR-096 [INFERRED]** — Adding to the watchlist increases its count by exactly one for that identity;
 removal decreases it by exactly one and leaves other entries intact; both survive relaunch.
 **FR-097 [INFERRED]** — An empty watchlist explains how to add titles.
