@@ -1265,6 +1265,14 @@ final class AppState {
           handleConnectionFailure(err)
           return false
         }
+        // TASK-1005: only an error the SERVER produced proves the address works. A transport
+        // failure on /sync/status (it dropped between the two probes, or only /version got
+        // through) means nothing answered, and adopting it cleared the offline banner for a
+        // server the app still cannot reach.
+        guard err.serverReached else {
+          homeLog.info("reconnect: \(candidate.url) /sync/status never reached the server — skipping")
+          continue
+        }
         homeLog.info("reconnect: \(candidate.url) returned API error but is reachable — using")
         api = probe
         if !candidate.requiresTunnelCookie {
