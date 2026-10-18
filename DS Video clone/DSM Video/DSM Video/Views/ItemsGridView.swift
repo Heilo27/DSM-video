@@ -571,6 +571,9 @@ struct ItemPosterCell: View {
     .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     // TASK-693/698: redact poster + title in the app switcher / screen recordings.
     .privacySensitive()
+    #if !os(tvOS)
+    .downloadStatus(itemID: item.id)   // TASK-983 · FR-041/FR-133
+    #endif
     #if os(iOS)
     // iPad trackpad/pointer affordance — lifts the poster on hover.
     .hoverEffect(.highlight)

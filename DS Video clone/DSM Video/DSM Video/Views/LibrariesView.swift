@@ -756,6 +756,9 @@ private struct ContinueWatchingCard: View {
     .dsCardDepth(cornerRadius: 10)
     // TASK-693/698: redact in app switcher / screen recordings.
     .privacySensitive()
+    #if !os(tvOS)
+    .downloadStatus(itemID: item.id)   // TASK-983 · FR-041/FR-133
+    #endif
     #if os(iOS)
     .hoverEffect(.highlight)
     #endif

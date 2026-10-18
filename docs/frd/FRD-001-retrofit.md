@@ -185,6 +185,13 @@ such a title opens no second transfer and hands back the playback session opened
 title page offers Resume (not Download) for a paused download.
 **FR-041 [STATED]** — Downloaded titles are distinguishable in the library from non-downloaded ones, and
 with the server offline, Play on a non-downloaded title is presented as unavailable **before** the tap.
+A downloaded title carries a small "downloaded" mark in the top-left corner of its poster card (library
+grid, home rails, collections, search results wide enough to hold it) and an inline mark in its episode
+row; the mark is also spoken ("Downloaded"). With the server unreachable, a card for a title that is not
+downloaded is dimmed (and spoken as "Not available offline") while its page still opens. The mark follows
+the playable download (FR-043, FR-262: on disk and allowed for the active profile) and disappears the
+moment the download is deleted, without a relaunch. iOS only: the Downloads surface does not exist on
+tvOS, so tvOS cards carry no mark and are never dimmed for this.
 **FR-042 [INFERRED]** — A download entry for an episode identifies the specific episode, not just the show.
 An episode's download reads "Show · S1 · E2 · Episode title"; a missing part is left out (never an empty
 segment or a repeat), so two "Pilot"s of different shows, and two episodes of one show, are told apart,
@@ -412,6 +419,7 @@ indicator rather than presented as a freshly confirmed live list.
 functional on downloaded ones.
 **FR-134 [INFERRED]** — Downloaded titles are visually distinguishable offline so the user can see what is
 playable now.
+(Realised by the FR-041 mark and dimming; one rule, `DownloadManager.badgeState`, drives every card.)
 **FR-135 [INFERRED]** — The Downloads list is truthful offline — it does not require the server to render,
 and zero downloads reads as "nothing downloaded", not as a server failure.
 **FR-136 [STATED]** — Search offline is a connection error with retry, not "no results".
