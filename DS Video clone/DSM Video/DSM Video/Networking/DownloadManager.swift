@@ -136,20 +136,37 @@ enum ManifestState {
 
 /// TASK-782: surfaces a genuine (non-pause) download failure to the UI so the row
 /// shows "Download failed" + a retry/dismiss affordance instead of silently vanishing.
-struct FailedDownload: Identifiable {
+///
+/// Persisted (TASK-994, FR-032): a failed row survives a relaunch until the user retries or
+/// dismisses it. Every failure is retryable (a retry re-resolves a fresh session), so there is
+/// no "permanent" kind. The token is a credential and is NOT written; a retry takes a live one.
+struct FailedDownload: Identifiable, Codable {
   let id: String
   let title: String
   /// Enough context to re-issue the download without the caller re-resolving the URL.
   let videoURL: URL?
   let posterURL: URL?
-  let token: String?
+  var token: String?
   let year: Int?
   let durationSeconds: Int
   /// FR-262: the level captured when the download started, carried so a retry keeps it.
   var ageLevel: Int? = nil
-  /// Permanent failures (e.g. disk full) can't be retried by a network retry — tell the user.
-  let isPermanent: Bool
   let message: String
+
+  private enum CodingKeys: String, CodingKey {
+    case id, title, videoURL, posterURL, year, durationSeconds, ageLevel, message
+  }
+}
+
+/// Work a background relaunch could not finish because the app's providers (token, session
+/// release) are wired only when the scene appears (TASK-994). Written to disk so it survives
+/// the process that deferred it, and run by `flushDeferredWork()` once the providers exist.
+private struct DeferredWork: Codable {
+  /// Playback sessions of downloads that finished while nothing could release them.
+  var sessionReleases: [String] = []
+  /// itemId → poster URL of downloads that finished while no token could fetch the poster.
+  var posters: [String: URL] = [:]
+  var isEmpty: Bool { sessionReleases.isEmpty && posters.isEmpty }
 }
 
 @MainActor
@@ -206,6 +223,15 @@ final class DownloadManager: NSObject {
   /// the resume data from `cancel(byProducingResumeData:)` and records the stop itself, and the
   /// callback can land first without that data, which would turn a good pause into a Failed row.
   private var pausing: Set<String> = []
+
+  /// Tasks a pause stopped with nothing to resume, by `taskIdentifier` -> item (TASK-994). The
+  /// stop raised a Failed row and released the item's state, but a transfer that had in fact
+  /// finished still delivers its file afterwards; this is how that late delivery finds its item
+  /// and is kept instead of discarded. Cleared when the task's last callback arrives.
+  private var stoppedByPauseWithoutData: [Int: String] = [:]
+
+  /// Session releases and poster fetches a relaunch could not run yet; see `DeferredWork`.
+  private var deferredWork = DeferredWork()
 
   private let storageKey = "dsReel.downloadedItems"
   private let resumeDataKey = "dsReel.resumeData"
@@ -404,7 +430,7 @@ final class DownloadManager: NSObject {
     removeResumeBlob(for: itemId)
 
     // Clear any prior failure record — this itemId is being (re)started.
-    failedDownloads.removeValue(forKey: itemId)
+    clearFailure(itemId)
 
     var request = URLRequest(url: videoURL)
     // Video Station embeds the SID as a `_sid=` query parameter in the URL itself.
@@ -458,7 +484,7 @@ final class DownloadManager: NSObject {
     // Clean up all state regardless of whether download was active or paused
     pendingDownloadInfo.removeValue(forKey: itemId)
     pausedDownloads.removeValue(forKey: itemId)
-    failedDownloads.removeValue(forKey: itemId)
+    clearFailure(itemId)
     forgetDownload(for: itemId)
   }
 
@@ -516,6 +542,7 @@ final class DownloadManager: NSObject {
     downloadProgress.removeAll()
     pausedDownloads.removeAll()
     failedDownloads.removeAll()
+    deferredWork = DeferredWork()
     pendingDownloadInfo.removeAll()
     downloadSessionIDs.removeAll()
     lastProgressUpdate.removeAll()
@@ -545,6 +572,11 @@ final class DownloadManager: NSObject {
     // as the next user's paused or failed rows.
     try? fm.removeItem(at: downloadsMetadataFileURL)
     try? fm.removeItem(at: pausedMetaFileURL)
+    // Failed rows name titles; deferred work names sessions and poster URLs. None may outlive
+    // the account.
+    try? fm.removeItem(at: failedDownloadsFileURL)
+    try? fm.removeItem(at: deferredWorkFileURL)
+    stoppedByPauseWithoutData.removeAll()
     cachedDownloadedItems = nil
   }
 
@@ -588,13 +620,13 @@ final class DownloadManager: NSObject {
     failedDownloads[itemId] != nil
   }
 
-  /// Re-issue a previously-failed download from its captured metadata. No-op for a
-  /// permanent failure (e.g. disk full) — retrying the network can't fix that.
+  /// Re-issue a previously-failed download from its captured metadata. Every failure can be
+  /// retried: a retry re-resolves a fresh session, and a storage failure needs only free space.
   func retryFailedDownload(itemId: String) {
     // No videoURL requirement: a retry re-resolves by item id and never uses the stored URL,
     // and a download adopted after a relaunch without its metadata has none (TASK-947).
-    guard let failure = failedDownloads[itemId], !failure.isPermanent else { return }
-    failedDownloads.removeValue(forKey: itemId)
+    guard let failure = failedDownloads[itemId] else { return }
+    clearFailure(itemId)
     // Re-resolve rather than reusing failure.videoURL: that URL is session-scoped and its
     // session is already released (the failure path releases it), so a retry against the
     // stored URL would 404 every time.
@@ -608,7 +640,19 @@ final class DownloadManager: NSObject {
 
   /// Dismiss a failure row without retrying.
   func dismissFailedDownload(itemId: String) {
-    failedDownloads.removeValue(forKey: itemId)
+    clearFailure(itemId)
+  }
+
+  /// The ONE way a Failed row appears. It is written to disk with it (FR-032): a failure stays
+  /// on the Downloads screen across a relaunch until the user retries or dismisses it.
+  private func raiseFailure(_ failure: FailedDownload) {
+    failedDownloads[failure.id] = failure
+    persistFailures()
+  }
+
+  private func clearFailure(_ itemId: String) {
+    guard failedDownloads.removeValue(forKey: itemId) != nil else { return }
+    persistFailures()
   }
 
   /// Pause an active download, capturing resume data so it can be continued later.
@@ -632,6 +676,10 @@ final class DownloadManager: NSObject {
     // item. If the map entry is gone, the transfer finished just before the cancel and
     // didFinishDownloadingTo completed it: there is nothing to pause.
     guard downloadTasks[task] != nil else { return }
+    // Nothing to resume can still mean the bytes were already complete: the transfer finished in
+    // the instant before the cancel, and its file is delivered after this. Remember whose task
+    // it was so that late delivery is kept, not discarded (TASK-994).
+    if resumeData == nil { stoppedByPauseWithoutData[task.taskIdentifier] = itemId }
     // Same rule as any other stop: resume data makes it a paused row; none means it cannot be
     // continued, which is said in a Failed row instead of the row silently vanishing.
     recordStop(itemId: itemId, task: task, errorCode: NSURLErrorCancelled,
@@ -652,6 +700,8 @@ final class DownloadManager: NSObject {
       task.taskDescription = itemId   // survives termination, like a fresh start's (TASK-947)
       downloadTasks[task] = itemId
       resumedFromData.insert(itemId)
+      // Recorded with the metadata so a termination mid-transfer keeps the 404 fallback.
+      persistDownloadMeta(for: itemId)
       let download = ActiveDownload(
         id: itemId,
         title: info.title,
@@ -678,12 +728,12 @@ final class DownloadManager: NSObject {
       pendingDownloadInfo.removeValue(forKey: itemId)
       pausedDownloads.removeValue(forKey: itemId)
       forgetDownload(for: itemId)
-      failedDownloads[itemId] = FailedDownload(
+      raiseFailure(FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
         posterURL: info.posterURL, token: nil, year: info.year,
-        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
+        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel,
         message: "This download can't be resumed. Tap to start it again."
-      )
+      ))
     }
   }
 
@@ -996,7 +1046,7 @@ final class DownloadManager: NSObject {
       // The live transfer is the item's state now; an older paused or failed record is stale.
       pausedDownloads.removeValue(forKey: itemId)
       removeResumeBlob(for: itemId)
-      failedDownloads.removeValue(forKey: itemId)
+      clearFailure(itemId)
       if task.state == .suspended { task.resume() }
     }
 
@@ -1012,10 +1062,11 @@ final class DownloadManager: NSObject {
         continue
       }
       releasePlaybackSession(for: itemId)
+      resumedFromData.remove(itemId)
       let info = pendingDownloadInfo.removeValue(forKey: itemId) ?? minimalInfo(for: itemId)
       forgetDownload(for: itemId)
-      failedDownloads[itemId] = failure(itemId: itemId, info: info,
-                                        message: "This download was interrupted. Tap to start it again.")
+      raiseFailure(failure(itemId: itemId, info: info,
+                           message: "This download was interrupted. Tap to start it again."))
     }
 
     survivingTasksAdopted = true
@@ -1065,7 +1116,7 @@ final class DownloadManager: NSObject {
     FailedDownload(
       id: itemId, title: info.title, videoURL: info.videoURL,
       posterURL: info.posterURL, token: info.token, year: info.year,
-      durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
+      durationSeconds: info.durationSeconds, ageLevel: info.ageLevel,
       message: message
     )
   }
@@ -1085,7 +1136,7 @@ final class DownloadManager: NSObject {
     let message = Self.isOutOfSpace(error)
       ? "There isn't enough free storage to save this download. Free up space, then retry."
       : "Couldn't save the download on this device. Check free storage, then retry."
-    failedDownloads[itemId] = failure(itemId: itemId, info: info, message: message)
+    raiseFailure(failure(itemId: itemId, info: info, message: message))
     log.error("download \(itemId) finished but could not be saved: \(error?.localizedDescription ?? "manifest write failed")")
   }
 
@@ -1111,7 +1162,7 @@ final class DownloadManager: NSObject {
     if let resumeData {
       if pendingDownloadInfo[itemId] == nil { pendingDownloadInfo[itemId] = minimalInfo(for: itemId) }
       pausedDownloads[itemId] = resumeData
-      failedDownloads.removeValue(forKey: itemId)
+      clearFailure(itemId)
       persistResumeData(resumeData, for: itemId)
       persistDownloadMeta(for: itemId)
       return
@@ -1120,9 +1171,9 @@ final class DownloadManager: NSObject {
     let info = pendingDownloadInfo.removeValue(forKey: itemId) ?? minimalInfo(for: itemId)
     pausedDownloads.removeValue(forKey: itemId)
     forgetDownload(for: itemId)
-    failedDownloads[itemId] = failure(
+    raiseFailure(failure(
       itemId: itemId, info: info,
-      message: Self.stopMessage(errorCode: errorCode, cancelReason: cancelReason))
+      message: Self.stopMessage(errorCode: errorCode, cancelReason: cancelReason)))
   }
 
   /// FR-033: the message names the real cause of a stop that left nothing to resume.
@@ -1191,6 +1242,47 @@ final class DownloadManager: NSObject {
     )
   }
 
+  private var failedDownloadsFileURL: URL {
+    (containerOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0])
+      .appendingPathComponent("failedDownloads.json")
+  }
+
+  private var deferredWorkFileURL: URL {
+    (containerOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0])
+      .appendingPathComponent("deferredDownloadWork.json")
+  }
+
+  /// Writes `value` to `url` atomically, or removes the file when there is nothing to keep.
+  private func writeJSON<T: Encodable>(_ value: T, isEmpty: Bool, to url: URL) {
+    if isEmpty {
+      try? FileManager.default.removeItem(at: url)
+      return
+    }
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    do {
+      try JSONEncoder().encode(value).write(to: url, options: .atomic)
+      try? FileManager.default.setAttributes(
+        [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+        ofItemAtPath: url.path)
+    } catch {
+      log.error("could not write \(url.lastPathComponent): \(error.localizedDescription)")
+    }
+  }
+
+  /// Failed rows persist without the token and with the `_sid=` credential stripped from the URL.
+  private func persistFailures() {
+    let safe = failedDownloads.values.map { f in
+      FailedDownload(id: f.id, title: f.title, videoURL: f.videoURL.map(strippingSid(from:)),
+                     posterURL: f.posterURL, token: nil, year: f.year,
+                     durationSeconds: f.durationSeconds, ageLevel: f.ageLevel, message: f.message)
+    }
+    writeJSON(safe, isEmpty: safe.isEmpty, to: failedDownloadsFileURL)
+  }
+
+  private func persistDeferredWork() {
+    writeJSON(deferredWork, isEmpty: deferredWork.isEmpty, to: deferredWorkFileURL)
+  }
+
   /// One-time move of pre-SEC-01 resume state out of UserDefaults. `shared` only: a test
   /// manager must not move the host app's real keys.
   private func migrateLegacyResumeStore() {
@@ -1216,6 +1308,14 @@ final class DownloadManager: NSObject {
   /// resume data if it has any, and the playback session it holds. Runs at launch, before the
   /// session can deliver a previous process's task, so that delivery finds what it needs.
   private func restorePersistedDownloads() {
+    if let data = try? Data(contentsOf: failedDownloadsFileURL),
+       let saved = try? JSONDecoder().decode([FailedDownload].self, from: data) {
+      for failure in saved { failedDownloads[failure.id] = failure }
+    }
+    if let data = try? Data(contentsOf: deferredWorkFileURL),
+       let saved = try? JSONDecoder().decode(DeferredWork.self, from: data) {
+      deferredWork = saved
+    }
     for (itemId, meta) in loadPausedMetaFromDisk() {
       if let data = try? Data(contentsOf: resumeDataFileURL(for: itemId)) {
         pausedDownloads[itemId] = data
@@ -1230,6 +1330,8 @@ final class DownloadManager: NSObject {
         ageLevel: meta["ageLevel"].flatMap { Int($0) }
       )
       if let sessionID = meta["sessionID"] { downloadSessionIDs[itemId] = sessionID }
+      // Started from resume data by the process that wrote this (see `resumedFromData`).
+      if meta["resumed"] == "1" { resumedFromData.insert(itemId) }
     }
   }
 
@@ -1259,6 +1361,7 @@ final class DownloadManager: NSObject {
     meta["durationSeconds"] = "\(info.durationSeconds)"
     if let ageLevel = info.ageLevel { meta["ageLevel"] = "\(ageLevel)" }
     if let sessionID = downloadSessionIDs[itemId] { meta["sessionID"] = sessionID }
+    if resumedFromData.contains(itemId) { meta["resumed"] = "1" }
     store[itemId] = meta
     savePausedMetaToDisk(store)
   }
@@ -1430,7 +1533,7 @@ final class DownloadManager: NSObject {
     downloadProgress.removeValue(forKey: itemId)
     pendingDownloadInfo.removeValue(forKey: itemId)
     // Done for good: no failed, paused or persisted in-flight trace of it may remain.
-    failedDownloads.removeValue(forKey: itemId)
+    clearFailure(itemId)
     pausedDownloads.removeValue(forKey: itemId)
     resumedFromData.remove(itemId)
     forgetDownload(for: itemId)
@@ -1440,13 +1543,27 @@ final class DownloadManager: NSObject {
 
     // Fetch poster image asynchronously and update the stored item once done.
     guard let posterURL = info.posterURL else { return }
+    guard info.token != nil || tokenProvider != nil else {
+      // Completed in a background relaunch, before the app could supply a credential: the
+      // poster is fetched when the providers are wired (TASK-994), not silently skipped.
+      deferredWork.posters[itemId] = posterURL
+      persistDeferredWork()
+      return
+    }
+    fetchPoster(itemId: itemId, posterURL: posterURL, token: info.token)
+  }
+
+  /// Downloads a finished item's poster and records it on the stored item. Best-effort: the
+  /// title stays playable without one.
+  private func fetchPoster(itemId: String, posterURL: URL, token: String?) {
+    let dir = downloadsDirectory()
     let posterFilename = "\(itemId).poster.jpg"
     let posterDestination = dir.appendingPathComponent(posterFilename)
 
     Task {
       var req = URLRequest(url: posterURL)
       // info.token is nil after a relaunch (never persisted) — fall back to a live one.
-      if let tok = info.token ?? tokenProvider?() {
+      if let tok = token ?? tokenProvider?() {
         req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
       }
       if usesTunnelCookieProvider?() == true {
@@ -1547,9 +1664,12 @@ extension DownloadManager: URLSessionDownloadDelegate {
       try? FileManager.default.removeItem(at: stableCopy)
       preserveError = error
     }
+    let taskID = downloadTask.taskIdentifier
     Task { @MainActor in
-      // The map, or the label the task carries when a previous process started it (TASK-947).
-      guard let itemId = owner(of: downloadTask) else {
+      // The map, or the label the task carries when a previous process started it (TASK-947),
+      // or the task a pause stopped with nothing to resume just as it finished (TASK-994).
+      let pauseStopped = stoppedByPauseWithoutData.removeValue(forKey: taskID)
+      guard let itemId = owner(of: downloadTask) ?? pauseStopped else {
         try? FileManager.default.removeItem(at: stableCopy)
         return
       }
@@ -1580,22 +1700,22 @@ extension DownloadManager: URLSessionDownloadDelegate {
     guard let urlResolver else {
       // No resolver wired (should not happen in the app; possible in tests). Surface it
       // rather than starting a download that is guaranteed to fail.
-      failedDownloads[itemId] = FailedDownload(
+      raiseFailure(FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
         posterURL: info.posterURL, token: nil, year: info.year,
-        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
+        durationSeconds: info.durationSeconds, ageLevel: info.ageLevel,
         message: "This download can't be restarted right now. Try again."
-      )
+      ))
       return
     }
     Task { @MainActor in
       guard let resolved = await urlResolver(itemId) else {
-        failedDownloads[itemId] = FailedDownload(
+        raiseFailure(FailedDownload(
           id: itemId, title: info.title, videoURL: info.videoURL,
           posterURL: info.posterURL, token: nil, year: info.year,
-          durationSeconds: info.durationSeconds, ageLevel: info.ageLevel, isPermanent: false,
+          durationSeconds: info.durationSeconds, ageLevel: info.ageLevel,
           message: "Couldn't reach the server to restart this download. Try again."
-        )
+        ))
         return
       }
       startDownload(
@@ -1618,7 +1738,30 @@ extension DownloadManager: URLSessionDownloadDelegate {
   /// as it is read, so a second call is a no-op.
   private func releasePlaybackSession(for itemId: String) {
     guard let sessionID = downloadSessionIDs.removeValue(forKey: itemId) else { return }
-    releaseSessionProvider?(sessionID)
+    guard let releaseSessionProvider else {
+      // A background relaunch finishes transfers before the scene wires its providers
+      // (TASK-994). Dropping the id would pin the server's transcode until its idle reaper
+      // runs, so it is kept and released by `flushDeferredWork()` once the app is up.
+      deferredWork.sessionReleases.append(sessionID)
+      persistDeferredWork()
+      return
+    }
+    releaseSessionProvider(sessionID)
+  }
+
+  /// Runs the work a background relaunch could not: releases the playback sessions of transfers
+  /// that finished, and fetches the posters of downloads that completed without a credential
+  /// (TASK-994). Called by the app once the providers are wired; a no-op until they are.
+  func flushDeferredWork() {
+    guard releaseSessionProvider != nil, tokenProvider != nil else { return }
+    let work = deferredWork
+    guard !work.isEmpty else { return }
+    deferredWork = DeferredWork()
+    persistDeferredWork()
+    for sessionID in work.sessionReleases { releaseSessionProvider?(sessionID) }
+    for (itemId, posterURL) in work.posters where isDownloaded(itemId: itemId) {
+      fetchPoster(itemId: itemId, posterURL: posterURL, token: nil)
+    }
   }
 
   /// Surface an HTTP-level download failure through the same path as a transport failure,
@@ -1628,7 +1771,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
   /// with the same dead token cannot fix by itself — but re-resolving on retry can, so it
   /// is not marked permanent. A 404 means the stream URL no longer resolves, which is what
   /// happens when the playback session backing it was already released.
-  private func recordHTTPFailure(itemId: String, status: Int) {
+  func recordHTTPFailure(itemId: String, status: Int) {
     activeDownloads.removeValue(forKey: itemId)
     downloadProgress.removeValue(forKey: itemId)
     lastProgressUpdate.removeValue(forKey: itemId)
@@ -1659,7 +1802,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
     }
 
     let info = pendingDownloadInfo.removeValue(forKey: itemId) ?? finishingInfo(for: itemId)
-    failedDownloads[itemId] = failure(itemId: itemId, info: info, message: message)
+    raiseFailure(failure(itemId: itemId, info: info, message: message))
     forgetDownload(for: itemId)
     log.error("download \(itemId) failed with HTTP \(status) — no file written")
   }
@@ -1688,7 +1831,10 @@ extension DownloadManager: URLSessionDownloadDelegate {
     // launch as a cancel with resume data.
     let resumeData = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
     let cancelReason = nsError.userInfo[NSURLErrorBackgroundTaskCancelledReasonKey] as? Int
+    let taskID = downloadTask.taskIdentifier
     Task { @MainActor in
+      // The task's last callback: a late delivery, had there been one, has already come.
+      stoppedByPauseWithoutData.removeValue(forKey: taskID)
       // The map, or the task's label when a previous process started it (TASK-947).
       guard let itemId = owner(of: downloadTask) else { return }
       // A pause in progress records its own stop with the resume data it was handed.

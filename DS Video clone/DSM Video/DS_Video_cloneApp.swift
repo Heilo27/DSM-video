@@ -131,6 +131,9 @@ struct DS_Video_cloneApp: App {
                               let url = info.streamUrl else { return nil }
                         return (url: url, sessionID: info.resolvedSessionID)
                     }
+                    // Downloads that finished in a background relaunch, before these providers
+                    // existed, left sessions to release and posters to fetch (TASK-994).
+                    DownloadManager.shared.flushDeferredWork()
                 }
                 .onChange(of: themeIDRaw) { _, _ in
                     ThemeHolder.shared.current = activeTheme

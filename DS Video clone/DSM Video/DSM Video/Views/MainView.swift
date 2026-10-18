@@ -1047,8 +1047,8 @@ struct DownloadsView: View {
   // MARK: - Active Downloads Section
 
   @ViewBuilder
-  // TASK-782: renders each failed download with its reason and a Retry (transient) or
-  // dismiss (permanent) affordance, so a failure is never silent.
+  // TASK-782: renders each failed download with its reason, a Retry and a Dismiss, so a
+  // failure is never silent.
   private var failedDownloadsSection: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Failed")
@@ -1074,29 +1074,28 @@ struct DownloadsView: View {
                   .lineLimit(2)
               }
               Spacer()
-              if failure.isPermanent {
-                Button {
-                  downloadManager.dismissFailedDownload(itemId: itemID)
-                } label: {
-                  Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(Color.dsTextSecondary)
-                    .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Dismiss failed download \(failure.title)")
-              } else {
-                Button {
-                  downloadManager.retryFailedDownload(itemId: itemID)
-                } label: {
-                  Text("Retry")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.dsAccent)
-                    .frame(minHeight: 44)
-                    .padding(.horizontal, 8)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Retry download \(failure.title)")
+              // Every failure can be retried or dismissed (FR-032): a failed row stays until
+              // the user chooses one.
+              Button {
+                downloadManager.retryFailedDownload(itemId: itemID)
+              } label: {
+                Text("Retry")
+                  .font(.subheadline.weight(.semibold))
+                  .foregroundStyle(Color.dsAccent)
+                  .frame(minHeight: 44)
+                  .padding(.horizontal, 8)
               }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Retry download \(failure.title)")
+              Button {
+                downloadManager.dismissFailedDownload(itemId: itemID)
+              } label: {
+                Image(systemName: "xmark.circle.fill")
+                  .foregroundStyle(Color.dsTextSecondary)
+                  .frame(width: 44, height: 44)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Dismiss failed download \(failure.title)")
             }
             .padding(.horizontal)
             .padding(.vertical, 8)

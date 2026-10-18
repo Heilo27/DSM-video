@@ -157,7 +157,8 @@ your NAS is offline"; this is only meaningful if the converse holds.
 **FR-032 [STATED]** — A download failure is surfaced to the user. A failing download must not silently
 vanish from the list. A transfer that finishes but whose file cannot be kept on the device leaves
 Downloading for a retryable Failed row naming storage as the cause, leaves no orphaned bytes behind, and
-never sits at 100% (TASK-971).
+never sits at 100% (TASK-971). A Failed row stays on the Downloads screen, across a relaunch, until the
+user retries or dismisses it; every Failed row offers both, none is Dismiss-only (TASK-994).
 *Derivation:* FR-005 plus the stated commitment to clear messages; corroborated as in-scope by ticket
 TASK-782's title.
 **FR-033 [INFERRED]** — A download failure message names the real cause (server unreachable, storage
@@ -198,6 +199,13 @@ transfer continues in the background (TASK-947):
   continues from where it stopped. If the server no longer holds the session it was cut from, it starts
   over on a fresh one rather than failing. A stop with nothing to continue shows as Failed, naming why
   (connection, storage, app closed, Background App Refresh off, system stopped it).
+- A download that completes in a background relaunch, before the app can sign in to the server, is kept
+  at once; releasing its playback session and fetching its poster wait for the app to be running with a
+  session, and are not lost if the app closes in between (TASK-994).
+- A pause that races a transfer finishing never drops the finished file.
+- *Accepted limit:* a transfer resumed from saved data and cut again by a relaunch restarts on a fresh
+  session only once the app is running with a server session; until then its Failed row says to start
+  it again.
 - An unfinished download whose transfer was lost with the app shows as Failed ("interrupted") and can be
   started again.
 
