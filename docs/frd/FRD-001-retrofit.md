@@ -318,7 +318,9 @@ result, so the error screen applies instead. Offline, an unfiltered grid falls b
 **FR-099 [INFERRED]** — Home-video-type libraries are browsable with whatever metadata exists; they are
 not hidden and do not break the library view.
 **FR-100 [INFERRED]** — Titles with unusual names (quotes, ampersands, non-ASCII, very long) list, open,
-and are findable by search.
+and are findable by search. That includes one-character titles ("M", "Z", "1"): as-you-type search waits
+for two characters, but an explicit search (the Search key, a recent search, or Siri) runs at any non-empty
+length, and a lone character shows a "press Search" hint instead of a blank screen.
 
 **FR-143 [DESIGN, DESTRUCTIVE, 2026-10-17, TASK-933/937]** — *A server scan resolves doubt toward keeping.*
 A folder the server cannot read keeps every title already known under it, and the failure is logged with
