@@ -403,6 +403,9 @@ and zero downloads reads as "nothing downloaded", not as a server failure.
 **FR-136 [STATED]** — Search offline is a connection error with retry, not "no results".
 **FR-137 [INFERRED]** — Offline progress and offline watched/watchlist changes are retained and
 reconciled on reconnection, or the user is told at the time that they could not be saved.
+Watchlist changes take the second path: a change the NAS does not receive is undone (a removed title
+returns to its old place) and a brief message says so, naming the cause (no internet connection, or the
+NAS can't be reached).
 **FR-138 [INFERRED]** — Cached content, the downloads list, and the signed-in session all survive a cold
 start while offline.
 **FR-139 [INFERRED]** — On reconnection, retry (or foregrounding) restores live content, clears the

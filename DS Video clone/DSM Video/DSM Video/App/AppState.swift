@@ -3035,6 +3035,19 @@ final class AppState {
     }
   }
 
+  /// TASK-989 (FR-137): set when a watchlist change could not be saved and was rolled
+  /// back, so the user is told at the time instead of watching the toggle silently undo
+  /// itself. Shown briefly by the root views, which clear it.
+  var watchlistNotice: String?
+
+  /// The watchlist-failure message, naming the real cause when the connection is down.
+  static func watchlistNotice(isOffline: Bool, serverUnreachable: Bool) -> String {
+    guard let cause = OfflineBanner.cause(isOffline: isOffline, serverUnreachable: serverUnreachable) else {
+      return "Couldn't update your watchlist. Try again."
+    }
+    return "Couldn't update your watchlist. \(cause)."
+  }
+
   func toggleWatchlist(item: ItemSummary) async {
     guard !isDemoMode else { return }
     // Header-less, the write would land on the most restricted profile's list (FR-221).
@@ -3062,6 +3075,8 @@ final class AppState {
         // A bare catch swallowed 401s here: the write silently no-op'd while the UI kept
         // looking authenticated. loadWatchlist already routes failures this way.
         handleConnectionFailure(error)
+        // After handleConnectionFailure, so the flags it sets name the cause (FR-137).
+        watchlistNotice = Self.watchlistNotice(isOffline: isOffline, serverUnreachable: serverUnreachable)
       }
     } else {
       watchlistItems.insert(item, at: 0)
@@ -3071,6 +3086,7 @@ final class AppState {
         guard homeResultIsCurrent(generation, "toggleWatchlist rollback") else { return }
         watchlistItems.removeAll(where: { $0.id == item.id })
         handleConnectionFailure(error)
+        watchlistNotice = Self.watchlistNotice(isOffline: isOffline, serverUnreachable: serverUnreachable)
       }
     }
   }

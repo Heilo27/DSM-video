@@ -95,6 +95,13 @@ struct MainView: View {
       OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
         .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
     }
+    // A watchlist change the NAS never received is reported, not silently undone (FR-137).
+    // Lifted clear of the tab bar.
+    .overlay(alignment: .bottom) {
+      TransientNoticeBanner(message: Bindable(appState).watchlistNotice)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 64)
+    }
     // Deep links (dsvideo://item/{id}) — iOS side.
     //
     // The URL scheme is registered for the iOS target in Info.plist and the app parses
@@ -108,6 +115,12 @@ struct MainView: View {
         // No title is carried in the URL; the real one replaces this as soon as the
         // detail request lands.
         ItemDetailView(itemID: target.id, fallbackTitle: "Loading…")
+      }
+      // The root's notice is hidden under this sheet; its watchlist toggle needs its own.
+      .overlay(alignment: .bottom) {
+        TransientNoticeBanner(message: Bindable(appState).watchlistNotice, announces: false)
+          .padding(.horizontal, 24)
+          .padding(.bottom, 32)
       }
     }
     .onChange(of: appState.pendingDeepLinkItemID) { _, newID in

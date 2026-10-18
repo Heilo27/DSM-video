@@ -16,6 +16,8 @@ nonisolated final class ProfileStubServer: URLProtocol, @unchecked Sendable {
   enum Reply {
     case json(Int, String)
     case unreachable
+    /// The device has no network: URLError.notConnectedToInternet.
+    case offline
   }
   struct Recorded: Equatable {
     let method: String
@@ -81,6 +83,8 @@ nonisolated final class ProfileStubServer: URLProtocol, @unchecked Sendable {
     switch reply {
     case .unreachable:
       client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+    case .offline:
+      client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
     case .json(let status, let text):
       let response = HTTPURLResponse(url: req.url!, statusCode: status, httpVersion: "HTTP/1.1",
                                      headerFields: ["Content-Type": "application/json"])!

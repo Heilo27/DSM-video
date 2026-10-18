@@ -32,6 +32,12 @@ struct TVMainView: View {
         ProfilePickerView()
       } else {
         TVHomeView()
+          // A watchlist change the NAS never received is reported, not silently undone
+          // (FR-137). Not focusable, so it never moves focus off the control just used.
+          .overlay(alignment: .bottom) {
+            TransientNoticeBanner(message: Bindable(appState).watchlistNotice)
+              .padding(.bottom, 60)
+          }
       }
     }
   }

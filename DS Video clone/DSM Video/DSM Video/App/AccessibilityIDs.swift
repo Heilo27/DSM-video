@@ -110,6 +110,8 @@ enum A11y {
     static let errorState = "shared.errorState"
     static let retryButton = "shared.retry"
     static let offlineBanner = "shared.offlineBanner"
+    /// A short-lived message about a change that just failed (TASK-989).
+    static let transientNotice = "shared.transientNotice"
     static let loadingIndicator = "shared.loading"
   }
 }
