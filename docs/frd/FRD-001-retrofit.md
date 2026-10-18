@@ -153,6 +153,16 @@ on a show page it is the next episode to play, not skipped), yet its card and it
 a bar of 3%, because progress above zero is shown. Every surface reads them: the rails, poster cards, the
 episode rows on the show page (check when complete, ring otherwise, nothing at zero), the downloaded-item
 resume bar, and the show page's Resume-or-next-episode choice.
+**Show page Resume / Play button [DESIGN, 2026-10-18, TASK-1060]** — A show's page, on iPhone, iPad and Apple TV,
+has one primary button under the title that opens playback at the right episode: "Resume S2·E3" when an
+episode is part-way through, otherwise "Play S2·E3" for the next episode to watch. When every episode is
+complete, or nothing has been started, it is "Play S1·E1", so a show with episodes always offers something to
+play. One routine decides this for all three (`ShowResumeResolver`); it reads the seasons in order, at most
+five, and stops at the first season holding a part-watched episode. A season that fails to load is skipped;
+a show with no episodes has no button. On Apple TV the button sits in the backdrop panel, and it takes focus
+when the page opens, and again once the target is known (the episode list may have loaded first). Demo mode
+has a resume point too: the demo library's second show resumes its part-watched first episode and the first
+show offers "Play S1·E1". Before this, Apple TV had no such button, and in demo mode it had no resume point.
 **FR-017 [INFERRED]** — With zero in-progress titles the rail is absent rather than rendered empty, and
 its absence is not an error.
 **FR-018 [STATED]** — Mark as Watched sets a title to fully watched, removes it from Continue Watching,
