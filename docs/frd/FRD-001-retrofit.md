@@ -775,6 +775,51 @@ page without playing; AC-5 nothing indexed carries a URL or token; AC-6 this req
 *Derivation:* P1 (every title is findable, here from the phone's own search), S4 (nothing shared that
 could expose the account) and S5 (profiles keep their ceilings). TASK-743.
 
+**FR-154 [DESIGN, 2026-10-18, TASK-743]** — *A Continue Watching widget shows the active profile's
+in-progress titles on the iPhone Home Screen, without ever contacting the server.* The widget lists at
+most **4** titles, in the same order as the app's Continue Watching rail (most recent first). Each shows
+the title (a show's name for an episode), a subtitle ("S2 · E4" for an episode, the year for a movie), how
+far through it the person is, and a small poster when one is available. Tapping one opens that title's
+detail page (`dsvideo://item/{id}`, the same destination as FR-147 and FR-153), and never starts playback.
+*What is shared:* title, subtitle, a progress fraction, the poster's image id and a small poster picture
+only. Never a stream address, a sign-in token or the address of a poster.
+*The widget makes no network call.* It draws only what the app last wrote to a snapshot file in the app
+group; if the app has not written one, the widget shows nothing. Apple TV has no widget and writes no
+snapshot.
+*Whose titles:* only the **active profile's**, by the same ceiling rule as every other list (FRD-002
+FR-242). The snapshot records which profile it was written for, and the widget shows it only while that
+profile is the active one, so profile B never sees profile A's titles even in the moment before the app
+rewrites the file. An account with profiles where none is chosen yet, and a server without profiles,
+get no snapshot. Demo mode writes none, and an empty Continue Watching rail removes it.
+*When it is written and cleared:* the app writes the snapshot whenever Continue Watching changes and
+whenever the profile list (and so the ceiling) changes, and asks the widget to refresh only when the file
+really changed. The snapshot is deleted on sign-out and on every profile switch, before the new profile's
+titles load. A failed write removes the old snapshot rather than leaving it advertised. Posters are fetched
+once each and reused; a poster that arrives after a sign-out or profile switch is dropped.
+*One-time profile migration (upgrade):* the widget needs the App Group, which the iPhone app does not hold
+today. Without it, the profile list and the active profile live in the app's own preferences; with it,
+they live in the group's, which starts empty. On first launch after the app gains the group, the app copies
+the profile values across once, so a person is not sent back to the profile picker by the upgrade. It
+copies only when the group holds none of those values (it never overwrites), never deletes the old copy,
+and records that it has run: the record survives sign-out, so signing out is never undone by copying the
+old values back. Without the group it does nothing.
+*Known limit, device verification pending:* the location of the old preferences file is inferred from how
+the system stores a named defaults suite (`Library/Preferences/group.HeiloProjects.DSReel.plist`), not
+observed on a device. If the inference is wrong, the copy finds nothing and profiles reset once on the
+upgrade (the person chooses a profile again; no data is lost). To be confirmed on a device with an
+installed pre-upgrade build before the widget ships.
+*Acceptance:* AC-1 the snapshot holds at most 4 titles in rail order and only the active profile's; AC-2 no
+title above the profile's ceiling is in it, and an unchosen or no-profile scope has no snapshot; AC-3
+a snapshot written for one profile is shown to no other; AC-4 sign-out and every profile switch delete it,
+and an empty rail or demo mode leaves none; AC-5 an unchanged snapshot is not rewritten and does not refresh
+the widget; AC-6 nothing in the snapshot carries a URL or token and the widget makes no network call;
+AC-7 the profile migration copies once, never overwrites, never deletes the old copy, and its record
+survives sign-out; AC-8 this requirement.
+*Derivation:* P1 (the title you were watching is one tap from the Home Screen), S4 (display data only; no
+address or token leaves the app) and S5 (profiles keep their ceilings, and one never sees another's), A2
+(no server of ours, and the widget itself reaches no server at all) and S3 (the upgrade must not lose the
+person's profiles). TASK-743 (B1: snapshot and migration; B2: the widget itself).
+
 ---
 
 ## 8. Offline (no server reachable)
