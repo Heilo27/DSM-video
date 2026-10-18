@@ -77,6 +77,10 @@ struct GestureVideoPlayer: View {
     var onGoToShow: (() -> Void)?
     /// When true, d-pad left/right does not seek (used when an overlay captures focus).
     var blockDpadSeek: Bool = false
+    /// The caller is already re-resolving the stream after a network failure (TASK-991,
+    /// FR-052). The failure screen says "Reconnecting…" and offers only Dismiss until the
+    /// caller either rebuilds the stream or gives up, when the real error and Retry return.
+    var reconnecting: Bool = false
 
     @State private var player: AVPlayer?
     #if os(iOS)
@@ -343,6 +347,13 @@ struct GestureVideoPlayer: View {
                 focusedControl = showControls ? .playPause : .hidden
             }
         }
+        // Retry is hidden while reconnecting and comes back if the reconnect fails, so the
+        // first live button changes under a failure that is already on screen (TASK-991).
+        .onChange(of: reconnecting) { _, _ in
+            if let err = playerError {
+                focusedControl = retryOffered(for: err) ? .errorRetry : .errorDismiss
+            }
+        }
         #endif
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Play/Pause") { togglePlayPause() }
@@ -552,17 +563,27 @@ struct GestureVideoPlayer: View {
     @ViewBuilder
     private func errorContent(err: String) -> some View {
         VStack(spacing: .dsSpaceLG) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.white.opacity(0.8))
-            Text("Playback Failed")
-                .font(.headline)
-                .foregroundStyle(.white)
-            Text(err)
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, .dsSpaceXXXL)
+            if Self.failureScreen(playerError: err, reconnecting: reconnecting) == .reconnecting {
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .tint(.white)
+                    .accessibilityHidden(true)
+                Text(StreamRecovery.reconnectingLabel)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+            } else {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.white.opacity(0.8))
+                Text("Playback Failed")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Text(err)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, .dsSpaceXXXL)
+            }
             HStack(spacing: .dsSpaceMD) {
                 // TASK-848: hide Retry when the failure was an expired session. Retrying
                 // re-fetches with the same dead token and fails identically every time —
@@ -614,9 +635,30 @@ struct GestureVideoPlayer: View {
     }
 
     /// Whether the error screen offers Retry. One rule for the button and for the tvOS
-    /// d-pad handler, so the remote never aims at a button that is not drawn.
+    /// d-pad handler, so the remote never aims at a button that is not drawn. Not while the
+    /// caller is reconnecting: a Retry then would start a second rebuild beside the first.
     private func retryOffered(for err: String) -> Bool {
-        onPlaybackFailed != nil && !err.localizedCaseInsensitiveContains("session expired")
+        onPlaybackFailed != nil && !reconnecting && Self.retryCanHelp(err)
+    }
+
+    /// TASK-848: Retry after an expired session re-fetches with the same dead token and fails
+    /// identically, so it is not offered. The one home for that rule: this player's failure
+    /// screen and PlayerSheet's load-failure screen both ask it.
+    nonisolated static func retryCanHelp(_ err: String) -> Bool {
+        !err.localizedCaseInsensitiveContains("session expired")
+    }
+
+    /// What the failure screen shows (TASK-991, FR-052). While the caller re-resolves the
+    /// stream the error is not yet the final word, so it reads "Reconnecting…"; once the
+    /// caller stops, the player's own error (the real cause) is shown again.
+    nonisolated enum FailureScreen: Equatable {
+        case reconnecting
+        case failed(String)
+    }
+
+    nonisolated static func failureScreen(playerError: String?, reconnecting: Bool) -> FailureScreen? {
+        guard let playerError else { return nil }
+        return reconnecting ? .reconnecting : .failed(playerError)
     }
 
     // MARK: - Gesture Overlay
