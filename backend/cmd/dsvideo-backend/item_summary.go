@@ -62,12 +62,8 @@ func itemSummary(r itemSummaryRow) map[string]any {
 	if r.ShowFolderID.Valid && r.ShowFolderID.String != "" {
 		item["showFolderId"] = r.ShowFolderID.String
 	}
-	if r.ProgPos.Valid {
-		item["progress"] = map[string]any{
-			"positionSeconds": r.ProgPos.Int64,
-			"durationSeconds": r.ProgDur.Int64,
-			"updatedAt":       r.ProgUpdatedAt.String,
-		}
+	if rec, ok := progressFromNull(r.ProgPos, r.ProgDur, r.ProgUpdatedAt); ok {
+		item["progress"] = rec.JSON()
 	}
 	return item
 }

@@ -64,6 +64,14 @@ func withIsolatedAppState(
   }
 }
 
+/// AppState starts an NWPathMonitor in init, and its first update (a satisfied path, on this
+/// machine) lands a few milliseconds later and writes `isOffline = false`. A test that sets
+/// `isOffline` must let that update land first, or the monitor undoes the test's setup.
+@MainActor
+func letNetworkMonitorSettle() async {
+  try? await Task.sleep(for: .milliseconds(300))
+}
+
 /// TASK-925 AC-1/AC-2. An AppState built on injected stores reads and writes ONLY those; the
 /// app-group store is left as it was, and every client it builds names the profile from the
 /// injected store.

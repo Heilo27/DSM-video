@@ -1925,9 +1925,13 @@ final class AppState {
   /// it mattered — finishing an episode changes Continue Watching, and without this didSet
   /// the shelf kept offering the thing you just watched. What the shelf may show from these
   /// rails (e.g. never Continue Watching on an account with a restricted profile) is
-  /// TopShelfPolicy's decision, not the didSet's.
+  /// TopShelfPolicy's decision, not the didSet's. Continue Watching also feeds the iPhone
+  /// widget's snapshot (FR-154), whose rules are ContinueWatchingSnapshotPolicy's.
   var homeContinueWatching: [ItemSummary] = [] {
-    didSet { writeTopShelfSnapshot() }
+    didSet {
+      writeTopShelfSnapshot()
+      writeContinueWatchingSnapshot()
+    }
   }
   var homeJustAdded: [ItemSummary] = [] {
     didSet { writeTopShelfSnapshot() }
@@ -2046,6 +2050,10 @@ final class AppState {
     // profile change can never leave the previous profile's titles searchable; the next
     // refreshSpotlightIndex() fills it back for whoever is active.
     clearSpotlightIndex()
+    // FR-154: the widget's snapshot is the previous profile's Continue Watching. Emptying the rail
+    // above already clears it through the didSet; deleted directly as well so sign-out and a
+    // profile switch never depend on the writer's empty-rail path.
+    deleteContinueWatchingSnapshot()
   }
 
   // MARK: - Spotlight (FR-153)
@@ -2123,6 +2131,112 @@ final class AppState {
   @ObservationIgnored var topShelfSnapshotURL: URL? = FileManager.default.containerURL(
     forSecurityApplicationGroupIdentifier: ActiveProfileStore.appGroupID
   )?.appendingPathComponent("topshelf.json")
+
+  // MARK: - Continue Watching widget snapshot (FR-154, TASK-743)
+
+  /// Where the widget's snapshot lives. nil while the iPhone app has no App Group entitlement,
+  /// which makes the writer a no-op until the widget ships (TASK-743 B2). A stored property only
+  /// so tests can point the writer at a file they own.
+  @ObservationIgnored var continueWatchingSnapshotURL: URL? = ContinueWatchingSnapshotPolicy.containerFileURL()
+
+  /// Fetches one poster thumbnail by image id. Tests replace it; nil uses the Spotlight fetch
+  /// (same 200px JPEG, same authenticated loader).
+  @ObservationIgnored var continueWatchingThumbnailLoader: ((String) async -> Data?)?
+  /// Thumbnails already fetched, by poster image id. Profile-scoped: emptied with the snapshot.
+  @ObservationIgnored private var continueWatchingThumbnails: [String: Data] = [:]
+  /// Poster ids a fetch was already started for, so a poster that cannot be fetched is not asked
+  /// for again on every rail change. Emptied with the snapshot.
+  @ObservationIgnored private var continueWatchingThumbnailAttempts: Set<String> = []
+  @ObservationIgnored private var continueWatchingThumbnailTask: Task<Void, Never>?
+
+  /// Writes the widget's snapshot from the Continue Watching rail, or deletes it when there must be
+  /// none (ContinueWatchingSnapshotPolicy: no chosen profile, an empty rail, demo mode). iPhone and
+  /// iPad only; Apple TV has no widget.
+  ///
+  /// Thumbnails already known (fetched this session, or in the file from an earlier one) are written
+  /// with the entries at once; missing ones are fetched afterwards, fenced by the home generation so
+  /// a fetch that outlives a sign-out or profile switch is dropped, and the file is rewritten.
+  func writeContinueWatchingSnapshot() {
+    #if os(iOS)
+    let scope = profileStore.activeScope
+    guard !isDemoMode,
+          let snapshot = ContinueWatchingSnapshotPolicy.snapshot(
+            profileID: scope.id,
+            entries: ContinueWatchingSnapshotPolicy.entries(from: homeContinueWatching, scope: scope))
+    else {
+      deleteContinueWatchingSnapshot()
+      return
+    }
+    guard let fileURL = continueWatchingSnapshotURL else { return }
+    let onDisk = (try? Data(contentsOf: fileURL)).flatMap(ContinueWatchingSnapshotPolicy.decode)
+    var stored: [String: Data] = [:]
+    for entry in onDisk?.entries ?? [] {
+      if let id = entry.posterImageID, let data = entry.thumbnail { stored[id] = data }
+    }
+    let filled = ContinueWatchingSnapshot(
+      profileID: snapshot.profileID,
+      entries: snapshot.entries.map { entry in
+        entry.withThumbnail(entry.posterImageID.flatMap { continueWatchingThumbnails[$0] ?? stored[$0] })
+      })
+    do {
+      if try ContinueWatchingSnapshotPolicy.write(filled, to: fileURL) {
+        ContinueWatchingWidgetRefresh.notify()
+      }
+    } catch {
+      // Fail closed: a failed write must not leave the PREVIOUS snapshot advertised.
+      homeLog.error("writeContinueWatchingSnapshot: write failed — \(error.localizedDescription); clearing the widget")
+      deleteContinueWatchingSnapshot()
+      return
+    }
+    fetchMissingContinueWatchingThumbnails(for: filled)
+    #endif
+  }
+
+  private func fetchMissingContinueWatchingThumbnails(for snapshot: ContinueWatchingSnapshot) {
+    let missing = Set(snapshot.entries.compactMap { $0.thumbnail == nil ? $0.posterImageID : nil })
+      .subtracting(continueWatchingThumbnailAttempts)
+    guard !missing.isEmpty else { return }
+    continueWatchingThumbnailAttempts.formUnion(missing)
+    let generation = homeStateGeneration
+    let client = api
+    let load = continueWatchingThumbnailLoader ?? { posterID in
+      await Self.spotlightThumbnail(posterID: posterID, client: client)
+    }
+    continueWatchingThumbnailTask = Task {
+      var fetched: [String: Data] = [:]
+      for posterID in missing.sorted() {
+        if Task.isCancelled { return }
+        if let data = await load(posterID) { fetched[posterID] = data }
+      }
+      guard !Task.isCancelled, !fetched.isEmpty,
+            self.homeResultIsCurrent(generation, "continueWatchingThumbnails") else { return }
+      self.continueWatchingThumbnails.merge(fetched) { _, new in new }
+      self.writeContinueWatchingSnapshot()
+    }
+  }
+
+  /// Waits for an in-flight thumbnail fetch. For tests.
+  func waitForContinueWatchingThumbnails() async {
+    await continueWatchingThumbnailTask?.value
+  }
+
+  /// Removes the widget's snapshot and forgets its thumbnails. Called on sign-out and every
+  /// profile switch (discardProfileScopedHomeState), and whenever the writer finds there must be
+  /// no snapshot.
+  func deleteContinueWatchingSnapshot() {
+    continueWatchingThumbnailTask?.cancel()
+    continueWatchingThumbnailTask = nil
+    continueWatchingThumbnails = [:]
+    continueWatchingThumbnailAttempts = []
+    guard let fileURL = continueWatchingSnapshotURL,
+          FileManager.default.fileExists(atPath: fileURL.path) else { return }
+    do {
+      try FileManager.default.removeItem(at: fileURL)
+      ContinueWatchingWidgetRefresh.notify()
+    } catch {
+      homeLog.error("deleteContinueWatchingSnapshot: could not remove the widget file — \(error.localizedDescription)")
+    }
+  }
 
 
   var homeAllRailsEmpty: Bool {
@@ -3067,8 +3181,15 @@ final class AppState {
   // MARK: - Heartbeat
 
   /// Lightweight check — fires every 30s in foreground. Only syncs if sequences changed.
+  ///
+  /// SKIPS (does not defer) while the home load is decoding the local catalog (TASK-1062).
+  /// A skip loses nothing: this runs on a 30s timer and re-reads the server and local cursors
+  /// from scratch each time, so a change missed now is seen on the next beat. The decode ends
+  /// within moments, and the cold start that owns it starts its own delta sync right after
+  /// (`loadHomeColdStartWithCache`), so waiting here would only queue a second sync behind it.
+  /// Same reasoning for the loading and background-refreshing states.
   func runHeartbeat() async {
-    guard !isDemoMode, !homeIsLoading, !homeIsBackgroundRefreshing,
+    guard !isDemoMode, !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing,
           api.baseURL != AppState.fallbackURL else { return }
     let apiSnapshot = api
     do {
@@ -3460,6 +3581,7 @@ final class AppState {
       await loadAgeLevelsIfNeeded()
       homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(self.profileStore.activeProfileID ?? "none") picker=\(self.needsProfilePicker)")
       writeTopShelfSnapshot()  // the list sets the shelf's ceiling (FR-264, TopShelfPolicy)
+      writeContinueWatchingSnapshot()  // a changed ceiling re-filters the widget now (FR-154)
     } catch {
       profileSupport = ProfileGate.support(afterProfilesError: error)
       homeLog.warning("refreshProfiles: failed — \(error.localizedDescription); support=\(String(describing: self.profileSupport))")
@@ -3493,6 +3615,13 @@ final class AppState {
   }
 
   #if DEBUG
+  /// TEST SEAM (TASK-1062). `.cacheDecoding` lasts only the few milliseconds of a local read,
+  /// so a test cannot hold it by driving `homeLoad`. This puts the state there directly so a
+  /// guard that reads it can be exercised deterministically.
+  func setHomeLoadStateForTesting(_ state: HomeLoadState) {
+    homeLoadState = state
+  }
+
   /// QA hook only (ProfileScreenPreviewHost): the ladder labels without a server.
   func seedAgeLevelsForPreview(_ levels: [AgeLevelsResponse.Level]) {
     ageLevels = levels
@@ -3787,7 +3916,7 @@ final class AppState {
         title: item.title,
         year: item.year,
         imageURL: imageURLString,
-        deepLinkURL: "dsvideo://item/\(item.id)",
+        deepLinkURL: ItemDeepLink.urlString(itemID: item.id),
         // tvOS draws the resume bar from this; nil under a restricted ceiling (FR-264).
         playbackProgress: TopShelfPolicy.playbackProgress(for: item, ceiling: content.ceiling),
         ageLevel: item.ageLevel
