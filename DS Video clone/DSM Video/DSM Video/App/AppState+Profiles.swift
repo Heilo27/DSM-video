@@ -94,6 +94,8 @@ extension AppState {
 nonisolated enum ProfileText {
   /// FR-263: why a PIN-protected profile cannot be entered offline.
   static let pinNeedsNAS = "Your NAS needs to be reachable to check this PIN."
+  /// The two entries of a new PIN differ; the flow goes back to the first entry.
+  static let pinMismatch = "Those PINs didn't match. Choose a PIN again."
   static let saveNeedsNAS = "Couldn't reach your NAS, so nothing was changed. Check your connection and try again."
 
   /// The real cause of a failed PIN check (FR-266, AC-002-41): wrong PIN with tries left,

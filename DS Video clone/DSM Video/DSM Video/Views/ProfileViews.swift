@@ -371,6 +371,10 @@ enum PinPadOutcome: Equatable {
 struct PinPadView<Header: View>: View {
   let title: String
   var message: String?
+  /// An error to show from the first frame, for a pad that was rebuilt because of the very
+  /// failure it should report (NewPinView returns to its first step on a reject). The next
+  /// digit clears it, like any error the pad raised itself.
+  var initialError: String? = nil
   let submit: (String) async -> PinPadOutcome
   let cancel: () -> Void
   @ViewBuilder let header: () -> Header
@@ -416,7 +420,10 @@ struct PinPadView<Header: View>: View {
     // Over the top edge rather than in the column: the pad already fills a TV's height and a
     // small iPhone's, so one more row would push the keys off screen.
     .overlay(alignment: .top) { forgotBar }
-    .onAppear { focusedKey = .k1 }
+    .onAppear {
+      focusedKey = .k1
+      if error == nil { error = initialError }
+    }
     #if os(tvOS)
     .onExitCommand { cancel() }
     #endif
@@ -596,6 +603,51 @@ struct ProfilePinEntryView: View {
   }
 }
 
+/// The two steps of choosing a PIN, as a plain value so the transitions are testable without a
+/// UI runner. A rejected confirm returns to the first step and carries the reason with it:
+/// `NewPinView` rebuilds the pad when the step changes, which would otherwise discard the very
+/// message the reject was about to show (TASK-1063).
+nonisolated struct NewPinFlow: Equatable {
+  /// The first entry, held until the confirmation; nil while choosing.
+  private(set) var firstPin: String?
+  /// Why the flow went back to the first step; shown on the pad that replaces the old one.
+  private(set) var notice: String?
+
+  var isConfirming: Bool { firstPin != nil }
+
+  enum Step: Equatable {
+    /// First entry taken; ask for it again.
+    case confirm
+    /// The confirmation differs; the flow is already back at the first step.
+    case reject(String)
+    /// The two entries match; hand the PIN to the caller to save.
+    case save(String)
+  }
+
+  mutating func enter(_ pin: String) -> Step {
+    guard let firstPin else {
+      firstPin = pin
+      notice = nil
+      return .confirm
+    }
+    guard firstPin == pin else {
+      return rejected(ProfileText.pinMismatch)
+    }
+    return .save(pin)
+  }
+
+  /// The caller could not keep the PIN: back to the first step, saying why.
+  mutating func saveFailed(_ message: String) {
+    _ = rejected(message)
+  }
+
+  private mutating func rejected(_ message: String) -> Step {
+    firstPin = nil
+    notice = message
+    return .reject(message)
+  }
+}
+
 /// Choosing a new PIN: enter it, then enter it again. Hands the PIN to `chosen`, which
 /// returns nil when it was accepted or the reason it was not.
 struct NewPinView: View {
@@ -603,26 +655,26 @@ struct NewPinView: View {
   let chosen: (String) async -> String?
   let cancel: () -> Void
 
-  @State private var first: String?
+  @State private var flow = NewPinFlow()
 
   var body: some View {
     PinPadView(
-      title: first == nil ? title : "Enter it again",
-      message: first == nil ? "Choose 4 digits." : "To make sure it's right."
+      title: flow.isConfirming ? "Enter it again" : title,
+      message: flow.isConfirming ? "To make sure it's right." : "Choose 4 digits.",
+      initialError: flow.notice
     ) { pin in
-      guard let firstPin = first else {
-        first = pin
+      switch flow.enter(pin) {
+      case .confirm:
+        return .accept
+      case .reject(let reason):
+        return .reject(reason)
+      case .save(let pin):
+        if let failure = await chosen(pin) {
+          flow.saveFailed(failure)
+          return .reject(failure)
+        }
         return .accept
       }
-      guard firstPin == pin else {
-        first = nil
-        return .reject("Those PINs didn't match. Choose a PIN again.")
-      }
-      if let failure = await chosen(pin) {
-        first = nil
-        return .reject(failure)
-      }
-      return .accept
     } cancel: {
       cancel()
     } header: {
@@ -630,7 +682,7 @@ struct NewPinView: View {
         .font(.system(size: ProfileMetrics.tile * 0.25))
         .foregroundStyle(Color.dsTextSecondary)
     }
-    .id(first == nil ? "first" : "confirm")
+    .id(flow.isConfirming ? "confirm" : "first")
   }
 }
 
