@@ -277,6 +277,10 @@ appears exactly once, with its episodes merged. On a restricted profile the merg
 see, in the show list and the show's seasons and episodes alike, so the detail lists the episodes the
 header counted (FRD-002 FR-250). [TASK-924] The DS Video web plane (`TVShow` / `TVShowEpisode`
 `list` and `getinfo`) follows the same rule, and its result never depends on database row order. [TASK-995]
+The inverse holds too: a folder is ONE show. When a folder holds episodes of more than one show, the
+folder takes the name most of its episodes carry, and all of its episodes list under that show, in the
+apps and on the web plane alike (one grouping path, `groupEpisodesByShow`); a sequel's own folder is its
+own show. Every episode appears in exactly one show. [TASK-999]
 **FR-085 [STATED]** — The detail screen shows title, year, runtime, genre, rating, director, cast, and
 description. *Derivation:* design-spec B4 §4/§6/§7.
 **FR-086 [INFERRED]** — Missing optional metadata is omitted cleanly — never rendered as "null"/"nil" or
