@@ -353,6 +353,9 @@ final class AppState {
   /// The offline catalog this AppState reads and writes. Production is always `.shared`;
   /// tests pass a store on a temp database (`LocalStore.makeForTesting`).
   let localStore: LocalStore
+  /// Where the "update your server" dismissal is remembered (FR-149). Injected so tests use
+  /// a throwaway suite.
+  let serverUpdateDismissal: ServerUpdateDismissal
 
   // Use custom REST API client (our backend)
   private(set) var api: APIClient
@@ -384,9 +387,11 @@ final class AppState {
     )
   }
 
-  init(profileStore: ActiveProfileStore = .shared, localStore: LocalStore = .shared) {
+  init(profileStore: ActiveProfileStore = .shared, localStore: LocalStore = .shared,
+       serverUpdateDefaults: UserDefaults = .standard) {
     self.profileStore = profileStore
     self.localStore = localStore
+    self.serverUpdateDismissal = ServerUpdateDismissal(defaults: serverUpdateDefaults)
     #if DEBUG
     // Must run BEFORE any stored value is read below, or this launch would load the state it
     // is supposed to be clearing.
@@ -1076,6 +1081,7 @@ final class AppState {
     savedPassword = ""
     username = ""  // SEC-03: clear username so it doesn't persist cross-user on shared devices
     sessionToken = nil
+    serverUpdateNotice = nil  // FR-149: belongs to the server just signed out of
     pairingCode = nil
     loginError = nil
     watchlistItems = []
@@ -2267,6 +2273,9 @@ final class AppState {
       return
     }
 
+    // FR-149: signing in lands here. Not awaited: the notice is advice and never holds up the rails.
+    Task { await self.checkServerVersion() }
+
     // Already have in-memory rail data — run heartbeat to check for changes.
     //
     // This MUST gate on the rails themselves, not on libraries. The condition used to
@@ -2437,6 +2446,8 @@ final class AppState {
     defer { isForegroundCoordinating = false }
 
     let result = await revalidateConnection()
+    // FR-149: a server updated (or not) while the app was in the background. Not awaited.
+    Task { await self.checkServerVersion() }
     // .switched → networkDidReconnect already triggered homeLoad; don't double-refresh.
     guard result != .switched else { return }
     await foregroundRefresh()
@@ -3362,6 +3373,45 @@ final class AppState {
       homeLog.warning("loadWatchlist failed: \(error.localizedDescription)")
       handleConnectionFailure(error)
     }
+  }
+
+  // MARK: - Server update notice (FR-149)
+
+  /// Set when the connected server is older than `RecommendedServer.version` and the user has
+  /// not dismissed the notice for it. The root views show it; nil clears it.
+  var serverUpdateNotice: ServerUpdateNotice?
+  private var isCheckingServerVersion = false
+
+  /// Reads the server's version (`/api/v1/version`, the call the connection probes already use)
+  /// and updates `serverUpdateNotice`. Does nothing in demo mode, signed out, or while the server
+  /// cannot be reached; a failed read changes nothing, because "could not ask" says nothing about
+  /// the server's version and the notice must never claim it does.
+  func checkServerVersion() async {
+    guard sessionToken != nil, !isDemoMode, !isServerUnavailable, !isCheckingServerVersion else { return }
+    isCheckingServerVersion = true
+    defer { isCheckingServerVersion = false }
+    do {
+      let reported = try await api.serverVersion()
+      // Signed out (or into demo) while the request was in flight: the answer is not for this session.
+      guard sessionToken != nil, !isDemoMode else { return }
+      evaluateServerVersion(reported.serverVersion)
+    } catch {
+      homeLog.info("checkServerVersion: version read failed, notice unchanged — \(error.localizedDescription)")
+    }
+  }
+
+  /// Applies `ServerUpdatePolicy` to a version the server reported.
+  func evaluateServerVersion(_ reported: String?) {
+    serverUpdateNotice = ServerUpdatePolicy.notice(
+      serverVersion: reported, dismissedFor: serverUpdateDismissal.dismissedFor)
+  }
+
+  /// "Not now": hides the notice and remembers it for the version it recommended, so it comes
+  /// back only when the app recommends a newer server.
+  func dismissServerUpdateNotice() {
+    guard let notice = serverUpdateNotice else { return }
+    serverUpdateDismissal.dismiss(recommendedVersion: notice.recommendedVersion)
+    serverUpdateNotice = nil
   }
 
   /// TASK-989 (FR-137): set when a watchlist change could not be saved and was rolled

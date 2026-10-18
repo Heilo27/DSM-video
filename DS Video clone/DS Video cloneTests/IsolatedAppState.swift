@@ -47,7 +47,8 @@ func withIsolatedAppState(
   let localStore = await LocalStore.makeForTesting(databaseURL: dir.appendingPathComponent("dsreel.db"))
   await localStore.setActiveProfile(profileStore.activeScope)
 
-  let state = AppState(profileStore: profileStore, localStore: localStore)
+  let state = AppState(profileStore: profileStore, localStore: localStore,
+                       serverUpdateDefaults: defaults)
   let savedBase = state.baseURL, savedHTTPS = state.useHTTPS, savedRemember = state.rememberMe
   if let stubHost {
     state.rememberMe = false
