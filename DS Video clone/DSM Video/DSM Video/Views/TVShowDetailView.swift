@@ -1732,7 +1732,7 @@ private struct TVShowMetadataFixerSheet: View {
                     if isDuplicate {
                       Text("ID \(candidate.tmdbId)")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.dsWarning)
                     }
                   }
                   if let overview = candidate.overview, !overview.isEmpty {

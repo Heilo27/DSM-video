@@ -1346,7 +1346,7 @@ private struct MetadataFixerSheet: View {
         }
         if applied {
           Text("Metadata updated! Pull to refresh.")
-            .foregroundStyle(.green)
+            .foregroundStyle(Color.dsSuccess)
             .font(.caption)
             .listRowBackground(Color(white: 0.08))
         }

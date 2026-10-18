@@ -1135,7 +1135,7 @@ struct DownloadsView: View {
           if let failure = downloadManager.failedDownloads[itemID] {
             HStack(spacing: 12) {
               Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.dsError)
                 .accessibilityHidden(true)
               VStack(alignment: .leading, spacing: 2) {
                 Text(failure.title)
@@ -1657,7 +1657,7 @@ struct SettingsView: View {
           }
           .disabled(appState.isGeneratingPairingCode)
           if let err = appState.pairingError {
-            Text(err).font(.footnote).foregroundStyle(.red)
+            Text(err).font(.footnote).foregroundStyle(Color.dsError)
           }
         } header: {
           Text("Apple TV")

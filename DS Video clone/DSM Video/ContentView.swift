@@ -136,7 +136,7 @@ private struct LaunchAnimationView: View {
                         // Logo: red circle + play triangle
                         ZStack {
                             Circle()
-                                .fill(Color.red)
+                                .fill(Color.dsAccent)
                                 .frame(width: 64, height: 64)
                             Image(systemName: "play.fill")
                                 .font(.system(size: 26))
@@ -292,7 +292,7 @@ private struct LaserView: View {
                 Rectangle()
                     .fill(
                         LinearGradient(
-                            colors: [Color.red.opacity(0.9), Color.red.opacity(0.2)],
+                            colors: [Color.dsAccent.opacity(0.9), Color.dsAccent.opacity(0.2)],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
