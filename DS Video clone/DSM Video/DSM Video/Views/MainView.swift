@@ -1556,7 +1556,7 @@ struct SettingsView: View {
   @AppStorage(SubtitleStyle.textColorKey) private var subtitleTextColor: String = "#FFFFFF"
   @AppStorage(SubtitleStyle.backgroundOpacityKey) private var subtitleBackgroundOpacity: Double = 0.0
   // Theme selection (Classic / Nitrate). Shared key with the app entry.
-  @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
+  @AppStorage(ThemeID.storageKey) private var themeIDRaw: String = ThemeID.defaultRaw
   var isEmbedded: Bool = false
   /// Set when Contact Support could not open a mail composer (TASK-757). Non-nil = alert up.
   @State private var supportMailNotice: String?

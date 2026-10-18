@@ -181,7 +181,7 @@ private struct ProfileTileLabel<Art: View>: View {
     VStack(spacing: 18) {
       art()
         .overlay(
-          RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)
+          RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)  // literal: tile corner scales with the tile size (16%), like the avatar
             .strokeBorder(.white, lineWidth: lifted ? ProfileMetrics.tile * 0.03 : 0))
         .shadow(color: .black.opacity(lifted ? 0.6 : 0), radius: 24, y: 12)
         .scaleEffect(scale)
@@ -206,7 +206,7 @@ private struct ProfileTileLabel<Art: View>: View {
 
 private struct AddTileArt: View {
   var body: some View {
-    RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)
+    RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous)  // literal: tile corner scales with the tile size (16%), like the avatar
       .strokeBorder(Color.dsTextTertiary, style: StrokeStyle(lineWidth: 3, dash: [10, 8]))
       .frame(width: ProfileMetrics.tile, height: ProfileMetrics.tile)
       .overlay(
@@ -758,8 +758,7 @@ struct ProfileManagementView: View {
                       .foregroundStyle(.white)
                       .frame(width: ProfileMetrics.tile, height: ProfileMetrics.tile)
                       .background(.black.opacity(0.45),
-                                  in: RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16,
-                                                       style: .continuous))
+                                  in: RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.16, style: .continuous))  // literal: tile corner scales with the tile size (16%), like the avatar
                   }
               }
             }

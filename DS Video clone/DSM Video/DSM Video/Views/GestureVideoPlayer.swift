@@ -575,18 +575,12 @@ struct GestureVideoPlayer: View {
                         onPlaybackFailed?()
                     }
                     .accessibilityIdentifier(A11y.Player.errorRetryButton)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, .dsSpaceXXL)
-                    .padding(.vertical, 10)
-                    .background(Color.dsAccent.opacity(0.8), in: Capsule())
+                    // TASK-954: the one primary-action look (pill: it sits over the player's
+                    // dark chrome). The style draws pressed/focused; the call site binds focus.
+                    .dsPrimaryButton(.pill)
                     #if os(tvOS)
-                    .buttonStyle(.plain)
                     .focused($focusedControl, equals: .errorRetry)
                     .focusEffectDisabled()
-                    .scaleEffect(focusedControl == .errorRetry ? 1.15 : 1.0)
-                    .brightness(focusedControl == .errorRetry ? 0.25 : 0)
-                    .animation(.easeInOut(duration: 0.15), value: focusedControl)
                     #endif
                 }
                 Button("Dismiss") {

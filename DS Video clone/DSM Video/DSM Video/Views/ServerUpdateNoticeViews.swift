@@ -58,7 +58,7 @@ struct ServerUpdateCard: View {
     }
     .padding(.dsSpaceLG)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .background(Color.dsSurfaceRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .background(Color.dsSurfaceRaised, in: RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
     .padding(.horizontal, .dsSpaceLG)
     .padding(.top, .dsSpaceSM)
     .accessibilityElement(children: .contain)
@@ -105,7 +105,7 @@ struct TVServerUpdateCard: View {
     }
     .padding(.dsSpaceXXL)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .background(Color.dsSurfaceRaised, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    .background(Color.dsSurfaceRaised, in: RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
     .padding(.horizontal, .dsSpaceTitleSafe)
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier(A11y.Shared.serverUpdateCard)
@@ -126,7 +126,7 @@ struct TVInstallQRCode: View {
           .scaledToFit()
           .frame(width: size, height: size)
           .padding(.dsSpaceMD)
-          .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .background(Color.white, in: RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
       }
       Text(RecommendedServer.displayURL)
         .font(.callout.weight(.semibold))
