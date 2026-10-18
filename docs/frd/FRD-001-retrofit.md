@@ -231,6 +231,10 @@ server must transcode still play.
 **FR-051 [STATED]** — Playback resumes at the title's recorded position, with an option to start over.
 **FR-052 [STATED]** — If the NAS drops off the network mid-video, the user gets a clear message and can
 retry — never an endless spinner. Retry resumes at the stall position.
+*Clarified 2026-10-17 (TASK-991):* when the app moves between the home and away addresses
+mid-video (M5), the video picks up again on the new address near where it was, with no tap. A video
+that failed to load for lack of network retries itself when the network returns. If the new address
+cannot play it either, the message names that failure, not the one that led to it.
 **FR-053 [STATED]** — Transient buffering and permanent disconnection are distinguishable; recoverable
 buffering never raises the connection-lost error.
 *Derivation:* competitive research explicitly frames this distinction as the requirement.
@@ -246,6 +250,9 @@ locks; the setting can be turned off in Settings.
 duration and advancing elapsed time, and its controls actually affect playback. *(Stated as a pattern in
 competitive research P05; inferred as a requirement from the stated background-audio promise — audio
 that keeps playing with no lock-screen control is a half-feature.)*
+*Clarified 2026-10-17 (TASK-965):* the artwork is the title's poster, or its backdrop when it has no
+poster. A title with neither shows no picture, never the previous title's, and its name, duration and
+time still show. When autoplay moves to the next episode, the artwork changes with it.
 **FR-059 [STATED]** — Playback Speed lives in Settings, is easy to find, and is easy to set back to
 normal. A user must never be stuck playing fast with no way to change it.
 **FR-060 [INFERRED]** — The persisted default playback rate is 1x; after a cold start with no explicit
@@ -280,7 +287,9 @@ identity and records the finished episode as watched; the final episode of a sho
 leaves them unable to continue playing the title.
 **FR-070 [INFERRED]** — Double-triggering Play yields exactly one playback session.
 **FR-071 [STATED]** — With the NAS offline, Play on a non-downloaded title is unavailable up front rather
-than failing after the tap.
+than failing after the tap. This includes shortcuts that start playback directly (the Home hero's Play,
+a Continue Watching card, opening an episode to play): they land on the title's detail screen with Play
+unavailable instead of opening the player.
 
 ---
 
@@ -404,8 +413,11 @@ address re-entry. This works in both directions (iOS→tvOS and tvOS→iOS).
 code, leaves the device unpaired, creates no partial session, and allows a retry with a fresh code.
 **FR-119 [INFERRED]** — A session established by sign-in or pairing survives relaunch; the user is not
 asked to re-authenticate after a cold start.
-**FR-120 [INFERRED]** — An unreachable server at launch does not sign the user out and does not report a
-credentials failure.
+**FR-120 [INFERRED; duration rule 2026-10-17, TASK-973]** — An unreachable server at launch does not sign
+the user out and does not report a credentials failure, **however long the outage lasts**. The app keeps
+trying to reach the server for as long as it stays unreachable (backing off to a slow cadence after the
+first few minutes, and trying again at once whenever the app returns to the foreground). Giving up on
+reaching the server never ends the session; only the server rejecting the session (FR-121) does.
 **FR-121 [INFERRED]** — An expired or revoked session is reported as a session problem with a path to
 re-authenticate — not as the server being offline or the media being unplayable. After re-authenticating,
 progress and watchlist are intact.
@@ -427,6 +439,10 @@ when a secure path was available.
 
 **FR-130 [STATED]** — With the NAS unreachable, the app states that the server is offline. It does not sign
 the user out and does not report a credentials error.
+*Clarified 2026-10-17 (TASK-973, TASK-953):* the server-offline indicator appears as soon as any request
+fails to reach the server, from any screen, including a cold start onto cached content. It is not
+deferred until a background check notices. It clears as soon as the server answers again. A cancelled
+request (for example, the user navigating away) is not an outage and changes nothing.
 **FR-131 [STATED]** — An unreachable server never renders as an empty library. "We could not load" and
 "there is nothing here" are distinct states on every surface (instance of FR-001, and the single
 highest-value requirement in this FRD).
@@ -443,6 +459,9 @@ and zero downloads reads as "nothing downloaded", not as a server failure.
 **FR-136 [STATED]** — Search offline is a connection error with retry, not "no results".
 **FR-137 [INFERRED]** — Offline progress and offline watched/watchlist changes are retained and
 reconciled on reconnection, or the user is told at the time that they could not be saved.
+Watchlist changes take the second path: a change the NAS does not receive is undone (a removed title
+returns to its old place) and a brief message says so, naming the cause (no internet connection, or the
+NAS can't be reached).
 **FR-138 [INFERRED]** — Cached content, the downloads list, and the signed-in session all survive a cold
 start while offline.
 **FR-139 [INFERRED]** — On reconnection, retry (or foregrounding) restores live content, clears the
@@ -452,6 +471,9 @@ and leaves no entry claiming to be playable. A transfer interrupted by connectiv
 interrupted state, never completed.
 **FR-141 [INFERRED]** — Every surface reports the offline condition consistently; no screen shows a
 success-looking or blank state while another reports offline.
+*Clarified 2026-10-17 (TASK-988):* Apple TV shows the same indicator, in the same words as iPhone, over
+the top of every screen including detail screens. It never takes focus, and it clears when the server
+answers again with no re-sign-in.
 **FR-142 [STATED]** — The offline error screen on tvOS is focus-navigable; its retry control can be
 reached and activated (instance of FR-006).
 

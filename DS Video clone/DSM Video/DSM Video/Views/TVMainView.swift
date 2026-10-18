@@ -32,6 +32,19 @@ struct TVMainView: View {
         ProfilePickerView()
       } else {
         TVHomeView()
+          // A watchlist change the NAS never received is reported, not silently undone
+          // (FR-137). Not focusable, so it never moves focus off the control just used.
+          .overlay(alignment: .bottom) {
+            TransientNoticeBanner(message: Bindable(appState).watchlistNotice)
+              .padding(.bottom, 60)
+          }
+          // The connection state (FR-130, FR-132, FR-141). On the root rather than the header
+          // so it stays visible over pushed detail screens; top-centre sits in the header's
+          // open space. Clears with the flags, so reconnecting needs no re-sign-in.
+          .overlay(alignment: .top) {
+            ConnectionIndicator(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
+              .padding(.top, 40)
+          }
       }
     }
   }

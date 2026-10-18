@@ -70,10 +70,36 @@ struct ItemDetailView: View {
   /// showing content it could not deliver, then failing on tap. Downloaded titles play
   /// from disk and stay enabled.
   private var playUnavailableOffline: Bool {
+    Self.playUnavailableOffline(
+      serverUnreachable: appState.serverUnreachable,
+      isOffline: appState.isOffline,
+      isDownloaded: isDownloaded
+    )
+  }
+
+  /// The one rule for "Play can't work right now" (FR-071, FR-133). Shared by this
+  /// screen's Play buttons, its autoPlay entry, and the Home hero's Play.
+  static func playUnavailableOffline(serverUnreachable: Bool, isOffline: Bool, isDownloaded: Bool) -> Bool {
     // isOffline as well as serverUnreachable: in airplane mode before any request has
     // actually failed, only isOffline is set — so Play stayed enabled on a non-downloaded
     // item and dead-ended on the playback-failed panel instead of being disabled up front.
-    (appState.serverUnreachable || appState.isOffline) && !isDownloaded
+    (serverUnreachable || isOffline) && !isDownloaded
+  }
+
+  /// Whether an autoPlay entry (Home hero Play, Continue Watching card, episode
+  /// autoPlay) should open the player on appear. TASK-984: autoPlay bypassed the
+  /// disabled Play button entirely, so offline a non-downloaded title opened straight
+  /// into the playback-failed panel. When playback is unavailable the user lands on
+  /// this screen with Play disabled and its hint instead.
+  static func shouldAutoPlay(requested: Bool, playUnavailableOffline: Bool) -> Bool {
+    requested && !playUnavailableOffline
+  }
+
+  /// VoiceOver hint for a Play control disabled by `playUnavailableOffline`.
+  static let playUnavailableOfflineHint = "Unavailable — your NAS is unreachable and this video isn't downloaded"
+
+  private var autoPlayOnAppear: Bool {
+    Self.shouldAutoPlay(requested: autoPlay, playUnavailableOffline: playUnavailableOffline)
   }
 
   private var downloadProgress: Double {
@@ -86,7 +112,7 @@ struct ItemDetailView: View {
       .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        if autoPlay { showPlayer = true }
+        if autoPlayOnAppear { showPlayer = true }
       }
       // Put focus on Play EXPLICITLY, rather than trusting prefersDefaultFocus.
       //
@@ -102,7 +128,7 @@ struct ItemDetailView: View {
       // engine's own resolution, and `autoPlay` skips it entirely because the player is
       // about to cover this screen anyway.
       .task(id: itemID) {
-        guard !autoPlay else { return }
+        guard !autoPlayOnAppear else { return }
         try? await Task.sleep(for: .milliseconds(120))
         focusedAction = .play
       }
@@ -118,6 +144,7 @@ struct ItemDetailView: View {
           itemID: itemID,
           title: shownTitle,
           itemYear: detail?.year,
+          artworkURL: appState.api.nowPlayingArtworkURL(images: detail?.images, version: detail?.changeSeq),
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
@@ -134,7 +161,7 @@ struct ItemDetailView: View {
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        if autoPlay { showPlayer = true }
+        if autoPlayOnAppear { showPlayer = true }
       }
       .fullScreenCover(isPresented: $showPlayer, onDismiss: {
         playFromBeginning = false
@@ -148,6 +175,7 @@ struct ItemDetailView: View {
           itemID: itemID,
           title: shownTitle,
           itemYear: detail?.year,
+          artworkURL: appState.api.nowPlayingArtworkURL(images: detail?.images, version: detail?.changeSeq),
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
@@ -349,7 +377,7 @@ struct ItemDetailView: View {
     // for "Play holds default focus" needs.
     .accessibilityIdentifier(A11y.Detail.playButton)
     .accessibilityLabel("Play \(shownTitle)")
-    .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
+    .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
   }
 
   private var tvStartOverButton: some View {
@@ -521,7 +549,7 @@ struct ItemDetailView: View {
             .opacity(playUnavailableOffline ? 0.4 : 1)
             .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
-            .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
+            .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
 
             if savedPositionSeconds > 0 {
               Button {
@@ -849,7 +877,7 @@ struct ItemDetailView: View {
 
   @ViewBuilder
   private var backdropImage: some View {
-    if let backdropId = detail?.images?.backdrop?.id ?? detail?.images?.backdrop?.mapperId {
+    if let backdropId = detail?.images?.backdropImageID {
       AuthenticatedImage(
         url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq,
                                     kind: .backdrop),
@@ -1410,12 +1438,20 @@ private struct PlayerSheet: View {
   let itemID: String
   let title: String
   var itemYear: Int? = nil
+  /// Lock-screen / Control Center artwork (FR-058): the title's poster, else its backdrop.
+  var artworkURL: URL? = nil
   var forceFromBeginning: Bool = false
   var nextEpisode: ItemSummary? = nil
   var onPlayNextEpisode: (() -> Void)? = nil
   var onGoToShow: (() -> Void)? = nil
 
   @State private var playbackURL: URL?
+  /// The API base `playbackURL` was resolved through. The server builds stream URLs from the
+  /// address a request arrived on, so a reconnect to a different base strands the stream
+  /// (TASK-991).
+  @State private var streamResolvedThrough: URL?
+  /// The last load failed on the network, so the next reconnect retries it (TASK-991).
+  @State private var loadFailedOnConnection = false
   /// Server playback session backing `playbackURL`, so it can be released when the sheet
   /// closes or when a re-fetch supersedes it. Nothing released these before: each play,
   /// each retry, and every subtitle-offset nudge opened a fresh transcode that lived on
@@ -1487,6 +1523,7 @@ private struct PlayerSheet: View {
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
+          artworkURL: artworkURL,
           trickplayBaseURL: isOffline ? nil : appState.api.trickplayBaseURL(itemID: itemID),
           authToken: appState.sessionToken,
           usesTunnelCookie: appState.api.usesTunnelCookie,
@@ -1583,13 +1620,10 @@ private struct PlayerSheet: View {
           onPlaybackFailed: {
             // Reset and re-fetch a fresh playback URL. Handles stale HLS sessions
             // (e.g. server restart clears in-memory sessions, causing 404 on stream).
-            // TASK-719: snapshot the last-known position BEFORE start() wipes the sync
-            // trackers, so recovery resumes where the user was and a quick dismiss
-            // afterward still records progress.
-            if lastSyncedPosition > 0 && lastKnownDuration > 0 {
-              resumeOverrideSeconds = lastSyncedPosition
-              resumeOverrideDuration = lastKnownDuration
-            }
+            // TASK-719: snapshot the position BEFORE start() wipes the sync trackers, so
+            // recovery resumes where the user was and a quick dismiss afterward still
+            // records progress.
+            snapshotResumePoint()
             playbackURL = nil
             Task { await start() }
           },
@@ -1625,10 +1659,7 @@ private struct PlayerSheet: View {
               // TASK-722: the stream is rebuilt with the new subtitle offset. Carry the
               // live position across the restart so playback resumes where the user was,
               // not at the up-to-10s-stale server heartbeat position.
-              if lastSyncedPosition > 0 && lastKnownDuration > 0 {
-                resumeOverrideSeconds = lastSyncedPosition
-                resumeOverrideDuration = lastKnownDuration
-              }
+              snapshotResumePoint()
               playbackURL = nil
               await start()
             }
@@ -1667,6 +1698,21 @@ private struct PlayerSheet: View {
     // position. That value could then be written against the new episode. The two sibling
     // .task modifiers in this file are already keyed this way.
     .task(id: itemID) { await start() }
+    // TASK-991 (FR-052, M5): leaving the house mid-episode moves the app from the LAN to the
+    // WAN address, but the open stream still points at the LAN host and AVPlayer stalls on
+    // segments it can no longer reach. Re-resolve through the new address and resume in place.
+    // A load that failed on the network is retried the same way once the network is back.
+    .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
+      guard StreamReresolution.isNeeded(playing: playbackURL,
+                                        resolvedThrough: streamResolvedThrough,
+                                        currentBase: appState.api.baseURL,
+                                        lastLoadFailedOnConnection: loadFailedOnConnection)
+      else { return }
+      snapshotResumePoint()
+      playbackURL = nil
+      error = nil
+      Task { await start() }
+    }
     .onDisappear {
       // FIX-12: Cancel countdown when player is dismissed via system back gesture or swipe-to-dismiss.
       // Without this, the Task continues running against a deallocated binding and fires
@@ -1813,6 +1859,8 @@ private struct PlayerSheet: View {
     // and shift every recorded position by it.
     playlistTimeOffset = 0
     isOffline = false
+    streamResolvedThrough = nil
+    loadFailedOnConnection = false
     playbackProfileID = await LocalStore.shared.activeScope.id
 
     // TASK-719: if a failure-recovery snapshot exists, seed the trackers so an
@@ -1859,46 +1907,26 @@ private struct PlayerSheet: View {
     }
 
     // Fall back to streaming
+    //
+    // Ask the server to BEGIN the transcode at the position we intend to resume to.
+    //
+    // Transcodes start at zero and progress at roughly realtime, so resuming 45 minutes
+    // into a film used to seek into a region the playlist did not contain yet — the
+    // player simply stalled. Starting the transcode there instead means the stream opens
+    // exactly where the user wants it, with no seek at all. Ignored by the server for
+    // direct play and remux (already byte-range seekable), so this costs nothing for the
+    // ~99% of this library that direct-plays.
+    //
+    // Only the retry / subtitle-restart / reconnect paths know a position before the
+    // request; a cold open learns it from the response and is handled by the normal resume
+    // path in play(_:resolvedThrough:).
+    let requestedStart = forceFromBeginning ? 0 : Double(resumeOverrideSeconds)
     do {
-      // Ask the server to BEGIN the transcode at the position we intend to resume to.
-      //
-      // Transcodes start at zero and progress at roughly realtime, so resuming 45 minutes
-      // into a film used to seek into a region the playlist did not contain yet — the
-      // player simply stalled. Starting the transcode there instead means the stream opens
-      // exactly where the user wants it, with no seek at all. Ignored by the server for
-      // direct play and remux (already byte-range seekable), so this costs nothing for the
-      // ~99% of this library that direct-plays.
-      //
-      // Only the retry / subtitle-restart paths know a position before the request; a cold
-      // open learns it from the response and is handled by the normal resume path below.
-      let requestedStart = forceFromBeginning ? 0 : Double(resumeOverrideSeconds)
+      let base = appState.api.baseURL
       let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap,
                                                  subtitleOffset: subtitleOffset,
                                                  startSeconds: requestedStart)
-      await releaseActiveSession()
-      activeSessionID = info.resolvedSessionID
-      let url = info.streamUrl ?? info.hlsMasterUrl
-      guard let url else {
-        error = "No playable URL."
-        return
-      }
-      // If the server started the transcode at our requested offset, the stream already
-      // BEGINS there — seeking again would jump an extra `startSeconds` into the film.
-      let serverStart = info.startSeconds ?? 0
-      playlistTimeOffset = serverStart
-      if serverStart > 0 {
-        resumePosition = 0
-      } else {
-        resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
-          positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
-          durationSeconds: info.durationSeconds ?? 0))
-      }
-      resumeOverrideSeconds = 0
-      resumeOverrideDuration = 0
-      chapters = info.chapters ?? []
-      subtitles = info.subtitles ?? []
-      playbackDuration = Double(info.durationSeconds ?? 0)
-      playbackURL = url
+      await play(info, resolvedThrough: base)
     } catch APIError.converting {
       // Server is auto-normalizing this title (TASK-755). Show the informational
       // message; the server was reached, so don't treat it as a connection failure
@@ -1914,32 +1942,89 @@ private struct PlayerSheet: View {
         self.error = "Your session expired. Please sign in again."
         return
       }
+      // The error the user sees is the LAST one: when the retry below fails, its reason
+      // (e.g. the WAN address refusing) is the true one, not the LAN timeout that led to it
+      // (TASK-991).
+      var failure: Error = error
       // If this was a network failure and the server is a QuickConnect ID,
       // try re-resolving candidates (network context may have changed since login).
       if appState.serverUnreachable, await appState.reconnect() {
         do {
-          let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset)
-          await releaseActiveSession()
-          activeSessionID = info.resolvedSessionID
-          let url = info.streamUrl ?? info.hlsMasterUrl
-          guard let url else { self.error = "No playable URL."; return }
-          resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
-            positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
-            durationSeconds: info.durationSeconds ?? 0))
-          resumeOverrideSeconds = 0
-          resumeOverrideDuration = 0
-          chapters = info.chapters ?? []
-          subtitles = info.subtitles ?? []
-          playbackDuration = Double(info.durationSeconds ?? 0)
-          playbackURL = url
+          let base = appState.api.baseURL
+          // Same start position as the first attempt: this retry used to drop it, so a
+          // mid-file transcode restarted from zero on the new address (TASK-991).
+          let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap,
+                                                     subtitleOffset: subtitleOffset,
+                                                     startSeconds: requestedStart)
+          await play(info, resolvedThrough: base)
           appState.clearNetworkError()
           return
         } catch {
           appState.handleConnectionFailure(error)
+          failure = error
         }
       }
-      self.error = (error as? APIError)?.userMessage ?? "Couldn't connect to server."
+      switch failure as? APIError {
+      case .connection?, .network?: loadFailedOnConnection = true
+      default: loadFailedOnConnection = false
+      }
+      self.error = (failure as? APIError)?.userMessage ?? "Couldn't connect to server."
     }
+  }
+
+  /// Puts a resolved stream on screen. Shared by the first request and the post-reconnect
+  /// retry so both honour the server's start offset (the retry used to skip it).
+  private func play(_ info: PlaybackInfo, resolvedThrough base: URL) async {
+    await releaseActiveSession()
+    activeSessionID = info.resolvedSessionID
+    guard let url = info.streamUrl ?? info.hlsMasterUrl else {
+      error = "No playable URL."
+      return
+    }
+    // If the server started the transcode at our requested offset, the stream already
+    // BEGINS there — seeking again would jump an extra `startSeconds` into the film.
+    let serverStart = info.startSeconds ?? 0
+    playlistTimeOffset = serverStart
+    if serverStart > 0 {
+      resumePosition = 0
+    } else {
+      resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(
+        positionSeconds: max(info.resumePositionSeconds, resumeOverrideSeconds),
+        durationSeconds: info.durationSeconds ?? 0))
+    }
+    resumeOverrideSeconds = 0
+    resumeOverrideDuration = 0
+    chapters = info.chapters ?? []
+    subtitles = info.subtitles ?? []
+    playbackDuration = Double(info.durationSeconds ?? 0)
+    streamResolvedThrough = base
+    playbackURL = url
+  }
+
+  /// Carries the position across a stream rebuild so playback resumes where the user was
+  /// (TASK-719, TASK-722, TASK-991). The live tick, not only the throttled sync value,
+  /// which can be 10s stale (TASK-838).
+  private func snapshotResumePoint() {
+    let position = max(livePosition, lastSyncedPosition)
+    if position > 0 && lastKnownDuration > 0 {
+      resumeOverrideSeconds = position
+      resumeOverrideDuration = lastKnownDuration
+    }
+  }
+}
+
+/// Whether an open player must re-resolve its stream after the app reconnects
+/// (FR-052, M5, TASK-991).
+///
+/// Compared against the base URL the stream was RESOLVED THROUGH, not the stream's own host:
+/// a server with an operator-set public URL hands out a stream host that never equals the
+/// client's address, and comparing hosts would rebuild the stream on every reconnect.
+enum StreamReresolution {
+  nonisolated static func isNeeded(playing: URL?, resolvedThrough: URL?, currentBase: URL,
+                                   lastLoadFailedOnConnection: Bool) -> Bool {
+    guard let playing else { return lastLoadFailedOnConnection }
+    guard !playing.isFileURL, let resolvedThrough else { return false }
+    return resolvedThrough.absoluteString != currentBase.absoluteString
   }
 }
 

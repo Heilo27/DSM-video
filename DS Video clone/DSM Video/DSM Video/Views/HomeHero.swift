@@ -11,6 +11,7 @@ import SwiftUI
 struct HomeHero: View {
   @Environment(AppState.self) private var appState
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+  @State private var downloadManager = DownloadManager.shared
 
   /// Candidate items to feature (typically Just Added). The hero picks the first few
   /// that have a usable backdrop/poster.
@@ -190,8 +191,17 @@ struct HomeHero: View {
   }
 
   // Play — filled accent with glow.
+  //
+  // TASK-984: offline, a title that isn't downloaded can't play, so Play is disabled
+  // with the same rule and hint as the detail screen's Play. Tapping the hero body
+  // still opens the detail screen.
   private func playButton(for current: ItemSummary) -> some View {
-    NavigationLink {
+    let unavailable = ItemDetailView.playUnavailableOffline(
+      serverUnreachable: appState.serverUnreachable,
+      isOffline: appState.isOffline,
+      isDownloaded: downloadManager.playableDownloadedItem(itemId: current.id) != nil
+    )
+    return NavigationLink {
       ItemDetailView(itemID: current.id, fallbackTitle: current.title, autoPlay: true)
     } label: {
       Label("Play", systemImage: "play.fill")
@@ -206,6 +216,9 @@ struct HomeHero: View {
         .shadow(color: Color.dsAccentGlow, radius: 12, y: 4)
     }
     .buttonStyle(.plain)
+    .disabled(unavailable)
+    .opacity(unavailable ? 0.4 : 1)
+    .accessibilityHint(unavailable ? ItemDetailView.playUnavailableOfflineHint : "")
   }
 
   /// True when the given item is already on the watchlist.

@@ -47,6 +47,9 @@ struct GestureVideoPlayer: View {
     var itemID: String = ""
     var itemTitle: String = ""
     var itemYear: Int? = nil
+    /// The title's poster (else backdrop) for the Now Playing surface (FR-058, TASK-965).
+    /// Nil = no artwork; the other Now Playing fields are unaffected.
+    var artworkURL: URL? = nil
     // TASK-740: base URL for the trick-play VTT/sprite endpoints (nil = no preview).
     var trickplayBaseURL: URL? = nil
     var authToken: String? = nil
@@ -69,6 +72,8 @@ struct GestureVideoPlayer: View {
     var blockDpadSeek: Bool = false
 
     @State private var player: AVPlayer?
+    /// Built from `artworkURL` once its image loads; nil until then and when there is none.
+    @State private var nowPlayingArtwork: MPMediaItemArtwork?
     #if os(iOS)
     @State private var pipController: AVPictureInPictureController?
     @State private var pipDelegate: PictureInPictureDelegate?
@@ -216,6 +221,9 @@ struct GestureVideoPlayer: View {
 
     var body: some View {
         playerContent
+            // Keyed on the URL so a new title (autoplay-next) drops the old picture and
+            // loads its own (FR-058, TASK-965).
+            .task(id: artworkURL) { await loadNowPlayingArtwork() }
             .onAppear {
                 setupPlayer()
                 setupVolumeObserver()
@@ -1794,7 +1802,7 @@ struct GestureVideoPlayer: View {
         }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = Double(player?.rate ?? 0)
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = Self.nowPlayingInfo(info, artwork: nowPlayingArtwork)
 
         let center = MPRemoteCommandCenter.shared()
         // Clear any handlers from a prior player instance before re-adding.
@@ -1858,6 +1866,45 @@ struct GestureVideoPlayer: View {
         info[MPNowPlayingInfoPropertyPlaybackRate] = actualRate
         if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// `info` carrying `artwork`, or no artwork at all. A title without an image REMOVES the
+    /// key rather than leaving the previous title's picture on the lock screen (FR-058).
+    static func nowPlayingInfo(_ info: [String: Any], artwork: MPMediaItemArtwork?) -> [String: Any] {
+        var info = info
+        if let artwork {
+            info[MPMediaItemPropertyArtwork] = artwork
+        } else {
+            info.removeValue(forKey: MPMediaItemPropertyArtwork)
+        }
+        return info
+    }
+
+    /// Nonisolated on purpose: MediaPlayer calls the request handler off the main thread,
+    /// and a closure formed in this MainActor view would trap on the isolation check there.
+    nonisolated static func makeArtwork(_ image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+    }
+
+    /// Clears the artwork, then loads `artworkURL` through the shared image cache (so a
+    /// poster the library grid already fetched is reused) and publishes it. Clearing first
+    /// means a new title never shows the previous one's picture, even while its own loads.
+    private func loadNowPlayingArtwork() async {
+        nowPlayingArtwork = nil
+        publishNowPlayingArtwork()
+        guard let url = artworkURL,
+              let image = await AuthenticatedImageLoader.image(
+                url: url, token: authToken, usesTunnelCookie: usesTunnelCookie),
+              !Task.isCancelled else { return }
+        nowPlayingArtwork = Self.makeArtwork(image)
+        publishNowPlayingArtwork()
+    }
+
+    /// Merges the current artwork into the live Now Playing info. Before setupNowPlaying()
+    /// has run there is nothing to merge into; it picks `nowPlayingArtwork` up itself.
+    private func publishNowPlayingArtwork() {
+        guard let info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = Self.nowPlayingInfo(info, artwork: nowPlayingArtwork)
     }
 
     /// Remove Now Playing info and unregister command handlers on teardown.
@@ -2353,10 +2400,23 @@ private extension GestureVideoPlayer {
         }
     }
 
+}
+
+// Internal rather than private so the error-to-message mapping is testable (TASK-981).
+extension GestureVideoPlayer {
     /// TASK-375: Maps common AVFoundation error codes to user-friendly messages.
     /// Falls back to the system localizedDescription for unrecognised codes.
-    private static func friendlyPlayerError(_ error: Error) -> String {
+    ///
+    /// TASK-981: AVPlayer reports a dropped stream as a generic AVFoundation error
+    /// (usually -11800) with the real transport failure nested under
+    /// NSUnderlyingErrorKey, often behind a CoreMedia error. The chain is searched
+    /// for a transport cause first, so a lost connection is not reported as a
+    /// corrupt file (FR-054, FR-002).
+    nonisolated static func friendlyPlayerError(_ error: Error) -> String {
         let nsError = error as NSError
+        for link in underlyingChain(of: nsError) {
+            if let message = transportMessage(for: link) { return message }
+        }
         if nsError.domain == AVFoundationErrorDomain {
             switch nsError.code {
             case -11800: return "Playback failed. The file may be corrupted."
@@ -2369,9 +2429,25 @@ private extension GestureVideoPlayer {
             default: break
             }
         }
-        // The most likely errors for a NAS on home Wi-Fi are transport failures, not
-        // AVFoundation ones. Left unmapped they fall through to Apple's opaque
-        // "The operation could not be completed", which tells the user nothing.
+        return error.localizedDescription
+    }
+
+    /// The error itself followed by each NSUnderlyingErrorKey beneath it. Bounded and
+    /// identity-checked so a malformed, self-referencing chain cannot loop.
+    nonisolated private static func underlyingChain(of error: NSError) -> [NSError] {
+        var chain: [NSError] = []
+        var current: NSError? = error
+        while let link = current, chain.count < 8, !chain.contains(where: { $0 === link }) {
+            chain.append(link)
+            current = link.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return chain
+    }
+
+    /// The most likely errors for a NAS on home Wi-Fi are transport failures, not
+    /// AVFoundation ones. Left unmapped they fall through to Apple's opaque
+    /// "The operation could not be completed", which tells the user nothing.
+    nonisolated private static func transportMessage(for nsError: NSError) -> String? {
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorNotConnectedToInternet:
@@ -2387,7 +2463,7 @@ private extension GestureVideoPlayer {
             default: break
             }
         }
-        return error.localizedDescription
+        return nil
     }
 }
 

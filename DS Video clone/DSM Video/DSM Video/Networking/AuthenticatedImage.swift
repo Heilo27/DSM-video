@@ -111,17 +111,7 @@ enum ImagePrefetcher {
     Task.detached(priority: .utility) {
       for url in targets {
         if await ImageCache.shared.isWarm(url) { continue }
-        var req = URLRequest(url: url, timeoutInterval: 15)
-        if url.absoluteString.contains("_sid=") {
-          // Video Station: session ID already in the URL.
-        } else if let token {
-          req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        if usesTunnelCookie {
-          req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
-        }
-        // AC-002-44: every request from the app names the active profile.
-        ActiveProfileStore.shared.applyHeader(to: &req)
+        let req = AuthenticatedImageLoader.request(for: url, token: token, usesTunnelCookie: usesTunnelCookie)
         // No retry here on purpose: a prefetch that misses costs nothing, and the
         // visible-cell load will retry properly when the card actually appears.
         guard let (data, response) = try? await ImageSession.shared.data(for: req),
@@ -131,6 +121,93 @@ enum ImagePrefetcher {
       }
     }
     #endif
+  }
+}
+
+// MARK: - Loader
+
+/// The one way the app builds and retries an authenticated image fetch: the card grid
+/// (AuthenticatedImage), the prefetcher and the Now Playing artwork (TASK-965) all go
+/// through here and share ImageCache, so the lock screen reuses a poster the library grid
+/// already downloaded at the same URL.
+enum AuthenticatedImageLoader {
+  /// The request for an image URL. Video Station URLs carry the session in `_sid=`; the
+  /// REST API takes the bearer token. QuickConnect relay needs `Cookie: type=tunnel` on
+  /// every request (FIX-4), and every request names the active profile (AC-002-44).
+  /// Nonisolated because ImagePrefetcher builds requests inside a detached task.
+  nonisolated static func request(for url: URL, token: String?, usesTunnelCookie: Bool) -> URLRequest {
+    var req = URLRequest(url: url, timeoutInterval: 15)
+    if url.absoluteString.contains("_sid=") {
+      // Video Station: session ID already in the URL, no header needed.
+    } else if let token {
+      req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    if usesTunnelCookie {
+      req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
+    }
+    ActiveProfileStore.shared.applyHeader(to: &req)
+    return req
+  }
+
+  /// The image at `url`: from the cache, by joining a fetch already running for it, or by
+  /// fetching it. Nil when it can't be had (404, undecodable, unreachable after retries).
+  static func image(url: URL, token: String?, usesTunnelCookie: Bool) async -> UIImage? {
+    let outcome = await ImageCache.shared.fetchOrJoin(for: url)
+    if let cached = outcome.cached { return cached }
+    if let existing = outcome.task { return await existing.value }
+    let req = request(for: url, token: token, usesTunnelCookie: usesTunnelCookie)
+    let fetchTask = Task<UIImage?, Never> { await fetch(req, caching: url) }
+    await ImageCache.shared.registerTask(fetchTask, for: url)
+    // Must survive cancellation, for the reason given in AuthenticatedImage.loadIfNeeded.
+    defer { Task { await ImageCache.shared.clearInFlightTask(for: url) } }
+    return await fetchTask.value
+  }
+
+  /// Fetches `req` and caches the decoded image under `url`, retrying transient failures.
+  ///
+  /// Previously a single dropped packet or a NAS busy for one second greyed the card
+  /// permanently — nothing retried until the token or baseURL changed. Only network errors
+  /// and 5xx/429 are retried; a 404 poster or a 401 fails immediately (retrying those is
+  /// pure latency, and the token refresh path already re-fires the load via loadKey).
+  static func fetch(_ req: URLRequest, caching url: URL) async -> UIImage? {
+    for attempt in 0..<3 {
+      if Task.isCancelled { return nil }
+      do {
+        let (data, response) = try await ImageSession.shared.data(for: req)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           httpResponse.statusCode != 200 {
+          let code = httpResponse.statusCode
+          let transient = code == 429 || (500...599).contains(code)
+          if transient, attempt < 2 {
+            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+            continue
+          }
+          return nil
+        }
+
+        if let uiImage = UIImage(data: data) {
+          await ImageCache.shared.setImage(uiImage, for: url)
+          return uiImage
+        }
+        // 200 with undecodable bytes — a truncated response is worth one more try.
+        if attempt < 2 {
+          try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+          continue
+        }
+        return nil
+      } catch is CancellationError {
+        return nil
+      } catch {
+        // URLError (timeout, connection lost, DNS) — the transient case worth retrying.
+        if attempt < 2 {
+          try? await Task.sleep(nanoseconds: backoffNanos(attempt))
+          continue
+        }
+        return nil
+      }
+    }
+    return nil
   }
 }
 #endif
@@ -287,68 +364,8 @@ struct AuthenticatedImage: View {
     // outcome.isNew == true: we are responsible for the fetch
     isLoading = true
 
-    let usesTunnel = usesTunnelCookie
-    let fetchTask = Task<UIImage?, Never> {
-      var req = URLRequest(url: url, timeoutInterval: 15)
-
-      // Check if URL already has _sid parameter (Video Station) or use Bearer token (REST API)
-      if url.absoluteString.contains("_sid=") {
-        // Video Station: session ID already in URL, no header needed
-      } else if let token = token {
-        // REST API: use Bearer token
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-      }
-      // FIX-4: QuickConnect relay requires Cookie: type=tunnel on every request.
-      if usesTunnel {
-        req.setValue("type=tunnel", forHTTPHeaderField: "Cookie")
-      }
-      // AC-002-44: every request from the app names the active profile.
-      ActiveProfileStore.shared.applyHeader(to: &req)
-
-      // Retry transient failures. Previously a single dropped packet or a NAS busy
-      // for one second greyed the card permanently — nothing retried until the token
-      // or baseURL changed. Only network errors and 5xx/429 are retried; a 404 poster
-      // or a 401 fails immediately (retrying those is pure latency, and the token
-      // refresh path already re-fires the load via loadKey).
-      for attempt in 0..<3 {
-        if Task.isCancelled { return nil }
-        do {
-          let (data, response) = try await ImageSession.shared.data(for: req)
-
-          if let httpResponse = response as? HTTPURLResponse,
-             httpResponse.statusCode != 200 {
-            let code = httpResponse.statusCode
-            let transient = code == 429 || (500...599).contains(code)
-            if transient, attempt < 2 {
-              try? await Task.sleep(nanoseconds: backoffNanos(attempt))
-              continue
-            }
-            return nil
-          }
-
-          if let uiImage = UIImage(data: data) {
-            await ImageCache.shared.setImage(uiImage, for: url)
-            return uiImage
-          }
-          // 200 with undecodable bytes — a truncated response is worth one more try.
-          if attempt < 2 {
-            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
-            continue
-          }
-          return nil
-        } catch is CancellationError {
-          return nil
-        } catch {
-          // URLError (timeout, connection lost, DNS) — the transient case worth retrying.
-          if attempt < 2 {
-            try? await Task.sleep(nanoseconds: backoffNanos(attempt))
-            continue
-          }
-          return nil
-        }
-      }
-      return nil
-    }
+    let req = AuthenticatedImageLoader.request(for: url, token: token, usesTunnelCookie: usesTunnelCookie)
+    let fetchTask = Task<UIImage?, Never> { await AuthenticatedImageLoader.fetch(req, caching: url) }
 
     // Register before awaiting so any concurrent caller sees the task immediately
     await ImageCache.shared.registerTask(fetchTask, for: url)

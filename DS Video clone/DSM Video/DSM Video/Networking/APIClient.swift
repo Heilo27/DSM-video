@@ -460,6 +460,20 @@ struct APIClient {
     return comps.url
   }
 
+  /// The lock-screen and Control Center artwork for a title (FR-058, TASK-965): its poster,
+  /// else its backdrop, so a title with only one kind of art still shows a picture. Nil when
+  /// it has neither. The poster URL is byte-identical to the library grid's (ItemPosterCell:
+  /// 342, versioned) so a title opened from the grid finds its artwork already in ImageCache.
+  func nowPlayingArtworkURL(images: ItemDetail.Images?, version: Int? = nil) -> URL? {
+    if let posterID = images?.poster?.id {
+      return imageURL(id: posterID, width: 342, version: version)
+    }
+    if let backdropID = images?.backdropImageID {
+      return imageURL(id: backdropID, width: 780, version: version, kind: .backdrop)
+    }
+    return nil
+  }
+
   /// TASK-740: base URL for an item's trick-play assets. The player appends
   /// "trickplay.vtt"/"trickplay.jpg". Returns nil when the server isn't resolved.
   func trickplayBaseURL(itemID: String) -> URL? {
