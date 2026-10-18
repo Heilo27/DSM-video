@@ -78,7 +78,7 @@ struct ConnectionIndicator: View {
     }
     .focusable(false)
     .allowsHitTesting(false)
-    .animation(.easeInOut(duration: 0.3), value: isOffline || serverUnreachable)
+    .animation(.easeInOut(duration: 0.3), value: AppState.serverUnavailable(isOffline: isOffline, serverUnreachable: serverUnreachable))
   }
 }
 
