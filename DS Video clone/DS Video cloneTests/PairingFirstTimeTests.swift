@@ -38,6 +38,7 @@ struct PairingFirstTimeTests {
         state.lanAddress = ""
         state.wanAddress = ""
         state.lastGoodAddress = ""
+        state.quickConnectID = ""
         state.quickConnectResolve = { id in
           Issue.record("QuickConnect was queried for \(id) on a device with nothing configured")
           return []

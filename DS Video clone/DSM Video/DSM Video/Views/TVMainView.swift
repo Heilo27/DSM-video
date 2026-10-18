@@ -146,7 +146,7 @@ struct TVLoginView: View {
               }
 
               Button {
-                appState.baseURL = server
+                appState.useSignInAddress(server)
                 appState.username = username
                 // setPassword() is the intended seam (it is what the iOS path uses);
                 // assigning savedPassword directly bypassed it.
@@ -177,7 +177,7 @@ struct TVLoginView: View {
         }
       }
       .onAppear {
-        server = appState.baseURL
+        server = appState.signInAddress  // the QuickConnect ID when there is one (TASK-1030)
         username = appState.username
         password = appState.savedPassword
       }

@@ -45,6 +45,7 @@ final class AppState {
     static let lastGoodAddress = "dsReel.lastGoodAddress"
     static let lanAddress = "dsReel.lanAddress"
     static let wanAddress = "dsReel.wanAddress"
+    static let quickConnectID = "dsReel.quickConnectID"
     static let username = "dsReel.username"
     static let rememberMe = "dsReel.rememberMe"
     static let useHTTPS = "dsReel.useHTTPS"
@@ -92,6 +93,42 @@ final class AppState {
   /// Remote address (e.g. mynas.duckdns.org or a Tailscale IP). Optional.
   var wanAddress: String {
     didSet { UserDefaults.standard.set(wanAddress, forKey: Keys.wanAddress) }
+  }
+
+  /// The QuickConnect ID this device signed in or paired through (TASK-1030, FR-111).
+  ///
+  /// A successful sign-in replaces baseURL with the URL that answered, and the cascade only
+  /// asked QuickConnect when baseURL itself was an ID, so after the first success the ID was
+  /// never tried again: no relay, no fresh addresses, and a device away from home could be left
+  /// with nothing but its LAN address. This slot keeps the ID across that overwrite. Written by
+  /// useSignInAddress (the address the user chose), a successful sign-in or pairing, and the
+  /// launch carry-over below; read through configuredQuickConnectID.
+  var quickConnectID: String {
+    didSet { UserDefaults.standard.set(quickConnectID, forKey: Keys.quickConnectID) }
+  }
+
+  /// The one answer to "which QuickConnect ID does this device connect through?" (TASK-1030).
+  /// The address being signed in with wins, then the kept ID, then an ID left in the WAN/LAN
+  /// slots (where an iOS QuickConnect sign-in and a QuickConnect-only pairing put it).
+  var configuredQuickConnectID: String? {
+    [baseURL, quickConnectID, wanAddress, lanAddress].lazy
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .compactMap { QuickConnectResolver.extractBareID(from: $0) }
+      .first
+  }
+
+  /// What a sign-in screen puts in its address field: the QuickConnect ID when the device
+  /// connects through one, so signing in again keeps it, otherwise the stored address.
+  var signInAddress: String {
+    quickConnectID.isEmpty ? baseURL : quickConnectID
+  }
+
+  /// The address the user chose on a sign-in or pairing screen. Choosing a QuickConnect ID
+  /// makes it the device's ID; choosing a direct address stops trying the old one.
+  func useSignInAddress(_ address: String) {
+    let chosen = address.trimmingCharacters(in: .whitespacesAndNewlines)
+    quickConnectID = QuickConnectResolver.extractBareID(from: chosen) ?? ""
+    baseURL = chosen
   }
   var username: String {
     didSet { UserDefaults.standard.set(username, forKey: Keys.username) }
@@ -360,6 +397,7 @@ final class AppState {
     lastGoodAddress = d.string(forKey: Keys.lastGoodAddress) ?? ""
     lanAddress = d.string(forKey: Keys.lanAddress) ?? ""
     wanAddress = d.string(forKey: Keys.wanAddress) ?? ""
+    quickConnectID = d.string(forKey: Keys.quickConnectID) ?? ""
     username = d.string(forKey: Keys.username) ?? ""
     rememberMe = storedRememberMe
     useHTTPS = storedUseHTTPS
@@ -386,6 +424,12 @@ final class AppState {
     var initialClient = APIClient(baseURL: resolvedInitURL, token: storedToken)
     initialClient.profileStore = profileStore
     api = initialClient
+    // TASK-1030 carry-over: an install signed in through QuickConnect before the ID had its own
+    // slot still has it in the WAN/LAN slot. Keep it, so the sign-in screen offers it rather
+    // than the URL that answered (which iOS would then reclassify over the ID).
+    if quickConnectID.isEmpty, let carried = configuredQuickConnectID {
+      quickConnectID = carried
+    }
     startNetworkMonitoring()
     startHeartbeatTimer()
     // SEC-02: proactively check JWT expiry so users aren't surprised by mid-session logout.
@@ -673,7 +717,7 @@ final class AppState {
     await resolveCandidateSet().candidates
   }
 
-  /// The cascade plus, when baseURL is a QuickConnect ID whose lookup produced nothing, why.
+  /// The cascade plus, when the device's QuickConnect ID lookup produced nothing, why.
   /// login() needs the reason to tell an unknown ID from a failed lookup (TASK-974); reconnect
   /// only needs the list. Returned rather than stored so a background reconnect resolving at the
   /// same moment cannot overwrite the reason a sign-in is about to show.
@@ -706,9 +750,18 @@ final class AppState {
     // WAN second
     addDirect(wan)
 
-    // If baseURL is a QC ID, append its full cascade after direct addresses
+    // No direct LAN/WAN address (none set, or the slot holds a QuickConnect ID): try baseURL,
+    // the address the user configured or the last one that answered. addDirect skips an ID.
+    if candidates.isEmpty {
+      addDirect(raw)
+    }
+
+    // The device's QuickConnect ID, wherever it is kept, appends its full cascade (fresh
+    // addresses and the relay) after the direct ones. TASK-1030: this used to look only at
+    // baseURL, which a successful sign-in overwrites with the winning URL, so the ID was never
+    // asked again and a device away from home lost its way in.
     var quickConnectFailure: QuickConnectError?
-    if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+    if let qcID = configuredQuickConnectID {
       // A failed lookup must not sink the LAN/WAN addresses already in the list: they are tried
       // regardless, and the failure is only reported if nothing else answers.
       var qcCandidates: [QuickConnectResolver.Candidate] = []
@@ -726,9 +779,6 @@ final class AppState {
       for c in qcCandidates where !existing.contains(c.url.absoluteString) {
         candidates.append(c)
       }
-    } else if lan.isEmpty && wan.isEmpty {
-      // No dual addresses — fall back to baseURL directly
-      addDirect(raw)
     }
 
     return (Self.preferringLastGood(candidates, lastGood: lastGoodAddress), quickConnectFailure)
@@ -891,6 +941,8 @@ final class AppState {
           sessionToken = resp.token
           clearNetworkError()
           api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+          // Keep the ID before adoptWinningAddress overwrites baseURL with the winner (TASK-1030).
+          quickConnectID = configuredQuickConnectID ?? ""
           adoptWinningAddress(candidate)
           if !savedPassword.isEmpty {
             Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
@@ -922,7 +974,6 @@ final class AppState {
       // purely a connectivity/resolution miss (no server ever answered). Otherwise a
       // real 401/403 (wrong password, or account lacks app permission) gets hidden
       // behind a misleading "check the QuickConnect ID" message.
-      let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
       dlog.error(.auth, "login FAILED — all \(candidates.count) candidate(s) exhausted")
 
       // NAME WHAT WAS TRIED. The old messages ("Login failed. Check that DSVideoServer is
@@ -936,7 +987,7 @@ final class AppState {
         loginError = apiErr.userMessage
       } else if localNetworkRefused {
         loginError = LocalNetworkPermission.deniedMessage
-      } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+      } else if let qcID = configuredQuickConnectID {
         let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
         // The saved LAN/WAN addresses failed AND the QuickConnect lookup failed: the lookup is
         // the actionable half (a typo, or no internet), so lead with it.
@@ -1535,11 +1586,7 @@ final class AppState {
     let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
     let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     let wan = wanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-    // After a QuickConnect sign-in the ID lives in wanAddress (ServerSetupView.connect) and
-    // baseURL holds the winning URL, so look in all three.
-    var info = PairingServerInfo(
-      quickConnectId: [raw, wan, lan].lazy.compactMap { QuickConnectResolver.extractBareID(from: $0) }.first
-    )
+    var info = PairingServerInfo(quickConnectId: configuredQuickConnectID)
     func direct(_ address: String) -> String? {
       address.isEmpty || QuickConnectResolver.extractBareID(from: address) != nil ? nil : address
     }
@@ -1603,6 +1650,7 @@ final class AppState {
     let nothingConfigured = raw.isEmpty
       && lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && configuredQuickConnectID == nil
 
     // Configured addresses: the same LAN → WAN → QuickConnect cascade sign-in uses (TASK-974
     // reasons included). Discovery only for a device with nothing configured, so a typo'd
@@ -1623,7 +1671,7 @@ final class AppState {
     guard !candidates.isEmpty else {
       if nothingConfigured {
         loginError = discoveryDenied ? LocalNetworkPermission.deniedMessage : Self.pairingNoServerFoundMessage
-      } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+      } else if let qcID = configuredQuickConnectID {
         loginError = quickConnectFailure?.userMessage ?? QuickConnectError.noAddress(id: qcID).userMessage
       } else {
         loginError = Self.invalidServerAddressMessage
@@ -1643,6 +1691,12 @@ final class AppState {
         sessionToken = resp.token
         clearNetworkError()
         api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+        // TASK-1030: the ID this device reached the server through, else the generating
+        // device's, is kept before adoptWinningAddress overwrites baseURL. adoptPairedServerInfo
+        // only fills an empty WAN slot, so an ID sent alongside a WAN address was dropped.
+        quickConnectID = configuredQuickConnectID
+          ?? resp.server?.quickConnectId.flatMap { QuickConnectResolver.extractBareID(from: $0) }
+          ?? ""
         adoptWinningAddress(candidate)
         adoptPairedServerInfo(resp.server, winner: candidate)
         startHeartbeatTimer()

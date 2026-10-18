@@ -435,7 +435,7 @@ private struct TVOtherWaysView: View {
             VStack(spacing: 12) {
               ForEach(discovery.servers) { server in
                 Button {
-                  appState.baseURL = server.baseURL
+                  appState.useSignInAddress(server.baseURL)
                   onManualLogin()
                 } label: {
                   HStack(spacing: 16) {

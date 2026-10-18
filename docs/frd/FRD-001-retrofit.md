@@ -442,6 +442,11 @@ logo and avatar gradients all derive from it, so it cannot drift between themes.
 successful sign-in reaches library content. *Derivation:* design-spec B1.
 **FR-111 [STATED]** — QuickConnect and direct HTTPS are both supported connection paths, including for
 remote access.
+*Clarified 2026-10-17 (TASK-1030):* a device that signed in with a QuickConnect ID, or that received one
+through pairing, keeps that ID and tries it whenever it connects again: at launch, on reconnect and at
+the next sign-in, alongside any home or away address it also knows. Connecting successfully through an
+address QuickConnect returned does not replace the ID. The sign-in screen shows the ID, not the address
+that answered. Signing in with a direct address instead stops the device from using the old ID.
 **FR-112 [STATED]** — The NAS is discovered automatically on the local network; manual IP entry is not
 required.
 **FR-113 [INFERRED]** — When nothing is discovered, manual entry remains available and the absence of

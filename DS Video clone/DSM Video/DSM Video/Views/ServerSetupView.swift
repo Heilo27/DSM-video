@@ -585,7 +585,7 @@ struct SetupConnectScreen: View {
 
     // An address typed above is used as typed (a typo fails as a typo). Left empty on a
     // device that has never connected, AppState looks for the server on this network.
-    if !trimmedAddress.isEmpty { appState.baseURL = trimmedAddress }
+    if !trimmedAddress.isEmpty { appState.useSignInAddress(trimmedAddress) }
 
     await appState.exchangePairingCode(pairingCode)
 
@@ -619,8 +619,10 @@ struct SetupConnectScreen: View {
     if address.isEmpty {
       if !flow.resolvedAddress.isEmpty {
         address = flow.resolvedAddress
-      } else if !appState.baseURL.isEmpty && appState.baseURL != "http://localhost:5000" {
-        address = appState.baseURL
+      } else if !appState.signInAddress.isEmpty && appState.signInAddress != "http://localhost:5000" {
+        // The QuickConnect ID when signed in through one (TASK-1030): the winning URL here
+        // would be reclassified by connect() over the ID and the relay fallback lost.
+        address = appState.signInAddress
       }
     }
 
@@ -653,7 +655,7 @@ struct SetupConnectScreen: View {
 
     let addr = trimmedAddress
 
-    appState.baseURL = addr
+    appState.useSignInAddress(addr)
     appState.username = username.trimmingCharacters(in: .whitespaces)
     appState.setPassword(password)
 

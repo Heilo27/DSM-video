@@ -18,14 +18,16 @@ final class ResolverProbe {
 /// has to point the state at a QuickConnect id.
 @MainActor
 struct SavedAddresses {
-  let base, lan, wan, lastGood: String
+  let base, lan, wan, lastGood, quickConnect: String
   let https, remember: Bool
   init(_ s: AppState) {
     base = s.baseURL; lan = s.lanAddress; wan = s.wanAddress; lastGood = s.lastGoodAddress
+    quickConnect = s.quickConnectID
     https = s.useHTTPS; remember = s.rememberMe
   }
   func restore(_ s: AppState) {
     s.baseURL = base; s.lanAddress = lan; s.wanAddress = wan; s.lastGoodAddress = lastGood
+    s.quickConnectID = quickConnect
     s.useHTTPS = https; s.rememberMe = remember
   }
 }
