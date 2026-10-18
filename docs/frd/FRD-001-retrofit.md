@@ -186,6 +186,9 @@ title page offers Resume (not Download) for a paused download.
 **FR-041 [STATED]** — Downloaded titles are distinguishable in the library from non-downloaded ones, and
 with the server offline, Play on a non-downloaded title is presented as unavailable **before** the tap.
 **FR-042 [INFERRED]** — A download entry for an episode identifies the specific episode, not just the show.
+An episode's download reads "Show · S1 · E2 · Episode title"; a missing part is left out (never an empty
+segment or a repeat), so two "Pilot"s of different shows, and two episodes of one show, are told apart,
+and the show name appears once. A blank episode title leaves "Show · S1 · E2". *(TASK-980)*
 **FR-043 [INFERRED]** — A completed download whose file has been removed outside the app stops claiming
 to be playable.
 **FR-044 [INFERRED, DESTRUCTIVE]** — Sign-out handles downloaded media in one consistent, stated way;

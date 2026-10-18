@@ -1211,7 +1211,7 @@ struct ItemDetailView: View {
         itemId: itemID, serverLevel: detail?.ageLevel)
       downloadManager.startDownload(
         itemId: itemID,
-        title: shownTitle,
+        title: detail?.downloadTitle ?? shownTitle,
         year: detail?.year,
         videoURL: videoURL,
         posterURL: posterURL,
