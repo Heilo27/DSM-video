@@ -36,6 +36,15 @@ nonisolated enum PlaybackProgress {
     /// (MaxAudiobookResume) for exactly this reason.
     static let finishedRemainingSeconds: Int = 90
 
+    /// The one position/duration division, 0...1, or nil when no ratio is meaningful (duration
+    /// zero or negative). Every progress bar, ring, badge test and Top Shelf value reads this, so
+    /// the clamp and the divisor guard have one home (TASK-1017, TASK-1036). A position past the
+    /// end reads 1 and a negative one reads 0, so a bad record cannot draw outside its track.
+    static func fraction(positionSeconds: Int, durationSeconds: Int) -> Double? {
+        guard durationSeconds > 0 else { return nil }
+        return min(1, max(0, Double(positionSeconds) / Double(durationSeconds)))
+    }
+
     /// Whether a saved position should be treated as "finished" — i.e. playback should
     /// start from the beginning rather than resuming.
     ///
@@ -49,8 +58,10 @@ nonisolated enum PlaybackProgress {
     static func isFinished(positionSeconds: Int, durationSeconds: Int) -> Bool {
         // Unknown/zero duration: no ratio is meaningful, so never suppress the resume.
         // Better to resume at a stale position than to silently restart a partly-watched item.
-        guard durationSeconds > 0, positionSeconds > 0 else { return false }
-        if Double(positionSeconds) / Double(durationSeconds) > watchedThreshold { return true }
+        guard positionSeconds > 0,
+              let frac = fraction(positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+        else { return false }
+        if frac > watchedThreshold { return true }
         return (durationSeconds - positionSeconds) < finishedRemainingSeconds
     }
 
@@ -79,11 +90,11 @@ nonisolated enum PlaybackProgress {
     /// already dropped, instead of advancing to the next one. It also disagreed at exactly
     /// 95.000%, which `isFinished` (strictly greater) does not treat as finished.
     static func watchState(positionSeconds: Int, durationSeconds: Int) -> WatchState {
-        guard durationSeconds > 0 else { return .unwatched }
+        guard let frac = fraction(positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+        else { return .unwatched }
         if isFinished(positionSeconds: positionSeconds, durationSeconds: durationSeconds) {
             return .watched
         }
-        let frac = Double(positionSeconds) / Double(durationSeconds)
         // INCLUSIVE at startedThreshold, matching the rail SQL in LocalStore
         // (`ratio >= startedThreshold`). The show-page scans used a strict `>` while the
         // rail used `>=`, so an item sitting at exactly 5.000% appeared in one place and
@@ -159,11 +170,13 @@ nonisolated enum PlaybackProgress {
     /// rails and playback use: a finished title shows the badge and no bar; an unfinished one with a
     /// position above zero shows a bar of exactly its fraction; zero shows nothing.
     static func cardIndicator(positionSeconds: Int, durationSeconds: Int) -> CardIndicator {
-        guard durationSeconds > 0, positionSeconds > 0 else { return .none }
+        guard positionSeconds > 0,
+              let frac = fraction(positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+        else { return .none }
         if isFinished(positionSeconds: positionSeconds, durationSeconds: durationSeconds) {
             return .watchedBadge
         }
-        return .bar(fraction: Double(positionSeconds) / Double(durationSeconds))
+        return .bar(fraction: frac)
     }
 
     /// Convenience over an item's optional progress record.
