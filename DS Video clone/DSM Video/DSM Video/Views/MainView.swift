@@ -105,7 +105,12 @@ struct MainView: View {
         LocalStoreBanner(message: appState.localStoreUnavailableMessage)
         // The offline library was damaged and rebuilt empty on this launch (TASK-1034).
         LocalStoreRecoveryBanner(message: Bindable(appState).localStoreRecoveryNotice)
+        // The connected server is older than this app recommends (FR-149). Dismissible.
+        if let notice = appState.serverUpdateNotice {
+          ServerUpdateCard(notice: notice) { appState.dismissServerUpdateNotice() }
+        }
       }
+      .animation(.easeInOut(duration: 0.3), value: appState.serverUpdateNotice)
     }
     // A watchlist change the NAS never received is reported, not silently undone (FR-137).
     // Lifted clear of the tab bar.

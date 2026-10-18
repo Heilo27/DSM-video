@@ -226,6 +226,11 @@ private struct TVHomeView: View {
 
         ScrollView(.vertical, showsIndicators: false) {
           VStack(alignment: .leading, spacing: 56) {
+            // The connected server is older than this app recommends (FR-149). In the content,
+            // not an overlay, so it never covers the header buttons and sits in the focus order.
+            if let notice = appState.serverUpdateNotice {
+              TVServerUpdateCard(notice: notice) { appState.dismissServerUpdateNotice() }
+            }
             if let loadError = appState.homeError, appState.homeAllRailsEmpty {
               VStack(spacing: .dsSpaceXXXL) {
                 DSContentUnavailable(

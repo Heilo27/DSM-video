@@ -121,5 +121,10 @@ enum A11y {
     /// A short-lived message about a change that just failed (TASK-989).
     static let transientNotice = "shared.transientNotice"
     static let loadingIndicator = "shared.loading"
+    /// The "your server is out of date" notice and its parts (FR-149).
+    static let serverUpdateCard = "shared.serverUpdate.card"
+    static let serverUpdateTitle = "shared.serverUpdate.title"
+    static let serverUpdateDownload = "shared.serverUpdate.download"
+    static let serverUpdateDismiss = "shared.serverUpdate.dismiss"
   }
 }

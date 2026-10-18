@@ -607,6 +607,32 @@ through third-party servers. Credentials are not transmitted in cleartext over a
 when a secure path was available.
 *Derivation:* "PRIVATE BY DESIGN" (stated); the cleartext clause is inferred from it.
 **FR-124 [INFERRED]** — Signing out on one device does not sign out another.
+**FR-149 [DESIGN, 2026-10-18, TASK-1055]** — *The app suggests updating a server that is older than the app
+expects.* Each app release names the newest server it is built for (the "recommended" server version, in
+the server package's `MAJOR.MINOR.PATCH-BUILD` form, e.g. 0.3.9-0002). After sign-in, and again each time
+the app returns to the foreground, while the server is reachable, the app asks the user's own server which
+version it is running. If that version is **older** than the recommended one, a notice appears; if it is the
+same, newer, or cannot be read (a development build of the server, an empty or missing version), nothing
+appears. Versions are compared as numbers field by field, so 0.3.10-0001 is newer than 0.3.9-0002.
+*What the notice says:* that a newer server is available; the version the server is on and the recommended
+one; that the newer one has fixes and new features; and the steps: download the server package from
+heiloprojects.com/dsmvideo, then on the NAS open Package Center, choose Manual Install, and pick the
+downloaded file. The wording is for anyone who opens the app, because the app does not know whether the
+account is an administrator on a server this old: it adds "if you don't manage the NAS, pass this on to
+whoever does." On iPhone and iPad a **Download Update** button opens that page. Apple TV cannot open a
+web page, so it shows the short address and a QR code to scan with a phone. Both have **Not Now**.
+*Behavior:* the notice never blocks anything; the app keeps working underneath it. **Not Now** is
+remembered on this device for the recommended version it was shown for, so it stays away until a later app
+release recommends a newer server, and then returns. Signing out clears it. A failed or skipped check
+(device offline, server unreachable, demo mode) neither shows nor hides the notice, because not being able
+to ask says nothing about the server's version. The recommended version is kept equal to the version the
+server package in this repository ships by an automated check, so a server release cannot go out while the
+app still recommends the previous one.
+*Derivation:* P1 and S2 (honest: the user is told the real reason a newer app and an older server may not
+work well together, and given the way to fix it). S4 and A2 hold: the version is read from the user's own
+NAS, nothing is sent to anyone else, and the download page is not in the media or credential path.
+Ryan, 2026-10-18: "for anyone using the iOS/tvos app. If it detects that their server is not updated, it
+suggests downloading the update and installing it." [TASK-1055]
 
 ---
 

@@ -70,6 +70,7 @@ TARGETS=(
   "$VIEWS/TVPairingView.swift|PairingControl|control"
   "$VIEWS/TVMainView.swift|HomeControl|homeControl"
   "$VIEWS/TVShowsView.swift|ShowsControl|control"
+  "$VIEWS/ServerUpdateNoticeViews.swift|ServerUpdateControl|control"
 )
 
 if [[ ! -f "$PLAYER" ]]; then
