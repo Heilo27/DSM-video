@@ -10,6 +10,9 @@
 		AA01000000000001000AA001 /* TopShelfProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA01000000000001000AA002 /* TopShelfProvider.swift */; };
 		AA01000000000001000AA003 /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA01000000000001000AA004 /* TVServices.framework */; };
 		AA01000000000001000AA005 /* DSM Video Top Shelf.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AA01000000000001000AA006 /* DSM Video Top Shelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		AA02000000000001000AA001 /* ContinueWatchingWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02000000000001000AA002 /* ContinueWatchingWidget.swift */; };
+		AA02000000000001000AA003 /* ContinueWatchingWidgetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02000000000001000AA004 /* ContinueWatchingWidgetView.swift */; };
+		AA02000000000001000AA005 /* ContinueWatchingSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02000000000001000AA006 /* ContinueWatchingSnapshot.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -19,6 +22,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = AA01000000000001000AA00D;
 			remoteInfo = "DSM Video Top Shelf";
+		};
+		AA02000000000001000AA00F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F4468EF52F0EDAAB008B87E6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA02000000000001000AA00D;
+			remoteInfo = "DSM Video Widget";
 		};
 		AB000000000000000000000B /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -63,6 +73,12 @@
 		AA01000000000001000AA004 /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
 		AA01000000000001000AA006 /* DSM Video Top Shelf.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "DSM Video Top Shelf.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA01000000000001000AA007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA02000000000001000AA002 /* ContinueWatchingWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinueWatchingWidget.swift; sourceTree = "<group>"; };
+		AA02000000000001000AA004 /* ContinueWatchingWidgetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinueWatchingWidgetView.swift; sourceTree = "<group>"; };
+		AA02000000000001000AA006 /* ContinueWatchingSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ContinueWatchingSnapshot.swift; path = "DSM Video/DSM Video/Models/ContinueWatchingSnapshot.swift"; sourceTree = SOURCE_ROOT; };
+		AA02000000000001000AA007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA02000000000001000AA008 /* ContinueWatchingWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ContinueWatchingWidget.entitlements; sourceTree = "<group>"; };
+		AA02000000000001000AA00A /* DSM Video Widget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "DSM Video Widget.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AB0000000000000000000009 /* DSM Video tvOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM Video tvOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468EFD2F0EDAAB008B87E6 /* DSM Video.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSM Video.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F4468F0C2F0EDAAD008B87E6 /* DSM VideoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSM VideoTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -105,6 +121,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA01000000000001000AA003 /* TVServices.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA02000000000001000AA00C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -157,11 +180,24 @@
 			path = TopShelfExtension;
 			sourceTree = "<group>";
 		};
+		AA02000000000001000AA009 /* ContinueWatchingWidget */ = {
+			isa = PBXGroup;
+			children = (
+				AA02000000000001000AA002 /* ContinueWatchingWidget.swift */,
+				AA02000000000001000AA004 /* ContinueWatchingWidgetView.swift */,
+				AA02000000000001000AA006 /* ContinueWatchingSnapshot.swift */,
+				AA02000000000001000AA007 /* Info.plist */,
+				AA02000000000001000AA008 /* ContinueWatchingWidget.entitlements */,
+			);
+			path = ContinueWatchingWidget;
+			sourceTree = "<group>";
+		};
 		F4468EF42F0EDAAB008B87E6 = {
 			isa = PBXGroup;
 			children = (
 				F4468EFF2F0EDAAB008B87E6 /* DSM Video */,
 				AA01000000000001000AA008 /* TopShelfExtension */,
+				AA02000000000001000AA009 /* ContinueWatchingWidget */,
 				F4468F0F2F0EDAAD008B87E6 /* DS Video cloneTests */,
 				F4468F192F0EDAAD008B87E6 /* DS Video cloneUITests */,
 				F4468EFE2F0EDAAB008B87E6 /* Products */,
@@ -175,6 +211,7 @@
 				F4468EFD2F0EDAAB008B87E6 /* DSM Video.app */,
 				812F6926D48AB885753A8393 /* DSM Video tvOS.app */,
 				AA01000000000001000AA006 /* DSM Video Top Shelf.appex */,
+				AA02000000000001000AA00A /* DSM Video Widget.appex */,
 				F4468F0C2F0EDAAD008B87E6 /* DSM VideoTests.xctest */,
 				F4468F162F0EDAAD008B87E6 /* DSM VideoUITests.xctest */,
 				AB0000000000000000000009 /* DSM Video tvOSUITests.xctest */,
@@ -200,6 +237,22 @@
 			productName = "DSM Video Top Shelf";
 			productReference = AA01000000000001000AA006 /* DSM Video Top Shelf.appex */;
 			productType = "com.apple.product-type.tv-app-extension";
+		};
+		AA02000000000001000AA00D /* DSM Video Widget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA02000000000001000AA00E /* Build configuration list for PBXNativeTarget "DSM Video Widget" */;
+			buildPhases = (
+				AA02000000000001000AA00B /* Sources */,
+				AA02000000000001000AA00C /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "DSM Video Widget";
+			productName = "DSM Video Widget";
+			productReference = AA02000000000001000AA00A /* DSM Video Widget.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		AB0000000000000000000001 /* DSM Video tvOSUITests */ = {
 			isa = PBXNativeTarget;
@@ -255,10 +308,12 @@
 				F4468EF92F0EDAAB008B87E6 /* Sources */,
 				F4468EFA2F0EDAAB008B87E6 /* Frameworks */,
 				F4468EFB2F0EDAAB008B87E6 /* Resources */,
+				AA02000000000001000AA013 /* Embed Widget (Debug simulator only) */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				AA02000000000001000AA010 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				F4468EFF2F0EDAAB008B87E6 /* DSM Video */,
@@ -329,6 +384,9 @@
 					AA01000000000001000AA00D = {
 						CreatedOnToolsVersion = 26.2;
 					};
+					AA02000000000001000AA00D = {
+						CreatedOnToolsVersion = 26.2;
+					};
 					D4B6E34DAF9E45D7BB81EBFA = {
 						CreatedOnToolsVersion = 26.2;
 					};
@@ -363,6 +421,7 @@
 				F4468EFC2F0EDAAB008B87E6 /* DSM Video */,
 				D4B6E34DAF9E45D7BB81EBFA /* DSM Video tvOS */,
 				AA01000000000001000AA00D /* DSM Video Top Shelf */,
+				AA02000000000001000AA00D /* DSM Video Widget */,
 				F4468F0B2F0EDAAD008B87E6 /* DSM VideoTests */,
 				F4468F152F0EDAAD008B87E6 /* DSM VideoUITests */,
 			);
@@ -407,12 +466,45 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		AA02000000000001000AA013 /* Embed Widget (Debug simulator only) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/DSM Video Widget.appex",
+			);
+			name = "Embed Widget (Debug simulator only)";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# TASK-743 B2: the Continue Watching widget ships in Debug SIMULATOR builds only.\n# Release and device builds must not embed it until its signing resources exist (App ID\n# HeiloProjects.DSReel.widget, the App Group on HeiloProjects.DSReel, profiles). The widget\n# target compiles unsigned for iphoneos (CODE_SIGNING_ALLOWED[sdk=iphoneos*] = NO) and is\n# never copied there. When the resources exist, replace this phase with a standard\n# Embed Foundation Extensions copy phase (see FR-154).\n# No declared output: declaring the PlugIns path makes Xcode create an empty PlugIns folder in\n# EVERY configuration, Release included. The app's Debug config turns script sandboxing off\n# instead so this copy may write there; Release keeps the sandbox and writes nothing.\nset -e\nif [ \"${CONFIGURATION}\" != \"Debug\" ] || [ \"${PLATFORM_NAME}\" != \"iphonesimulator\" ]; then\n  echo \"Continue Watching widget not embedded (${CONFIGURATION}, ${PLATFORM_NAME})\"\n  exit 0\nfi\nSRC=\"${BUILT_PRODUCTS_DIR}/DSM Video Widget.appex\"\nDST_DIR=\"${TARGET_BUILD_DIR}/${PLUGINS_FOLDER_PATH}\"\nmkdir -p \"${DST_DIR}\"\nrm -rf \"${DST_DIR}/DSM Video Widget.appex\"\nditto \"${SRC}\" \"${DST_DIR}/DSM Video Widget.appex\"\necho \"Embedded Continue Watching widget in ${DST_DIR}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		AA01000000000001000AA00B /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				AA01000000000001000AA001 /* TopShelfProvider.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA02000000000001000AA00B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA02000000000001000AA001 /* ContinueWatchingWidget.swift in Sources */,
+				AA02000000000001000AA003 /* ContinueWatchingWidgetView.swift in Sources */,
+				AA02000000000001000AA005 /* ContinueWatchingSnapshot.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -458,6 +550,11 @@
 			isa = PBXTargetDependency;
 			target = AA01000000000001000AA00D /* DSM Video Top Shelf */;
 			targetProxy = AA01000000000001000AA00F /* PBXContainerItemProxy */;
+		};
+		AA02000000000001000AA010 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA02000000000001000AA00D /* DSM Video Widget */;
+			targetProxy = AA02000000000001000AA00F /* PBXContainerItemProxy */;
 		};
 		AB000000000000000000000A /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -560,6 +657,62 @@
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = 3;
 				TVOS_DEPLOYMENT_TARGET = "$(RECOMMENDED_TVOS_DEPLOYMENT_TARGET)";
+			};
+			name = Release;
+		};
+		AA02000000000001000AA011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ContinueWatchingWidget/ContinueWatchingWidget.entitlements;
+				"CODE_SIGNING_ALLOWED[sdk=iphoneos*]" = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_TEAM = 752QKBCTJR;
+				INFOPLIST_FILE = ContinueWatchingWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.3.8;
+				PRODUCT_BUNDLE_IDENTIFIER = HeiloProjects.DSReel.widget;
+				PRODUCT_NAME = "DSM Video Widget";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AA02000000000001000AA012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ContinueWatchingWidget/ContinueWatchingWidget.entitlements;
+				"CODE_SIGNING_ALLOWED[sdk=iphoneos*]" = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_TEAM = 752QKBCTJR;
+				INFOPLIST_FILE = ContinueWatchingWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.3.8;
+				PRODUCT_BUNDLE_IDENTIFIER = HeiloProjects.DSReel.widget;
+				PRODUCT_NAME = "DSM Video Widget";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -768,10 +921,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = DSM_Video_iOS.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 752QKBCTJR;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -922,6 +1077,15 @@
 			buildConfigurations = (
 				AA01000000000001000AA010 /* Debug */,
 				AA01000000000001000AA011 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA02000000000001000AA00E /* Build configuration list for PBXNativeTarget "DSM Video Widget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA02000000000001000AA011 /* Debug */,
+				AA02000000000001000AA012 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

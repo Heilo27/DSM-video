@@ -805,8 +805,22 @@ detail page (`dsvideo://item/{id}`, the same destination as FR-147 and FR-153), 
 *What is shared:* title, subtitle, a progress fraction, the poster's image id and a small poster picture
 only. Never a stream address, a sign-in token or the address of a poster.
 *The widget makes no network call.* It draws only what the app last wrote to a snapshot file in the app
-group; if the app has not written one, the widget shows nothing. Apple TV has no widget and writes no
-snapshot.
+group. Apple TV has no widget and writes no snapshot.
+*What the widget shows (iPhone, small and medium):*
+- **Small** shows the most recent title only: its poster, the title (up to two lines), the subtitle when
+  there is one, and a progress bar when there is a usable fraction.
+- **Medium** shows up to **4** posters side by side at 2:3, in rail order, each with its own progress bar.
+  A title with no poster picture draws a plain tile carrying its title, so it is still identifiable.
+- **A progress bar** appears only when the fraction is a real number, drawn clamped to 0-100%. No usable
+  fraction means no bar at all, never an empty one.
+- **Empty state:** a missing, unreadable, empty or other-profile snapshot (no app group, nothing in
+  progress, no profile chosen) shows the calm line "Nothing in progress", never an error.
+- **Tapping** a title opens `dsvideo://item/{id}`: the small widget opens its one title, and each medium
+  poster opens its own. Tapping the empty state opens the app.
+- **Where it ships:** the widget needs its own App ID and the App Group on both the app and the widget,
+  and neither exists yet. Until they do, it is built and embedded **only in Debug simulator builds**;
+  Release and device builds do not include it. Shipping it is a separate step that needs the signing
+  resources first.
 *Whose titles:* only the **active profile's**, by the same ceiling rule as every other list (FRD-002
 FR-242). The snapshot records which profile it was written for, and the widget shows it only while that
 profile is the active one, so profile B never sees profile A's titles even in the moment before the app
@@ -835,7 +849,11 @@ a snapshot written for one profile is shown to no other; AC-4 sign-out and every
 and an empty rail or demo mode leaves none; AC-5 an unchanged snapshot is not rewritten and does not refresh
 the widget; AC-6 nothing in the snapshot carries a URL or token and the widget makes no network call;
 AC-7 the profile migration copies once, never overwrites, never deletes the old copy, and its record
-survives sign-out; AC-8 this requirement.
+survives sign-out; AC-8 this requirement; AC-9 small shows only the first title and medium at most 4,
+in rail order; AC-10 a missing, empty, unreadable or other-profile snapshot shows "Nothing in progress"
+and no error; AC-11 a progress bar is drawn only for a finite fraction, clamped to 0-100%, and a title
+with no poster still shows its title; AC-12 a tap opens `dsvideo://item/{id}` for that title; AC-13 a
+Release or device build contains no widget until its signing resources exist.
 *Derivation:* P1 (the title you were watching is one tap from the Home Screen), S4 (display data only; no
 address or token leaves the app) and S5 (profiles keep their ceilings, and one never sees another's), A2
 (no server of ours, and the widget itself reaches no server at all) and S3 (the upgrade must not lose the
