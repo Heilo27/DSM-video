@@ -267,7 +267,8 @@ server's metadata — posters, episode guides, descriptions.
 failure to load presents as an error with retry (instance of FR-001).
 **FR-082 [INFERRED]** — All titles in a library are reachable, each exactly once, across pagination
 boundaries; the displayed item count matches the server's total. *(Item count display stated in
-design-spec B3 §5.)*
+design-spec B3 §5.)* Identity is the server's id: the client applies no second rule, so distinct ids that
+share title, year and runtime (two files of one film) are each a tile. The same id twice is one tile.
 **FR-083 [STATED]** — TV content is organised as show → season → episode, with seasons and episodes
 matching what the server reports.
 **FR-084 [INFERRED]** — A show whose episodes are split across multiple folders/paths on the NAS
@@ -309,7 +310,11 @@ supported platform. Entries above the profile's age ceiling are hidden, never de
 removal decreases it by exactly one and leaves other entries intact; both survive relaunch.
 **FR-097 [INFERRED]** — An empty watchlist explains how to add titles.
 **FR-098 [INFERRED]** — A failed refresh of an already-loaded library keeps the existing content visible
-with a refresh-failed indication; it must not wipe the grid to empty.
+with a refresh-failed indication; it must not wipe the grid to empty. This covers the Libraries list (the
+list stays, a "Couldn't refresh" notice with Retry sits above it; the full-screen error is only for a first
+load with nothing to keep) and the library grid on iOS and tvOS. The kept grid must still answer what the user
+asked for: if the failed load was for a different genre filter or library, the old grid is not shown as that
+result, so the error screen applies instead. Offline, an unfiltered grid falls back to the on-device catalog.
 **FR-099 [INFERRED]** — Home-video-type libraries are browsable with whatever metadata exists; they are
 not hidden and do not break the library view.
 **FR-100 [INFERRED]** — Titles with unusual names (quotes, ampersands, non-ASCII, very long) list, open,
