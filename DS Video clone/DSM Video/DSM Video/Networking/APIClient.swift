@@ -464,7 +464,13 @@ struct APIClient {
   /// else its backdrop, so a title with only one kind of art still shows a picture. Nil when
   /// it has neither. The poster URL is byte-identical to the library grid's (ItemPosterCell:
   /// 342, versioned) so a title opened from the grid finds its artwork already in ImageCache.
-  func nowPlayingArtworkURL(images: ItemDetail.Images?, version: Int? = nil) -> URL? {
+  ///
+  /// `downloadedPoster` is the poster file a download saved beside its video (TASK-1011). It
+  /// is the same picture as the server poster, so it comes first: it needs no network, and a
+  /// download is most often played offline.
+  func nowPlayingArtworkURL(images: ItemDetail.Images?, version: Int? = nil,
+                            downloadedPoster: URL? = nil) -> URL? {
+    if let downloadedPoster { return downloadedPoster }
     if let posterID = images?.poster?.id {
       return imageURL(id: posterID, width: 342, version: version)
     }

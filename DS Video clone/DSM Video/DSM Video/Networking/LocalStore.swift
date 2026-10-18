@@ -1261,6 +1261,24 @@ actor LocalStore {
     return colOptInt(stmt, 0)
   }
 
+  /// The catalog's poster and backdrop ids for a title, and the change sequence that versions
+  /// their URLs, in the shape the Now Playing artwork rule takes (FR-058). A download carries
+  /// only its saved poster file; this is how its player still finds the backdrop of a title
+  /// with no poster (TASK-1011). Nil when the title is not in the catalog. Reads no scope.
+  func artworkImages(forItemID itemID: String) -> (images: ItemDetail.Images, changeSeq: Int)? {
+    guard !itemID.isEmpty, let db else { return nil }
+    var stmt: OpaquePointer?
+    let sql = "SELECT poster_image_id, backdrop_image_id, change_seq FROM items WHERE id = ?1"
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+    defer { sqlite3_finalize(stmt) }
+    sqlite3_bind_text(stmt, 1, itemID, -1, SQLITE_TRANSIENT)
+    guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+    let images = ItemDetail.Images(
+      poster: colText(stmt, 0).map { .init(id: $0, mapperId: nil) },
+      backdrop: colText(stmt, 1).map { .init(id: $0, mapperId: nil) })
+    return (images, Int(sqlite3_column_int64(stmt, 2)))
+  }
+
   /// Moves progress recorded before profiles existed (the legacy bucket '') to the owner
   /// (FR-233), once the owner's id is known. Where the owner already has a row for the same
   /// title, an unsent local write wins (same ownership rule as upsertProgress); otherwise

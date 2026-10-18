@@ -32,6 +32,9 @@ struct DownloadedItem: Identifiable, Codable {
   /// field, and one it forgot (an age level, a profile's position) would silently drop.
   var videoPath: String
   var posterPath: String?
+  /// The saved poster as a file URL, for the Now Playing artwork (FR-058). The read path
+  /// clears `posterPath` when the file is gone, so this is nil rather than a dead file.
+  var posterFileURL: URL? { posterPath.map { URL(fileURLWithPath: $0) } }
   let fileSize: Int64
   let downloadedAt: Date
   /// The single per-device position recorded before profiles existed: the legacy scope's

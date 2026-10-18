@@ -164,7 +164,8 @@ struct ItemDetailView: View {
           itemID: itemID,
           title: shownTitle,
           itemYear: detail?.year,
-          artworkURL: appState.api.nowPlayingArtworkURL(images: detail?.images, version: detail?.changeSeq),
+          artworkImages: detail?.images,
+          artworkVersion: detail?.changeSeq,
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
@@ -195,7 +196,8 @@ struct ItemDetailView: View {
           itemID: itemID,
           title: shownTitle,
           itemYear: detail?.year,
-          artworkURL: appState.api.nowPlayingArtworkURL(images: detail?.images, version: detail?.changeSeq),
+          artworkImages: detail?.images,
+          artworkVersion: detail?.changeSeq,
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
@@ -1458,8 +1460,10 @@ private struct PlayerSheet: View {
   let itemID: String
   let title: String
   var itemYear: Int? = nil
-  /// Lock-screen / Control Center artwork (FR-058): the title's poster, else its backdrop.
-  var artworkURL: URL? = nil
+  /// Lock-screen / Control Center artwork (FR-058): the title's images, resolved through
+  /// APIClient.nowPlayingArtworkURL, the one artwork rule.
+  var artworkImages: ItemDetail.Images? = nil
+  var artworkVersion: Int? = nil
   var forceFromBeginning: Bool = false
   var nextEpisode: ItemSummary? = nil
   var onPlayNextEpisode: (() -> Void)? = nil
@@ -1487,6 +1491,9 @@ private struct PlayerSheet: View {
   // From the playback response's durationSeconds, falling back to the item's own.
   @State private var playbackDuration: Double = 0
   @State private var isOffline: Bool = false
+  /// The poster saved with the download being played, so its artwork shows offline
+  /// (TASK-1011). Nil when streaming.
+  @State private var downloadedPoster: URL?
   /// The profile that opened the local file (FR-233). Every offline position save names it,
   /// so a profile change while the player is up cannot hand the save to someone else.
   @State private var offlineProfileID: String = ""
@@ -1546,7 +1553,8 @@ private struct PlayerSheet: View {
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
-          artworkURL: artworkURL,
+          artworkURL: appState.api.nowPlayingArtworkURL(
+            images: artworkImages, version: artworkVersion, downloadedPoster: downloadedPoster),
           trickplayBaseURL: isOffline ? nil : appState.api.trickplayBaseURL(itemID: itemID),
           authToken: appState.sessionToken,
           usesTunnelCookie: appState.api.usesTunnelCookie,
@@ -1883,6 +1891,7 @@ private struct PlayerSheet: View {
     // and shift every recorded position by it.
     playlistTimeOffset = 0
     isOffline = false
+    downloadedPoster = nil
     streamResolvedThrough = nil
     loadFailedOnConnection = false
     playbackFailedOnConnection = false
@@ -1920,6 +1929,7 @@ private struct PlayerSheet: View {
       let localURL = URL(fileURLWithPath: downloaded.videoPath)
       if FileManager.default.fileExists(atPath: downloaded.videoPath) {
         isOffline = true
+        downloadedPoster = downloaded.posterFileURL
         // FR-233: progress is the profile's. Saves go to the profile that opened the file.
         offlineProfileID = downloads.activeResumeProfileID
         resumePosition = forceFromBeginning ? 0 : Double(PlaybackProgress.resumable(

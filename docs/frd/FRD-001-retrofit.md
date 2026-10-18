@@ -276,6 +276,9 @@ that keeps playing with no lock-screen control is a half-feature.)*
 *Clarified 2026-10-17 (TASK-965):* the artwork is the title's poster, or its backdrop when it has no
 poster. A title with neither shows no picture, never the previous title's, and its name, duration and
 time still show. When autoplay moves to the next episode, the artwork changes with it.
+*Clarified 2026-10-17 (TASK-1011):* a title played from Downloads, or a downloaded copy played from its
+own page, shows the same artwork. The poster saved with the download comes first, so the picture shows
+offline; with no saved poster, the title's poster or backdrop from the catalog is used.
 **FR-059 [STATED]** — Playback Speed lives in Settings, is easy to find, and is easy to set back to
 normal. A user must never be stuck playing fast with no way to change it.
 **FR-060 [INFERRED]** — The persisted default playback rate is 1x; after a cold start with no explicit

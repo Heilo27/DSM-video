@@ -883,6 +883,9 @@ struct DownloadsView: View {
   /// The profile that opened `playerItem` (FR-233). Captured on tap and named by every
   /// position save, so a profile change while the player is up cannot reassign the save.
   @State private var playerProfileID: String = ""
+  /// The Now Playing artwork for `playerItem` (FR-058, TASK-1011). Resolved after the tap,
+  /// because the catalog lookup is async; the player reloads its artwork when this changes.
+  @State private var playerArtworkURL: URL?
   /// Progress-write throttle, mirroring PlayerSheet (ItemDetailView).
   /// The player ticks every 0.5s, and each tick here did a full JSON read + decode +
   /// re-encode + atomic write, PLUS a SQLite write and a network POST — unthrottled, in
@@ -959,6 +962,11 @@ struct DownloadsView: View {
                     }
                     playerProfileID = downloadManager.activeResumeProfileID
                     playerItem = playable
+                    playerArtworkURL = nil  // never the previous title's picture
+                    Task {
+                      let url = await nowPlayingArtworkURL(for: playable)
+                      if playerItem?.id == playable.id { playerArtworkURL = url }
+                    }
                     showPlayer = true
                   } label: {
                     DownloadedItemCell(item: item, resumeSeconds: downloadManager.resumePosition(of: item)) {
@@ -1015,6 +1023,9 @@ struct DownloadsView: View {
           url: URL(fileURLWithPath: item.videoPath),
           title: item.title,
           resumePosition: Double(downloadManager.resumePosition(of: item, profileID: playerProfileID)),
+          artworkURL: playerArtworkURL,
+          authToken: appState.sessionToken,
+          usesTunnelCookie: appState.api.usesTunnelCookie,
           onDismiss: {
             // TASK-838 pattern (see PlayerSheet): persist the LIVE position on exit, not
             // the throttled one — otherwise every close loses up to 10s of progress.
@@ -1238,6 +1249,14 @@ struct DownloadsView: View {
   }
 
   // MARK: - Helpers
+
+  /// A download's Now Playing artwork, by the same rule streaming uses (FR-058, TASK-1011):
+  /// its saved poster, which needs no network; else the catalog's poster or backdrop.
+  private func nowPlayingArtworkURL(for item: DownloadedItem) async -> URL? {
+    let catalog = await LocalStore.shared.artworkImages(forItemID: item.id)
+    return appState.api.nowPlayingArtworkURL(
+      images: catalog?.images, version: catalog?.changeSeq, downloadedPoster: item.posterFileURL)
+  }
 
   /// The downloads the active profile may see (FR-262), not the whole account's manifest.
   private func loadDownloads() {
