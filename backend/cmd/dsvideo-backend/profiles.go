@@ -827,6 +827,16 @@ func pinColumnValue(f profileFields) (sql.NullString, error) {
 	return sql.NullString{String: h, Valid: true}, nil
 }
 
+// writeServerError answers 500 `server_error` AND logs why. Without the log line a failure
+// on a user's device left nothing on the NAS to find (TASK-1048). It is the only place the
+// `server_error` code is written, so a new site cannot skip the log. The line carries the
+// method, the path (never the query string), the step and the underlying error; those errors
+// come from the entropy source and the hasher and never contain the PIN, password or token.
+func writeServerError(w http.ResponseWriter, r *http.Request, step string, err error) {
+	log.Printf("server_error %s %s: %s: %v", r.Method, r.URL.Path, step, err)
+	writeErr(w, http.StatusInternalServerError, "server_error")
+}
+
 // requestUser returns the authenticated account, or writes 401 (the session, not a profile,
 // is what is missing here).
 func requestUser(w http.ResponseWriter, r *http.Request) (authedUser, bool) {
@@ -928,13 +938,13 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 	var pinHash sql.NullString
 	if f.pinPresent {
 		if pinHash, err = pinColumnValue(f); err != nil {
-			writeErr(w, http.StatusInternalServerError, "server_error")
+			writeServerError(w, r, "create profile: secure PIN", err)
 			return
 		}
 	}
 	id, err := newProfileID()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "server_error")
+		writeServerError(w, r, "create profile: new id", err)
 		return
 	}
 	created := time.Now().UTC().Format(time.RFC3339)
@@ -1027,7 +1037,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	if f.pinPresent {
 		h, err := pinColumnValue(f)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "server_error")
+			writeServerError(w, r, "update profile: secure PIN", err)
 			return
 		}
 		sets, args = append(sets, "pin_hash = ?"), append(args, h)
@@ -1238,7 +1248,7 @@ func (s *Server) handleOwnerPinReset(w http.ResponseWriter, r *http.Request) {
 
 	hash, err := hashPIN(newPin)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "server_error")
+		writeServerError(w, r, "owner PIN reset: secure PIN", err)
 		return
 	}
 

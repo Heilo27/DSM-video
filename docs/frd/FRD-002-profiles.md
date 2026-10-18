@@ -477,7 +477,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | `unknown_collection` | 404 | Collection id not defined, or not offered to this profile's tier. An offered collection with no visible titles is an empty page, not this error (FR-275). |
 | `invalid_avatar` | 400 | Avatar key outside 1–32 letters, digits, `-` and `_` (FR-203). |
 | `dsm_unavailable` | 503 | Owner PIN reset when DSM cannot be reached or gives no usable answer (FR-216). |
-| `server_error` | 500 | The server failed to generate a profile ID or secure a PIN, before anything was written. The apps say nothing was saved and to try again (FRD-001 FR-002). |
+| `server_error` | 500 | The server failed to generate a profile ID or secure a PIN, before anything was written. The apps say nothing was saved and to try again (FRD-001 FR-002). The server logs the request method and path, the failing step and the underlying error for every `server_error`, and never a PIN, password, token or PIN hash (TASK-1048). |
 
 ## 11. Threat model (what this does and does not protect)
 

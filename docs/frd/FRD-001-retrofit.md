@@ -452,6 +452,9 @@ flagged to Ryan.)
 **FR-144 [DESIGN, 2026-10-17, TASK-929]** — *Secrets never reach the server log.* Request logging never
 records a body. A query string may be logged, but passwords, one-time codes, session ids, tokens and DSM's
 trusted-device token are redacted from it, and from any URL, wherever a request is logged.
+*Clarified 2026-10-18 (TASK-1048):* the other direction holds too: a response of `server_error` always
+leaves a log line naming the request method and path and the error underneath it, so a failure that
+reached a device can be traced on the NAS. That line carries no PIN, password, token or PIN hash.
 **FR-145 [DESIGN, 2026-09-15, TASK-920]** — *Suggested is decided by the server.* The Suggested rail
 offers titles that share a genre with what the viewer watched most recently, from one server request, and
 leaves out anything the viewer has already started. It never draws on another profile's history, and with

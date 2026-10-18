@@ -416,7 +416,7 @@ func newProfileID() (string, error) {
 	b.WriteString("pf_")
 	max := big.NewInt(int64(len(base62)))
 	for i := 0; i < 10; i++ {
-		n, err := rand.Int(rand.Reader, max)
+		n, err := rand.Int(entropy, max)
 		if err != nil {
 			return "", fmt.Errorf("profile id: %w", err)
 		}

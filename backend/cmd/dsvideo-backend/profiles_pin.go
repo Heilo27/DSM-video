@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"strconv"
@@ -19,6 +20,11 @@ import (
 	"sync"
 	"time"
 )
+
+// entropy is where profile IDs and PIN salts get their randomness. A variable only so a test
+// can make the source fail: the failure paths it guards answer `server_error`, which must
+// leave a log line (TASK-1048).
+var entropy io.Reader = rand.Reader
 
 const (
 	// pinHashIterations: PBKDF2-HMAC-SHA256 cost. 100k iterations is tens of milliseconds on
@@ -81,7 +87,7 @@ func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
 // hashPIN returns "pbkdf2-sha256$<iterations>$<b64 salt>$<b64 key>" (RawStdEncoding).
 func hashPIN(pin string) (string, error) {
 	salt := make([]byte, pinSaltBytes)
-	if _, err := rand.Read(salt); err != nil {
+	if _, err := io.ReadFull(entropy, salt); err != nil {
 		return "", fmt.Errorf("pin salt: %w", err)
 	}
 	key := pbkdf2SHA256([]byte(pin), salt, pinHashIterations, pinKeyBytes)
