@@ -111,7 +111,12 @@ code. The app says the account uses two-factor sign-in and asks for the DSM veri
 password, never the raw code name. [2026-10-17, TASK-961] When the reset is refused with
 `dsm_unavailable`, the app says it couldn't reach DSM on the NAS to check the password, that nothing
 was changed, and to try again, never that the password is wrong and never the raw code name; the
-user stays signed in. [2026-10-18, TASK-1014] A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
+user stays signed in. [2026-10-18, TASK-1014] On iOS/iPadOS and tvOS, the owner's PIN pad offers
+"Forgot PIN?", including while it is locked out. It asks for the DSM password, an optional DSM
+verification code and a new PIN entered twice. The password is sent exactly as typed. A blank code is
+not sent. Any refusal is shown on that screen in the words above, keeps what was typed, changes nothing
+and never signs the user out. A reset that succeeds opens profile management under the new PIN.
+[2026-10-18, TASK-1016] A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
 
 **FR-217 [DESIGN]** PIN and profile errors are **never** HTTP 401. The apps treat 401 as an expired session
 and sign out (APIClient, DownloadManager), so a wrong PIN answered with 401 would sign the user out and
@@ -568,6 +573,7 @@ tvOS (TASK-917)
 - **AC-002-46** Given a profile deletion, the confirmation says that the profile's history and watchlist will be permanently deleted. (FR-206, FR-266)
 - **AC-002-47** Given a restricted profile and a library with no titles at its level, the empty state names the level, and it differs from both the empty-library state and the load-failure state. Given a restricted profile whose Home rails are all empty, Home shows that same level-named state on iOS and tvOS, not "Add videos to your NAS" or "No Libraries", and an adult profile's truly empty library still shows the generic state with no level named. Given a restricted profile on a cold launch with the NAS unreachable, the level is still named. (FR-265)
 - **AC-002-48** Given the release that enables server enforcement, the iOS/iPadOS app also offers the picker and sends `X-DSVideo-Profile`. (FR-267)
+- **AC-002-49** Given an owner who has forgotten the owner PIN, on iOS/iPadOS and tvOS, the owner PIN pad offers "Forgot PIN?". It takes the DSM password, an optional verification code and a new PIN, and on success opens management under the new PIN. A wrong password, a missing code, an unreachable DSM or an unreachable NAS is each named on that screen; nothing changes and the user stays signed in. (FR-216, FR-217)
 
 Collections (TASK-918)
 - **AC-002-60** Given a kids' profile, `GET /collections` returns only collections with at least one visible title, in definition order, genre-kind ones included. Given a Teens or Adult profile, it returns only `audience: all` collections. (FR-273, FR-274)

@@ -58,6 +58,22 @@ extension AppState {
     }
   }
 
+  /// FR-216: reset a forgotten owner PIN with the account's DSM password (and verification
+  /// code, if the account has two-factor sign-in). DSM checks the password on the server;
+  /// nothing here does. On success the list is re-read, so the owner's lock reads the
+  /// server's answer.
+  func resetOwnerPin(password: String, otp: String?, newPin: String) async -> Result<Void, Error> {
+    do {
+      try await api.resetOwnerPin(password: password, otp: otp, newPin: newPin)
+      dlog.info(.app, "resetOwnerPin: owner PIN reset")
+      await refreshProfiles()
+      return .success(())
+    } catch {
+      dlog.warn(.app, "resetOwnerPin failed — \(error.localizedDescription)")
+      return .failure(error)
+    }
+  }
+
   /// DESTRUCTIVE (FR-206): the server permanently deletes the profile's progress, history
   /// and watchlist. Callers confirm with `ProfileText.deleteConfirmation` first (FR-266).
   func deleteProfile(id: String, ownerPin: String) async -> Result<Void, Error> {
@@ -92,6 +108,13 @@ nonisolated enum ProfileText {
   static func saveFailure(_ error: Error) -> String {
     guard let api = error as? APIError, api.serverReached else { return saveNeedsNAS }
     return api.userMessage
+  }
+
+  /// FR-216: what the owner-PIN reset asks for, and why. The code field is always offered:
+  /// the app can't know before the server answers whether the account uses two-factor sign-in.
+  static func ownerPinResetIntro(name: String) -> String {
+    "Enter this account's DSM password to choose a new PIN for \(name). "
+      + "If the account uses two-factor sign-in, also enter its DSM verification code."
   }
 
   /// FR-206, AC-002-46: the deletion confirmation names exactly what is lost.

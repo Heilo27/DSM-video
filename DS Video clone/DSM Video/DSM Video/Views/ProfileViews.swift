@@ -367,8 +367,11 @@ struct PinPadView<Header: View>: View {
   let submit: (String) async -> PinPadOutcome
   let cancel: () -> Void
   @ViewBuilder let header: () -> Header
+  /// Offers "Forgot PIN?" below the keys when set. Only the owner's pad has a way back from a
+  /// forgotten PIN (the DSM password, FR-216); any other profile's PIN is reset by the owner.
+  var forgot: (() -> Void)? = nil
 
-  enum PinPadKey: Hashable { case k0, k1, k2, k3, k4, k5, k6, k7, k8, k9, delete, cancel }
+  enum PinPadKey: Hashable { case k0, k1, k2, k3, k4, k5, k6, k7, k8, k9, delete, cancel, forgot }
 
   @State private var digits = ""
   @State private var error: String?
@@ -403,10 +406,36 @@ struct PinPadView<Header: View>: View {
       }
       .padding(40)
     }
+    // Over the top edge rather than in the column: the pad already fills a TV's height and a
+    // small iPhone's, so one more row would push the keys off screen.
+    .overlay(alignment: .top) { forgotBar }
     .onAppear { focusedKey = .k1 }
     #if os(tvOS)
     .onExitCommand { cancel() }
     #endif
+  }
+
+  @ViewBuilder
+  private var forgotBar: some View {
+    if let forgot {
+      HStack {
+        Spacer(minLength: 0)
+        Button("Forgot PIN?", action: forgot)
+          .font(ProfileMetrics.body.weight(.semibold))
+          .buttonStyle(.bordered)
+          .disabled(busy)
+          .focused($focusedKey, equals: .forgot)
+          .accessibilityIdentifier("pinPad.forgot")
+      }
+      .padding(.horizontal, ProfileMetrics.spacing)
+      .padding(.top, ProfileMetrics.spacing * 0.5)
+      // tvOS: a full-width section, so Up from any key in the top row lands on the button
+      // even though it sits at the right edge, not directly above.
+      #if os(tvOS)
+      .frame(maxWidth: .infinity)
+      .focusSection()
+      #endif
+    }
   }
 
   private var dots: some View {
@@ -612,6 +641,8 @@ struct ProfileManagementView: View {
   /// Fixed when the screen opens, so setting the owner's first PIN (which flips `hasPin`
   /// as the list refreshes) does not swap the pad for another one mid-flow.
   @State private var ownerHadPin: Bool?
+  /// The owner chose "Forgot PIN?" on the owner pad (FR-216).
+  @State private var resettingPin = false
   @FocusState private var focusedProfile: String?
   @FocusState private var focusedControl: ManageControl?
 
@@ -623,6 +654,13 @@ struct ProfileManagementView: View {
     Group {
       if let ownerPin {
         list(ownerPin: ownerPin)
+      } else if let owner, resettingPin {
+        OwnerPinResetView(owner: owner) { newPin in
+          resettingPin = false
+          unlock(with: newPin)
+        } cancel: {
+          resettingPin = false
+        }
       } else if let owner, ownerHadPin ?? owner.hasPin {
         PinPadView(title: "Enter the owner's PIN",
                    message: "Changing profiles needs \(owner.name)'s PIN.") { pin in
@@ -637,6 +675,8 @@ struct ProfileManagementView: View {
           close()
         } header: {
           ProfileAvatarView(avatar: owner.avatar, name: owner.name, size: ProfileMetrics.tile * 0.6)
+        } forgot: {
+          resettingPin = true
         }
       } else if let owner {
         // FR-212: the owner sets a PIN before any other profile can exist. The first PIN
@@ -750,6 +790,184 @@ struct ProfileManagementView: View {
     #if os(tvOS)
     .onExitCommand { close() }
     #endif
+  }
+}
+
+// MARK: - Owner PIN reset (FR-216, TASK-1016)
+
+/// What the owner-PIN reset sends and what it shows, held apart from the view so both can be
+/// tested without rendering it. DSM checks the password on the server; the words for a refusal
+/// come from ProfileText, the one home for the profile screens' errors.
+struct OwnerPinReset {
+  /// Sent as typed, never trimmed: a DSM password may begin or end with a space.
+  var password = ""
+  /// The DSM verification code. Blank for an account without two-factor sign-in.
+  var code = ""
+  /// The new 4-digit PIN, once chosen (and confirmed) on the PIN pad.
+  var newPin: String?
+
+  enum Outcome: Equatable {
+    /// The owner's PIN is now this one.
+    case reset(String)
+    /// Nothing changed; show this.
+    case refused(String)
+    /// No password or no new PIN yet: nothing was sent.
+    case incomplete
+  }
+
+  /// The code as sent: spaces dropped (codes are often typed or pasted as "123 456"); nil
+  /// when blank, so an account without two-factor sign-in sends no code.
+  var otp: String? {
+    let digits = code.filter { !$0.isWhitespace }
+    return digits.isEmpty ? nil : digits
+  }
+
+  var canSubmit: Bool { !password.isEmpty && newPin != nil }
+
+  @MainActor
+  func perform(on appState: AppState) async -> Outcome {
+    guard let newPin, canSubmit else { return .incomplete }
+    switch await appState.resetOwnerPin(password: password, otp: otp, newPin: newPin) {
+    case .success: return .reset(newPin)
+    case .failure(let error): return .refused(ProfileText.saveFailure(error))
+    }
+  }
+}
+
+/// "Forgot PIN?" on the owner pad (FR-216): the account's DSM password, its verification code
+/// when it has two-factor sign-in, and a new PIN chosen twice on the pad. A refusal is shown
+/// here, beside the fields that fix it, and keeps what was typed.
+struct OwnerPinResetView: View {
+  @Environment(AppState.self) private var appState
+  let owner: Profile
+  let done: (String) -> Void
+  let cancel: () -> Void
+
+  enum OwnerPinResetControl: Hashable { case password, code, choosePin, reset, cancel }
+
+  @State private var form = OwnerPinReset()
+  @State private var choosingPin = false
+  @State private var sending = false
+  @State private var error: String?
+  @FocusState private var focusedField: OwnerPinResetControl?
+
+  var body: some View {
+    ZStack {
+      ProfileBackdrop()
+      ScrollView {
+        VStack(alignment: .leading, spacing: ProfileMetrics.spacing * 0.6) {
+          HStack(spacing: ProfileMetrics.spacing * 0.6) {
+            ProfileAvatarView(avatar: owner.avatar, name: owner.name, size: ProfileMetrics.tile * 0.5)
+            Text("Reset the Owner's PIN")
+              .font(ProfileMetrics.title)
+              .foregroundStyle(.white)
+              .accessibilityAddTraits(.isHeader)
+          }
+          Text(ProfileText.ownerPinResetIntro(name: owner.name))
+            .font(ProfileMetrics.body)
+            .foregroundStyle(Color.dsTextSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 900, alignment: .leading)
+
+          SecureField("DSM password", text: $form.password)
+            .textContentType(.password)
+            .focused($focusedField, equals: .password)
+            #if os(iOS)
+            .textFieldStyle(.roundedBorder)
+            #endif
+            .frame(maxWidth: 700)
+            .accessibilityIdentifier("ownerPinReset.password")
+          TextField("Verification code (two-factor sign-in only)", text: $form.code)
+            .textContentType(.oneTimeCode)
+            .autocorrectionDisabled()
+            #if os(iOS)
+            .keyboardType(.numberPad)
+            .textFieldStyle(.roundedBorder)
+            #endif
+            .focused($focusedField, equals: .code)
+            .frame(maxWidth: 700)
+            .accessibilityIdentifier("ownerPinReset.code")
+
+          // tvOS: full-width focus sections, as in the editor, so Down always finds the row.
+          #if os(tvOS)
+          pinRow
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .focusSection()
+          #else
+          pinRow
+          #endif
+
+          if let error {
+            Text(error)
+              .font(ProfileMetrics.body)
+              .foregroundStyle(Color.dsError)
+              .fixedSize(horizontal: false, vertical: true)
+              .accessibilityIdentifier("ownerPinReset.error")
+          }
+
+          HStack(spacing: 28) {
+            Button {
+              Task { await send() }
+            } label: {
+              Text(sending ? "Resetting…" : "Reset PIN").frame(minWidth: 160)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.dsAccent)
+            .disabled(!form.canSubmit || sending)
+            .focused($focusedField, equals: .reset)
+            .accessibilityIdentifier("ownerPinReset.reset")
+
+            Button("Cancel", action: cancel)
+              .buttonStyle(.bordered)
+              .focused($focusedField, equals: .cancel)
+              .accessibilityIdentifier("ownerPinReset.cancel")
+          }
+          .font(ProfileMetrics.body.weight(.semibold))
+          #if os(tvOS)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .focusSection()
+          #endif
+        }
+        .padding(.horizontal, ProfileMetrics.spacing * 1.4)
+        .padding(.vertical, ProfileMetrics.spacing)
+      }
+    }
+    .fullScreenCover(isPresented: $choosingPin) {
+      NewPinView(title: "New PIN for \(owner.name)") { pin in
+        form.newPin = pin
+        error = nil
+        choosingPin = false
+        return nil
+      } cancel: {
+        choosingPin = false
+      }
+    }
+    #if os(tvOS)
+    .onExitCommand { cancel() }
+    #endif
+  }
+
+  private var pinRow: some View {
+    HStack(spacing: 24) {
+      Text(form.newPin == nil ? "New PIN: not chosen" : "New PIN: chosen")
+        .font(ProfileMetrics.body)
+        .foregroundStyle(.white)
+      Button(form.newPin == nil ? "Choose New PIN" : "Change New PIN") { choosingPin = true }
+        .buttonStyle(.bordered)
+        .focused($focusedField, equals: .choosePin)
+        .accessibilityIdentifier("ownerPinReset.choosePin")
+    }
+    .font(ProfileMetrics.body.weight(.semibold))
+  }
+
+  private func send() async {
+    sending = true
+    defer { sending = false }
+    switch await form.perform(on: appState) {
+    case .reset(let pin): done(pin)
+    case .refused(let message): error = message
+    case .incomplete: break
+    }
   }
 }
 

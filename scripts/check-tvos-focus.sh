@@ -44,6 +44,7 @@ TARGETS=(
   "$VIEWS/ItemDetailView.swift|OverlayButton|focused"
   "$VIEWS/ProfileViews.swift|PinPadKey|focusedKey"
   "$VIEWS/ProfileViews.swift|EditorControl|focusedControl"
+  "$VIEWS/ProfileViews.swift|OwnerPinResetControl|focusedField"
   "$VIEWS/CollectionViews.swift|CollectionControl|focusedControl"
 )
 
