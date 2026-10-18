@@ -1762,6 +1762,21 @@
     }
 
     // API
+    // The playback response's stream URL, re-homed onto the address this page talks to.
+    // The server's path already carries the prefix the request came in on (/dsvideo when
+    // embedded, TASK-1056), so it is resolved against the ORIGIN of state.baseURL; appending
+    // it to state.baseURL would double the prefix (/dsvideo/dsvideo/api/v1/...).
+    function playbackSourceURL(rawUrl) {
+      let origin = window.location.origin;
+      try { origin = new URL(state.baseURL).origin; } catch (e) { /* relative/empty base */ }
+      try {
+        const parsed = new URL(rawUrl, origin);
+        return origin + parsed.pathname + parsed.search;
+      } catch (e) {
+        return rawUrl;
+      }
+    }
+
     async function api(endpoint, options = {}) {
       const response = await fetch(`${state.baseURL}${endpoint}`, {
         ...options,
@@ -3025,13 +3040,7 @@
         let rawUrl = data.hlsMasterUrl || data.streamUrl;
         if (!rawUrl) throw new Error('No playback URL available');
 
-        let url = rawUrl;
-        try {
-          const parsed = new URL(rawUrl);
-          url = state.baseURL + parsed.pathname + parsed.search;
-        } catch (e) {
-          if (rawUrl.startsWith('/')) url = state.baseURL + rawUrl;
-        }
+        const url = playbackSourceURL(rawUrl);
 
         const resumeAt = pendingResume || data.resumePositionSeconds || 0;
 

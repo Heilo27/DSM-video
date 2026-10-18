@@ -853,10 +853,10 @@ func main() {
 	// Synology DSM). Failures are non-fatal — server still works without it.
 	go advertiseMDNS(cfg.ListenAddr)
 
-	// Warn if DSVIDEO_BASE_URL is not configured — relay/QC stream URLs will be wrong.
-	if strings.HasPrefix(cfg.BaseURL, "http://localhost") || strings.HasPrefix(cfg.BaseURL, "https://localhost") {
-		log.Printf("WARNING: DSVIDEO_BASE_URL not set — stream URLs will use Host header heuristic. Set DSVIDEO_BASE_URL to the public URL of this server for reliable QuickConnect/relay playback.")
-	}
+	// No warning when DSVIDEO_BASE_URL is unset: that is the intended configuration.
+	// Stream URLs are derived per request so LAN, WAN and QuickConnect clients each
+	// get their own address back; a single pinned URL would break the other two
+	// (TASK-1056, see requestBaseURL).
 	log.Printf("DS Video backend listening on %s", cfg.ListenAddr)
 
 	// Explicit http.Server rather than ListenAndServe, so shutdown can be graceful and so
@@ -9578,15 +9578,25 @@ func randID(prefix string) string {
 	return prefix + hex.EncodeToString(b[:])
 }
 
-// requestBaseURL derives a base URL for building stream URLs returned to the client.
-// If cfgBaseURL is set (non-empty, non-localhost), it is used directly — this is the
-// correct value for relay/QuickConnect deployments where nginx sets X-Forwarded-Proto:https
-// but the relay only speaks HTTP, causing scheme confusion when derived from headers.
-// Falls back to deriving from the request Host header for direct-IP deployments.
+// requestBaseURL derives the base URL for the absolute URLs the playback response
+// hands out (streamUrl, hlsMasterUrl, subtitle renditions). Clients play those URLs
+// verbatim, so each must point back at the exact address the request arrived through:
+// LAN (http://<ip>:5000), WAN direct (https://<ddns>:<port>) or the QuickConnect relay
+// (https://<relay>:<port>). One fixed base cannot serve all three, so the base is
+// derived per request (TASK-1056).
+//
+//   - cfgBaseURL (DSVIDEO_BASE_URL) is an optional operator override that pins every
+//     URL to one address. Empty or loopback values (the default) mean "derive".
+//   - Host comes from X-Forwarded-Host (the packaged nginx sets it to $http_host, port
+//     included), else r.Host.
+//   - Scheme comes from X-Forwarded-Proto (first hop), else r.TLS. QuickConnect hosts
+//     (*.quickconnect.to) are always https: the clients reach them only over TLS
+//     (TASK-776) and iOS ATS refuses plaintext to a public host, while the $scheme nginx
+//     sees on the relay's leg says nothing about the client's leg.
+//   - A request that arrived under the /dsvideo alias keeps that prefix. nginx passes
+//     the path through unstripped and the API is mounted under both /api/v1 and
+//     /dsvideo/api/v1, so the prefixed URL routes to the same handler.
 func requestBaseURL(r *http.Request, cfgBaseURL string) string {
-	// Operator-configured base URL takes priority (relay/QuickConnect deployments).
-	// Skip loopback values — the start script defaults to http://127.0.0.1:PORT which
-	// is not a useful external URL; treat those the same as unset.
 	isLoopback := strings.HasPrefix(cfgBaseURL, "http://localhost") ||
 		strings.HasPrefix(cfgBaseURL, "https://localhost") ||
 		strings.HasPrefix(cfgBaseURL, "http://127.") ||
@@ -9594,33 +9604,41 @@ func requestBaseURL(r *http.Request, cfgBaseURL string) string {
 	if cfgBaseURL != "" && !isLoopback {
 		return strings.TrimRight(cfgBaseURL, "/")
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
+	firstHop := func(v string) string {
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			v = v[:i]
+		}
+		return strings.TrimSpace(v)
 	}
-	// Prefer X-Forwarded-Host (explicitly set by our nginx config) over r.Host.
-	// DSM nginx may proxy with HTTP/1.0 which doesn't reliably forward the Host
-	// header — X-Forwarded-Host is always set to $http_host so it's trustworthy.
-	host := r.Header.Get("X-Forwarded-Host")
+	host := firstHop(r.Header.Get("X-Forwarded-Host"))
 	if host == "" {
 		host = r.Host
 	}
 	if host == "" {
 		host = r.URL.Host
 	}
-	// Respect X-Forwarded-Proto from reverse proxies (e.g., DSM nginx).
-	// Exception: QuickConnect relay always speaks HTTP regardless of nginx's proto.
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		if strings.Contains(host, "quickconnect.to") {
-			scheme = "http"
-		} else {
-			scheme = proto
-		}
-	}
 	if host == "" {
 		return "http://localhost:8080" // fallback
 	}
-	return scheme + "://" + host
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if proto := strings.ToLower(firstHop(r.Header.Get("X-Forwarded-Proto"))); proto == "http" || proto == "https" {
+		scheme = proto
+	}
+	hostname := strings.ToLower(host)
+	if h, _, err := net.SplitHostPort(hostname); err == nil {
+		hostname = h
+	}
+	if strings.HasSuffix(hostname, ".quickconnect.to") {
+		scheme = "https"
+	}
+	prefix := ""
+	if strings.HasPrefix(r.URL.Path, "/dsvideo/") {
+		prefix = "/dsvideo"
+	}
+	return scheme + "://" + host + prefix
 }
 
 // -------------------------

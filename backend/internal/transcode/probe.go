@@ -6,6 +6,7 @@ package transcode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -130,6 +131,22 @@ func NewProber(ffprobePath string) *Prober {
 	return &Prober{FFprobePath: ffprobePath}
 }
 
+// stderrTail returns the last non-empty line of ffprobe's stderr, capped so a
+// pathological file cannot flood the log. ffprobe prints its fatal reason last.
+func stderrTail(stderr []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(stderr)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			const max = 300
+			if len(line) > max {
+				line = line[:max] + "..."
+			}
+			return line
+		}
+	}
+	return ""
+}
+
 // Probe analyzes a video file and returns codec information.
 func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 	if p.FFprobePath == "" {
@@ -140,8 +157,12 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// -v error (not quiet): when ffprobe refuses a file, its stderr names the reason
+	// ("Invalid data found when processing input", "Permission denied", ...). With
+	// -v quiet the failure logged only "exit status 1" and the cause was unrecoverable
+	// without shelling into the NAS (TASK-1056). The JSON on stdout is unaffected.
 	cmd := exec.CommandContext(ctx, p.FFprobePath,
-		"-v", "quiet",
+		"-v", "error",
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
@@ -151,6 +172,12 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if reason := stderrTail(exitErr.Stderr); reason != "" {
+				return nil, fmt.Errorf("ffprobe failed: %w: %s", err, reason)
+			}
+		}
 		return nil, fmt.Errorf("ffprobe failed: %w", err)
 	}
 

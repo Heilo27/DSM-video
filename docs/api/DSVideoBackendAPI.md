@@ -234,6 +234,22 @@ Response:
 }
 ```
 
+`streamUrl`, `hlsMasterUrl` and subtitle `url` values are absolute, and the apps play them as given,
+so each points back at the address this request came in on [TASK-1056]:
+
+| Request arrived via | URLs begin with |
+|---------------------|-----------------|
+| LAN, DSM's port (`http://192.168.50.148:5000/api/v1/...`) | `http://192.168.50.148:5000/api/v1/playback/...` |
+| The `/dsvideo` alias (`.../dsvideo/api/v1/...`) | the same address plus `/dsvideo`, e.g. `http://192.168.50.148:5000/dsvideo/api/v1/playback/...` |
+| QuickConnect (any `*.quickconnect.to` host) | `https://<that host>:<that port>/api/v1/playback/...`, always `https` |
+| WAN direct HTTPS (`https://<ddns>:5001/...`) | `https://<ddns>:5001/api/v1/playback/...` |
+
+The host and port come from `X-Forwarded-Host` (the package's nginx sets it to the client's `Host`), else
+`Host`; the scheme from `X-Forwarded-Proto`, else the connection. QuickConnect is always `https` because
+the apps reach it only over TLS. HLS playlists and segments are relative to the master playlist, so they
+follow it. `DSVIDEO_BASE_URL` is an optional override that pins every one of these URLs to a single
+address; leave it unset (the package default) so LAN, WAN and QuickConnect clients each get their own.
+
 `audioTracks` lists every audio stream of the source, in source order, for every `kind` (direct,
 remux and HLS alike); a title with no audio answers `[]`, never `null`. It comes from the same
 probe the HLS audio renditions are built from, so it matches the master playlist track for track

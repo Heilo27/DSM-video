@@ -526,6 +526,11 @@ signing in: ten lookups a minute from one device address, shared with the sign-i
 which the answer is `rate_limit_exceeded` and the sign-in page says to wait a minute. An ID that is not
 letters, digits, hyphens or underscores (at most 64, starting with a letter or digit) is refused as
 `invalid_quickconnect_id` without contacting Synology, so the NAS cannot be used to look up arbitrary names.
+*Clarified 2026-10-18 (TASK-1056):* the address a video plays from is the address the app is connected
+through: on the home network, through the away address, or through QuickConnect, each gets stream links
+on that same address, and QuickConnect links are always secure (`https`). The server needs no public
+address configured for this, and does not warn that one is missing. A server owner may still pin every
+stream link to one address, at the cost of the other connection paths.
 **FR-112 [STATED]** — The NAS is discovered automatically on the local network; manual IP entry is not
 required.
 **FR-113 [INFERRED]** — When nothing is discovered, manual entry remains available and the absence of
