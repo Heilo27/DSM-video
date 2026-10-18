@@ -28,7 +28,7 @@ struct OfflineBanner: View {
 
   var body: some View {
     if let message {
-      HStack(spacing: 8) {
+      HStack(spacing: .dsSpaceSM) {
         Image(systemName: Self.symbol(isOffline: isOffline))
           .font(.footnote.weight(.semibold))
           .accessibilityHidden(true)
@@ -36,10 +36,10 @@ struct OfflineBanner: View {
           .font(.footnote.weight(.semibold))
       }
       .foregroundStyle(.white)
-      .padding(.horizontal, 16)
-      .padding(.vertical, 8)
+      .padding(.horizontal, .dsSpaceLG)
+      .padding(.vertical, .dsSpaceSM)
       .frame(maxWidth: .infinity)
-      .background(Color(white: 0.15))
+      .background(Color.dsSurfaceRaised)
       .transition(.move(edge: .top).combined(with: .opacity))
       .accessibilityIdentifier(A11y.Shared.offlineBanner)
       .onAppear {
@@ -71,9 +71,9 @@ struct ConnectionIndicator: View {
         Label(text, systemImage: OfflineBanner.symbol(isOffline: isOffline))
           .font(.callout.weight(.semibold))
           .foregroundStyle(.white)
-          .padding(.horizontal, 24)
-          .padding(.vertical, 12)
-          .background(Capsule().fill(Color(white: 0.2)))
+          .padding(.horizontal, .dsSpaceXXL)
+          .padding(.vertical, .dsSpaceMD)
+          .background(Capsule().fill(Color.dsSurfaceRaised))
           .transition(.opacity)
           .accessibilityElement(children: .combine)
           .accessibilityIdentifier(A11y.Shared.offlineBanner)
@@ -82,7 +82,9 @@ struct ConnectionIndicator: View {
     }
     .focusable(false)
     .allowsHitTesting(false)
-    .animation(.easeInOut(duration: 0.3), value: isOffline || serverUnreachable || localNetworkDenied)
+    .animation(.easeInOut(duration: 0.3),
+               value: AppState.serverUnavailable(isOffline: isOffline, serverUnreachable: serverUnreachable)
+                 || localNetworkDenied)
   }
 }
 
@@ -103,9 +105,9 @@ struct TransientNoticeBanner: View {
           .font(.footnote.weight(.semibold))
           .foregroundStyle(.white)
           .multilineTextAlignment(.center)
-          .padding(.horizontal, 16)
+          .padding(.horizontal, .dsSpaceLG)
           .padding(.vertical, 10)
-          .background(Capsule().fill(Color(white: 0.15)))
+          .background(Capsule().fill(Color.dsSurfaceRaised))
           .transition(.move(edge: .bottom).combined(with: .opacity))
           .accessibilityIdentifier(A11y.Shared.transientNotice)
       }
@@ -135,15 +137,15 @@ struct LocalStoreBanner: View {
         Label(message, systemImage: "externaldrive.badge.exclamationmark")
           #if os(tvOS)
           .font(.callout.weight(.semibold))
-          .padding(.horizontal, 24)
-          .padding(.vertical, 12)
-          .background(Capsule().fill(Color(white: 0.2)))
+          .padding(.horizontal, .dsSpaceXXL)
+          .padding(.vertical, .dsSpaceMD)
+          .background(Capsule().fill(Color.dsSurfaceRaised))
           #else
           .font(.footnote.weight(.semibold))
-          .padding(.horizontal, 16)
-          .padding(.vertical, 8)
+          .padding(.horizontal, .dsSpaceLG)
+          .padding(.vertical, .dsSpaceSM)
           .frame(maxWidth: .infinity)
-          .background(Color(white: 0.15))
+          .background(Color.dsSurfaceRaised)
           #endif
           .foregroundStyle(.white)
           .multilineTextAlignment(.center)

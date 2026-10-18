@@ -99,7 +99,7 @@ struct MainView: View {
       VStack(spacing: 0) {
         OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable,
                       localNetworkDenied: appState.localNetworkDenied)
-          .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
+          .animation(.easeInOut(duration: 0.3), value: appState.isServerUnavailable)
           .animation(.easeInOut(duration: 0.3), value: appState.localNetworkDenied)
         // Watch history cannot be kept on this device (TASK-1012, FR-015).
         LocalStoreBanner(message: appState.localStoreUnavailableMessage)
@@ -109,8 +109,8 @@ struct MainView: View {
     // Lifted clear of the tab bar.
     .overlay(alignment: .bottom) {
       TransientNoticeBanner(message: Bindable(appState).watchlistNotice)
-        .padding(.horizontal, 24)
-        .padding(.bottom, 64)
+        .padding(.horizontal, .dsSpaceXXL)
+        .padding(.bottom, .dsSpaceGiant)
     }
     // Deep links (dsvideo://item/{id}) — iOS side.
     //
@@ -129,8 +129,8 @@ struct MainView: View {
       // The root's notice is hidden under this sheet; its watchlist toggle needs its own.
       .overlay(alignment: .bottom) {
         TransientNoticeBanner(message: Bindable(appState).watchlistNotice, announces: false)
-          .padding(.horizontal, 24)
-          .padding(.bottom, 32)
+          .padding(.horizontal, .dsSpaceXXL)
+          .padding(.bottom, .dsSpaceXXXL)
       }
     }
     // Siri search (FRD-001 FR-147). The intents set `pendingSearchTerm`; only TVMainView read it,
@@ -415,7 +415,7 @@ struct SearchView: View {
 
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
 
   var body: some View {
@@ -423,7 +423,7 @@ struct SearchView: View {
       if searchText.isEmpty && !hasSearched {
         if recentSearches.isEmpty {
           DSContentUnavailable(title: "Search Videos", systemImage: "magnifyingglass", description: "Enter a title to search your library")
-            .padding(.top, 60)
+            .padding(.top, .dsSpaceTitleSafe)
         } else {
           RecentSearchesView(
             searches: recentSearches,
@@ -434,13 +434,13 @@ struct SearchView: View {
             onRemove: { query in removeRecentSearch(query) },
             onClearAll: { recentSearchesRaw = "" }
           )
-          .padding(.top, 16)
+          .padding(.top, .dsSpaceLG)
         }
       } else if isSearching {
         ProgressView("Searching for videos")
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
       } else if let searchError {
-        VStack(spacing: 16) {
+        VStack(spacing: .dsSpaceLG) {
           Image(systemName: "wifi.slash")
             .font(.system(size: 44))
             .foregroundStyle(Color.dsError)
@@ -452,30 +452,30 @@ struct SearchView: View {
             .font(.subheadline)
             .foregroundStyle(.white.opacity(0.75))
             .multilineTextAlignment(.center)
-            .padding(.horizontal, 32)
+            .padding(.horizontal, .dsSpaceXXXL)
           Button {
             Task { await search(explicit: true, record: true) }
           } label: {
             Text("Retry")
               .font(.subheadline.weight(.semibold))
               .foregroundStyle(.white)
-              .padding(.horizontal, 24)
+              .padding(.horizontal, .dsSpaceXXL)
               .padding(.vertical, 10)
               .background(Color.dsError)
               .clipShape(Capsule())
           }
           .buttonStyle(.plain)
         }
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
       } else if hasSearched && results.isEmpty {
         DSContentUnavailable(title: "No Results", systemImage: "magnifyingglass", description: "No videos match \"\(searchText)\"")
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
       } else if !hasSearched && SearchRules.needsExplicitSubmit(searchText) {
         // One character is below the live-search floor. Say so, rather than leave a blank
         // screen: pressing Search still looks it up (TASK-977).
         DSContentUnavailable(title: SearchRules.shortQueryTitle, systemImage: "magnifyingglass",
                              description: SearchRules.shortQueryHint(for: searchText))
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
       } else if !results.isEmpty {
         LazyVStack(spacing: 0) {
           ForEach(results) { item in
@@ -489,14 +489,14 @@ struct SearchView: View {
             .accessibilityHint("Opens video details")
 
             Divider()
-              .background(Color(white: 0.18))
+              .background(Color.dsBorderSubtle)
               .padding(.leading, 12 + 60 + 12)
           }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, .dsSpaceSM)
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle("Search")
     // ALWAYS SHOWN, and focused on appear.
     //
@@ -661,7 +661,7 @@ private struct RecentSearchesView: View {
   let onClearAll: () -> Void
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: .dsSpaceMD) {
       HStack {
         Text("Recent Searches")
           .font(.headline)
@@ -671,12 +671,12 @@ private struct RecentSearchesView: View {
           .font(.subheadline)
           .foregroundStyle(Color.dsAccent)
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
 
       ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           ForEach(searches, id: \.self) { query in
-            HStack(spacing: 4) {
+            HStack(spacing: .dsSpaceXS) {
               Button {
                 onSelect(query)
               } label: {
@@ -699,15 +699,15 @@ private struct RecentSearchesView: View {
               .buttonStyle(.plain)
               .accessibilityLabel("Remove \(query) from recent searches")
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, .dsSpaceMD)
             .padding(.vertical, 6)
             .background(
-              RoundedRectangle(cornerRadius: 20, style: .continuous)
+              RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous)
                 .fill(Color.dsSurface)
             )
           }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, .dsSpaceLG)
       }
     }
   }
@@ -740,15 +740,15 @@ private struct SearchResultCell: View {
   }
 
   var body: some View {
-    HStack(spacing: 12) {
+    HStack(spacing: .dsSpaceMD) {
       // Thumbnail: 60x90pt
       posterThumbnail
         .frame(width: 60, height: 90)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb, style: .continuous))
         .accessibilityHidden(true)
 
       // Metadata
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: .dsSpaceXS) {
         Text(item.title)
           .font(.subheadline.weight(.semibold))
           .foregroundStyle(Color.dsTextPrimary)
@@ -764,7 +764,7 @@ private struct SearchResultCell: View {
           .font(.caption2.weight(.medium))
           .foregroundStyle(Color.dsAccent)
           .padding(.horizontal, 7)
-          .padding(.vertical, 2)
+          .padding(.vertical, .dsSpaceXXS)
           .background(Color.dsAccent.opacity(0.15))
           .clipShape(Capsule())
       }
@@ -775,7 +775,7 @@ private struct SearchResultCell: View {
         .font(.system(size: 13, weight: .semibold))
         .foregroundStyle(.secondary)
     }
-    .padding(.horizontal, 12)
+    .padding(.horizontal, .dsSpaceMD)
     .padding(.vertical, 10)
     .frame(minHeight: 100)
     .contentShape(Rectangle())
@@ -796,7 +796,7 @@ private struct SearchResultCell: View {
       .scaledToFill()
     } else {
       Rectangle()
-        .fill(Color(white: 0.10))
+        .fill(Color.dsSurfaceHigh)
         .overlay(
           Image(systemName: "film.fill")
             .font(.system(size: 20))
@@ -817,7 +817,7 @@ struct WatchlistView: View {
 
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
 
   var body: some View {
@@ -848,7 +848,7 @@ struct WatchlistView: View {
           )
         } else {
           ScrollView {
-            LazyVGrid(columns: columns, spacing: 12) {
+            LazyVGrid(columns: columns, spacing: .dsSpaceMD) {
               ForEach(appState.watchlistItems) { item in
                 NavigationLink {
                   ItemDetailView(itemID: item.id, fallbackTitle: item.title)
@@ -860,11 +860,11 @@ struct WatchlistView: View {
                 .accessibilityHint("Opens video details")
               }
             }
-            .padding(12)
+            .padding(.dsSpaceMD)
           }
         }
       }
-      .background(Color.black.ignoresSafeArea())
+      .background(Color.dsBackground.ignoresSafeArea())
       .navigationTitle("Watchlist")
       .task { await appState.loadWatchlist() }
       // FIX-15: refresh watchlist when network reconnects after being offline
@@ -907,7 +907,7 @@ struct DownloadsView: View {
 
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
 
   // FR-262: in-flight rows name a title too, so they are filtered by the same ceiling.
@@ -936,7 +936,7 @@ struct DownloadsView: View {
         DSContentUnavailable(title: "No Downloads", systemImage: "arrow.down.circle", description: "Downloaded videos will appear here for offline viewing")
       } else {
         ScrollView {
-          VStack(spacing: 16) {
+          VStack(spacing: .dsSpaceLG) {
             // Storage indicator
             storageSection
 
@@ -952,7 +952,7 @@ struct DownloadsView: View {
 
             // Completed downloads grid
             if !downloads.isEmpty {
-              LazyVGrid(columns: columns, spacing: 12) {
+              LazyVGrid(columns: columns, spacing: .dsSpaceMD) {
                 ForEach(downloads) { item in
                   Button {
                     // TASK-796: guard against a double-tap setting playerItem twice
@@ -988,7 +988,7 @@ struct DownloadsView: View {
         }
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle("Downloads")
     .onAppear {
       loadDownloads()
@@ -1094,7 +1094,7 @@ struct DownloadsView: View {
 
   @ViewBuilder
   private var storageSection: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: .dsSpaceSM) {
       HStack {
         Text("Storage")
           .font(.headline)
@@ -1106,10 +1106,10 @@ struct DownloadsView: View {
       }
       GeometryReader { geo in
         ZStack(alignment: .leading) {
-          RoundedRectangle(cornerRadius: 5)
+          RoundedRectangle(cornerRadius: 5)  // literal: storage-bar track, half its 10pt height; not a card radius
             .fill(Color.dsSurface)
             .frame(height: 10)
-          RoundedRectangle(cornerRadius: 5)
+          RoundedRectangle(cornerRadius: 5)  // literal: storage-bar fill, matches the track
             .fill(Color.dsAccent)
             .frame(
               width: totalBytes > 0
@@ -1126,9 +1126,9 @@ struct DownloadsView: View {
     }
     .padding()
     .background(Color.dsSurface.opacity(0.5))
-    .clipShape(RoundedRectangle(cornerRadius: 12))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
     .padding(.horizontal)
-    .padding(.top, 8)
+    .padding(.top, .dsSpaceSM)
     .accessibilityElement(children: .combine)
     .accessibilityLabel("Storage: \(formatBytes(usedByAppBytes)) used by downloads, \(formatBytes(availableBytes)) of \(formatBytes(totalBytes)) available")
   }
@@ -1139,7 +1139,7 @@ struct DownloadsView: View {
   // TASK-782: renders each failed download with its reason, a Retry and a Dismiss, so a
   // failure is never silent.
   private var failedDownloadsSection: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: .dsSpaceSM) {
       Text("Failed")
         .font(.headline)
         .foregroundStyle(Color.dsTextPrimary)
@@ -1148,11 +1148,11 @@ struct DownloadsView: View {
       VStack(spacing: 0) {
         ForEach(failedDownloadIDs, id: \.self) { itemID in
           if let failure = downloadManager.failedDownloads[itemID] {
-            HStack(spacing: 12) {
+            HStack(spacing: .dsSpaceMD) {
               Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.dsError)
                 .accessibilityHidden(true)
-              VStack(alignment: .leading, spacing: 2) {
+              VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                 Text(failure.title)
                   .font(.subheadline.weight(.semibold))
                   .foregroundStyle(Color.dsTextPrimary)
@@ -1172,7 +1172,7 @@ struct DownloadsView: View {
                   .font(.subheadline.weight(.semibold))
                   .foregroundStyle(Color.dsAccent)
                   .frame(minHeight: 44)
-                  .padding(.horizontal, 8)
+                  .padding(.horizontal, .dsSpaceSM)
               }
               .buttonStyle(.plain)
               .accessibilityLabel("Retry download \(failure.title)")
@@ -1187,7 +1187,7 @@ struct DownloadsView: View {
               .accessibilityLabel("Dismiss failed download \(failure.title)")
             }
             .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.vertical, .dsSpaceSM)
 
             if itemID != failedDownloadIDs.last {
               Divider()
@@ -1198,13 +1198,13 @@ struct DownloadsView: View {
         }
       }
       .background(Color.dsSurface.opacity(0.5))
-      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
       .padding(.horizontal)
     }
   }
 
   private var activeDownloadsSection: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: .dsSpaceSM) {
       Text("Downloading")
         .font(.headline)
         .foregroundStyle(Color.dsTextPrimary)
@@ -1237,7 +1237,7 @@ struct DownloadsView: View {
             onCancel: { downloadManager.cancelDownload(itemId: itemID) }
           )
           .padding(.horizontal)
-          .padding(.vertical, 8)
+          .padding(.vertical, .dsSpaceSM)
 
           if itemID != inProgressIDs.last {
             Divider()
@@ -1247,7 +1247,7 @@ struct DownloadsView: View {
         }
       }
       .background(Color.dsSurface.opacity(0.5))
-      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
       .padding(.horizontal)
     }
   }
@@ -1331,9 +1331,9 @@ private struct ActiveDownloadCell: View {
   let onCancel: () -> Void
 
   var body: some View {
-    HStack(spacing: 12) {
-      VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 4) {
+    HStack(spacing: .dsSpaceMD) {
+      VStack(alignment: .leading, spacing: .dsSpaceXS) {
+        HStack(spacing: .dsSpaceXS) {
           Text(title)
             .font(.subheadline)
             .foregroundStyle(Color.dsTextPrimary)
@@ -1343,9 +1343,9 @@ private struct ActiveDownloadCell: View {
               .font(.caption2)
               .foregroundStyle(Color.dsTextSecondary)
               .padding(.horizontal, 6)
-              .padding(.vertical, 2)
+              .padding(.vertical, .dsSpaceXXS)
               .background(Color.dsSurface)
-              .clipShape(RoundedRectangle(cornerRadius: 4))
+              .clipShape(RoundedRectangle(cornerRadius: 4))  // literal: 4pt status chip, below radiusSm
           }
         }
         ProgressView(value: progress)
@@ -1439,7 +1439,7 @@ private struct DownloadedItemCell: View {
         )
         .allowsHitTesting(false)
 
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: .dsSpaceXXS) {
           Text(item.title)
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.white)
@@ -1451,32 +1451,31 @@ private struct DownloadedItemCell: View {
             .foregroundStyle(.white.opacity(0.75))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
+        .padding(.horizontal, .dsSpaceSM)
+        .padding(.bottom, .dsSpaceSM)
 
-        // Resume progress bar — only shown when there is a meaningful resume position
-        if resumeSeconds > 0 && item.durationSeconds > 0 {
-          let frac = min(1.0, Double(resumeSeconds) / Double(item.durationSeconds))
-          if frac < PlaybackProgress.watchedThreshold {
-            VStack(spacing: 0) {
-              Spacer()
-              GeometryReader { barGeo in
-                ZStack(alignment: .leading) {
-                  Color.white.opacity(0.25)
-                    .frame(height: 3)
-                  Color.dsAccent
-                    .frame(width: barGeo.size.width * frac, height: 3)
-                }
+        // Resume progress bar — the same card rule as every poster (PlaybackProgress.cardIndicator,
+        // FR-020): a bar for a position above zero that is not finished, nothing otherwise.
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(
+            positionSeconds: resumeSeconds, durationSeconds: item.durationSeconds) {
+          VStack(spacing: 0) {
+            Spacer()
+            GeometryReader { barGeo in
+              ZStack(alignment: .leading) {
+                Color.white.opacity(0.25)
+                  .frame(height: 3)
+                Color.dsAccent
+                  .frame(width: barGeo.size.width * frac, height: 3)
               }
-              .frame(height: 3)
             }
-            .padding(.horizontal, 6)
-            .padding(.bottom, 6)
+            .frame(height: 3)
           }
+          .padding(.horizontal, 6)
+          .padding(.bottom, 6)
         }
       }
       .frame(width: width, height: height)
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
       .contextMenu {
         Button(role: .destructive) {
           onDelete()
@@ -1500,7 +1499,7 @@ private struct DownloadedItemCell: View {
           .clipped()
       } else {
         Rectangle()
-          .fill(Color(white: 0.06))
+          .fill(Color.dsSurface)
           .frame(width: width, height: height)
           .overlay(
             Image(systemName: "film.fill")
@@ -1654,8 +1653,11 @@ struct SettingsView: View {
       if appState.sessionToken != nil {
         Section {
           if let code = appState.pairingCode {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: .dsSpaceSM) {
               Text(code)
+                // Deliberately outside the theme type scale (TASK-951): a pairing code is read
+                // digit by digit, so it is fixed-size and monospaced on every theme. The tvOS
+                // counterpart is Font.dsTVCode.
                 .font(.system(size: 40, weight: .bold, design: .monospaced))
                 .tracking(6)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1667,7 +1669,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, .dsSpaceXS)
           }
           Button {
             Task { await appState.generatePairingCode() }
@@ -1681,7 +1683,7 @@ struct SettingsView: View {
           }
           .disabled(appState.isGeneratingPairingCode)
           if let err = appState.pairingError {
-            Text(err).font(.footnote).foregroundStyle(.red)
+            Text(err).font(.footnote).foregroundStyle(Color.dsError)
           }
         } header: {
           Text("Apple TV")
@@ -1733,7 +1735,7 @@ struct SettingsView: View {
 
       #if !os(tvOS)
       Section {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: .dsSpaceXS) {
           Text("Text Size")
           Slider(value: $subtitleScale, in: 0.7...2.0, step: 0.1)
           Text(String(format: "%.0f%%", subtitleScale * 100))
@@ -1745,7 +1747,7 @@ struct SettingsView: View {
             Text(preset.name).tag(preset.hex)
           }
         }
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: .dsSpaceXS) {
           Text("Background")
           Slider(value: $subtitleBackgroundOpacity, in: 0...1, step: 0.1)
           Text(subtitleBackgroundOpacity < 0.05 ? "None"
@@ -1965,6 +1967,6 @@ private struct HowToStep: View {
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
     }
-    .padding(.vertical, 4)
+    .padding(.vertical, .dsSpaceXS)
   }
 }

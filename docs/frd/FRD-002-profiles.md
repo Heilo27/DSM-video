@@ -44,7 +44,7 @@ same account never sees, resumes from or changes them.
 
 **FR-203 [DESIGN]** A profile has: a name (1–20 characters after trimming, unique within the account
 regardless of case; **[DESIGN, 2026-10-17, TASK-952]** a character is a Unicode code point, counted the same by the server
-and by the apps' editor, so an emoji sequence such as a family counts as several and "Grandma 👨‍👩‍👧‍👦 Smith" is 21; the editor shows the count as n/20 and says why Save is off), an avatar key chosen from a fixed set built into the apps (no image uploads), a
+and by the apps' editor, so an emoji sequence such as a family counts as several and "Grandma 👨‍👩‍👧‍👦 Smith" is 21; the editor shows the count as n/20 and says why Save is off; **[DESIGN, 2026-10-17, TASK-1023]** "trimming" removes, from both ends only, exactly the Unicode White_Space characters: U+0009–U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F and U+3000, on the server and in the apps alike. Other invisible characters, such as U+200B zero-width space, U+FEFF and U+180E, are not trimmed and count as characters. One shared test vector, `docs/test-vectors/profile-name.json`, is asserted by both the server and the apps), an avatar key chosen from a fixed set built into the apps (no image uploads), a
 maximum age level, and whether a PIN is set. The PIN itself is never returned by any endpoint. An avatar
 key is 1–32 characters of letters, digits, `-` and `_`; anything else is refused with `invalid_avatar`.
 

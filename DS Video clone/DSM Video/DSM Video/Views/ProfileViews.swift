@@ -71,7 +71,7 @@ struct ProfileAvatarView: View {
   }
 
   var body: some View {
-    RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)
+    RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)  // literal: avatar corner scales with size (16%), so it cannot be a fixed token
       .fill(LinearGradient(
         colors: [Color(hue: hue / 360, saturation: 0.62, brightness: 0.78),
                  Color(hue: hue / 360, saturation: 0.78, brightness: 0.42)],
@@ -84,6 +84,8 @@ struct ProfileAvatarView: View {
             .foregroundStyle(.white.opacity(0.95))
         } else {
           Text(String(name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased())
+            // Deliberately outside the theme type scale (TASK-951): the initial is sized as a
+            // proportion of the avatar, so it scales with the avatar, not with a text role.
             .font(.system(size: size * 0.44, weight: .bold, design: .rounded))
             .foregroundStyle(.white.opacity(0.95))
         }
@@ -212,8 +214,8 @@ private struct AddTileArt: View {
 private struct ProfileBackdrop: View {
   var body: some View {
     ZStack {
-      Color.black
-      RadialGradient(colors: [Color(white: 0.11), .black], center: .top,
+      Color.dsBackground
+      RadialGradient(colors: [Color.dsSurfaceHigh, Color.dsBackground], center: .top,
                      startRadius: 40, endRadius: 1100)
     }
     .ignoresSafeArea()
@@ -262,7 +264,7 @@ struct ProfilePickerView: View {
           Label("Manage Profiles", systemImage: "pencil")
             .font(ProfileMetrics.body.weight(.semibold))
             #if os(iOS)
-            .padding(.horizontal, 20).padding(.vertical, 10)
+            .padding(.horizontal, .dsSpaceXL).padding(.vertical, 10)
             #endif
         }
         .buttonStyle(.bordered)
@@ -272,7 +274,7 @@ struct ProfilePickerView: View {
         .accessibilityIdentifier("profilePicker.manage")
         Spacer(minLength: 0)
       }
-      .padding(.horizontal, 60)
+      .padding(.horizontal, .dsSpaceTitleSafe)
     }
     .task { await appState.refreshProfiles() }
     .onAppear {
@@ -319,10 +321,10 @@ struct ProfilePickerView: View {
       }
     }
     #if os(tvOS)
-    HStack(alignment: .top, spacing: 64) { content; add }
+    HStack(alignment: .top, spacing: .dsSpaceGiant) { content; add }
       .focusSection()
     #else
-    LazyVGrid(columns: [GridItem(.adaptive(minimum: ProfileMetrics.tile + 24), spacing: 24)],
+    LazyVGrid(columns: [GridItem(.adaptive(minimum: ProfileMetrics.tile + 24), spacing: .dsSpaceXXL)],
               spacing: 28) { content; add }
       .frame(maxWidth: 560)
     #endif
@@ -404,7 +406,7 @@ struct PinPadView<Header: View>: View {
         .accessibilityIdentifier("pinPad.message")
         keypad
       }
-      .padding(40)
+      .padding(.dsSpaceJumbo)
     }
     // Over the top edge rather than in the column: the pad already fills a TV's height and a
     // small iPhone's, so one more row would push the keys off screen.
@@ -713,7 +715,7 @@ struct ProfileManagementView: View {
   private var unavailable: some View {
     ZStack {
       ProfileBackdrop()
-      VStack(spacing: 32) {
+      VStack(spacing: .dsSpaceXXXL) {
         Text("Profiles couldn't be loaded.")
           .font(ProfileMetrics.title).foregroundStyle(.white)
         Text(ProfileText.saveNeedsNAS)
@@ -769,9 +771,9 @@ struct ProfileManagementView: View {
           }
         }
         #if os(tvOS)
-        HStack(alignment: .top, spacing: 64) { tiles }.focusSection()
+        HStack(alignment: .top, spacing: .dsSpaceGiant) { tiles }.focusSection()
         #else
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: ProfileMetrics.tile + 24), spacing: 24)],
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: ProfileMetrics.tile + 24), spacing: .dsSpaceXXL)],
                   spacing: 28) { tiles }
           .frame(maxWidth: 560)
         #endif
@@ -784,7 +786,7 @@ struct ProfileManagementView: View {
           .accessibilityIdentifier("profileManage.done")
         Spacer(minLength: 0)
       }
-      .padding(.horizontal, 60)
+      .padding(.horizontal, .dsSpaceTitleSafe)
     }
     .onAppear { if focusedProfile == nil { focusedProfile = profiles.first?.id } }
     #if os(tvOS)
@@ -1032,7 +1034,7 @@ struct ProfileEditorView: View {
             .foregroundStyle(.white)
             .accessibilityAddTraits(.isHeader)
 
-          HStack(alignment: .center, spacing: 40) {
+          HStack(alignment: .center, spacing: .dsSpaceJumbo) {
             ProfileAvatarView(avatar: avatar, name: trimmedName.isEmpty ? "?" : trimmedName,
                               size: ProfileMetrics.tile * 0.8)
             VStack(alignment: .leading, spacing: 10) {
@@ -1114,8 +1116,8 @@ struct ProfileEditorView: View {
           .focusSection()
           #endif
         }
-        .padding(.horizontal, 80)
-        .padding(.vertical, 60)
+        .padding(.horizontal, .dsSpaceColossal)
+        .padding(.vertical, .dsSpaceTitleSafe)
       }
     }
     .onAppear(perform: load)
@@ -1146,7 +1148,7 @@ struct ProfileEditorView: View {
   private var nameFeedback: some View {
     let reason = ProfileNameRules.reason(for: name)
     let over = !nameValid && !trimmedName.isEmpty
-    return HStack(alignment: .firstTextBaseline, spacing: 16) {
+    return HStack(alignment: .firstTextBaseline, spacing: .dsSpaceLG) {
       if let reason {
         Text(reason)
           .foregroundStyle(over ? Color.dsError : Color.dsTextSecondary)
@@ -1176,9 +1178,9 @@ struct ProfileEditorView: View {
           Button { avatar = choice.rawValue } label: {
             ProfileAvatarView(avatar: choice.rawValue, name: name, size: ProfileMetrics.tile * 0.5)
               .overlay(
-                RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.08, style: .continuous)
+                RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.08, style: .continuous)  // literal: tile corner scales with the tile size (8%)
                   .strokeBorder(.white, lineWidth: avatar == choice.rawValue ? 4 : 0))
-              .padding(8)
+              .padding(.dsSpaceSM)
           }
           .buttonStyle(ProfileTileButtonStyle())
           .focused($focusedAvatar, equals: choice.rawValue)
@@ -1186,8 +1188,8 @@ struct ProfileEditorView: View {
           .accessibilityAddTraits(avatar == choice.rawValue ? .isSelected : [])
         }
       }
-      .padding(.vertical, 20)
-      .padding(.horizontal, 8)
+      .padding(.vertical, .dsSpaceXL)
+      .padding(.horizontal, .dsSpaceSM)
     }
     #if os(tvOS)
     .focusSection()
@@ -1197,7 +1199,7 @@ struct ProfileEditorView: View {
   @ViewBuilder
   private var levelRow: some View {
     #if os(tvOS)
-    HStack(spacing: 20) {
+    HStack(spacing: .dsSpaceXL) {
       ForEach(1...ProfileScope.unrestrictedLevel, id: \.self) { value in
         Button { level = value } label: {
           Text(appState.ageLevelLabel(value) ?? "Level \(value)")
@@ -1227,8 +1229,8 @@ struct ProfileEditorView: View {
       ForEach(1...ProfileScope.unrestrictedLevel, id: \.self) { value in
         let selected = level == value
         Button { level = value } label: {
-          HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+          HStack(spacing: .dsSpaceMD) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
               Text(appState.ageLevelLabel(value) ?? "Level \(value)")
                 .font(ProfileMetrics.body.weight(.semibold))
               if let ratings = appState.ageLevelRatings(value) {
@@ -1242,12 +1244,12 @@ struct ProfileEditorView: View {
               Image(systemName: "checkmark").font(.body.weight(.semibold))
             }
           }
-          .padding(.horizontal, 18).padding(.vertical, 12)
+          .padding(.horizontal, 18).padding(.vertical, .dsSpaceMD)
           .frame(maxWidth: 520, alignment: .leading)
-          .background(RoundedRectangle(cornerRadius: 14)
+          .background(RoundedRectangle(cornerRadius: .dsRadiusMd)
             .fill(selected ? Color.white : Color.white.opacity(0.1)))
           .foregroundStyle(selected ? Color.black : Color.white)
-          .contentShape(RoundedRectangle(cornerRadius: 14))
+          .contentShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
         }
         .buttonStyle(ProfileTileButtonStyle())
         .focused($focusedLevel, equals: value)
@@ -1261,7 +1263,7 @@ struct ProfileEditorView: View {
   @ViewBuilder
   private var pinControls: some View {
     let ownerKeepsPin = isOwner && appState.profiles.count > 1
-    HStack(spacing: 24) {
+    HStack(spacing: .dsSpaceXXL) {
       Text(willHavePin ? "On" : "Off")
         .font(ProfileMetrics.body)
         .foregroundStyle(.white)

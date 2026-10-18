@@ -112,7 +112,7 @@ struct SetupConnectScreen: View {
       Color.dsBackground.ignoresSafeArea()
 
       ScrollView {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: .dsSpaceXXL) {
           header
 
           if !isReturningUser {
@@ -146,7 +146,7 @@ struct SetupConnectScreen: View {
           pairingCodeSection
           #endif
         }
-        .padding(24)
+        .padding(.dsSpaceXXL)
       }
       .scrollDismissesKeyboard(.interactively)
       // KEEP THE FORM CLEAR OF THE KEYBOARD ACCESSORY.
@@ -219,7 +219,7 @@ struct SetupConnectScreen: View {
   // MARK: Sections
 
   private var header: some View {
-    VStack(spacing: 8) {
+    VStack(spacing: .dsSpaceSM) {
       ZStack {
         Circle()
           .fill(Color.dsAccent)
@@ -230,7 +230,7 @@ struct SetupConnectScreen: View {
           .offset(x: 3)
       }
       .accessibilityHidden(true)
-      .padding(.bottom, 8)
+      .padding(.bottom, .dsSpaceSM)
 
       Text(isReturningUser ? "Welcome Back" : AppInfo.displayName)
         .font(.largeTitle.weight(.semibold))
@@ -246,7 +246,7 @@ struct SetupConnectScreen: View {
         .fixedSize(horizontal: false, vertical: true)
     }
     .frame(maxWidth: .infinity)
-    .padding(.top, 16)
+    .padding(.top, .dsSpaceLG)
   }
 
   /// Bonjour results. This used to be buried one tap deep inside the "Direct address"
@@ -278,7 +278,7 @@ struct SetupConnectScreen: View {
       }
     } else if !discovery.servers.isEmpty {
       VStack(alignment: .leading, spacing: 10) {
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           Text("FOUND ON YOUR NETWORK")
             .font(.caption.weight(.semibold))
             .foregroundStyle(Color.dsTextMuted)
@@ -294,7 +294,7 @@ struct SetupConnectScreen: View {
             connectError = nil
             focusedField = username.isEmpty ? .username : .password
           } label: {
-            HStack(spacing: 16) {
+            HStack(spacing: .dsSpaceLG) {
               Image(systemName: "server.rack")
                 .font(.system(size: 22))
                 .foregroundStyle(Color.dsAccent)
@@ -322,7 +322,7 @@ struct SetupConnectScreen: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
             .background(Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
           }
           .buttonStyle(.plain)
           .accessibilityLabel("\(server.name), \(server.baseURL)")
@@ -355,12 +355,12 @@ struct SetupConnectScreen: View {
   /// ONE field. It accepts a LAN IP, a DDNS hostname, a Tailscale 100.x address, or a bare
   /// QuickConnect ID, because buildCandidates() accepts all four and works out the rest.
   private var addressSection: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: .dsSpaceSM) {
       Text("SERVER ADDRESS")
         .font(.caption.weight(.semibold))
         .foregroundStyle(Color.dsTextMuted)
 
-      HStack(spacing: 12) {
+      HStack(spacing: .dsSpaceMD) {
         Image(systemName: "network")
           .foregroundStyle(Color.dsTextMuted)
           .frame(width: 20)
@@ -378,10 +378,10 @@ struct SetupConnectScreen: View {
           .accessibilityHint("Your NAS IP address, hostname, QuickConnect ID, or Tailscale address")
           .accessibilityIdentifier(A11y.Setup.addressField)
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
       .frame(minHeight: 52)
       .background(Color.dsSurface)
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
 
       Text("IP address, hostname, QuickConnect ID, or Tailscale IP — whatever you have.")
         .font(.caption)
@@ -392,7 +392,7 @@ struct SetupConnectScreen: View {
 
   private var credentialsSection: some View {
     VStack(spacing: 0) {
-      HStack(spacing: 12) {
+      HStack(spacing: .dsSpaceMD) {
         Image(systemName: "person.fill")
           .foregroundStyle(Color.dsTextMuted)
           .frame(width: 20)
@@ -405,12 +405,12 @@ struct SetupConnectScreen: View {
           .onSubmit { focusedField = .password }
           .accessibilityIdentifier(A11y.Setup.usernameField)
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
       .frame(minHeight: 52)
 
       Divider().background(Color.dsBorderSubtle)
 
-      HStack(spacing: 12) {
+      HStack(spacing: .dsSpaceMD) {
         Image(systemName: "lock.fill")
           .foregroundStyle(Color.dsTextMuted)
           .frame(width: 20)
@@ -449,16 +449,16 @@ struct SetupConnectScreen: View {
         .buttonStyle(.plain)
         .accessibilityLabel(showPassword ? "Hide password" : "Show password")
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
       .frame(minHeight: 52)
     }
     .background(Color.dsSurface)
-    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
     .privacySensitive()
   }
 
   private func errorRow(_ message: String) -> some View {
-    HStack(alignment: .top, spacing: 8) {
+    HStack(alignment: .top, spacing: .dsSpaceSM) {
       Image(systemName: "exclamationmark.circle")
         .foregroundStyle(Color.dsError)
         .font(.footnote)
@@ -470,7 +470,7 @@ struct SetupConnectScreen: View {
     }
     .padding(14)
     .background(Color.dsError.opacity(0.08))
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
     // The identifier is on the container and the message is exposed as its a11y value, so a
     // test can assert WHAT the error says — the project rule is that error text must name the
     // real cause, and a test that only checks "an error appeared" cannot catch a wrong one.
@@ -488,15 +488,10 @@ struct SetupConnectScreen: View {
           ProgressView().tint(Color.dsAccentOn)
         } else {
           Text("Connect")
-            .font(.headline)
-            .foregroundStyle(canConnect ? Color.dsAccentOn : Color.dsTextMuted)
         }
       }
-      .frame(maxWidth: .infinity, minHeight: 52)
-      .background(canConnect && !isConnecting ? Color.dsAccent : Color.dsSurface)
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
-    .buttonStyle(.plain)
+    .dsPrimaryButton(fillsWidth: true)
     .disabled(!canConnect || isConnecting)
     .accessibilityLabel(isConnecting ? "Connecting, please wait" : "Connect")
     .accessibilityIdentifier(A11y.Setup.connectButton)
@@ -508,7 +503,7 @@ struct SetupConnectScreen: View {
   /// never connected: AppState finds the server on this network and keeps the addresses the
   /// TV sent with the code.
   private var pairingCodeSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: .dsSpaceMD) {
       Button {
         withAnimation(.easeInOut(duration: 0.2)) { showPairingCode.toggle() }
         if showPairingCode { focusedField = .pairingCode }
@@ -532,7 +527,7 @@ struct SetupConnectScreen: View {
           .foregroundStyle(Color.dsTextMuted)
           .fixedSize(horizontal: false, vertical: true)
 
-        HStack(spacing: 12) {
+        HStack(spacing: .dsSpaceMD) {
           TextField("6-digit code", text: $pairingCode)
             .keyboardType(.numberPad)
             .textContentType(.oneTimeCode)
@@ -544,10 +539,10 @@ struct SetupConnectScreen: View {
             }
             .accessibilityLabel("Pairing code")
             .accessibilityIdentifier(A11y.Setup.pairingCodeField)
-            .padding(.horizontal, 16)
+            .padding(.horizontal, .dsSpaceLG)
             .frame(minHeight: 52)
             .background(Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
 
           Button {
             Task { await pair() }
@@ -563,7 +558,7 @@ struct SetupConnectScreen: View {
             }
             .frame(minWidth: 88, minHeight: 52)
             .background(canPair && !isPairing ? Color.dsAccent : Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
           }
           .buttonStyle(.plain)
           .disabled(!canPair || isPairing)
@@ -793,7 +788,7 @@ struct ConnectionHelpView: View {
             detail: "Use your NAS account username and password. On DSM, non-admin accounts also need permission for this app, granted in Control Panel → Application Privileges."
           )
         }
-        .padding(24)
+        .padding(.dsSpaceXXL)
       }
     }
     .navigationTitle("Connecting")
@@ -814,7 +809,7 @@ private struct HelpTopic: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      HStack(spacing: 12) {
+      HStack(spacing: .dsSpaceMD) {
         Image(systemName: icon)
           .font(.system(size: 20, weight: .medium))
           .foregroundStyle(Color.dsAccent)
@@ -832,9 +827,9 @@ private struct HelpTopic: View {
         .fixedSize(horizontal: false, vertical: true)
 
       if !steps.isEmpty {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: .dsSpaceMD) {
           ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .top, spacing: .dsSpaceMD) {
               ZStack {
                 Circle().fill(Color.dsAccent).frame(width: 24, height: 24)
                 Text("\(index + 1)")
@@ -850,9 +845,9 @@ private struct HelpTopic: View {
             }
           }
         }
-        .padding(16)
+        .padding(.dsSpaceLG)
         .background(Color.dsSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
       }
     }
   }

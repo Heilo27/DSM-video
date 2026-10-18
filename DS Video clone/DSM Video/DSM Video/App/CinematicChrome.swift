@@ -11,8 +11,6 @@ import SwiftUI
 // MARK: Card depth
 
 private struct CinematicCardDepth: ViewModifier {
-    let radius: CGFloat
-
     func body(content: Content) -> some View {
         let theme = ThemeHolder.shared.current
         if theme.usesCinematicChrome {
@@ -31,26 +29,56 @@ private struct CinematicCardDepth: ViewModifier {
 
 extension View {
     /// Ambient card elevation on the Cinematic theme; nothing on flat themes.
-    func dsCardDepth(cornerRadius: CGFloat = 12) -> some View {
-        modifier(CinematicCardDepth(radius: cornerRadius))
+    func dsCardDepth() -> some View {
+        modifier(CinematicCardDepth())
     }
 }
 
-// MARK: Press-scale interaction
+// MARK: Press and disabled interaction
+
+/// The opacity every custom button style uses for its pressed and disabled states, so
+/// the states read the same across the app (TRUTHS S2: a custom ButtonStyle must render
+/// pressed and disabled visibly differently from idle).
+enum DSInteractionOpacity {
+    /// Label opacity while pressed on flat themes; matches the dim `.plain` gave.
+    static let pressed: Double = 0.6
+    /// Label opacity when the control is disabled.
+    static let disabled: Double = 0.4
+}
+
+/// The pressed (and optionally disabled) feedback every custom button style shares, so the
+/// rule has one home: Cinematic signals a press with the themed scale; flat themes
+/// (Classic / Nitrate) dim the label, which is what `.plain` did before DSPressableStyle
+/// replaced it. A style that draws its own disabled look (DSPrimaryButtonStyle) passes
+/// `dimsWhenDisabled: false` so the control is not dimmed twice.
+struct DSPressFeedback: ViewModifier {
+    let pressed: Bool
+    let dimsWhenDisabled: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        let theme = ThemeHolder.shared.current
+        let cinematic = theme.usesCinematicChrome
+        let opacity: Double = (!isEnabled && dimsWhenDisabled) ? DSInteractionOpacity.disabled
+            : (isEnabled && pressed && !cinematic ? DSInteractionOpacity.pressed : 1.0)
+        return content
+            .scaleEffect(cinematic && pressed ? theme.pressScale : 1.0)
+            .opacity(opacity)
+            .animation(.easeOut(duration: theme.motionDuration * 0.5), value: pressed)
+    }
+}
 
 private struct DSPressableStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        let theme = ThemeHolder.shared.current
-        let scale = configuration.isPressed ? theme.pressScale : 1.0
-        return configuration.label
-            .scaleEffect(theme.usesCinematicChrome ? scale : 1.0)
-            .animation(.easeOut(duration: theme.motionDuration * 0.5), value: configuration.isPressed)
+        configuration.label
+            .modifier(DSPressFeedback(pressed: configuration.isPressed, dimsWhenDisabled: true))
     }
 }
 
 extension View {
-    /// Wraps the view in a plain button with a themed press-scale. On flat themes the
-    /// scale is fixed at 1.0 so behavior matches the prior `.buttonStyle(.plain)`.
+    /// Plain-button replacement with a themed pressed state (scale on Cinematic, opacity
+    /// dim on flat themes) and a dimmed disabled state. Unlike `.buttonStyle(.plain)`,
+    /// this is a custom style, so it must draw its own pressed and disabled looks.
     func dsPressable() -> some View {
         buttonStyle(DSPressableStyle())
     }

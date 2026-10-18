@@ -86,19 +86,41 @@ struct CardIndicatorSingleSourceTests {
     text.components(separatedBy: needle).count - 1
   }
 
-  /// iOS poster cell: one bar, one badge, and the VoiceOver label.
+  /// iOS poster cell: one ask for the shared `PosterCard` shell (which draws the bar and the badge
+  /// from it) and one for the VoiceOver label. The shell itself takes the indicator as an input
+  /// and never decides.
   @Test func theIOSPosterCellAsksTheSharedFunction() throws {
     let text = try source("ItemsGridView.swift")
-    #expect(count(of: "PlaybackProgress.cardIndicator(for: item.progress)", in: text) == 3)
+    #expect(count(of: "PlaybackProgress.cardIndicator(for: item.progress)", in: text) == 2)
     #expect(!text.contains("frac >= 0.02"), "the iOS card has no private bar cutoff")
+    #expect(!text.contains("frac >= PlaybackProgress.watchedThreshold"))
+    let shell = try source("PosterCard.swift")
+    #expect(!shell.contains("PlaybackProgress.cardIndicator("), "the shell is handed the decision, it does not remake it")
+    #expect(!shell.contains("frac >= PlaybackProgress.watchedThreshold"))
+  }
+
+  /// tvOS landscape bar, landscape badge, portrait bar, portrait badge.
+  @Test func theTVOSCardsAskTheSharedFunction() throws {
+    let text = try source("TVMainView.swift")
+    #expect(count(of: "PlaybackProgress.cardIndicator(for: item.progress)", in: text) == 4)
+    #expect(!text.contains("if frac < 1.0"), "a tvOS card drew a bar for anything under 100%")
     #expect(!text.contains("frac >= PlaybackProgress.watchedThreshold"))
   }
 
-  /// tvOS landscape bar, portrait bar, portrait badge.
-  @Test func theTVOSCardsAskTheSharedFunction() throws {
+  /// TASK-1018: the landscape card used to draw a bar and never a badge, so a finished title on a
+  /// landscape rail looked untouched. Both tvOS cards draw the one shared badge view, which since
+  /// TASK-1035 is `CardWatchedBadge` (shared with the iOS cards), defined once in its own file.
+  @Test func bothTVOSCardsDrawTheWatchedBadge() throws {
     let text = try source("TVMainView.swift")
-    #expect(count(of: "PlaybackProgress.cardIndicator(for: item.progress)", in: text) == 3)
-    #expect(!text.contains("if frac < 1.0"), "a tvOS card drew a bar for anything under 100%")
-    #expect(!text.contains("frac >= PlaybackProgress.watchedThreshold"))
+    let landscapeStart = try #require(text.range(of: "private struct TVLandscapeCard"))
+    let portraitStart = try #require(text.range(of: "private struct TVPortraitCard"))
+    let landscape = String(text[landscapeStart.lowerBound..<portraitStart.lowerBound])
+    let portrait = String(text[portraitStart.lowerBound...])
+    #expect(landscape.contains("== .watchedBadge"))
+    #expect(landscape.contains("CardWatchedBadge("))
+    #expect(portrait.contains("CardWatchedBadge("))
+    #expect(!text.contains("struct TVCardWatchedBadge"), "no private per-screen badge view in TVMainView")
+    let badge = try source("CardWatchedBadge.swift")
+    #expect(count(of: "struct CardWatchedBadge", in: badge) == 1, "one badge view, not one per card")
   }
 }

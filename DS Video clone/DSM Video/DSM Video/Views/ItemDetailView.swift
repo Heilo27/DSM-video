@@ -83,7 +83,7 @@ struct ItemDetailView: View {
     // isOffline as well as serverUnreachable: in airplane mode before any request has
     // actually failed, only isOffline is set — so Play stayed enabled on a non-downloaded
     // item and dead-ended on the playback-failed panel instead of being disabled up front.
-    (serverUnreachable || isOffline) && !isDownloaded
+    AppState.serverUnavailable(isOffline: isOffline, serverUnreachable: serverUnreachable) && !isDownloaded
   }
 
   /// Whether an autoPlay entry (Home hero Play, Continue Watching card, episode
@@ -178,7 +178,7 @@ struct ItemDetailView: View {
       .navigationTitle(shownTitle)
       .navigationBarTitleDisplayMode(.inline)
       .toolbarBackground(.visible, for: .navigationBar)
-      .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+      .toolbarBackground(Color.dsBackground.opacity(0.85), for: .navigationBar)
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
@@ -252,7 +252,8 @@ struct ItemDetailView: View {
   private var tvBody: some View {
     GeometryReader { geo in
       ZStack(alignment: .bottom) {
-        // Image fills the full geometry frame
+        // Image fills the full geometry frame. Black is deliberate: it sits behind the
+        // backdrop artwork like a letterbox, not as a themed ground.
         Color.black
         backdropImage
           .scaledToFill()
@@ -277,7 +278,7 @@ struct ItemDetailView: View {
           .frame(width: geo.size.width, alignment: .bottom)
           .frame(maxHeight: geo.size.height * 0.52, alignment: .bottom)
           .clipped()
-          .padding(.bottom, 20)
+          .padding(.bottom, .dsSpaceXL)
       }
       .frame(width: geo.size.width, height: geo.size.height)
     }
@@ -334,7 +335,7 @@ struct ItemDetailView: View {
     // — that is the cost of the fix. The explanatory comment was lost in a later refactor,
     // which is how this came back as a suspected bug; see 3c45fc3.
     .id(showPlayer)
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .privacySensitive()
   }
   #endif
@@ -353,8 +354,7 @@ struct ItemDetailView: View {
   enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched, nextEpisode }
 
   private var tvPlayButton: some View {
-    let focused = focusedAction == .play
-    return Button {
+    Button {
       // TASK-796: guard so a Play/Start Over double-tap can't flip playFromBeginning
       // after the player is already presenting.
       guard !showPlayer else { return }
@@ -370,30 +370,20 @@ struct ItemDetailView: View {
             .accessibilityHidden(true)
         }
       }
-        .font(.headline.weight(.semibold))
-        .foregroundStyle(Color.dsAccentOn)
         // A fixed 260x54 with no scale factor clipped the label at accessibility sizes,
         // on the screen's PRIMARY action. minimumScaleFactor alone was not enough: at XXL
         // the label still needs more than 0.7 of a fixed 260pt, so it kept clipping to a
-        // glyph fragment (TASK-897 #1). The width is now a MINIMUM — the button grows to
-        // fit its label instead of shrinking the label to fit the button — and the height
-        // grows with it so the text is never vertically clipped either.
+        // glyph fragment (TASK-897 #1). The width is now a MINIMUM (dsPrimaryButton's
+        // minWidth) — the button grows to fit its label instead of shrinking the label to
+        // fit the button — and the height grows with it so the text is never clipped.
         .minimumScaleFactor(0.7)
         .lineLimit(1)
-        .padding(.horizontal, 20)
-        .frame(minWidth: 260, minHeight: 54)
-        .background(Color.dsAccent.brightness(focused ? 0.12 : 0))
-        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
-        .scaleEffect(focused ? 1.04 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: focused)
     }
-    .buttonStyle(.plain)
+    .dsPrimaryButton(minWidth: 260)
     .focusEffectDisabled()
-    .shadow(color: Color.dsAccent.opacity(focused ? 0.7 : 0.3), radius: focused ? 10 : 5, x: 0, y: 3)
     .focused($focusedAction, equals: .play)
     .prefersDefaultFocus(in: actionNamespace)
     .disabled(playUnavailableOffline)
-    .opacity(playUnavailableOffline ? 0.4 : 1)
     // A11y.Detail.playButton existed in the registry and was applied to nothing, so the
     // primary action could not be addressed by identifier — which is exactly what a test
     // for "Play holds default focus" needs.
@@ -496,7 +486,7 @@ struct ItemDetailView: View {
 
           #if os(tvOS)
           // tvOS: episode badge + title on left, action buttons on right — one row
-          HStack(alignment: .center, spacing: 16) {
+          HStack(alignment: .center, spacing: .dsSpaceLG) {
             // Episode badge + title (expands to fill available space)
             if seasonNumber != nil || episodeNumber != nil {
               let badge: String = {
@@ -522,7 +512,7 @@ struct ItemDetailView: View {
             // Action buttons — fixed width, right-aligned
             // Start Over is always in the layout (opacity 0 when no saved position)
             // so the Play button never shifts when progress loads asynchronously.
-            HStack(spacing: 12) {
+            HStack(spacing: .dsSpaceMD) {
               tvPlayButton
               tvStartOverButton
                 .opacity(savedPositionSeconds > 0 ? 1 : 0)
@@ -537,7 +527,7 @@ struct ItemDetailView: View {
           // iOS: action buttons row. Play + Start Over FLEX to share the available
           // width (was fixed 200pt each, which overflowed the panel); the icon
           // buttons stay fixed-size.
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             Button {
               guard !showPlayer else { return }  // TASK-796
               playFromBeginning = false
@@ -552,24 +542,14 @@ struct ItemDetailView: View {
                     .accessibilityHidden(true)
                 }
               }
-              .font(.headline.weight(.semibold))
-              .foregroundStyle(Color.dsAccentOn)
-              // Same clipping as the tvOS button (TASK-897 #1): a hard 44pt height cannot
-              // hold a scaled "Play" at accessibility sizes, so the primary action showed
-              // a cropped glyph. 44 is the HIG minimum, not a maximum — as a minHeight the
-              // button grows with the text instead of cropping it.
+              // Same clipping as the tvOS button (TASK-897 #1): a hard height cannot hold a
+              // scaled "Play" at accessibility sizes, so the primary action showed a cropped
+              // glyph. dsPrimaryButton's height is a minimum: the button grows with the text.
               .minimumScaleFactor(0.7)
               .lineLimit(1)
-              .padding(.vertical, 8)
-              .frame(maxWidth: .infinity)
-              .frame(minHeight: 44)
-              .background(Color.dsAccent)
-              .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .dsPrimaryButton(fillsWidth: true)
             .disabled(playUnavailableOffline)
-            .opacity(playUnavailableOffline ? 0.4 : 1)
-            .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
             .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
 
@@ -628,7 +608,7 @@ struct ItemDetailView: View {
                 // button 122pt tall against Play's 92pt — the secondary action physically
                 // larger than the primary one, and the biggest focus target on the screen.
                 // The two lines say the same thing a single line does at 10 feet.
-                HStack(spacing: 8) {
+                HStack(spacing: .dsSpaceSM) {
                   Text("Next Episode")
                     .font(.subheadline.weight(.semibold))
                   Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
@@ -637,7 +617,7 @@ struct ItemDetailView: View {
                     .lineLimit(1)
                 }
                 #else
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                   Text("Next Episode")
                     .font(.subheadline.weight(.semibold))
                   Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
@@ -662,7 +642,7 @@ struct ItemDetailView: View {
               // Capped rather than hugging its text: the trailing episode title varies in
               // length, and a button that changes width per episode makes the row jump as
               // you move through a season.
-              .padding(.horizontal, 20)
+              .padding(.horizontal, .dsSpaceXL)
               .padding(.vertical, 10)
               .frame(maxWidth: 620, minHeight: 48, alignment: .leading)
               #else
@@ -691,7 +671,7 @@ struct ItemDetailView: View {
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
           } else if isLastOfSeason {
-            HStack(spacing: 8) {
+            HStack(spacing: .dsSpaceSM) {
               Image(systemName: "flag.checkered")
                 #if os(tvOS)
                 .font(.body)
@@ -726,7 +706,7 @@ struct ItemDetailView: View {
             }()
             // iOS 26 deprecated Text + Text concatenation. HStack keeps the
             // two-color treatment (accent badge + white title) without it.
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: .dsSpaceSM) {
               Text(badge).foregroundStyle(Color.dsAccent)
               Text(shownTitle).foregroundStyle(.white)
             }
@@ -775,16 +755,16 @@ struct ItemDetailView: View {
         // NEXT one" rather than on Play. Scoping the whole panel is what makes the
         // preference binding below actually mean something.
         .focusScope(actionNamespace)
-        .padding(.horizontal, 60)
-        .padding(.top, 20)
-        .padding(.bottom, 24)
+        .padding(.horizontal, .dsSpaceTitleSafe)
+        .padding(.top, .dsSpaceXL)
+        .padding(.bottom, .dsSpaceXXL)
         .frame(maxWidth: .infinity, alignment: .leading)
         #else
-        .padding(.horizontal, 16)
+        .padding(.horizontal, .dsSpaceLG)
         .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
         .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.top, 16)
-        .padding(.bottom, 32)
+        .padding(.top, .dsSpaceLG)
+        .padding(.bottom, .dsSpaceXXXL)
         #endif
   }
   // end contentPanel
@@ -805,14 +785,14 @@ struct ItemDetailView: View {
   @ViewBuilder
   private var header: some View {
     if isLoading && detail == nil {
-      Color.black
+      Color.dsBackground
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(ProgressView("Loading").tint(.white).accessibilityLabel("Loading, please wait"))
     } else if let error {
-      Color.black
+      Color.dsBackground
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(
-          VStack(spacing: 12) {
+          VStack(spacing: .dsSpaceMD) {
             DSContentUnavailable(
             title: "Couldn't load details",
             systemImage: "exclamationmark.triangle",
@@ -842,8 +822,8 @@ struct ItemDetailView: View {
               Text("No metadata · Fix")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .padding(.horizontal, .dsSpaceSM)
+                .padding(.vertical, .dsSpaceXS)
                 .frame(minHeight: 44)
                 .background(Color.black.opacity(0.7))
                 .clipShape(Capsule())
@@ -884,7 +864,7 @@ struct ItemDetailView: View {
                     .minimumScaleFactor(0.6)
                     .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, .dsSpaceXL)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.bottom, geo.size.height - panelTop + 16)
               }
@@ -915,7 +895,7 @@ struct ItemDetailView: View {
     } else {
       // No backdrop — gradient placeholder with title overlay
       LinearGradient(
-        colors: [Color.dsSurfaceRaised, Color.black],
+        colors: [Color.dsSurfaceRaised, Color.dsBackground],
         startPoint: .top,
         endPoint: .bottom
       )
@@ -923,7 +903,7 @@ struct ItemDetailView: View {
         Text(shownTitle)
           .font(.title2.bold())
           .foregroundStyle(.white.opacity(0.7))
-          .padding(24)
+          .padding(.dsSpaceXXL)
           .accessibilityHidden(true)
       }
     }
@@ -950,7 +930,7 @@ struct ItemDetailView: View {
       ].compactMap { $0 }.joined(separator: ", ")
 
       ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           if let year {
             MetadataPill(text: String(year))
           }
@@ -989,7 +969,7 @@ struct ItemDetailView: View {
             MetadataPill(text: genre)
           }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, .dsSpaceXXS)
       }
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(metaLabel)
@@ -1114,12 +1094,12 @@ struct ItemDetailView: View {
       // horizontal ScrollView here could never be driven by the remote and everyone past
       // the visible width was unreachable. Same reasoning already applied to the summary
       // text above. Show a bounded, fully-visible subset instead of a scroller that lies.
-      HStack(alignment: .top, spacing: 24) {
+      HStack(alignment: .top, spacing: .dsSpaceXXL) {
         ForEach(Array(ordered.prefix(6).enumerated()), id: \.offset) { _, person in
           castAvatar(person)
         }
       }
-      .padding(.vertical, 2)
+      .padding(.vertical, .dsSpaceXXS)
       #else
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(alignment: .top, spacing: 14) {
@@ -1127,7 +1107,7 @@ struct ItemDetailView: View {
             castAvatar(person)
           }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, .dsSpaceXXS)
       }
       #endif
     }
@@ -1311,7 +1291,7 @@ private struct MetadataFixerSheet: View {
             .onSubmit { Task { await search() } }
             .foregroundStyle(.white)
         }
-        .listRowBackground(Color(white: 0.12))
+        .listRowBackground(Color.dsSurfaceHigh)
 
         if isSearching {
           HStack {
@@ -1319,24 +1299,24 @@ private struct MetadataFixerSheet: View {
             ProgressView("Searching").tint(.white)
             Spacer()
           }
-          .listRowBackground(Color(white: 0.08))
+          .listRowBackground(Color.dsSurface)
         } else {
           ForEach(results) { candidate in
             Button {
               Task { await apply(candidate) }
             } label: {
-              HStack(spacing: 12) {
+              HStack(spacing: .dsSpaceMD) {
                 AsyncImage(url: candidate.posterURL) { img in
                   img.resizable().scaledToFill()
                     .frame(width: 50, height: 75, alignment: .top)
                 } placeholder: {
-                  Color(white: 0.15)
+                  Color.dsSurfaceRaised
                 }
                 .frame(width: 50, height: 75)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb))
                 .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: .dsSpaceXS) {
                   Text(candidate.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -1356,7 +1336,7 @@ private struct MetadataFixerSheet: View {
             }
             .buttonStyle(.plain)
             .disabled(isApplying)
-            .listRowBackground(Color(white: 0.1))
+            .listRowBackground(Color.dsSurfaceHigh)
           }
         }
 
@@ -1364,13 +1344,13 @@ private struct MetadataFixerSheet: View {
           Text(error)
             .foregroundStyle(Color.dsError)
             .font(.caption)
-            .listRowBackground(Color(white: 0.08))
+            .listRowBackground(Color.dsSurface)
         }
         if applied {
           Text("Metadata updated! Pull to refresh.")
-            .foregroundStyle(.green)
+            .foregroundStyle(Color.dsSuccess)
             .font(.caption)
-            .listRowBackground(Color(white: 0.08))
+            .listRowBackground(Color.dsSurface)
         }
       }
       .navigationTitle("Fix Metadata")
@@ -1386,7 +1366,7 @@ private struct MetadataFixerSheet: View {
       }
       .task { await search() }
       .scrollContentBackground(.hidden)
-      .background(Color.black)
+      .background(Color.dsBackground)
     }
   }
 
@@ -1444,7 +1424,7 @@ private struct QualityBadge: View {
       .font(.caption2.weight(.bold))
       .foregroundStyle(Color.dsAccent)
       .padding(.horizontal, 9)
-      .padding(.vertical, 4)
+      .padding(.vertical, .dsSpaceXS)
       .overlay(Capsule().stroke(Color.dsAccent.opacity(0.6), lineWidth: 1))
       .clipShape(Capsule())
   }
@@ -1540,6 +1520,7 @@ private struct PlayerSheet: View {
 
   var body: some View {
     ZStack {
+      // Video letterbox: black on every theme by design, not a theme ground.
       Color.black.ignoresSafeArea()
 
       if let url = playbackURL {
@@ -1707,7 +1688,7 @@ private struct PlayerSheet: View {
           nextEpisodeOverlay(next: next)
         }
       } else if let error {
-        VStack(spacing: 20) {
+        VStack(spacing: .dsSpaceXL) {
           DSContentUnavailable(
             title: "Playback failed",
             systemImage: "exclamationmark.triangle",
@@ -1718,7 +1699,7 @@ private struct PlayerSheet: View {
             .buttonStyle(.borderedProminent)
         }
       } else {
-        VStack(spacing: 20) {
+        VStack(spacing: .dsSpaceXL) {
           ProgressView("Loading video")
             .tint(.white)
           Button("Cancel") { dismiss() }
@@ -1809,9 +1790,9 @@ private struct PlayerSheet: View {
       }
     )
     #else
-    VStack(spacing: 20) {
+    VStack(spacing: .dsSpaceXL) {
       Spacer()
-      VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceMD) {
         Text("Up Next")
           .font(.caption.weight(.semibold))
           .foregroundStyle(.white.opacity(0.7))
@@ -1825,7 +1806,7 @@ private struct PlayerSheet: View {
           .font(.subheadline)
           .foregroundStyle(.white.opacity(0.7))
           .monospacedDigit()
-        HStack(spacing: 16) {
+        HStack(spacing: .dsSpaceLG) {
           Button {
             countdownTask?.cancel()
             showNextEpisodeOverlay = false
@@ -1833,13 +1814,8 @@ private struct PlayerSheet: View {
             dismiss()
           } label: {
             Text("Play Now")
-              .font(.headline)
-              .foregroundStyle(Color.dsAccentOn)
-              .padding(.horizontal, 24)
-              .padding(.vertical, 10)
-              .background(Color.dsAccent, in: Capsule())
           }
-          .buttonStyle(.plain)
+          .dsPrimaryButton(.pill)
           Button {
             countdownTask?.cancel()
             showNextEpisodeOverlay = false
@@ -1847,7 +1823,7 @@ private struct PlayerSheet: View {
             Text("Cancel")
               .font(.headline)
               .foregroundStyle(.white)
-              .padding(.horizontal, 24)
+              .padding(.horizontal, .dsSpaceXXL)
               .padding(.vertical, 10)
               .background(Color.white.opacity(0.2), in: Capsule())
           }
@@ -1856,8 +1832,8 @@ private struct PlayerSheet: View {
       }
       .padding(28)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
-      .padding(.horizontal, 32)
-      .padding(.bottom, 60)
+      .padding(.horizontal, .dsSpaceXXXL)
+      .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.black.opacity(0.45).ignoresSafeArea())
@@ -2145,9 +2121,9 @@ private struct _NextEpisodeOverlayView: View {
   enum OverlayButton: Hashable { case playNow, stay }
 
   var body: some View {
-    VStack(spacing: 20) {
+    VStack(spacing: .dsSpaceXL) {
       Spacer()
-      VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceMD) {
         Text("UP NEXT")
           .font(.caption.weight(.semibold))
           .foregroundStyle(.white.opacity(0.7))
@@ -2160,20 +2136,12 @@ private struct _NextEpisodeOverlayView: View {
           .font(.subheadline)
           .foregroundStyle(.white.opacity(0.7))
           .monospacedDigit()
-        HStack(spacing: 24) {
+        HStack(spacing: .dsSpaceXXL) {
           Button(action: onPlayNow) {
             Text("Play Now")
-              .font(.headline)
-              .foregroundStyle(Color.dsAccentOn)
-              .padding(.horizontal, 28)
-              .padding(.vertical, 14)
-              .background(Color.dsAccent, in: Capsule())
-              .brightness(focused == .playNow ? 0.1 : 0)
           }
-          .buttonStyle(.plain)
+          .dsPrimaryButton(.pill)
           .focusEffectDisabled()
-          .scaleEffect(focused == .playNow ? 1.05 : 1.0)
-          .animation(.easeInOut(duration: 0.15), value: focused)
           .focused($focused, equals: .playNow)
           .prefersDefaultFocus(in: ns)
 
@@ -2196,8 +2164,8 @@ private struct _NextEpisodeOverlayView: View {
       .padding(28)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
       // 60 matches the title-safe inset used everywhere else on tvOS; 32 sat inside it.
-      .padding(.horizontal, 60)
-      .padding(.bottom, 60)
+      .padding(.horizontal, .dsSpaceTitleSafe)
+      .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.black.opacity(0.45).ignoresSafeArea())

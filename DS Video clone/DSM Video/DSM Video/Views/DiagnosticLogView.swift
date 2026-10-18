@@ -50,11 +50,11 @@ struct DiagnosticLogView: View {
             }
           }
           .padding(.horizontal)
-          .padding(.vertical, 12)
+          .padding(.vertical, .dsSpaceMD)
         }
       }
     }
-    .background(Color.black)
+    .background(Color.dsBackground)
     .navigationTitle("Diagnostic Log")
     .onAppear { entries = DiagnosticLog.shared.entries }
     .toolbar {
@@ -67,13 +67,7 @@ struct DiagnosticLogView: View {
       ToolbarItem(placement: .topBarTrailing) {
         ShareLink(item: DiagnosticLog.shared.exportText()) {
           Image(systemName: "square.and.arrow.up")
-              // Tap target. A toolbar caps its item's HEIGHT, so .frame alone cannot reach
-              // 44pt vertically (it widened 37->56 and stayed 36 tall). Growing the glyph
-              // raises the intrinsic height, and contentShape makes the padded area tappable
-              // rather than just the symbol's own bounds.
-              .font(.system(size: 20, weight: .semibold))
-              .frame(minWidth: 44, minHeight: 44)
-              .contentShape(Rectangle())
+              .dsToolbarIcon()
         }
       }
     }
@@ -87,11 +81,11 @@ struct DiagnosticLogView: View {
   private var header: some View {
     let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
     let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-    return VStack(alignment: .leading, spacing: 4) {
+    return VStack(alignment: .leading, spacing: .dsSpaceXS) {
       Text("v\(v) (\(b))  •  \(appState.baseURL)")
         .font(.system(.headline, design: .monospaced))
         .foregroundStyle(.white)
-      HStack(spacing: 12) {
+      HStack(spacing: .dsSpaceMD) {
         // Plain Button rather than Toggle(.button): the .button toggle style does not exist
         // on tvOS. A Button reads its state in the label, works with the focus engine, and
         // behaves identically on both platforms.
@@ -134,8 +128,8 @@ struct DiagnosticLogView: View {
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal)
-    .padding(.top, 12)
-    .padding(.bottom, 8)
+    .padding(.top, .dsSpaceMD)
+    .padding(.bottom, .dsSpaceSM)
   }
 
   private func cycleFilter() {

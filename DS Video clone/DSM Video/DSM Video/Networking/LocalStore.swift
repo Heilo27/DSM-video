@@ -1053,9 +1053,10 @@ actor LocalStore {
       ORDER BY i.added_at DESC
       LIMIT 500
     """
-    var items = fetchItems(sql: sql, deduplicateByShow: true, maxCount: 16)
-    items = fillShowPosters(items)
-    return items
+    // The SQL only picks the window (newest 500); ItemSummary.justAddedRail is the rule, shared
+    // with the demo library (TASK-1019).
+    let window = fetchItems(sql: sql, deduplicateByShow: false, maxCount: 500)
+    return fillShowPosters(ItemSummary.justAddedRail(from: window))
   }
 
   // For TV episodes missing a poster, substitute the poster ID from any sibling

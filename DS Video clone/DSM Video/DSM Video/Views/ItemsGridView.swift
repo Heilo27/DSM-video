@@ -69,11 +69,11 @@ struct ItemsGridView: View {
   }
 
   #if os(tvOS)
-  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 280), spacing: 24)] }
+  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 280), spacing: .dsSpaceXXL)] }
   #else
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
   #endif
 
@@ -82,16 +82,16 @@ struct ItemsGridView: View {
       if isLoading && items.isEmpty {
         ProgressView("Loading videos")
           #if os(tvOS)
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
           #else
-          .padding(.top, 24)
+          .padding(.top, .dsSpaceXXL)
           #endif
       } else if let error {
         // FIX-18 / TASK-649: shared error+retry component.
         ErrorRetryView(title: "Couldn't load items", message: error) {
           Task { await load() }
         }
-        .padding(.top, 24)
+        .padding(.top, .dsSpaceXXL)
       } else {
         #if os(tvOS)
         let gridSpacing: CGFloat = 24
@@ -153,9 +153,8 @@ struct ItemsGridView: View {
             } label: {
               ItemPosterCell(item: item)
             }
-            // dsPressable() == .plain + the Cinematic theme's press-scale (a no-op on
-            // flat themes). The style existed but had zero call sites, so the theme's
-            // press feedback never rendered anywhere.
+            // dsPressable() draws its own pressed state: press-scale on Cinematic, an
+            // opacity dim on flat themes (the dim .plain gave), and a dimmed disabled look.
             .dsPressable()
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(itemAccessibilityLabel(item))
@@ -170,7 +169,7 @@ struct ItemsGridView: View {
             .font(.caption)
             .foregroundStyle(Color.dsTextTertiary)
             .frame(maxWidth: .infinity)
-            .padding(.bottom, 16)
+            .padding(.bottom, .dsSpaceLG)
             .accessibilityHidden(true)
         }
       }
@@ -211,13 +210,7 @@ struct ItemsGridView: View {
       ToolbarItem(placement: .topBarTrailing) {
         Button { showSearchSheet = true } label: {
           Image(systemName: "magnifyingglass")
-              // Tap target. A toolbar caps its item's HEIGHT, so .frame alone cannot reach
-              // 44pt vertically (it widened 37->56 and stayed 36 tall). Growing the glyph
-              // raises the intrinsic height, and contentShape makes the padded area tappable
-              // rather than just the symbol's own bounds.
-              .font(.system(size: 20, weight: .semibold))
-              .frame(minWidth: 44, minHeight: 44)
-              .contentShape(Rectangle())
+              .dsToolbarIcon()
         }
         .accessibilityLabel("Search \(library.title)")
       }
@@ -231,9 +224,9 @@ struct ItemsGridView: View {
         ItemDetailView(itemID: item.id, fallbackTitle: item.title)
       } rowLabel: { item in
         AnyView(
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             ItemPosterCell(item: item).frame(width: 46)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
               Text(item.title).foregroundStyle(.white).lineLimit(1)
               if let y = item.year {
                 Text(String(y)).font(.caption).foregroundStyle(Color.dsTextSecondary)
@@ -250,13 +243,13 @@ struct ItemsGridView: View {
         SortChipBar(selection: $sortOption)
         browseFilterBar
         refreshNoticeBar
-        if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
+        if !items.isEmpty && appState.isServerUnavailable {
           Text("Showing cached content")
             .font(.caption2)
             .foregroundStyle(.white.opacity(0.5))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
-            .background(Color.black)
+            .padding(.vertical, .dsSpaceXS)
+            .background(Color.dsBackground)
         }
       }
     }
@@ -478,70 +471,11 @@ struct ItemPosterCell: View {
   private var posterScale: CGFloat { max(displayScale, 2) }
 
   var body: some View {
-    GeometryReader { geo in
-      let width = geo.size.width
-      let height = width * (3.0 / 2.0)
-
-      ZStack(alignment: .bottom) {
-        posterImage(width: width, height: height)
-        // TASK-857: the gradient's opaque region is a fixed fraction of card height, so at
-        // accessibility text sizes the footer grew up past it and drew unreadably over bare
-        // poster art (title text on top of the poster's own baked-in title). Backing the
-        // footer with a scrim sized to the footer's MEASURED height keeps text legible at
-        // every Dynamic Type size instead of only the ones that happen to fit under 45%.
-        gradientOverlay
-        cellFooter
-          .background(alignment: .bottom) {
-            LinearGradient(
-              colors: [.black.opacity(0), .black.opacity(0.85), .black.opacity(0.92)],
-              startPoint: .top,
-              endPoint: .bottom
-            )
-            .padding(.top, -14)   // fade in above the text rather than starting hard at it
-            .allowsHitTesting(false)
-          }
-
-        // Progress bar — pinned to bottom edge, INSIDE clip boundary. Whether and how wide is
-        // PlaybackProgress.cardIndicator's call (TASK-978), shared with the tvOS cards.
-        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
-          GeometryReader { barGeo in
-            ZStack(alignment: .leading) {
-              Rectangle()
-                .fill(Color.dsBorderStrong)
-                .frame(height: 3)
-              Rectangle()
-                .fill(Color.dsAccent)
-                .frame(width: barGeo.size.width * frac, height: 3)
-            }
-          }
-          .frame(height: 3)
-          .accessibilityHidden(true)
-        }
-      }
-      .frame(width: width, height: height)
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      // Watched badge — overlaid on top-right corner, outside clip so badge isn't clipped
-      .overlay(alignment: .topTrailing) {
-        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
-          Circle()
-            .fill(Color.dsSuccess)
-            .frame(width: 22, height: 22)
-            .overlay(
-              Image(systemName: "checkmark")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.black)
-            )
-            .padding(6)
-            .accessibilityHidden(true)
-        }
-      }
-      // Ambient elevation on the Cinematic theme; no-op on flat themes.
-      .dsCardDepth(cornerRadius: 10)
+    PosterCard(indicator: PlaybackProgress.cardIndicator(for: item.progress)) { width, height in
+      posterImage(width: width, height: height)
+    } footer: {
+      cellFooter
     }
-    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    // TASK-693/698: redact poster + title in the app switcher / screen recordings.
-    .privacySensitive()
     #if !os(tvOS)
     .downloadStatus(itemID: item.id)   // TASK-983 · FR-041/FR-133
     #endif
@@ -591,20 +525,8 @@ struct ItemPosterCell: View {
   }
 
   @ViewBuilder
-  private var gradientOverlay: some View {
-    LinearGradient(
-      stops: [
-        .init(color: .clear, location: 0.45),
-        .init(color: .black.opacity(0.85), location: 1.0)
-      ],
-      startPoint: .top,
-      endPoint: .bottom
-    )
-  }
-
-  @ViewBuilder
   private var cellFooter: some View {
-    VStack(alignment: .leading, spacing: 2) {
+    VStack(alignment: .leading, spacing: .dsSpaceXXS) {
       Text(item.title)
         .font(.footnote.weight(.semibold))
         .foregroundStyle(.white)
@@ -618,8 +540,8 @@ struct ItemPosterCell: View {
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(.horizontal, 8)
-    .padding(.bottom, 8)
+    .padding(.horizontal, .dsSpaceSM)
+    .padding(.bottom, .dsSpaceSM)
     // TASK-857: cap scaling at .accessibility1. The card frame is a fixed 2:3 aspect ratio
     // that does not grow with the text, so past this point the footer stops gaining
     // legibility and only eats poster area — at AX5 it climbed over the artwork entirely

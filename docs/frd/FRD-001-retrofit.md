@@ -130,6 +130,15 @@ The Continue Watching and Recently Watched rails, the poster-card indicator and 
 page's Resume-or-next-episode choice (FR-011) and the restart-from-zero on reopening all read that one
 rule (`PlaybackProgress.isFinished`; the rail SQL mirrors it). A 22-minute episode stopped 80 seconds from the
 end is therefore complete: its show offers the next episode, not a resume.
+**Thresholds, one set [DESIGN, 2026-10-18, TASK-1017]** — Three numbers, all in `PlaybackProgress`, and
+nothing else in the app carries a threshold of its own. *Started* is 5% and up (inclusive): only a started
+title is a resume point and belongs in Continue Watching. *Complete* is past 95%, or within the last 90
+seconds. *Indicator* is any position above zero that is not complete. They are different questions with
+different answers below 5%: a title at 3% is unwatched (not a resume point, not in Continue Watching, and
+on a show page it is the next episode to play, not skipped), yet its card and its episode row still draw
+a bar of 3%, because progress above zero is shown. Every surface reads them: the rails, poster cards, the
+episode rows on the show page (check when complete, ring otherwise, nothing at zero), the downloaded-item
+resume bar, and the show page's Resume-or-next-episode choice.
 **FR-017 [INFERRED]** — With zero in-progress titles the rail is absent rather than rendered empty, and
 its absence is not an error.
 **FR-018 [STATED]** — Mark as Watched sets a title to fully watched, removes it from Continue Watching,
@@ -143,7 +152,7 @@ complete, and a watched badge when complete. *Derivation:* design-spec B3 §3–
 **Card indicator [DESIGN, 2026-10-17, TASK-978]** — One function decides what a poster card draws
 (`PlaybackProgress.cardIndicator`), and the iOS grid and rails and both tvOS cards use it. At position zero
 the card draws nothing: no bar, no empty track, no percentage in its VoiceOver label. Complete (see FR-016)
-draws the watched badge and no bar. Anything between draws a bar whose width is exactly the fraction watched;
+draws the watched badge and no bar, on every card shape (the tvOS landscape card drew no badge until TASK-1018, and the iOS Continue Watching card none until TASK-1035). One view draws the badge on all of them (`CardWatchedBadge`). Anything between draws a bar whose width is exactly the fraction watched;
 there is no minimum width and no upper cutoff (iOS used to hide the bar below 2% and above 98%).
 **FR-021 [INFERRED]** — A TV show contributes at most one Continue Watching entry, identifying the
 specific partially-watched episode.
@@ -166,7 +175,9 @@ touches no progress causes no progress refetch.
 download with its state: completed, downloading (with progress and size), queued, or paused.
 An in-flight row reads "Queued" until the first bytes arrive, then percent plus bytes received of the
 total ("42% · 310 MB of 1.2 GB", bytes alone when the total is unknown); a paused row reads "Paused".
-Queued never renders like downloading. *(TASK-979)*
+Queued never renders like downloading. *(TASK-979)* A paused row shows the percent it had reached when
+it paused (its bar keeps that length), also after the app is relaunched; the percent and the byte count
+are cleared when the download is cancelled, completes, fails, or the user signs out. *(TASK-1021)*
 *Derivation:* design-spec B7 §2.
 **FR-031 [STATED]** — **"Downloaded" means playable offline.** A title reported as completed must play
 from local storage with the server unreachable. A transfer that did not fully complete must never be
@@ -297,9 +308,20 @@ before and its picker shows one track. This holds in the iOS and tvOS apps wheth
 file directly or the server converts it to HLS. The playback response lists the same tracks in its
 `audioTracks` array, named and defaulted exactly as the HLS master playlist names them (one source,
 the probe), whatever way the title is served. [TASK-1004] The web player never loses a track
-either: the realtime remux it uses for a single-audio file in a non-browser container carries one
-audio stream, so a web request for a title with two or more audio tracks is served as the HLS
-audio renditions instead, and the picker offers every track. [TASK-1003]
+either. A single served file gives a browser only one reachable track: the realtime remux it
+uses for a file in a non-browser container carries one audio stream, and a file the browser
+could play as is plays only its default track, with no way to switch outside Safari. So a web
+request for a title with two or more audio tracks is always served as the HLS audio renditions,
+the video copied rather than re-encoded when the browser could have played it directly.
+[TASK-1003, TASK-1028] The web player then shows an Audio menu listing every track by the same
+label, the default ticked, and switching keeps playing; a quality change keeps the chosen track.
+A single-audio title is served exactly as before (direct or remux) and shows no Audio menu, since
+there is nothing to choose. The apps are unaffected: they still direct play such a file and
+offer its tracks themselves. [TASK-1028]
+The web player's Quality menu (Auto, 1080p, 720p, 480p) must actually change what is served: it
+sends the same quality values the apps send and the server accepts, the whole `p`-suffixed
+set, so choosing 720p caps the picture at 720 lines instead of silently staying on Auto. The menu
+and the server share one list of values, and a test fails if they drift apart. [TASK-1031]
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than
@@ -366,7 +388,7 @@ new episodes appears once, as that show, not once per episode. On a restricted p
 titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, the device's own list of
 its newest synced titles stands in, under the same rules. The rail has no watched filter: a title the
 profile has started or finished is listed exactly while it is among the newest, online and offline alike
-(TASK-986; it also appears in Continue Watching or Recently Watched). *Derivation:* 0c9b4cd (Ryan: "the server decides
+(TASK-986; it also appears in Continue Watching or Recently Watched). The demo library builds its Just Added rail with the same function as the offline list, so it has no watched filter either (TASK-1035). The device's own list is shown only until the server answers, or when the server cannot be reached: a server answer that is empty (a profile whose ceiling hides every new title, a library with nothing added) empties the rail, and the device's list is not put back (TASK-1020). *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
 player sends no `limit` on Just Added or Suggested and takes the server's default for each, so its Just

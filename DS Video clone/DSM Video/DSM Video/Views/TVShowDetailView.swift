@@ -48,7 +48,7 @@ private struct TVShowDetailSplitView: View {
 
   var body: some View {
     ZStack(alignment: .topLeading) {
-      Color.black.ignoresSafeArea()
+      Color.dsBackground.ignoresSafeArea()
 
       GeometryReader { geo in
         HStack(spacing: 0) {
@@ -92,7 +92,7 @@ private struct TVShowDetailSplitView: View {
         .accessibilityHidden(true)
       } else {
         LinearGradient(
-          colors: [Color(white: 0.14), Color.black],
+          colors: [Color.dsSurfaceRaised, Color.dsBackground],
           startPoint: .topTrailing,
           endPoint: .bottomLeading
         )
@@ -109,7 +109,7 @@ private struct TVShowDetailSplitView: View {
       HStack(spacing: 0) {
         Spacer()
         LinearGradient(
-          colors: [.clear, .black],
+          colors: [.clear, Color.dsBackground],
           startPoint: .leading,
           endPoint: .trailing
         )
@@ -121,8 +121,8 @@ private struct TVShowDetailSplitView: View {
       LinearGradient(
         stops: [
           .init(color: .clear, location: 0.0),
-          .init(color: .black.opacity(0.5), location: 0.6),
-          .init(color: .black, location: 1.0)
+          .init(color: Color.dsBackground.opacity(0.5), location: 0.6),
+          .init(color: Color.dsBackground, location: 1.0)
         ],
         startPoint: .top,
         endPoint: .bottom
@@ -130,17 +130,17 @@ private struct TVShowDetailSplitView: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
       // Show title & meta overlaid bottom-left
-      VStack(alignment: .leading, spacing: 8) {
+      VStack(alignment: .leading, spacing: .dsSpaceSM) {
         Text(show.title)
-          .font(.system(size: 48, weight: .bold))
+          .font(.dsTVLargeTitle)
           .foregroundStyle(.white)
           .lineLimit(2)
           .shadow(color: .black.opacity(0.6), radius: 4, x: 0, y: 2)
 
-        HStack(spacing: 12) {
+        HStack(spacing: .dsSpaceMD) {
           if let year = show.year {
             Text(String(year))
-              .font(.system(size: 20))
+              .font(.dsTVBody)
               .foregroundStyle(Color.dsTextSecondary)
           }
           if show.year != nil {
@@ -151,14 +151,14 @@ private struct TVShowDetailSplitView: View {
           }
           if let sc = show.seasonCount {
             Text("\(sc) season\(sc == 1 ? "" : "s")")
-              .font(.system(size: 20))
+              .font(.dsTVBody)
               .foregroundStyle(Color.dsTextSecondary)
           }
         }
       }
       .accessibilityElement(children: .combine)
-      .padding(.leading, 60)
-      .padding(.bottom, 60)
+      .padding(.leading, .dsSpaceTitleSafe)
+      .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
@@ -175,14 +175,14 @@ private struct TVShowDetailSplitView: View {
         if isLoading && seasons.isEmpty {
           HStack {
             Spacer()
-            ProgressView().tint(.white).scaleEffect(1.5).padding(.top, 80)
+            ProgressView().tint(.white).scaleEffect(1.5).padding(.top, .dsSpaceColossal)
             Spacer()
           }
         } else if let error {
           ErrorRetryView(title: "Couldn't load seasons", message: error) {
             Task { await load() }
           }
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
         } else if seasons.isEmpty {
           // The seasons endpoint returns 200 {seasons: []} (not an error) when a show
           // folder can't be resolved — e.g. a stale Continue Watching / Just Added entry
@@ -190,7 +190,7 @@ private struct TVShowDetailSplitView: View {
           // a blank page (TASK-732).
           // TASK-792: the empty branch must expose a focusable action, otherwise the
           // tvOS focus engine lands nowhere and the user can only escape via Menu.
-          VStack(spacing: 24) {
+          VStack(spacing: .dsSpaceXXL) {
             DSContentUnavailable(
             title: "No Episodes Found",
             systemImage: "tv.slash",
@@ -198,12 +198,12 @@ private struct TVShowDetailSplitView: View {
           )
             .foregroundStyle(.white)
 
-            HStack(spacing: 20) {
+            HStack(spacing: .dsSpaceXL) {
               Button {
                 Task { await load() }
               } label: {
                 Label("Retry", systemImage: "arrow.clockwise")
-                  .font(.system(size: 20, weight: .medium))
+                  .font(.dsTVLabel)
               }
               .buttonStyle(.bordered)
 
@@ -211,13 +211,13 @@ private struct TVShowDetailSplitView: View {
                 showMetadataFixer = true
               } label: {
                 Label("Fix Metadata", systemImage: "magnifyingglass")
-                  .font(.system(size: 20, weight: .medium))
+                  .font(.dsTVLabel)
               }
               .buttonStyle(.bordered)
               .accessibilityHint("Search and correct this show's metadata")
             }
           }
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
         } else {
           // Keyed on position: two folders merged into one show can both report a
           // "Season 1", and keying on seasonNumber would render only one of them.
@@ -236,18 +236,18 @@ private struct TVShowDetailSplitView: View {
             showMetadataFixer = true
           } label: {
             Label("Fix Metadata", systemImage: "magnifyingglass")
-              .font(.system(size: 20, weight: .medium))
+              .font(.dsTVLabel)
           }
           .buttonStyle(.bordered)
-          .padding(.top, 32)
+          .padding(.top, .dsSpaceXXXL)
           .accessibilityHint("Search and correct this show's metadata")
         }
 
         Spacer(minLength: 80)
       }
     }
-    .padding(.leading, 48)
-    .padding(.trailing, 60)
+    .padding(.leading, .dsSpaceHuge)
+    .padding(.trailing, .dsSpaceTitleSafe)
     .sheet(isPresented: $showMetadataFixer, onDismiss: {
       let shouldReload = metadataFixApplied
       metadataFixApplied = false
@@ -287,17 +287,19 @@ private struct TVShowDetailSplitView: View {
   // Find the resume point across seasons. Fetches seasons sequentially (up to a cap)
   // and stops early once an in-progress episode is found — avoids 20+ parallel requests.
   //
-  // Algorithm:
+  // Algorithm (PlaybackProgress.showResumePick; thresholds in PlaybackProgress, FRD-001 FR-016):
   //   Walk all episodes in season order.
-  //   - Track the latest episode with 2%–95% progress as inProgressEp.
-  //   - Fully-watched (≥95%) episodes advance the firstUnwatched cursor past them.
-  //   - An episode with no progress is firstUnwatched only if no fully-watched or
-  //     in-progress episode has been seen yet in this season.
+  //   - Track the latest episode that is in progress (started: 5% or more, and not
+  //     finished) as the resume pick.
+  //   - A finished episode (past 95%, or within the last 90 seconds) moves the
+  //     first-unwatched cursor past it.
+  //   - An episode with no progress, or under 5% (never genuinely started), is
+  //     unwatched: it becomes first-unwatched if the cursor is empty.
   //   After scanning:
-  //   - If inProgressEp found: resume point IS that episode (resumes from its saved
-  //     position). Advancing to the next episode only happens for fully-watched
-  //     episodes, via the firstUnwatched cursor.
-  //   - Else: resume point is firstUnwatchedEp (first episode with no progress at all).
+  //   - If an in-progress episode was found: the resume point IS that episode (resumes
+  //     from its saved position). Advancing to the next episode only happens for
+  //     finished episodes, via the first-unwatched cursor.
+  //   - Else: the resume point is the first unwatched episode after the last finished one.
   //
   // TASK-654: capped to scanLimit seasons; sequential fetch exits early on first
   //           in-progress find — worst case 3–4 calls, not 20 parallel.
@@ -422,15 +424,15 @@ private struct TVSeasonSection: View {
                                          allSeasons: allSeasons.map(\.seasonNumber),
                                          highlightSeason: highlightSeason)
       } label: {
-        HStack(spacing: 12) {
+        HStack(spacing: .dsSpaceMD) {
           Text("Season \(season.seasonNumber)")
-            .font(.system(size: 22, weight: .semibold))
+            .font(.dsTVHeadline)
             .foregroundStyle(.white)
 
           Spacer()
 
           Text("\(season.episodeCount) ep\(season.episodeCount == 1 ? "" : "s")")
-            .font(.system(size: 17))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
 
           Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -438,13 +440,13 @@ private struct TVSeasonSection: View {
             .foregroundStyle(Color.dsTextSecondary)
             .accessibilityHidden(true)
         }
-        .padding(.vertical, 20)
+        .padding(.vertical, .dsSpaceXL)
         // TASK-710: guarantee a tall, full-width hit/focus region so the d-pad reliably
         // lands on the season header rather than skipping past a thin frame.
         .frame(minHeight: 60)
         .background(
-          RoundedRectangle(cornerRadius: 8)
-            .fill(isHeaderFocused ? Color(white: 0.22) : Color.clear)
+          RoundedRectangle(cornerRadius: .dsRadiusSm)
+            .fill(isHeaderFocused ? Color.dsFocusFill : Color.clear)
         )
         .contentShape(Rectangle())
       }
@@ -464,22 +466,22 @@ private struct TVSeasonSection: View {
         if isLoading && episodes.isEmpty {
           HStack {
             Spacer()
-            ProgressView().tint(.white).padding(.vertical, 24)
+            ProgressView().tint(.white).padding(.vertical, .dsSpaceXXL)
             Spacer()
           }
         } else {
           if let error, episodes.isEmpty {
             HStack {
               Text(error)
-                .font(.system(size: 17))
+                .font(.dsTVCaption)
                 .foregroundStyle(Color.dsTextMuted)
               Spacer()
               Button("Retry") { Task { await load() } }
-                .font(.system(size: 17))
+                .font(.dsTVCaption)
                 .foregroundStyle(Color.dsAccent)
             }
             .padding(.horizontal, 0)
-            .padding(.vertical, 20)
+            .padding(.vertical, .dsSpaceXL)
           }
           let seasonIdx = allSeasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
           // Keyed on position, not ep.id. Two rows sharing an id silently HIDE an
@@ -597,8 +599,8 @@ private struct TVEpisodeNavRow<Destination: View>: View {
     } label: {
       TVEpisodeRow(ep: ep, isHighlighted: isHighlighted)
         .background(
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(isFocused ? Color(white: 0.22) : Color.clear)
+          RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous)
+            .fill(isFocused ? Color.dsFocusFill : Color.clear)
         )
     }
     .buttonStyle(.plain)
@@ -615,18 +617,18 @@ private struct TVEpisodeRow: View {
   var isHighlighted: Bool = false
 
   var body: some View {
-    HStack(spacing: 20) {
+    HStack(spacing: .dsSpaceXL) {
       // Episode number badge
       Text(ep.episodeNumber.map { "E\($0)" } ?? "–")
-        .font(.system(size: 17, weight: .semibold).monospacedDigit())
+        .font(.dsTVCaptionEmphasis.monospacedDigit())
         .foregroundStyle(Color.dsTextMuted)
         .frame(width: 40, alignment: .center)
         .accessibilityHidden(true)
 
       // Thumbnail (16:9 landscape)
       ZStack {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-          .fill(Color(white: 0.1))
+        RoundedRectangle(cornerRadius: .dsRadiusSm, style: .continuous)
+          .fill(Color.dsSurfaceHigh)
           .frame(width: 120, height: 68)
 
         if appState.isDemoMode, let assetName = DemoData.posterAssetNames[ep.id] {
@@ -634,7 +636,7 @@ private struct TVEpisodeRow: View {
             .resizable()
             .scaledToFill()
             .frame(width: 120, height: 68, alignment: .top)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusSm, style: .continuous))
         } else if let posterID = ep.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: posterID, width: 240),
@@ -643,7 +645,7 @@ private struct TVEpisodeRow: View {
           )
           .scaledToFill()
           .frame(width: 120, height: 68, alignment: .top)
-          .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusSm, style: .continuous))
         } else {
           Image(systemName: "play.fill")
             .font(.system(size: 20))
@@ -653,9 +655,9 @@ private struct TVEpisodeRow: View {
 
       // Title + duration
       VStack(alignment: .leading, spacing: 6) {
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           Text(ep.title)
-            .font(.system(size: 19, weight: .medium))
+            .font(.dsTVLabel)
             .foregroundStyle(.white)
             .lineLimit(2)
           if isHighlighted {
@@ -668,7 +670,7 @@ private struct TVEpisodeRow: View {
 
         if let dur = ep.durationSeconds, dur > 0 {
           Text(formatDuration(dur))
-            .font(.system(size: 15))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
@@ -676,34 +678,35 @@ private struct TVEpisodeRow: View {
       Spacer()
 
       // Progress indicator (tvOS)
-      if let prog = ep.progress, prog.durationSeconds > 0 {
-        let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
-        if frac >= PlaybackProgress.watchedThreshold {
-          Circle()
-            .fill(Color.dsSuccess)
-            .frame(width: 32, height: 32)
-            .overlay(
-              Image(systemName: "checkmark")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(.black)
-            )
-            .accessibilityLabel("Watched")
-        } else {
-          ZStack {
-            Circle()
-              .stroke(Color(white: 0.25), lineWidth: 3)
-            Circle()
-              .trim(from: 0, to: frac)
-              .stroke(Color.dsAccent, lineWidth: 3)
-              .rotationEffect(.degrees(-90))
-          }
+      // One rule for every progress indicator (FR-020): PlaybackProgress.cardIndicator.
+      switch PlaybackProgress.cardIndicator(for: ep.progress) {
+      case .none:
+        EmptyView()
+      case .watchedBadge:
+        Circle()
+          .fill(Color.dsSuccess)
           .frame(width: 32, height: 32)
-          .accessibilityLabel("\(ep.episodeNumber.map { "Episode \($0), " } ?? "")\(Int(frac * 100)) percent watched")
+          .overlay(
+            Image(systemName: "checkmark")
+              .font(.system(size: 14, weight: .bold))
+              .foregroundStyle(.black)
+          )
+          .accessibilityLabel("Watched")
+      case .bar(let frac):
+        ZStack {
+          Circle()
+            .stroke(Color.dsBorderStrong, lineWidth: 3)
+          Circle()
+            .trim(from: 0, to: frac)
+            .stroke(Color.dsAccent, lineWidth: 3)
+            .rotationEffect(.degrees(-90))
         }
+        .frame(width: 32, height: 32)
+        .accessibilityLabel("\(ep.episodeNumber.map { "Episode \($0), " } ?? "")\(Int(frac * 100)) percent watched")
       }
     }
-    .padding(.vertical, 16)
-    .padding(.horizontal, 20)
+    .padding(.vertical, .dsSpaceLG)
+    .padding(.horizontal, .dsSpaceXL)
     .accessibilityElement(children: .combine)
   }
 }
@@ -905,26 +908,26 @@ private struct StillWatchingOverlay: View {
     ZStack {
       Color.black.opacity(0.75).ignoresSafeArea()
 
-      VStack(spacing: 32) {
-        VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceXXXL) {
+        VStack(spacing: .dsSpaceMD) {
           Text("Are you still watching?")
-            .font(.system(size: 36, weight: .bold))
+            .font(.dsTVTitle)
             .foregroundStyle(.white)
           Text("Stopping in \(countdown)s")
-            .font(.system(size: 22))
+            .font(.dsTVBodyLarge)
             .foregroundStyle(Color.dsTextSecondary)
             .monospacedDigit()
         }
 
-        HStack(spacing: 24) {
+        HStack(spacing: .dsSpaceXXL) {
           stillWatchingButton(label: "Yes, keep playing", sfSymbol: "play.fill",
                               button: .yes, isPrimary: true, action: onYes)
           stillWatchingButton(label: "Stop", sfSymbol: "stop.fill",
                               button: .stop, isPrimary: false, action: onStop)
         }
       }
-      .padding(60)
-      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+      .padding(.dsSpaceTitleSafe)
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))  // literal: 24pt tvOS prompt panel, larger than radiusPill
     }
     .onAppear { focused = .yes }
   }
@@ -936,7 +939,7 @@ private struct StillWatchingOverlay: View {
     let isFocused = focused == button
     Button(action: action) {
       Label(label, systemImage: sfSymbol)
-        .font(.system(size: 22, weight: .semibold))
+        .font(.dsTVHeadline)
         .foregroundStyle(.white)
         .frame(width: 280, height: 60)
         .background(
@@ -944,11 +947,11 @@ private struct StillWatchingOverlay: View {
             if isPrimary {
               Color.dsAccent.brightness(isFocused ? 0.12 : 0)
             } else {
-              isFocused ? Color(white: 0.35) : Color(white: 0.22)
+              isFocused ? Color.dsFocusFillStrong : Color.dsFocusFill
             }
           }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
@@ -1016,19 +1019,19 @@ private struct TVShowDetailScrollView: View {
 
         VStack(alignment: .leading, spacing: 0) {
           if isLoading && seasons.isEmpty {
-            ProgressView("Loading").padding(.top, 32).frame(maxWidth: .infinity)
+            ProgressView("Loading").padding(.top, .dsSpaceXXXL).frame(maxWidth: .infinity)
               .accessibilityLabel("Loading seasons, please wait")
           } else if let error {
             ErrorRetryView(title: "Couldn't load seasons", message: error) {
               isLoading = false; Task { await load() }
             }
-            .padding(.top, 32)
+            .padding(.top, .dsSpaceXXXL)
           } else if seasons.isEmpty {
             ErrorRetryView(title: "No seasons found",
                            message: "Couldn't load episodes for this show.") {
               isLoading = false; Task { await load() }
             }
-            .padding(.top, 32)
+            .padding(.top, .dsSpaceXXXL)
             .frame(maxWidth: .infinity)
           } else {
             // Keyed on position — see the tvOS branch. Two merged folders can both
@@ -1047,7 +1050,7 @@ private struct TVShowDetailScrollView: View {
         .frame(maxWidth: .infinity, alignment: .center)
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle(show.title)
     .task { await load() }
     .navigationDestination(item: $resumeNav) { target in
@@ -1064,7 +1067,7 @@ private struct TVShowDetailScrollView: View {
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
     .toolbarBackground(.visible, for: .navigationBar)
-    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+    .toolbarBackground(Color.dsBackground.opacity(0.85), for: .navigationBar)
     .toolbarColorScheme(.dark, for: .navigationBar)
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
@@ -1074,13 +1077,7 @@ private struct TVShowDetailScrollView: View {
           }
         } label: {
           Image(systemName: "ellipsis.circle")
-              // Tap target. A toolbar caps its item's HEIGHT, so .frame alone cannot reach
-              // 44pt vertically (it widened 37->56 and stayed 36 tall). Growing the glyph
-              // raises the intrinsic height, and contentShape makes the padded area tappable
-              // rather than just the symbol's own bounds.
-              .font(.system(size: 20, weight: .semibold))
-              .frame(minWidth: 44, minHeight: 44)
-              .contentShape(Rectangle())
+              .dsToolbarIcon()
         }
         .accessibilityLabel("More options")
       }
@@ -1136,20 +1133,20 @@ private struct TVShowDetailScrollView: View {
       LinearGradient(
         stops: [
           .init(color: .clear, location: 0.0),
-          .init(color: .black.opacity(0.8), location: 0.55),
-          .init(color: .black, location: 1.0)
+          .init(color: Color.dsBackground.opacity(0.8), location: 0.55),
+          .init(color: Color.dsBackground, location: 1.0)
         ],
         startPoint: .top,
         endPoint: .bottom
       )
       .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight)
 
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: .dsSpaceXS) {
         Text(show.title)
           .font(.title2.weight(.bold))
           .foregroundStyle(.white)
           .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 1)
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           if let year = show.year {
             Text(String(year)).font(.subheadline).foregroundStyle(.white.opacity(0.75))
           }
@@ -1161,7 +1158,7 @@ private struct TVShowDetailScrollView: View {
         }
       }
       .accessibilityElement(children: .combine)
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
       .padding(.bottom, 14)
     }
   }
@@ -1172,20 +1169,16 @@ private struct TVShowDetailScrollView: View {
       Button {
         resumeNav = resume
       } label: {
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           Image(systemName: resume.isResume ? "play.fill" : "play.circle.fill")
             .font(.headline)
           Text(resumeLabel)
             .font(.headline)
         }
-        .foregroundStyle(Color.dsAccentOn)
-        .frame(maxWidth: .infinity, minHeight: 50)
-        .background(Color.dsAccent)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
       }
-      .buttonStyle(.plain)
-      .padding(.horizontal, 16)
-      .padding(.top, 12)
+      .dsPrimaryButton(fillsWidth: true)
+      .padding(.horizontal, .dsSpaceLG)
+      .padding(.top, .dsSpaceMD)
       .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
       .frame(maxWidth: .infinity, alignment: .center)
       .accessibilityLabel(resumeLabel)
@@ -1350,8 +1343,8 @@ private struct iOSSeasonSection: View {
         }
         .frame(maxWidth: .infinity, minHeight: 44)
         .contentShape(Rectangle())
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, .dsSpaceLG)
+        .padding(.vertical, .dsSpaceMD)
       }
       .buttonStyle(.plain)
       .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
@@ -1360,7 +1353,7 @@ private struct iOSSeasonSection: View {
 
       if isExpanded {
         if isLoading && episodes.isEmpty {
-          ProgressView("Loading").padding(.vertical, 16).frame(maxWidth: .infinity)
+          ProgressView("Loading").padding(.vertical, .dsSpaceLG).frame(maxWidth: .infinity)
             .accessibilityLabel("Loading episodes, please wait")
         } else {
           if let error, episodes.isEmpty {
@@ -1376,8 +1369,8 @@ private struct iOSSeasonSection: View {
               .font(.footnote)
               .foregroundStyle(Color.dsAccent)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, .dsSpaceLG)
+            .padding(.vertical, .dsSpaceMD)
           }
           // Keyed on position, not ep.id — see the tvOS episode list. A duplicate id
           // hides an episode without any visible error.
@@ -1401,7 +1394,7 @@ private struct iOSSeasonSection: View {
             }
             .buttonStyle(.plain)
 
-            Divider().background(Color.white.opacity(0.07)).padding(.leading, 16)
+            Divider().background(Color.white.opacity(0.07)).padding(.leading, .dsSpaceLG)
           }
         }
       }
@@ -1448,7 +1441,7 @@ private struct iOSEpisodeRow: View {
   var isHighlighted: Bool = false
 
   var body: some View {
-    HStack(spacing: 12) {
+    HStack(spacing: .dsSpaceMD) {
       Text(ep.episodeNumber.map { "E\($0)" } ?? "–")
         .font(.caption.weight(.semibold).monospacedDigit())
         .foregroundStyle(isHighlighted ? Color.dsAccent : .white.opacity(0.75))
@@ -1480,19 +1473,20 @@ private struct iOSEpisodeRow: View {
       // TASK-983 · FR-041: a downloaded episode says so in its row.
       DownloadedRowGlyph(itemID: ep.id)
 
-      if let prog = ep.progress, prog.durationSeconds > 0 {
-        let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
-        if frac >= PlaybackProgress.watchedThreshold {
-          Image(systemName: "checkmark.circle.fill")
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(Color.dsSuccess)
-            .frame(width: 20, height: 20)
-            .accessibilityLabel("Watched")
-        } else {
-          iOSCircularProgress(fraction: frac)
-            .frame(width: 20, height: 20)
-            .accessibilityLabel("\(Int(frac * 100)) percent watched")
-        }
+      // One rule for every progress indicator (FR-020): PlaybackProgress.cardIndicator.
+      switch PlaybackProgress.cardIndicator(for: ep.progress) {
+      case .none:
+        EmptyView()
+      case .watchedBadge:
+        Image(systemName: "checkmark.circle.fill")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(Color.dsSuccess)
+          .frame(width: 20, height: 20)
+          .accessibilityLabel("Watched")
+      case .bar(let frac):
+        iOSCircularProgress(fraction: frac)
+          .frame(width: 20, height: 20)
+          .accessibilityLabel("\(Int(frac * 100)) percent watched")
       }
 
       Image(systemName: "chevron.right")
@@ -1502,7 +1496,7 @@ private struct iOSEpisodeRow: View {
     }
     .frame(minHeight: 44)
     .accessibilityElement(children: .combine)
-    .padding(.horizontal, 16)
+    .padding(.horizontal, .dsSpaceLG)
     .padding(.vertical, 10)
     .downloadStatus(itemID: ep.id, showsBadge: false)
   }
@@ -1683,7 +1677,7 @@ private struct TVShowMetadataFixerSheet: View {
             .onSubmit { Task { await search() } }
             .foregroundStyle(.white)
         }
-        .listRowBackground(Color(white: 0.12))
+        .listRowBackground(Color.dsSurfaceHigh)
 
         if isSearching {
           HStack {
@@ -1691,7 +1685,7 @@ private struct TVShowMetadataFixerSheet: View {
             ProgressView("Searching").tint(.white)
             Spacer()
           }
-          .listRowBackground(Color(white: 0.08))
+          .listRowBackground(Color.dsSurface)
         } else {
           // Pre-compute which title+year keys appear more than once so the
           // ForEach body avoids an O(n²) filter on every render pass.
@@ -1708,14 +1702,14 @@ private struct TVShowMetadataFixerSheet: View {
             Button {
               Task { await apply(candidate) }
             } label: {
-              HStack(spacing: 12) {
+              HStack(spacing: .dsSpaceMD) {
                 AuthenticatedImage(url: candidate.posterURL, token: nil)
                   .scaledToFill()
                   .frame(width: 50, height: 75, alignment: .top)
-                  .clipShape(RoundedRectangle(cornerRadius: 6))
+                  .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb))
                   .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: .dsSpaceXS) {
                   Text(candidate.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -1728,7 +1722,7 @@ private struct TVShowMetadataFixerSheet: View {
                     if isDuplicate {
                       Text("ID \(candidate.tmdbId)")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.dsWarning)
                     }
                   }
                   if let overview = candidate.overview, !overview.isEmpty {
@@ -1746,7 +1740,7 @@ private struct TVShowMetadataFixerSheet: View {
             }())
             .buttonStyle(.plain)
             .disabled(isApplying)
-            .listRowBackground(Color(white: 0.1))
+            .listRowBackground(Color.dsSurfaceHigh)
           }
         }
 
@@ -1754,7 +1748,7 @@ private struct TVShowMetadataFixerSheet: View {
           Text(error)
             .foregroundStyle(Color.dsError)
             .font(.caption)
-            .listRowBackground(Color(white: 0.08))
+            .listRowBackground(Color.dsSurface)
         }
 
         #if os(tvOS)
@@ -1767,7 +1761,7 @@ private struct TVShowMetadataFixerSheet: View {
             .disabled(isSearching)
           Button("Cancel") { dismiss() }
         }
-        .listRowBackground(Color(white: 0.1))
+        .listRowBackground(Color.dsSurfaceHigh)
         #endif
       }
       .navigationTitle("Fix Show Metadata")
@@ -1787,7 +1781,7 @@ private struct TVShowMetadataFixerSheet: View {
       #if !os(tvOS)
       .scrollContentBackground(.hidden)
       #endif
-      .background(Color.black)
+      .background(Color.dsBackground)
       .onChange(of: error) { _, msg in
         if let msg { AccessibilityNotification.Announcement(msg).post() }
       }

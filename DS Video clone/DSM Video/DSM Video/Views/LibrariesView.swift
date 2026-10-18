@@ -50,13 +50,13 @@ struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
             } label: {
               rowLabel(item)
             }
-            .listRowBackground(Color.black)
+            .listRowBackground(Color.dsBackground)
           }
           .listStyle(.plain)
           .scrollContentBackground(.hidden)
         }
       }
-      .background(Color.black.ignoresSafeArea())
+      .background(Color.dsBackground.ignoresSafeArea())
       .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: title)
       .searchFocused($fieldFocused)
       // Deferred one runloop turn: the field is installed by the navigation bar during
@@ -98,7 +98,7 @@ struct LibrariesView: View {
       } else if let error = content.blockingError {
         // FIX-18: retry button for transient network failures on the libraries screen.
         // Blocking only when there is no list to keep (FR-098, TASK-975).
-        VStack(spacing: 12) {
+        VStack(spacing: .dsSpaceMD) {
           DSContentUnavailable(
             title: "Couldn't load libraries",
             systemImage: "exclamationmark.triangle",
@@ -122,7 +122,7 @@ struct LibrariesView: View {
           VStack(alignment: .leading, spacing: 28) {
             if let notice = content.noticeMessage {
               RefreshFailedNotice(message: notice) { Task { await load(force: true) } }
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
             }
             ForEach(libraries) { lib in
               VStack(alignment: .leading, spacing: 10) {
@@ -147,13 +147,13 @@ struct LibrariesView: View {
               }
             }
           }
-          .padding(.horizontal, 16)
-          .padding(.vertical, 20)
+          .padding(.horizontal, .dsSpaceLG)
+          .padding(.vertical, .dsSpaceXL)
         }
       }
     }
     .navigationTitle("Libraries")
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .task { await load() }
     .refreshable { await load(force: true) }
     .onChange(of: appState.homeLibraries) { _, libs in
@@ -287,18 +287,18 @@ private struct LibraryCard: View {
           .accessibilityHidden(true)
       }
       .padding(.horizontal, 14)
-      .padding(.vertical, 12)
+      .padding(.vertical, .dsSpaceMD)
     }
     .frame(height: height)
-    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
     .overlay(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
+      RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
         .strokeBorder(Color.dsBorderStrong, lineWidth: 1)
     )
     // Make the ENTIRE card a single tap target. Without this, only the opaque
     // rendered pixels (text/icons) register taps, so transparent gaps between
     // collage tiles aren't tappable — which made parts of the card dead.
-    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .contentShape(RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
     // One element with a spoken state. The failed case shows a refresh glyph a sighted
     // user can read; without this, VoiceOver announced only the library name and count
     // (and on failure there IS no count), so the state was invisible to it (TASK-815).
@@ -339,14 +339,14 @@ private struct LibraryCard: View {
     } else if tiles.count == 1 {
       tileView(tiles[0])
     } else if tiles.count <= 3 {
-      HStack(spacing: 2) {
+      HStack(spacing: .dsSpaceXXS) {
         ForEach(Array(tiles.prefix(2).enumerated()), id: \.offset) { _, t in tileView(t) }
       }
     } else {
       let four = Array(tiles.prefix(4))
-      VStack(spacing: 2) {
-        HStack(spacing: 2) { tileView(four[0]); tileView(four[1]) }
-        HStack(spacing: 2) { tileView(four[2]); tileView(four[3]) }
+      VStack(spacing: .dsSpaceXXS) {
+        HStack(spacing: .dsSpaceXXS) { tileView(four[0]); tileView(four[1]) }
+        HStack(spacing: .dsSpaceXXS) { tileView(four[2]); tileView(four[3]) }
       }
     }
   }
@@ -372,7 +372,7 @@ private struct LibraryCard: View {
 
   private var placeholderFill: some View {
     Rectangle()
-      .fill(Color(white: 0.12))
+      .fill(Color.dsSurfaceHigh)
       .overlay(
         Image(systemName: loadFailed ? "arrow.clockwise" : icon)
           .font(.system(size: 56, weight: .regular))
@@ -464,7 +464,7 @@ struct LibraryHomeView: View {
           .accessibilityLabel("Loading content, please wait")
           .accessibilityAddTraits(.updatesFrequently)
       } else if let error = appState.homeError {
-        VStack(spacing: 16) {
+        VStack(spacing: .dsSpaceLG) {
           DSContentUnavailable(
             title: "Couldn't load content",
             systemImage: "exclamationmark.triangle",
@@ -531,7 +531,7 @@ struct LibraryHomeView: View {
             CollectionsRail()
           }
           .padding(.top, ThemeHolder.shared.current.usesCinematicChrome ? 0 : 16)
-          .padding(.bottom, 16)
+          .padding(.bottom, .dsSpaceLG)
         }
         .background(alignment: .top) {
           // Atmospheric light streaks sit behind all content (no-op on flat themes).
@@ -600,7 +600,7 @@ struct LibraryHomeView: View {
     // The duplicate handler that lived here raced the same home-* flags on the same
     // .active event; it has been removed. networkDidReconnect (above) still drives a
     // homeLoad when the coordinator switches address.
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     // Global search entry point.
     //
     // iPhone dropped the Search TAB to stay at five and avoid the system "More" collapse,
@@ -623,14 +623,7 @@ struct LibraryHomeView: View {
         ToolbarItem(placement: .topBarTrailing) {
           NavigationLink { SearchView(isEmbedded: true) } label: {
             Image(systemName: "magnifyingglass")
-              // An unframed toolbar image measured 37x36 — under Apple's 44pt minimum, so the
-              // tap was missable in exactly the corner where a thumb is least accurate. The
-              // Cinematic overlay below already framed itself to 44; this one did not.
-              // A toolbar caps item HEIGHT, so .frame alone cannot reach 44pt vertically —
-              // growing the glyph raises the intrinsic height too.
-              .font(.system(size: 20, weight: .semibold))
-              .frame(minWidth: 44, minHeight: 44)
-              .contentShape(Rectangle())
+              .dsToolbarIcon()
           }
           .accessibilityLabel("Search")
           .accessibilityHint("Search all movies and TV shows")
@@ -648,15 +641,15 @@ struct LibraryHomeView: View {
         }
         .accessibilityLabel("Search")
         .accessibilityHint("Search all movies and TV shows")
-        .padding(.trailing, 16)
-        .padding(.top, 8)
+        .padding(.trailing, .dsSpaceLG)
+        .padding(.top, .dsSpaceSM)
       }
     }
     .overlay(alignment: .topLeading) {
       if ThemeHolder.shared.current.usesCinematicChrome {
         ActiveProfileBadge(size: 32)
-          .padding(.leading, 16)
-          .padding(.top, 8)
+          .padding(.leading, .dsSpaceLG)
+          .padding(.top, .dsSpaceSM)
       }
     }
 
@@ -673,6 +666,10 @@ struct LibraryHomeView: View {
 private struct ContinueWatchingCard: View {
   @Environment(AppState.self) private var appState
   let item: ItemSummary
+
+  private var indicator: PlaybackProgress.CardIndicator {
+    PlaybackProgress.cardIndicator(for: item.progress)
+  }
 
   var body: some View {
     ZStack(alignment: .bottomLeading) {
@@ -700,7 +697,7 @@ private struct ContinueWatchingCard: View {
                  alignment: item.backdropImageId != nil ? .center : .top)
         } else {
           Rectangle()
-            .fill(Color(white: 0.1))
+            .fill(Color.dsSurfaceHigh)
             .overlay(
               Image(systemName: "play.rectangle.fill")
                 .font(.system(size: 28))
@@ -734,31 +731,31 @@ private struct ContinueWatchingCard: View {
         .foregroundStyle(.white)
         .lineLimit(2)
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, .dsSpaceSM)
+        .padding(.vertical, .dsSpaceXS)
         .frame(width: 200, alignment: .leading)
         .background(Color.black.opacity(0.75))
-        .padding(.bottom, 2)
+        .padding(.bottom, .dsSpaceXXS)
 
       // Progress bar
-      if let progress = item.progress, progress.durationSeconds > 0 {
-        let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-        if frac < 1.0 {
-          GeometryReader { geo in
-            ZStack(alignment: .leading) {
-              Rectangle().fill(Color.dsBorderStrong).frame(height: 3)
-              Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 3)
-            }
+      // The shared card rule (PlaybackProgress.cardIndicator, FR-020), not a fraction of its own.
+      if case .bar(let frac) = indicator {
+        GeometryReader { geo in
+          ZStack(alignment: .leading) {
+            Rectangle().fill(Color.dsBorderStrong).frame(height: 3)
+            Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 3)
           }
-          .frame(height: 3)
-          .accessibilityHidden(true)
         }
+        .frame(height: 3)
+        .accessibilityHidden(true)
       }
     }
     .frame(width: 200, height: 120)
-    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
+    // The same watched badge as the poster cards and the tvOS landscape card.
+    .cardWatchedBadge(indicator)
     // Ambient elevation on the Cinematic theme; no-op on flat themes.
-    .dsCardDepth(cornerRadius: 10)
+    .dsCardDepth()
     // TASK-693/698: redact in app switcher / screen recordings.
     .privacySensitive()
     #if !os(tvOS)
@@ -794,13 +791,13 @@ private struct HomeRail: View {
           }
           .font(.subheadline.weight(.medium))
           .foregroundStyle(Color.dsTextSecondary)
-          .padding(.vertical, 12)
-          .padding(.horizontal, 8)
+          .padding(.vertical, .dsSpaceMD)
+          .padding(.horizontal, .dsSpaceSM)
           .contentShape(Rectangle())
           .accessibilityLabel("See all in \(title)")
         }
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
 
       // Horizontal scroll of poster/landscape cards
       ScrollView(.horizontal, showsIndicators: false) {
@@ -865,7 +862,7 @@ private struct HomeRail: View {
               } label: {
                 ItemPosterCell(item: displayItem)
                   .frame(width: 110)
-                  .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                  .contentShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityElement(children: .ignore)
@@ -877,7 +874,7 @@ private struct HomeRail: View {
               } label: {
                 ItemPosterCell(item: item)
                   .frame(width: 110)
-                  .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                  .contentShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityElement(children: .ignore)
@@ -886,7 +883,7 @@ private struct HomeRail: View {
             }
           }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, .dsSpaceLG)
       }
     }
     // Warm the cache for this rail's posters as soon as the rail exists, so the cards

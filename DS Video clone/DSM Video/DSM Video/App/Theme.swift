@@ -62,6 +62,13 @@ struct Theme: Equatable, Sendable {
     let borderSubtle: Color
     let borderStrong: Color
 
+    // Focus / selection fills: the highlighted-row and unselected-button fills on tvOS
+    // (and the matching iOS rows). Brighter than surfaceRaised so a focused control reads
+    // against a card. `focusFillStrong` is the focused state of a control that already
+    // sits on `focusFill`.
+    let focusFill: Color
+    let focusFillStrong: Color
+
     // Radii
     let radiusSm: CGFloat
     let radiusMd: CGFloat
@@ -111,6 +118,10 @@ struct Theme: Equatable, Sendable {
     let fontDisplay: Font
     /// Uppercase technical eyebrow/metadata font (mono on cinematic).
     let fontEyebrow: Font
+
+    /// tvOS 10-foot text roles (TASK-951). Flat themes use `.standard`; Cinematic sets its
+    /// display, title and section roles in the rounded heavy face.
+    let tvType: TVTypeScale
 }
 
 // MARK: - Theme Shadow token
@@ -138,6 +149,8 @@ extension Theme {
         success: Color, error: Color, warning: Color,
         textPrimary: Color, textSecondary: Color, textTertiary: Color, textMuted: Color, textInactive: Color,
         borderSubtle: Color, borderStrong: Color,
+        focusFill: Color = Color(white: 0.22),
+        focusFillStrong: Color = Color(white: 0.35),
         radiusSm: CGFloat, radiusMd: CGFloat, radiusLg: CGFloat, radiusPill: CGFloat,
         fontLargeTitle: Font, fontTitle2: Font, fontHeadline: Font, fontBody: Font,
         fontSubheadline: Font, fontSubheadlineSB: Font, fontFootnote: Font,
@@ -152,7 +165,8 @@ extension Theme {
         pressScale: CGFloat = 1.0,
         motionDuration: Double = 0.25,
         fontDisplay: Font? = nil,
-        fontEyebrow: Font? = nil
+        fontEyebrow: Font? = nil,
+        tvType: TVTypeScale = .standard
     ) {
         self.id = id
         self.background = background; self.surface = surface
@@ -162,6 +176,7 @@ extension Theme {
         self.textPrimary = textPrimary; self.textSecondary = textSecondary
         self.textTertiary = textTertiary; self.textMuted = textMuted; self.textInactive = textInactive
         self.borderSubtle = borderSubtle; self.borderStrong = borderStrong
+        self.focusFill = focusFill; self.focusFillStrong = focusFillStrong
         self.radiusSm = radiusSm; self.radiusMd = radiusMd
         self.radiusLg = radiusLg; self.radiusPill = radiusPill
         self.fontLargeTitle = fontLargeTitle; self.fontTitle2 = fontTitle2
@@ -177,6 +192,7 @@ extension Theme {
         // Display/eyebrow default to the existing large-title / caption fonts on flat themes.
         self.fontDisplay = fontDisplay ?? fontLargeTitle
         self.fontEyebrow = fontEyebrow ?? fontCaption2
+        self.tvType = tvType
     }
 }
 
@@ -201,6 +217,8 @@ extension Theme {
         textInactive:   Color(hex: "#737373"),
         borderSubtle:   Color(hex: "#2A2A2E"),
         borderStrong:   Color(hex: "#3A3A40"),
+        focusFill:      Color(white: 0.22),
+        focusFillStrong: Color(white: 0.35),
         radiusSm:   8,
         radiusMd:   12,
         radiusLg:   16,
@@ -247,6 +265,8 @@ extension Theme {
         textInactive:   Color(hex: "#4D483E"),
         borderSubtle:   Color(hex: "#2A241B"),
         borderStrong:   Color(hex: "#3C3528"),
+        focusFill:      Color(hex: "#443A29"),
+        focusFillStrong: Color(hex: "#6B5D42"),
         radiusSm:   8,
         radiusMd:   12,
         radiusLg:   16,
@@ -287,6 +307,8 @@ extension Theme {
         textInactive:   Color(hex: "#4B4753"),
         borderSubtle:   Color(hex: "#221F28"),
         borderStrong:   Color(hex: "#332F3B"),
+        focusFill:      Color(hex: "#39353F"),
+        focusFillStrong: Color(hex: "#5B5666"),
         radiusSm:   10,
         radiusMd:   14,
         radiusLg:   18,
@@ -318,6 +340,7 @@ extension Theme {
         pressScale: 0.96,
         motionDuration: 0.32,
         fontDisplay: Font.system(size: 46, weight: .heavy, design: .rounded),
-        fontEyebrow: Font.system(size: 11, weight: .bold).monospaced()
+        fontEyebrow: Font.system(size: 11, weight: .bold).monospaced(),
+        tvType: .cinematic
     )
 }

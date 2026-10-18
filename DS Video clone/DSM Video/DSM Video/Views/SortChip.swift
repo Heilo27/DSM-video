@@ -29,10 +29,10 @@ struct SortChip: View {
     #if os(tvOS)
     Button(action: action) {
       Text(label)
-        .font(.system(size: 26, weight: .semibold))
+        .font(.dsTVSectionTitle)
         .foregroundStyle(isActive ? Color.dsAccentOn : (focused ? .black : Color.dsTextSecondary))
         .frame(minHeight: 56)
-        .padding(.horizontal, 24)
+        .padding(.horizontal, .dsSpaceXXL)
         .background(
           RoundedRectangle(cornerRadius: theme.radiusPill, style: .continuous)
             .fill(isActive ? Color.dsAccent : (focused ? .white : Color.dsSurface))
@@ -50,7 +50,7 @@ struct SortChip: View {
         .font(.subheadline.weight(.medium))
         .foregroundStyle(isActive ? Color.dsAccentOn : Color.dsTextSecondary)
         .frame(minHeight: 44)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, .dsSpaceMD)
         .background(
           RoundedRectangle(cornerRadius: theme.radiusPill, style: .continuous)
             .fill(isActive ? Color.dsAccent : Color.dsSurface)
@@ -70,22 +70,14 @@ struct SortChipScroller<Content: View>: View {
 
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
-      HStack(spacing: tvAdjusted(8)) {
+      HStack(spacing: .dsSpaceCompact) {
         content
       }
-      // 60pt horizontal on tvOS for the title-safe area; the chip row would otherwise
+      // dsSpaceGutter is the title-safe inset on tvOS (60pt); the chip row would otherwise
       // start inside the overscan region and the first chip would clip on a real TV.
-      .padding(.horizontal, tvAdjusted(16, tv: 60))
-      .padding(.vertical, tvAdjusted(8, tv: 16))
+      .padding(.horizontal, .dsSpaceGutter)
+      .padding(.vertical, .dsSpaceCompact)
     }
-    .background(Color.black.opacity(0.95))
-  }
-
-  private func tvAdjusted(_ base: CGFloat, tv: CGFloat? = nil) -> CGFloat {
-    #if os(tvOS)
-    return tv ?? base * 2
-    #else
-    return base
-    #endif
+    .background(Color.dsBackground.opacity(0.95))
   }
 }

@@ -80,7 +80,7 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 	srcTag := ""
 	if ffprobePath != "" {
 		if pr, perr := transcode.NewProber(ffprobePath).Probe(ctx, src); perr == nil && pr != nil {
-			srcTag = pr.VideoCodecTag
+			srcTag = copiedStreamTag(pr.VideoCodec, pr.VideoCodecTag)
 		}
 	}
 
@@ -148,6 +148,21 @@ func TargetOutputPath(src string) string {
 	base := filepath.Base(src)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
 	return filepath.Join(dir, stem+".mp4")
+}
+
+// copiedStreamTag returns the sample-entry FourCC a stream-copied video will carry in the
+// output MP4, given the source's probed codec and tag.
+//
+// An MP4 or MOV source carries its own FourCC and the copy keeps it. An MKV carries none
+// (ffprobe reports an empty or "[0][0][0][0]" tag), and ffmpeg's MP4 muxer then writes
+// hev1 for HEVC (checked against ffmpeg 8.1.1), which Apple devices refuse. Reporting hev1
+// there is what lets buildFFmpegArgs add the hvc1 relabel for MKV-sourced HEVC too.
+// Any other real tag (hvc1, dvh1, avc1, ...) and every non-HEVC codec is returned as is.
+func copiedStreamTag(codec, tag string) string {
+	if strings.EqualFold(codec, "hevc") && (tag == "" || tag == "[0][0][0][0]") {
+		return "hev1"
+	}
+	return tag
 }
 
 // buildFFmpegArgs assembles the ffmpeg argument list (excluding the binary itself)

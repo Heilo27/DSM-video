@@ -30,7 +30,7 @@ struct GenreFilterBar: View {
       // an empty bar — a control that can't do anything is worse than no control.
       EmptyView()
     } else {
-      VStack(alignment: .leading, spacing: 8) {
+      VStack(alignment: .leading, spacing: .dsSpaceSM) {
         SortChipScroller {
           // "All" clears the filter. Always first so there is a consistent way back to the
           // unfiltered grid without hunting for which chips are lit.

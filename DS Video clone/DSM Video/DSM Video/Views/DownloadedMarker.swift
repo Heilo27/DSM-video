@@ -27,11 +27,6 @@ extension DownloadManager {
   }
 }
 
-extension AppState {
-  /// The server cannot be reached right now (explicitly offline, or a failed reach).
-  var isServerUnavailable: Bool { isOffline || serverUnreachable }
-}
-
 #if !os(tvOS)
 /// The small "downloaded" mark. Decorative; the state is spoken through the card's value.
 struct DownloadedGlyph: View {

@@ -129,9 +129,10 @@ enum TopShelfPolicy {
     }
 
     /// The resume bar for an item, 0...1, or nil. Always nil under a restricted ceiling.
-    /// Guards the divisor: a zero duration would produce NaN, which tvOS cannot draw.
+    /// The division, its clamp and the zero-duration guard (NaN, which tvOS cannot draw) live in
+    /// `PlaybackProgress.fraction`; this adds only the ceiling rule.
     static func playbackProgress(for item: ItemSummary, ceiling: TopShelfCeiling) -> Double? {
-        guard !ceiling.isRestricted, let p = item.progress, p.durationSeconds > 0 else { return nil }
-        return min(1, max(0, Double(p.positionSeconds) / Double(p.durationSeconds)))
+        guard !ceiling.isRestricted, let p = item.progress else { return nil }
+        return PlaybackProgress.fraction(positionSeconds: p.positionSeconds, durationSeconds: p.durationSeconds)
     }
 }

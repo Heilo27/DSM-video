@@ -25,11 +25,11 @@ struct TVPairingView: View {
 
   var body: some View {
     ZStack {
-      Color.black.ignoresSafeArea()
+      Color.dsBackground.ignoresSafeArea()
 
       // Subtle radial depth
       RadialGradient(
-        colors: [Color(white: 0.07), Color.black],
+        colors: [Color.dsSurface, Color.dsBackground],
         center: .center,
         startRadius: 50,
         endRadius: 700
@@ -38,8 +38,8 @@ struct TVPairingView: View {
 
       VStack(spacing: 0) {
         // Header
-        VStack(spacing: 16) {
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
+        VStack(spacing: .dsSpaceLG) {
+          RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
             .fill(Color.dsAccent)
             .frame(width: 64, height: 64)
             .overlay(
@@ -50,7 +50,7 @@ struct TVPairingView: View {
             .accessibilityHidden(true)
 
           Text(appState.sessionToken == nil ? "Connect This Apple TV" : "Pair iOS Device")
-            .font(.system(size: 42, weight: .bold))
+            .font(.dsTVLargeTitle)
             .foregroundStyle(.white)
 
           // WHERE THE CODE COMES FROM. This is the one thing a first-time user cannot
@@ -62,17 +62,17 @@ struct TVPairingView: View {
           if appState.sessionToken == nil {
             VStack(spacing: 14) {
               Text("Get a code from your iPhone or iPad")
-                .font(.system(size: 22, weight: .semibold))
+                .font(.dsTVHeadline)
                 .foregroundStyle(.white)
 
               Text("On a device that's already signed in to \(AppInfo.displayName), open **Settings → Apple TV → Pair Apple TV**. It shows a 6-digit code — type it below.")
-                .font(.system(size: 20))
+                .font(.dsTVBody)
                 .foregroundStyle(Color.dsTextSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 900)
 
               Text("No signed-in device? Use Other ways to connect at the bottom.")
-                .font(.system(size: 17))
+                .font(.dsTVCaption)
                 .foregroundStyle(Color.dsTextMuted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 900)
@@ -80,7 +80,7 @@ struct TVPairingView: View {
             .accessibilityElement(children: .combine)
           } else {
             Text("Enter this code in \(AppInfo.displayName) on your iPhone or iPad.")
-              .font(.system(size: 20))
+              .font(.dsTVBody)
               .foregroundStyle(Color.dsTextSecondary)
               .multilineTextAlignment(.center)
               .frame(maxWidth: 900)
@@ -106,21 +106,21 @@ struct TVPairingView: View {
           ProgressView("Generating pairing code")
             .tint(.white)
             .scaleEffect(2.0)
-            .padding(.vertical, 40)
+            .padding(.vertical, .dsSpaceJumbo)
         } else if let code = pairingCode {
-          VStack(spacing: 32) {
+          VStack(spacing: .dsSpaceXXXL) {
             // Code + countdown grouped for VoiceOver
-            VStack(spacing: 16) {
+            VStack(spacing: .dsSpaceLG) {
               Text(code)
-                .font(.system(size: 80, weight: .bold, design: .monospaced))
+                .font(.dsTVCode)
                 .foregroundStyle(.white)
                 .tracking(8)
                 .padding(.horizontal, 72)
-                .padding(.vertical, 40)
-                .background(Color(white: 0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .padding(.vertical, .dsSpaceJumbo)
+                .background(Color.dsSurfaceHigh)
+                .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous))
                 .overlay(
-                  RoundedRectangle(cornerRadius: 20, style: .continuous)
+                  RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous)
                     .stroke(Color.dsBorderStrong, lineWidth: 1)
                 )
                 .speechSpellsOutCharacters(true)
@@ -128,13 +128,13 @@ struct TVPairingView: View {
                 .accessibilityLabel("Pairing code: \(code.map { String($0) }.joined(separator: " "))")
 
               if countdown > 0 {
-                HStack(spacing: 8) {
+                HStack(spacing: .dsSpaceSM) {
                   Image(systemName: "clock")
                     .font(.system(size: 17))
                     .foregroundStyle(Color.dsTextMuted)
                     .accessibilityHidden(true)
                   Text("Expires in \(countdown)s")
-                    .font(.system(size: 19))
+                    .font(.dsTVCaption)
                     .foregroundStyle(Color.dsTextSecondary)
                 }
               }
@@ -150,21 +150,21 @@ struct TVPairingView: View {
               Task { await generate() }
             } label: {
               Text("Generate New Code")
-                .font(.system(size: 19, weight: .medium))
-                .padding(.horizontal, 40)
+                .font(.dsTVLabel)
+                .padding(.horizontal, .dsSpaceJumbo)
                 .padding(.vertical, 18)
             }
             .buttonStyle(.borderedProminent)
-            .tint(Color(white: 0.18))
+            .tint(Color.dsSurfaceRaised)
           }
         } else if let error {
-          VStack(spacing: 24) {
+          VStack(spacing: .dsSpaceXXL) {
             Image(systemName: "exclamationmark.circle")
               .font(.system(size: 48))
               .foregroundStyle(Color.dsError)
 
             Text(error)
-              .font(.system(size: 20))
+              .font(.dsTVBody)
               .foregroundStyle(Color.dsTextSecondary)
               .multilineTextAlignment(.center)
 
@@ -172,8 +172,8 @@ struct TVPairingView: View {
               Task { await generate() }
             } label: {
               Text("Try Again")
-                .font(.system(size: 19, weight: .medium))
-                .padding(.horizontal, 40)
+                .font(.dsTVLabel)
+                .padding(.horizontal, .dsSpaceJumbo)
                 .padding(.vertical, 18)
             }
             .buttonStyle(.borderedProminent)
@@ -184,9 +184,9 @@ struct TVPairingView: View {
             Task { await generate() }
           } label: {
             Text("Generate Pairing Code")
-              .font(.system(size: 22, weight: .semibold))
-              .padding(.horizontal, 64)
-              .padding(.vertical, 24)
+              .font(.dsTVHeadline)
+              .padding(.horizontal, .dsSpaceGiant)
+              .padding(.vertical, .dsSpaceXXL)
           }
           .buttonStyle(.borderedProminent)
           .tint(Color.dsAccent)
@@ -210,15 +210,15 @@ struct TVPairingView: View {
             showOtherWays = true
           } label: {
             Text("Other ways to connect")
-              .font(.system(size: 19))
+              .font(.dsTVCaption)
               .foregroundStyle(Color.dsTextSecondary)
           }
           .buttonStyle(.bordered)
-          .padding(.top, 40)
+          .padding(.top, .dsSpaceJumbo)
           .accessibilityHint("Connect by choosing a server on your network, or by typing your server address and password")
         }
       }
-      .padding(60)
+      .padding(.dsSpaceTitleSafe)
     }
     .privacySensitive()
     .fullScreenCover(isPresented: $showManualLogin) {
@@ -273,7 +273,7 @@ struct TVPairingView: View {
       TextField("000000", text: $enteredCode)
         .textContentType(.oneTimeCode)
         .keyboardType(.numberPad)
-        .font(.system(size: 56, weight: .bold, design: .monospaced))
+        .font(.dsTVCodeField)
         .multilineTextAlignment(.center)
         .frame(maxWidth: 520)
         .focused($codeFieldFocused)
@@ -298,15 +298,15 @@ struct TVPairingView: View {
         }
 
       if isRedeeming {
-        HStack(spacing: 12) {
+        HStack(spacing: .dsSpaceMD) {
           ProgressView().tint(.white)
           Text("Connecting…")
-            .font(.system(size: 19))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       } else if let redeemError {
         Text(redeemError)
-          .font(.system(size: 19))
+          .font(.dsTVCaption)
           .foregroundStyle(Color.dsError)
           .multilineTextAlignment(.center)
           .frame(maxWidth: 700)
@@ -316,9 +316,9 @@ struct TVPairingView: View {
         Task { await redeem() }
       } label: {
         Text("Connect")
-          .font(.system(size: 22, weight: .semibold))
-          .padding(.horizontal, 64)
-          .padding(.vertical, 24)
+          .font(.dsTVHeadline)
+          .padding(.horizontal, .dsSpaceGiant)
+          .padding(.vertical, .dsSpaceXXL)
       }
       .buttonStyle(.borderedProminent)
       .tint(Color.dsAccent)
@@ -396,24 +396,24 @@ private struct TVOtherWaysView: View {
 
   var body: some View {
     ZStack {
-      Color.black.ignoresSafeArea()
+      Color.dsBackground.ignoresSafeArea()
       RadialGradient(
-        colors: [Color(white: 0.07), Color.black],
+        colors: [Color.dsSurface, Color.dsBackground],
         center: .center,
         startRadius: 50,
         endRadius: 700
       )
       .ignoresSafeArea()
 
-      VStack(spacing: 40) {
-        VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceJumbo) {
+        VStack(spacing: .dsSpaceMD) {
           Text("Other Ways To Connect")
-            .font(.system(size: 42, weight: .bold))
+            .font(.dsTVLargeTitle)
             .foregroundStyle(.white)
             .accessibilityAddTraits(.isHeader)
 
           Text("Pairing from your iPhone is quicker — but if you don't have it to hand, pick your server below or sign in by hand.")
-            .font(.system(size: 20))
+            .font(.dsTVBody)
             .foregroundStyle(Color.dsTextSecondary)
             .multilineTextAlignment(.center)
             .frame(maxWidth: 900)
@@ -422,32 +422,32 @@ private struct TVOtherWaysView: View {
         if discovery.status == .denied {
           // TASK-949: Local Network access is off; the scan can never find anything.
           Text(LocalNetworkPermission.deniedMessage)
-            .font(.system(size: 18))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
             .multilineTextAlignment(.center)
             .frame(maxWidth: 900)
         } else if !discovery.servers.isEmpty {
-          VStack(spacing: 16) {
+          VStack(spacing: .dsSpaceLG) {
             Text("Found on your network")
-              .font(.system(size: 20, weight: .semibold))
+              .font(.dsTVHeadline)
               .foregroundStyle(Color.dsTextSecondary)
 
-            VStack(spacing: 12) {
+            VStack(spacing: .dsSpaceMD) {
               ForEach(discovery.servers) { server in
                 Button {
                   appState.useSignInAddress(server.baseURL)
                   onManualLogin()
                 } label: {
-                  HStack(spacing: 16) {
+                  HStack(spacing: .dsSpaceLG) {
                     Image(systemName: "server.rack")
                       .font(.system(size: 22))
                       .foregroundStyle(Color.dsAccent)
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                       Text(server.name)
-                        .font(.system(size: 20, weight: .medium))
+                        .font(.dsTVLabel)
                         .foregroundStyle(.white)
                       Text(server.baseURL)
-                        .font(.system(size: 16))
+                        .font(.dsTVCaption)
                         .foregroundStyle(Color.dsTextMuted)
                     }
                     Spacer()
@@ -455,12 +455,12 @@ private struct TVOtherWaysView: View {
                       .foregroundStyle(Color.dsTextMuted)
                       .accessibilityHidden(true)
                   }
-                  .padding(.horizontal, 32)
+                  .padding(.horizontal, .dsSpaceXXXL)
                   .padding(.vertical, 18)
-                  .background(Color(white: 0.1))
-                  .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                  .background(Color.dsSurfaceHigh)
+                  .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
                   .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous)
                       .stroke(Color.dsBorderStrong, lineWidth: 1)
                   )
                 }
@@ -475,39 +475,39 @@ private struct TVOtherWaysView: View {
           // TASK-950: the scan window closed empty. Before it, this read "No servers found"
           // on the first frame (ahead of onAppear's scan) and the spinner never stopped.
           Text(BonjourDiscovery.noneFoundMessage)
-            .font(.system(size: 18))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextMuted)
         } else {
           // .idle (first frame, before onAppear starts the scan) and .scanning.
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             ProgressView().tint(Color.dsTextMuted)
             Text("Scanning network…")
-              .font(.system(size: 18))
+              .font(.dsTVCaption)
               .foregroundStyle(Color.dsTextMuted)
           }
         }
 
         // Always focusable, whatever discovery returns — a tvOS screen with no focusable
         // element cannot be escaped with the remote.
-        VStack(spacing: 20) {
+        VStack(spacing: .dsSpaceXL) {
           Button {
             onManualLogin()
           } label: {
             Text("Enter server address manually")
-              .font(.system(size: 20, weight: .semibold))
-              .padding(.horizontal, 48)
-              .padding(.vertical, 20)
+              .font(.dsTVHeadline)
+              .padding(.horizontal, .dsSpaceHuge)
+              .padding(.vertical, .dsSpaceXL)
           }
           .buttonStyle(.borderedProminent)
           .tint(Color.dsAccent)
 
           Button("Back") { dismiss() }
             .buttonStyle(.bordered)
-            .font(.system(size: 19))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
-      .padding(60)
+      .padding(.dsSpaceTitleSafe)
     }
     .onAppear { discovery.startScan() }
     .onDisappear { discovery.stopScan() }

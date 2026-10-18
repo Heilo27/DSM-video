@@ -82,7 +82,7 @@ struct TVShowsView: View {
   #else
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
   #endif
 
@@ -130,12 +130,12 @@ struct TVShowsView: View {
       if isLoading && shows.isEmpty {
         ProgressView("Loading TV shows")
           #if os(tvOS)
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
           #else
-          .padding(.top, 24)
+          .padding(.top, .dsSpaceXXL)
           #endif
       } else if let error {
-        VStack(spacing: 24) {
+        VStack(spacing: .dsSpaceXXL) {
           DSContentUnavailable(
             title: "Couldn't load shows",
             systemImage: "exclamationmark.triangle",
@@ -148,12 +148,12 @@ struct TVShowsView: View {
           .tint(Color.dsAccent)
         }
         #if os(tvOS)
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
         #else
-        .padding(.top, 24)
+        .padding(.top, .dsSpaceXXL)
         #endif
       } else if shows.isEmpty {
-        VStack(spacing: 24) {
+        VStack(spacing: .dsSpaceXXL) {
           if let profile = appState.activeProfile, profile.isRestricted {
             // FR-265: the list is filtered by the profile's level.
             RestrictedEmptyState(profile: profile, place: library.title)
@@ -172,9 +172,9 @@ struct TVShowsView: View {
           .tint(Color.dsAccent)
         }
         #if os(tvOS)
-        .padding(.top, 80)
+        .padding(.top, .dsSpaceColossal)
         #else
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
         #endif
       } else {
         #if os(tvOS)
@@ -200,11 +200,11 @@ struct TVShowsView: View {
           }
         }
         .privacySensitive()
-        .padding(.horizontal, 60)
-        .padding(.vertical, 48)
+        .padding(.horizontal, .dsSpaceTitleSafe)
+        .padding(.vertical, .dsSpaceHuge)
         #else
         // (an unreachable "No Results" branch wrapped this grid — see displayedShows)
-        LazyVGrid(columns: columns, spacing: 12) {
+        LazyVGrid(columns: columns, spacing: .dsSpaceMD) {
           // Keyed on POSITION — see the tvOS branch above. gridID collided whenever
           // two rows agreed on id AND title, which silently removed shows from the
           // grid. An offset cannot collide, so every show the server sends renders.
@@ -215,9 +215,8 @@ struct TVShowsView: View {
             } label: {
               TVShowPosterCell(show: show)
             }
-            // dsPressable() == .plain + the Cinematic theme's press-scale (a no-op on flat
-            // themes). The style existed with zero call sites, so the theme's press
-            // feedback never rendered anywhere.
+            // dsPressable() draws its own pressed state: press-scale on Cinematic, an
+            // opacity dim on flat themes (the dim .plain gave), and a dimmed disabled look.
             .dsPressable()
             .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
             .accessibilityHint("Opens show details")
@@ -227,7 +226,7 @@ struct TVShowsView: View {
         #endif
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle(library.title)
     #if !os(tvOS)
     // Force white nav-bar content (the large title was rendering dim grey on black).
@@ -250,13 +249,7 @@ struct TVShowsView: View {
       ToolbarItem(placement: .topBarTrailing) {
         Button { showSearchSheet = true } label: {
           Image(systemName: "magnifyingglass")
-              // Tap target. A toolbar caps its item's HEIGHT, so .frame alone cannot reach
-              // 44pt vertically (it widened 37->56 and stayed 36 tall). Growing the glyph
-              // raises the intrinsic height, and contentShape makes the padded area tappable
-              // rather than just the symbol's own bounds.
-              .font(.system(size: 20, weight: .semibold))
-              .frame(minWidth: 44, minHeight: 44)
-              .contentShape(Rectangle())
+              .dsToolbarIcon()
         }
         .accessibilityLabel("Search TV shows")
       }
@@ -270,9 +263,9 @@ struct TVShowsView: View {
         TVShowDetailView(show: show, library: library)
       } rowLabel: { show in
         AnyView(
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             TVShowPosterCell(show: show).frame(width: 46)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
               Text(show.title).foregroundStyle(.white).lineLimit(1)
               if let y = show.year {
                 Text(String(y)).font(.caption).foregroundStyle(Color.dsTextSecondary)
@@ -392,17 +385,12 @@ private struct TVShowPosterCell: View {
   let show: TVShow
 
   var body: some View {
-    ZStack(alignment: .bottom) {
-      // Size anchor: a content-independent 2:3 spacer defines the cell's frame so the
-      // ZStack's height NEVER depends on the poster or title. Without this, the ZStack
-      // took its size from its content — an unloaded AuthenticatedImage collapsed the
-      // cell to the title height (the "blank spot"), and when the image loaded mid-
-      // scroll the cell grew and shoved everything below it down (the "Daredevil
-      // glitches and slides into the blank spot" reflow). The spacer makes every cell
-      // identical and stable regardless of load state, so the grid can't reflow.
-      Color.clear
-        .aspectRatio(2.0 / 3.0, contentMode: .fit)
-
+    // PosterCard fixes the 2:3 size from the column width alone, so the cell never depends
+    // on the poster or the title. That is what stops a late-loading image from collapsing
+    // the cell to the title height (the "blank spot") or growing it mid-scroll and shoving
+    // everything below it down (the "Daredevil glitches and slides into the blank spot"
+    // reflow).
+    PosterCard { width, height in
       // Poster image — fills the anchored frame and clips. Filling a fixed frame
       // (not .scaledToFill() on an unconstrained image) also stops wide/landscape
       // posters from overflowing and covering neighbouring cells.
@@ -426,21 +414,11 @@ private struct TVShowPosterCell: View {
               .accessibilityHidden(true)
           }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: width, height: height)
         .clipped()
-
-      // Bottom gradient
-      LinearGradient(
-        stops: [
-          .init(color: .clear, location: 0.45),
-          .init(color: .black.opacity(0.88), location: 1.0)
-        ],
-        startPoint: .top,
-        endPoint: .bottom
-      )
-
+    } footer: {
       // Title + season label
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: .dsSpaceXS) {
         Text(show.title)
           .font(.subheadline.weight(.medium))
           .foregroundStyle(.white)
@@ -455,10 +433,6 @@ private struct TVShowPosterCell: View {
       .padding(.horizontal, 10)
       .padding(.bottom, 10)
     }
-    // The Color.clear spacer (first ZStack layer) fixes the 2:3 size; the ZStack
-    // just fills the column width the grid hands it.
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }
 
   private func seasonLabel(_ show: TVShow) -> String {

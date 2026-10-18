@@ -41,6 +41,13 @@ their files for this app; the app reads what is there.
   concat pass this NAS hardware should not carry. A loose .vob outside those folders is still
   indexed. Rows that an earlier scan made from files inside such a folder are removed by the
   normal stale-row purge (and tombstoned, so the apps drop them too). [TASK-998]
+  A Blu-ray rip is not indexed either, by the same rule: a folder named BDMV (any case) is
+  skipped whole and logged by path, once. Its BDMV/STREAM .m2ts clips are fragments of the
+  disc's titles (menus, intros, pieces of the feature joined by the disc's playlists), not
+  movies. A loose .m2ts outside a BDMV folder is still indexed, and so is a camcorder card's
+  AVCHD folder (a BDMV directly inside a folder named AVCHD): each of its .MTS clips is a
+  complete recording. Rows an earlier scan made inside a Blu-ray BDMV folder are purged and
+  tombstoned the same way. [TASK-1026]
 - The background normalize worker (which repackages or re-encodes non-direct-play files into
   MP4 so they stop needing a transcode on every play) covers these older containers by the same
   rule as any other file, with no special path, and the same limits: it works only while the
@@ -50,6 +57,25 @@ their files for this app; the app reads what is there.
   and the original is only ever moved aside (never deleted by the worker) and reclaimed after
   the retention window (default 7 days, at least the newest three kept). There is no
   time-of-day schedule: idleness is the schedule. [TASK-1001]
+  The manual bulk-conversion scripts (tools/convert-library.sh, scripts/sprint-convert.sh)
+  convert only files the scanner indexes, taking that list from the server itself
+  (`dsvideo-backend --list-video-files`), so they can never disagree with it about formats,
+  disc rips or the backup folder; with no usable server binary they stop rather than
+  guess. The parallel sprint script only stream-copies H.264 and leaves every other codec
+  to the worker; it files each original under its own path in the backup folder (never
+  overwriting a backup already there), dated the day it was moved so the retention window
+  starts then. [TASK-1025]
+  Backups never overwrite each other, in the worker or in either script. Two libraries can hold
+  the same relative path (for example `Movies/Heat.mkv` in each), and a backup already filed
+  stays exactly as it was: the newer original is filed beside it under a numbered name
+  (`Heat.1.mkv`), and the dated retention window applies to both. If the original cannot be
+  filed, the conversion is abandoned and the original left untouched; the converted file is
+  never put in place first. A converted file is likewise never written over a different file
+  already at its destination. (Destructive-class change: it narrows what the tools may replace
+  and removes no safeguard.) [TASK-1032]
+  Anything stream-copied from HEVC into an MP4 is labelled `hvc1` (ffmpeg's default `hev1` label
+  is one Apple devices refuse to play), in the worker and in tools/convert-library.sh; H.264 is
+  never relabelled. [TASK-1033]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.

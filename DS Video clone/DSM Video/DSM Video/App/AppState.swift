@@ -174,6 +174,16 @@ final class AppState {
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
+  /// The ONE "the server cannot be reached right now" rule (explicitly offline, or a failed
+  /// reach). Every gate, banner and animation reads this, never `isOffline || serverUnreachable`
+  /// written out again (TASK-1022). The static form is for the few places that hold the two
+  /// flags as plain values (OfflineBanner, ItemDetailView.playUnavailableOffline).
+  nonisolated static func serverUnavailable(isOffline: Bool, serverUnreachable: Bool) -> Bool {
+    isOffline || serverUnreachable
+  }
+  var isServerUnavailable: Bool {
+    Self.serverUnavailable(isOffline: isOffline, serverUnreachable: serverUnreachable)
+  }
   /// A request to the server was refused because Local Network access is off (TASK-949).
   /// Rides alongside `serverUnreachable` (the reconnect loop still runs, and can land on the
   /// WAN address) and only changes what the banner says. Never sets `isOffline`: the device's
@@ -1297,7 +1307,7 @@ final class AppState {
   /// logout() — not here. Cancelling from clearNetworkError() would self-cancel the retry task
   /// before homeLoad() runs on the success path (Issue 7).
   func clearNetworkError() {
-    let wasDown = serverUnreachable || isOffline
+    let wasDown = isServerUnavailable
     serverUnreachable = false
     isOffline = false
     localNetworkDenied = false
@@ -2016,11 +2026,11 @@ final class AppState {
       collections: homeCollections,
       load: homeCollectionsLoad,
       isKids: activeProfile?.kids ?? false,
-      isOffline: isDemoMode || isOffline || serverUnreachable)
+      isOffline: isDemoMode || isServerUnavailable)
   }
 
   func loadCollections() async {
-    guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
+    guard !isDemoMode, sessionToken != nil, !isServerUnavailable else { return }
     let generation = homeStateGeneration
     guard collectionsInFlightGeneration != generation else { return }
     collectionsInFlightGeneration = generation
@@ -2070,6 +2080,11 @@ final class AppState {
   /// is now the authority. The local query survives only as the offline fallback: if the
   /// request fails, whatever applyRails already set stays on screen rather than the rail
   /// going blank.
+  ///
+  /// TASK-1020: a request that SUCCEEDS is the answer, even when it is empty. An empty rail is
+  /// the server's verdict (a profile ceiling that hides every new title, a library with nothing
+  /// added), and showing the local list instead would put titles on screen that the server just
+  /// said this profile may not see. Only a failed request keeps the local fallback.
   func loadJustAddedRail() async {
     guard !isDemoMode, sessionToken != nil else { return }
     let apiSnapshot = api
@@ -2077,10 +2092,6 @@ final class AppState {
     do {
       let resp = try await apiSnapshot.justAdded(limit: 16)
       guard homeResultIsCurrent(generation, "justAdded") else { return }
-      guard !resp.items.isEmpty else {
-        homeLog.info("justAdded: server returned an empty rail — keeping the local fallback")
-        return
-      }
       homeJustAdded = resp.items
       homeLog.info("justAdded: \(resp.items.count) item(s) from the server")
     } catch {
@@ -2194,24 +2205,6 @@ final class AppState {
         return seen.insert(key).inserted
       }
     }
-    func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
-      var seen = Set<String>()
-      return items.filter { item in
-        let key: String
-        if let showKey = item.showDedupKey {
-          key = "show|\(showKey)"
-        } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
-          let base = item.title
-            .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
-            .lowercased()
-          key = "show|\(base)"
-        } else {
-          key = item.title.lowercased() + "|\(item.type)"
-        }
-        return seen.insert(key).inserted
-      }
-    }
 
     let continueWatching = Array(deduplicated(
       allItems
@@ -2244,12 +2237,8 @@ final class AppState {
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(16))
 
-    let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
-    let justAdded = Array(deduplicatedByShow(
-      allItems
-        .filter { !watchedIDs.contains($0.id) }
-        .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    ).prefix(16))
+    // The same function LocalStore.queryJustAdded uses: no progress filter (FR-088, TASK-1019).
+    let justAdded = ItemSummary.justAddedRail(from: allItems)
 
     return (continueWatching, justAdded, recentlyWatched)
   }
@@ -2321,7 +2310,7 @@ final class AppState {
       homeIsCacheDecoding = false
       // Skip background network sync when offline — cached content is already shown
       // and network calls will fail anyway (TASK-291).
-      guard !isOffline && !serverUnreachable else {
+      guard !isServerUnavailable else {
         homeLog.info("homeLoad[\(callID)]: offline — showing cached content, skipping network sync")
         return
       }
@@ -2352,7 +2341,7 @@ final class AppState {
       homeError = nil  // clear stale error before each retry attempt
       // When offline with no local data, skip the network attempt and surface an
       // appropriate error — avoids a loud failure on every network call (TASK-291).
-      guard !isOffline && !serverUnreachable else {
+      guard !isServerUnavailable else {
         homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
         homeError = isOffline ? "No internet connection."
           : localNetworkDenied ? LocalNetworkPermission.deniedMessage
@@ -2429,7 +2418,7 @@ final class AppState {
   /// only — not a full reload) and skips when offline or already busy.
   func foregroundRefresh() async {
     reconcileOfflineFlag()
-    guard !isDemoMode, !isOffline, !serverUnreachable else { return }
+    guard !isDemoMode, !isServerUnavailable else { return }
     guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else { return }
     await runDeltaSyncWithBackgroundTask()
   }
@@ -3055,7 +3044,7 @@ final class AppState {
   /// replays. It did the opposite: a late replay always arrived last and won (TASK-960).
   /// Verify against upsertProgress before trusting this again.
   func flushPendingProgress() async {
-    guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
+    guard !isDemoMode, sessionToken != nil, !isServerUnavailable else { return }
 
     // Re-entrancy guard, same pattern as reconnect()'s isReconnecting.
     //

@@ -112,7 +112,7 @@ private struct LaunchAnimationView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color.dsBackground.ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     Spacer()
@@ -136,7 +136,7 @@ private struct LaunchAnimationView: View {
                         // Logo: red circle + play triangle
                         ZStack {
                             Circle()
-                                .fill(Color.red)
+                                .fill(Color.dsAccent)
                                 .frame(width: 64, height: 64)
                             Image(systemName: "play.fill")
                                 .font(.system(size: 26))
@@ -292,7 +292,7 @@ private struct LaserView: View {
                 Rectangle()
                     .fill(
                         LinearGradient(
-                            colors: [Color.red.opacity(0.9), Color.red.opacity(0.2)],
+                            colors: [Color.dsAccent.opacity(0.9), Color.dsAccent.opacity(0.2)],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
@@ -305,7 +305,7 @@ private struct LaserView: View {
             if impactVisible {
                 HStack {
                     Spacer()
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: 4)  // literal: 4pt impact-flash sliver, decorative
                         .fill(Color.white)
                         .frame(width: 12, height: 40)
                         .blur(radius: 4)

@@ -413,19 +413,20 @@ struct HomeFallbackCeilingTests {
     }
   }
 
-  /// OC-2176 boundary · the server answering an EMPTY Just Added (nothing visible to a
-  /// level-1 profile) keeps the filtered local fallback, never an unfiltered one.
-  /// Red if: the empty-answer branch swaps in unfiltered local rows.
-  @Test func anEmptyServerAnswerKeepsTheFilteredFallback() async {
+  /// OC-2176 boundary (TASK-1020, FR-088) · the server answering an EMPTY Just Added (nothing
+  /// visible to a level-1 profile) is the answer: the rail is empty, the local list is not shown.
+  /// Red if: the empty-answer branch keeps the local fallback.
+  @Test func anEmptyServerAnswerEmptiesTheRail() async {
     await ocAccount(cached: [owner, kid], active: kid, routes: [
       "GET /api/v1/just-added": .json(200, #"{"items":[],"total":0}"#)
     ]) { state in
       await seed(state)
       let rails = await state.localStore.queryRails()
       #expect(state.applyRails(rails, startedAt: state.homeStateGeneration))
+      #expect(ids(state.homeJustAdded) == Self.justAddedAtLevel1, "the local list is on screen first")
       await state.loadJustAddedRail()
       #expect(ProfileStubServer.count("GET /api/v1/just-added") >= 1)
-      #expect(ids(state.homeJustAdded) == Self.justAddedAtLevel1)
+      #expect(state.homeJustAdded.isEmpty, "the server's empty answer replaces the local list")
     }
   }
 }

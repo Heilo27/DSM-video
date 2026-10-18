@@ -24,12 +24,10 @@ struct CollectionTile: View {
   private var height: CGFloat { width * 1.5 }
 
   var body: some View {
-    ZStack(alignment: .bottomLeading) {
+    PosterCard { _, _ in
       art
-      LinearGradient(
-        colors: [.black.opacity(0), .black.opacity(0.55), .black.opacity(0.9)],
-        startPoint: .center, endPoint: .bottom)
-      VStack(alignment: .leading, spacing: 2) {
+    } footer: {
+      VStack(alignment: .leading, spacing: .dsSpaceXXS) {
         Text(collection.title)
           .font(titleFont)
           .foregroundStyle(.white)
@@ -38,10 +36,10 @@ struct CollectionTile: View {
           .font(countFont)
           .foregroundStyle(.white.opacity(0.75))
       }
+      .frame(maxWidth: .infinity, alignment: .leading)
       .padding(padding)
     }
     .frame(width: width, height: height)
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }
 
   @ViewBuilder private var art: some View {
@@ -73,8 +71,8 @@ struct CollectionTile: View {
   }
 
   #if os(tvOS)
-  private var titleFont: Font { .system(size: 30, weight: .bold) }
-  private var countFont: Font { .system(size: 20) }
+  private var titleFont: Font { .dsTVSectionTitle }
+  private var countFont: Font { .dsTVBody }
   private var padding: CGFloat { 18 }
   #else
   private var titleFont: Font { .headline.weight(.bold) }
@@ -113,12 +111,12 @@ struct CollectionsRail: View {
           .padding(.leading, 28)
           .focusSection()
           #else
-          .padding(.horizontal, 16)
+          .padding(.horizontal, .dsSpaceLG)
           #endif
         }
         #if os(tvOS)
-        .padding(.leading, 32)
-        .padding(.trailing, 60)
+        .padding(.leading, .dsSpaceXXXL)
+        .padding(.trailing, .dsSpaceTitleSafe)
         #endif
       }
     case .noneYet:
@@ -142,11 +140,11 @@ struct CollectionsRail: View {
   private var header: some View {
     Text("Collections")
       #if os(tvOS)
-      .font(.system(size: 28, weight: .semibold))
-      .padding(.horizontal, 60)
+      .font(.dsTVSectionTitle)
+      .padding(.horizontal, .dsSpaceTitleSafe)
       #else
       .font(.title3.weight(.bold))
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
       #endif
       .foregroundStyle(.white)
       .accessibilityAddTraits(.isHeader)
@@ -173,14 +171,14 @@ struct CollectionsRail: View {
     VStack(alignment: .leading, spacing: 6) {
       Text(title)
         #if os(tvOS)
-        .font(.system(size: 26, weight: .semibold))
+        .font(.dsTVSectionTitle)
         #else
         .font(.headline)
         #endif
         .foregroundStyle(.white)
       Text(detail)
         #if os(tvOS)
-        .font(.system(size: 22))
+        .font(.dsTVBodyLarge)
         #else
         .font(.subheadline)
         #endif
@@ -267,7 +265,7 @@ struct CollectionGridView: View {
   var body: some View {
     ScrollView {
       if let error, items.isEmpty {
-        VStack(spacing: 24) {
+        VStack(spacing: .dsSpaceXXL) {
           DSContentUnavailable(title: "Couldn't Load", systemImage: "exclamationmark.triangle",
                                description: error)
           Button("Retry") { Task { await loadFirstPage() } }
@@ -277,17 +275,17 @@ struct CollectionGridView: View {
             .focused($focusedControl, equals: .gridRetry)
             #endif
         }
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
       } else if total == 0 {
         // The server answers total 0 for an offered collection with nothing visible right now
         // (FR-275). On a restricted profile that is the ceiling at work (FR-265).
         if let profile = appState.activeProfile, profile.isRestricted {
           RestrictedEmptyState(profile: profile, place: collection.title)
-            .padding(.top, 60)
+            .padding(.top, .dsSpaceTitleSafe)
         } else {
           DSContentUnavailable(title: "Nothing Here Yet", systemImage: "rectangle.stack",
                                description: "\(collection.title) has no titles right now.")
-            .padding(.top, 60)
+            .padding(.top, .dsSpaceTitleSafe)
         }
       } else {
         LazyVGrid(columns: columns, spacing: gridSpacing) {
@@ -303,7 +301,7 @@ struct CollectionGridView: View {
         }
         .padding(gridPadding)
         if isLoading && !items.isEmpty {
-          ProgressView().padding(.bottom, 24)
+          ProgressView().padding(.bottom, .dsSpaceXXL)
         }
       }
     }
@@ -387,11 +385,11 @@ struct CollectionGridView: View {
   }
 
   #if os(tvOS)
-  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220), spacing: 48)] }
+  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220), spacing: .dsSpaceHuge)] }
   private var gridSpacing: CGFloat { 48 }
   private var gridPadding: CGFloat { 48 }
   #else
-  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 110), spacing: 12)] }
+  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 110), spacing: .dsSpaceMD)] }
   private var gridSpacing: CGFloat { 12 }
   private var gridPadding: CGFloat { 12 }
   #endif

@@ -41,7 +41,24 @@ extension Color {
     // Borders / separators
     static let dsBorderSubtle    = Color(hex: "#2A2A2E")
     static let dsBorderStrong    = Color(hex: "#3A3A40")
+
+    // Focus / selection fills (tvOS focus highlight, selected rows). Per theme:
+    // Classic white 0.22 / 0.35, Nitrate #443A29 / #6B5D42, Cinematic #39353F / #5B5666.
+    // Views never use Color(white:) or a bare Color.black ground: grounds are dsBackground,
+    // fills are dsSurface / dsSurfaceHigh / dsSurfaceRaised / dsFocusFill, dividers dsBorderSubtle.
+    // Scrims, shadows, masks and the video letterbox stay black on purpose.
+    static let dsFocusFill       = Color(white: 0.22)
+    static let dsFocusFillStrong = Color(white: 0.35)
 }
+
+// Corner radii resolve through the active Theme too (CGFloat.dsRadius*). A view names the ROLE,
+// never a number, so a theme that rounds more rounds every surface of that role together.
+//   dsRadiusSm / Md / Lg / Pill   Classic and Nitrate 8 / 12 / 16 / 20, Cinematic 10 / 14 / 18 / 22
+//   dsRadiusPoster                poster and card artwork = radiusMd; ONE value for PosterCard,
+//                                 ContinueWatchingCard and the tvOS cards
+//   dsRadiusThumb                 6, fixed: 50x75 to 60x90 list thumbnails
+// Raw cornerRadius literals are allowed only where the radius is not a theme choice (a bar
+// track, a chip, a corner that scales with its tile); each carries a one-line reason.
 
 extension Color {
     init(hex: String) {
@@ -81,6 +98,34 @@ extension Font {
 }
 ```
 
+#### tvOS type scale (`Font.dsTV*`, `App/TVTypeScale.swift`)
+
+tvOS has no Dynamic Type, so its text sizes are fixed 10-foot points, but they belong to the
+theme like every other token: `Theme.tvType` supplies a `TVTypeScale`, and every TV screen reads
+`Font.dsTV*` instead of `.font(.system(size:))`. A theme's typography therefore reaches the TV.
+
+| Role | Classic / Nitrate | Cinematic | Used for |
+|------|-------------------|-----------|----------|
+| `dsTVDisplay` | 72 bold | 72 heavy rounded | Sign-in wordmark |
+| `dsTVLargeTitle` | 48 bold | 48 heavy rounded | Show-detail title, pairing screen titles |
+| `dsTVTitle` | 36 bold | 36 heavy rounded | Sign-in heading, "Are you still watching?" |
+| `dsTVSectionTitle` | 28 semibold | 28 bold rounded | Shelf and library titles, collection titles, sort chips, search result titles |
+| `dsTVHeadline` | 22 semibold | same | Button labels, emphasised lines |
+| `dsTVLabel` | 20 medium | same | Inline action labels, episode titles |
+| `dsTVBodyLarge` | 24 regular | same | Tagline, empty states, countdown |
+| `dsTVBody` | 20 regular | same | Supporting copy, counts, years in search |
+| `dsTVCaption` | 17 regular | same | Years, durations, hints, server addresses |
+| `dsTVCaptionEmphasis` | 17 medium | same | Card titles under artwork, episode number badge, speed button |
+| `dsTVField` | 36 regular | same | Search field |
+| `dsTVCode` / `dsTVCodeField` | 80 / 56 bold monospaced | same | Pairing code, pairing-code entry |
+
+Rules: SF Symbol glyph sizes (`Image(systemName:)` with `.font(.system(size:))`) are not text and
+stay at the call site. Two iOS sites are deliberately fixed and carry a comment: the 40pt
+monospaced pairing code (`MainView`) and the avatar initial, sized as a fraction of the avatar
+(`ProfileViews`). Sizes were collapsed onto the nearest role, so some TV text moved by 1 to 6 pt
+(for example 14/15/16/18/19 pt captions now 17 pt, 42 pt pairing titles now 48 pt, sort-chip and
+collection tile titles now 28 pt).
+
 ---
 
 ## Per-Screen Implementation Notes
@@ -105,7 +150,7 @@ extension Font {
 - Add app name "DS Reel" at 28pt bold below logomark, tagline "Your NAS, beautifully." at 15pt in `dsTextMuted`.
 - Form fields: background `dsSurface` (#111111), cornerRadius 12, height 52. Each field has a left icon (SF Symbols: `network`, `person`, `lock`).
 - Field labels: uppercase, 11pt semibold, `dsTextMuted`, 0.8 letter spacing.
-- Primary CTA: "Connect" button — full width, 56pt height, `dsAccent` fill, cornerRadius 14.
+- Primary CTA: "Connect" button — full width, `dsPrimaryButton()` card shape (52pt minimum height, `radiusMd`, `dsAccent` fill). Not-ready and connecting states use the style's disabled look (`dsSurface` fill, `dsTextMuted` label).
 - Secondary CTA: "Connect via QuickConnect ID" — full width, 52pt, `dsSurface` fill, 1pt `dsBorderSubtle` stroke, cornerRadius 14.
 - Divider between primary and secondary CTAs: 1pt line with "or" centered.
 - Remove existing bottom toolbar chrome; replace with simple version text footer.
@@ -156,9 +201,11 @@ NavigationView
 
 **New components needed:**
 
-`ContinueWatchingCard` — 200x120, rounded corners 10, image fill, gradient overlay bottom-half, title text at bottom-left (11pt semibold), red progress bar pinned to bottom edge (3pt height, progress fraction * 200 width).
+`ContinueWatchingCard` — 200x120, rounded corners `dsRadiusPoster`, image fill, gradient overlay bottom-half, title text at bottom-left (11pt semibold), red progress bar pinned to bottom edge (3pt height, progress fraction * 200 width).
 
-`PosterCard` — 110x165, rounded corners 8, image fill. Optional watched badge: 24pt green circle with checkmark in top-right corner (x: width-32, y: 8).
+`PosterCard` — the one 2:3 poster shell (`Views/PosterCard.swift`). Width comes from the parent, height is always width x 1.5, independent of the artwork or footer. Rounded corners `dsRadiusPoster`. Bottom scrim plus a footer scrim sized to the footer's measured height, a 3pt progress bar inside the clip, the watched badge outside it, `dsCardDepth()` on Cinematic. Movie cells (`ItemPosterCell`), TV-show cells and collection tiles are all `PosterCard`s, so a Cinematic movie grid and show grid show the same card depth. The tvOS portrait cards (`TVPortraitCard`, `TVShowPortraitCard`) are NOT: they put the title below the artwork and scale on focus. They share `dsRadiusPoster` and `CardWatchedBadge` only.
+
+`CardWatchedBadge` — green `dsSuccess` circle with a black checkmark in the top-trailing corner, drawn when `PlaybackProgress.cardIndicator` returns `.watchedBadge`. One view for every card, including `ContinueWatchingCard`: 22pt on iOS, 28pt on tvOS.
 
 `SectionHeader` — HStack with title (18pt bold) and optional "See All" link (14pt `dsAccent`).
 
@@ -366,12 +413,46 @@ These components are used across multiple screens — build as reusable SwiftUI 
 
 | Component | Used In | Notes |
 |-----------|---------|-------|
-| `PosterCard` | Grid, Home, Search | 110x165, progress bar, watched badge |
-| `ContinueWatchingCard` | Home | 200x120, landscape, progress bar |
+| `PosterCard` | Movie grid, TV-show grid, Collections | 2:3 shell shared by `ItemPosterCell`, `TVShowPosterCell`, `CollectionTile`: `dsRadiusPoster`, progress bar, watched badge, Cinematic depth |
+| `CardWatchedBadge` | Every card, iOS and tvOS | 22pt (iOS) / 28pt (tvOS); applied with `.cardWatchedBadge(_:size:)` |
+| `ContinueWatchingCard` | Home | 200x120, landscape, progress bar, watched badge |
 | `SectionHeader` | Home | Title + optional "See All" link |
 | `DSTabBar` | All main screens | HOME / SEARCH / DOWNLOADS, active in red |
 | `AirPlayButton` | Video Player | Wraps `AVRoutePickerView` |
 | `ErrorBanner` | Search, Player | Red-tinted, icon + title + subtitle + retry |
+| `dsToolbarIcon()` | Every toolbar glyph button | One home for the 44x44pt tap-target rule (FRD-001 FR-007): 20pt semibold glyph, `minWidth/minHeight 44`, `contentShape(Rectangle())` |
+| `dsPrimaryButton(_:fillsWidth:minWidth:)` | Every screen's primary action: movie Play, show Resume/Play, home hero Play, next-episode Play Now, Connect | One ButtonStyle (iOS + tvOS). Shape is a named choice: `.card` (rounded rect, `radiusMd`; 52pt min height iOS, 54pt tvOS) or `.pill` (capsule; 44pt iOS, 54pt tvOS). Idle: accent fill, `dsAccentOn` label, `dsAccentGlow`. Pressed: shared `DSPressFeedback`. Focused (tvOS): +0.12 brightness, 1.04 scale, stronger glow. Disabled: `dsSurface` fill, `dsTextMuted` label, no glow. Call sites keep `.focused()`. System `.borderedProminent` sites are not part of this component |
+| `dsPressable()` | Library poster grids (Movies, TV Shows, Collections) | Custom ButtonStyle. Pressed: scale on Cinematic, opacity dim (0.6) on Classic/Nitrate. Disabled: opacity 0.4 on every theme. Opacities live in `DSInteractionOpacity` |
+
+---
+
+## Spacing scale (`CGFloat.dsSpace*`, `App/DSSpacing.swift`)
+
+Padding and stack spacing read a named scale instead of bare numbers: `.padding(.dsSpaceLG)`,
+`HStack(spacing: .dsSpaceMD)`. The scale is theme-independent (spacing is layout, not skin).
+
+| Token | pt | Typical use |
+|-------|----|-------------|
+| `dsSpaceXXS` | 2 | Hairline gap between text lines |
+| `dsSpaceXS` | 4 | Icon-to-label gap, tight stacks |
+| `dsSpaceSM` | 8 | Gap inside a control or small row |
+| `dsSpaceMD` | 12 | Related elements in a card or form row |
+| `dsSpaceLG` | 16 | Default content inset and section gap |
+| `dsSpaceXL` | 20 | Roomy control padding |
+| `dsSpaceXXL` | 24 | Gap between groups |
+| `dsSpaceXXXL` | 32 | Gap between sections |
+| `dsSpaceJumbo` / `Huge` / `Giant` / `Colossal` | 40 / 48 / 64 / 80 | 10-foot gaps, insets and hero clearance |
+| `dsSpaceTitleSafe` | 60 | tvOS title-safe inset (constant) |
+| `dsSpaceGutter` | 16 iOS, 60 tvOS | Screen-edge inset |
+| `dsSpaceCompact` | 8 iOS, 16 tvOS | Tight control padding and gaps |
+
+Only `dsSpaceGutter` and `dsSpaceCompact` differ by platform; every other step is the same number
+on both. Off-scale literals (5, 6, 9, 10, 14, 18, 28, 56, 72, 120) and zero are not tokens: a value
+with no role is a layout one-off. The swap preserved layout exactly (only literals equal to a step
+were replaced).
+
+The app's `AccentColor` asset is the Classic accent `#D1262F`, so system chrome that reads the
+asset (tint, selection) matches `Color.dsAccent` before a theme loads.
 
 ---
 
@@ -384,7 +465,7 @@ DSVideoDesignSystem/
   Sources/
     Colors.swift      — all Color extensions
     Typography.swift  — all Font extensions
-    Spacing.swift     — padding/gap constants
+    Spacing.swift     — padding/gap constants (today: App/DSSpacing.swift)
     Components/
       PosterCard.swift
       SectionHeader.swift
