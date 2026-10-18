@@ -332,8 +332,7 @@ struct ItemDetailView: View {
   enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched, nextEpisode }
 
   private var tvPlayButton: some View {
-    let focused = focusedAction == .play
-    return Button {
+    Button {
       // TASK-796: guard so a Play/Start Over double-tap can't flip playFromBeginning
       // after the player is already presenting.
       guard !showPlayer else { return }
@@ -349,30 +348,20 @@ struct ItemDetailView: View {
             .accessibilityHidden(true)
         }
       }
-        .font(.headline.weight(.semibold))
-        .foregroundStyle(Color.dsAccentOn)
         // A fixed 260x54 with no scale factor clipped the label at accessibility sizes,
         // on the screen's PRIMARY action. minimumScaleFactor alone was not enough: at XXL
         // the label still needs more than 0.7 of a fixed 260pt, so it kept clipping to a
-        // glyph fragment (TASK-897 #1). The width is now a MINIMUM — the button grows to
-        // fit its label instead of shrinking the label to fit the button — and the height
-        // grows with it so the text is never vertically clipped either.
+        // glyph fragment (TASK-897 #1). The width is now a MINIMUM (dsPrimaryButton's
+        // minWidth) — the button grows to fit its label instead of shrinking the label to
+        // fit the button — and the height grows with it so the text is never clipped.
         .minimumScaleFactor(0.7)
         .lineLimit(1)
-        .padding(.horizontal, 20)
-        .frame(minWidth: 260, minHeight: 54)
-        .background(Color.dsAccent.brightness(focused ? 0.12 : 0))
-        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
-        .scaleEffect(focused ? 1.04 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: focused)
     }
-    .buttonStyle(.plain)
+    .dsPrimaryButton(minWidth: 260)
     .focusEffectDisabled()
-    .shadow(color: Color.dsAccent.opacity(focused ? 0.7 : 0.3), radius: focused ? 10 : 5, x: 0, y: 3)
     .focused($focusedAction, equals: .play)
     .prefersDefaultFocus(in: actionNamespace)
     .disabled(playUnavailableOffline)
-    .opacity(playUnavailableOffline ? 0.4 : 1)
     // A11y.Detail.playButton existed in the registry and was applied to nothing, so the
     // primary action could not be addressed by identifier — which is exactly what a test
     // for "Play holds default focus" needs.
@@ -531,24 +520,14 @@ struct ItemDetailView: View {
                     .accessibilityHidden(true)
                 }
               }
-              .font(.headline.weight(.semibold))
-              .foregroundStyle(Color.dsAccentOn)
-              // Same clipping as the tvOS button (TASK-897 #1): a hard 44pt height cannot
-              // hold a scaled "Play" at accessibility sizes, so the primary action showed
-              // a cropped glyph. 44 is the HIG minimum, not a maximum — as a minHeight the
-              // button grows with the text instead of cropping it.
+              // Same clipping as the tvOS button (TASK-897 #1): a hard height cannot hold a
+              // scaled "Play" at accessibility sizes, so the primary action showed a cropped
+              // glyph. dsPrimaryButton's height is a minimum: the button grows with the text.
               .minimumScaleFactor(0.7)
               .lineLimit(1)
-              .padding(.vertical, 8)
-              .frame(maxWidth: .infinity)
-              .frame(minHeight: 44)
-              .background(Color.dsAccent)
-              .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .dsPrimaryButton(fillsWidth: true)
             .disabled(playUnavailableOffline)
-            .opacity(playUnavailableOffline ? 0.4 : 1)
-            .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
             .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
 
@@ -1803,13 +1782,8 @@ private struct PlayerSheet: View {
             dismiss()
           } label: {
             Text("Play Now")
-              .font(.headline)
-              .foregroundStyle(Color.dsAccentOn)
-              .padding(.horizontal, 24)
-              .padding(.vertical, 10)
-              .background(Color.dsAccent, in: Capsule())
           }
-          .buttonStyle(.plain)
+          .dsPrimaryButton(.pill)
           Button {
             countdownTask?.cancel()
             showNextEpisodeOverlay = false
@@ -2061,17 +2035,9 @@ private struct _NextEpisodeOverlayView: View {
         HStack(spacing: 24) {
           Button(action: onPlayNow) {
             Text("Play Now")
-              .font(.headline)
-              .foregroundStyle(Color.dsAccentOn)
-              .padding(.horizontal, 28)
-              .padding(.vertical, 14)
-              .background(Color.dsAccent, in: Capsule())
-              .brightness(focused == .playNow ? 0.1 : 0)
           }
-          .buttonStyle(.plain)
+          .dsPrimaryButton(.pill)
           .focusEffectDisabled()
-          .scaleEffect(focused == .playNow ? 1.05 : 1.0)
-          .animation(.easeInOut(duration: 0.15), value: focused)
           .focused($focused, equals: .playNow)
           .prefersDefaultFocus(in: ns)
 

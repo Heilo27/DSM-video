@@ -46,21 +46,32 @@ enum DSInteractionOpacity {
     static let disabled: Double = 0.4
 }
 
-private struct DSPressableStyle: ButtonStyle {
+/// The pressed (and optionally disabled) feedback every custom button style shares, so the
+/// rule has one home: Cinematic signals a press with the themed scale; flat themes
+/// (Classic / Nitrate) dim the label, which is what `.plain` did before DSPressableStyle
+/// replaced it. A style that draws its own disabled look (DSPrimaryButtonStyle) passes
+/// `dimsWhenDisabled: false` so the control is not dimmed twice.
+struct DSPressFeedback: ViewModifier {
+    let pressed: Bool
+    let dimsWhenDisabled: Bool
     @Environment(\.isEnabled) private var isEnabled
 
-    func makeBody(configuration: Configuration) -> some View {
+    func body(content: Content) -> some View {
         let theme = ThemeHolder.shared.current
         let cinematic = theme.usesCinematicChrome
-        let pressed = configuration.isPressed
-        // Cinematic signals a press with the themed scale; flat themes (Classic / Nitrate)
-        // dim the label instead, which is what `.plain` did before this style replaced it.
-        let opacity: Double = !isEnabled ? DSInteractionOpacity.disabled
-            : (pressed && !cinematic ? DSInteractionOpacity.pressed : 1.0)
-        return configuration.label
+        let opacity: Double = (!isEnabled && dimsWhenDisabled) ? DSInteractionOpacity.disabled
+            : (isEnabled && pressed && !cinematic ? DSInteractionOpacity.pressed : 1.0)
+        return content
             .scaleEffect(cinematic && pressed ? theme.pressScale : 1.0)
             .opacity(opacity)
             .animation(.easeOut(duration: theme.motionDuration * 0.5), value: pressed)
+    }
+}
+
+private struct DSPressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .modifier(DSPressFeedback(pressed: configuration.isPressed, dimsWhenDisabled: true))
     }
 }
 

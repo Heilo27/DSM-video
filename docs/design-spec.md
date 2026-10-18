@@ -122,7 +122,7 @@ extension Font {
 - Add app name "DS Reel" at 28pt bold below logomark, tagline "Your NAS, beautifully." at 15pt in `dsTextMuted`.
 - Form fields: background `dsSurface` (#111111), cornerRadius 12, height 52. Each field has a left icon (SF Symbols: `network`, `person`, `lock`).
 - Field labels: uppercase, 11pt semibold, `dsTextMuted`, 0.8 letter spacing.
-- Primary CTA: "Connect" button — full width, 56pt height, `dsAccent` fill, cornerRadius 14.
+- Primary CTA: "Connect" button — full width, `dsPrimaryButton()` card shape (52pt minimum height, `radiusMd`, `dsAccent` fill). Not-ready and connecting states use the style's disabled look (`dsSurface` fill, `dsTextMuted` label).
 - Secondary CTA: "Connect via QuickConnect ID" — full width, 52pt, `dsSurface` fill, 1pt `dsBorderSubtle` stroke, cornerRadius 14.
 - Divider between primary and secondary CTAs: 1pt line with "or" centered.
 - Remove existing bottom toolbar chrome; replace with simple version text footer.
@@ -393,6 +393,7 @@ These components are used across multiple screens — build as reusable SwiftUI 
 | `AirPlayButton` | Video Player | Wraps `AVRoutePickerView` |
 | `ErrorBanner` | Search, Player | Red-tinted, icon + title + subtitle + retry |
 | `dsToolbarIcon()` | Every toolbar glyph button | One home for the 44x44pt tap-target rule (FRD-001 FR-007): 20pt semibold glyph, `minWidth/minHeight 44`, `contentShape(Rectangle())` |
+| `dsPrimaryButton(_:fillsWidth:minWidth:)` | Every screen's primary action: movie Play, show Resume/Play, home hero Play, next-episode Play Now, Connect | One ButtonStyle (iOS + tvOS). Shape is a named choice: `.card` (rounded rect, `radiusMd`; 52pt min height iOS, 54pt tvOS) or `.pill` (capsule; 44pt iOS, 54pt tvOS). Idle: accent fill, `dsAccentOn` label, `dsAccentGlow`. Pressed: shared `DSPressFeedback`. Focused (tvOS): +0.12 brightness, 1.04 scale, stronger glow. Disabled: `dsSurface` fill, `dsTextMuted` label, no glow. Call sites keep `.focused()`. System `.borderedProminent` sites are not part of this component |
 | `dsPressable()` | Library poster grids (Movies, TV Shows, Collections) | Custom ButtonStyle. Pressed: scale on Cinematic, opacity dim (0.6) on Classic/Nitrate. Disabled: opacity 0.4 on every theme. Opacities live in `DSInteractionOpacity` |
 
 ---

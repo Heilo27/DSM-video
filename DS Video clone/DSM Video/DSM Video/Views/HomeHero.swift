@@ -205,19 +205,11 @@ struct HomeHero: View {
       ItemDetailView(itemID: current.id, fallbackTitle: current.title, autoPlay: true)
     } label: {
       Label("Play", systemImage: "play.fill")
-        .font(.subheadline.weight(.bold))
-        .foregroundStyle(Color.dsAccentOn)
         .lineLimit(nil)
         .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil)
-        .padding(.horizontal, 22)
-        .padding(.vertical, 11)
-        .background(Color.dsAccent, in: Capsule())
-        .shadow(color: Color.dsAccentGlow, radius: 12, y: 4)
     }
-    .buttonStyle(.plain)
+    .dsPrimaryButton(.pill, fillsWidth: dynamicTypeSize.isAccessibilitySize)
     .disabled(unavailable)
-    .opacity(unavailable ? 0.4 : 1)
     .accessibilityHint(unavailable ? ItemDetailView.playUnavailableOfflineHint : "")
   }
 

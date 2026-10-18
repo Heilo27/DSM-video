@@ -1175,12 +1175,8 @@ private struct TVShowDetailScrollView: View {
           Text(resumeLabel)
             .font(.headline)
         }
-        .foregroundStyle(Color.dsAccentOn)
-        .frame(maxWidth: .infinity, minHeight: 50)
-        .background(Color.dsAccent)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
       }
-      .buttonStyle(.plain)
+      .dsPrimaryButton(fillsWidth: true)
       .padding(.horizontal, 16)
       .padding(.top, 12)
       .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)

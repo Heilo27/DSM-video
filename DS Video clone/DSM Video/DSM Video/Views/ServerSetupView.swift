@@ -488,15 +488,10 @@ struct SetupConnectScreen: View {
           ProgressView().tint(Color.dsAccentOn)
         } else {
           Text("Connect")
-            .font(.headline)
-            .foregroundStyle(canConnect ? Color.dsAccentOn : Color.dsTextMuted)
         }
       }
-      .frame(maxWidth: .infinity, minHeight: 52)
-      .background(canConnect && !isConnecting ? Color.dsAccent : Color.dsSurface)
-      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
     }
-    .buttonStyle(.plain)
+    .dsPrimaryButton(fillsWidth: true)
     .disabled(!canConnect || isConnecting)
     .accessibilityLabel(isConnecting ? "Connecting, please wait" : "Connect")
     .accessibilityIdentifier(A11y.Setup.connectButton)
