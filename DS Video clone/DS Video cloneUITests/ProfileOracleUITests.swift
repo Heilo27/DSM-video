@@ -152,4 +152,80 @@ final class ProfileOracleUITests: XCTestCase {
     XCTAssertFalse(element(app, UIID.Profile.restrictedEmptyState).exists,
                    "The restricted empty state is showing for an unrestricted profile.")
   }
+
+  // MARK: - PIN copy when the NAS cannot answer (FR-263 / FR-266)
+
+  private func tapPin(_ app: XCUIApplication, _ digits: String) {
+    for d in digits {
+      requireExists(app.buttons[UIID.Profile.PinPad.key(String(d))], "PIN pad key \(d)")
+      app.buttons[UIID.Profile.PinPad.key(String(d))].tap()
+    }
+  }
+
+  /// Polls the PIN pad's message line until it reads exactly `expected` (nil on timeout: returns
+  /// the last text seen so the failure names it).
+  private func pinMessage(_ app: XCUIApplication, becomes expected: String,
+                          timeout: TimeInterval = UITest.timeout) -> String {
+    let deadline = Date().addingTimeInterval(timeout)
+    var last = element(app, UIID.Profile.PinPad.message).label
+    while Date() < deadline, last != expected {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+      last = element(app, UIID.Profile.PinPad.message).label
+    }
+    return last
+  }
+
+  /// OC-2114 / FR-263 / FR-266. Given a PIN-protected profile and a NAS that stops answering,
+  /// when the user enters a PIN, then the pad says the NAS must be reachable, and it does NOT
+  /// call the PIN wrong.
+  /// Red if: ProfileText.pinFailure maps an unreachable server to anything but pinNeedsNAS.
+  func testPinCheckWithTheNASUnreachableNamesTheNASNotTheCode() throws {
+    server = try StubServer.withProfiles([
+      StubProfile(id: "p-owner", name: "Dana", isOwner: true),
+      StubProfile(id: "p-casey", name: "Casey", hasPin: true),
+    ])
+    let app = UITest.launchAgainst(server)
+    requireExists(app.buttons[UIID.Profile.Picker.profileTile(named: "Casey")],
+                  "Casey's tile on the picker", timeout: UITest.launchTimeout)
+    server.stop()
+
+    app.buttons[UIID.Profile.Picker.profileTile(named: "Casey")].tap()
+    tapPin(app, "1234")
+
+    let shown = pinMessage(app, becomes: "Your NAS needs to be reachable to check this PIN.")
+    XCTAssertEqual(shown, "Your NAS needs to be reachable to check this PIN.",
+                   "The PIN pad did not name the unreachable NAS.")
+    assertMessage(shown, avoids: ["Incorrect"], context: "unreachable-NAS PIN message")
+  }
+
+  /// OC-2114 negative control. Given the same profile and a NAS that ANSWERS "wrong PIN with 2
+  /// tries left", when the user enters a PIN, then the pad shows the server's reason, not the
+  /// unreachable-NAS line (the two causes must stay distinct).
+  /// Red if: pinFailure reports every failure as unreachable, or drops the server's reason.
+  func testPinCheckWithTheNASAnsweringWrongPinShowsTheTriesLeft() throws {
+    server = try StubServer.withProfiles([
+      StubProfile(id: "p-owner", name: "Dana", isOwner: true),
+      StubProfile(id: "p-casey", name: "Casey", hasPin: true),
+    ])
+    server.setRoute("/api/v1/profiles/p-casey/pin/verify",
+                    .init(#"{"error":"pin_incorrect","attemptsRemaining":2}"#, status: 403))
+    let app = UITest.launchAgainst(server)
+    requireExists(app.buttons[UIID.Profile.Picker.profileTile(named: "Casey")],
+                  "Casey's tile on the picker", timeout: UITest.launchTimeout)
+
+    app.buttons[UIID.Profile.Picker.profileTile(named: "Casey")].tap()
+    tapPin(app, "1234")
+
+    let shown = pinMessage(app, becomes: "Incorrect PIN. 2 tries left before this profile locks.")
+    XCTAssertEqual(shown, "Incorrect PIN. 2 tries left before this profile locks.")
+    XCTAssertEqual(server.requests(path: "/api/v1/profiles/p-casey/pin/verify").count, 1,
+                   "Exactly one verify call should have reached the NAS.")
+  }
+
+  // NOT AUTOMATED: ProfileText.saveNeedsNAS via the owner's first-PIN pad (OC-2111).
+  // NewPinView sets `first = nil` inside its submit closure before returning `.reject`, which
+  // flips `.id(first == nil ? "first" : "confirm")` and rebuilds PinPadView, discarding the
+  // `error` @State the reject was about to set. The pad ends on "Choose 4 digits." and neither
+  // the save-failure copy nor "Those PINs didn't match" is ever visible. App bug, reported on
+  // TASK-969; a test for it would fail until the app is fixed.
 }
