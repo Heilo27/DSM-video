@@ -131,14 +131,17 @@ private struct ProfileTileButtonStyle: ButtonStyle {
     let configuration: Configuration
     let scalesLabel: Bool
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-      let lifted = isFocused || configuration.isPressed
-      let scale: CGFloat = isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1)
+      let lifted = ProfileControlLook.isLit(isFocused: isFocused, isPressed: configuration.isPressed,
+                                            isEnabled: isEnabled)
+      let scale: CGFloat = !isEnabled ? 1 : (isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1))
       configuration.label
         .scaleEffect(scalesLabel ? scale : 1)
         .environment(\.profileTileLifted, lifted)
         .environment(\.profileTileScale, scale)
+        .opacity(ProfileControlLook.opacity(isEnabled: isEnabled))
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isFocused)
         .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -514,14 +517,19 @@ private struct PinKeyStyle: ButtonStyle {
     let configuration: Configuration
     let outlined: Bool
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-      let lit = isFocused || configuration.isPressed
+      let lit = ProfileControlLook.isLit(isFocused: isFocused, isPressed: configuration.isPressed,
+                                         isEnabled: isEnabled)
       configuration.label
-        .foregroundStyle(lit ? Color.black : Color.white)
-        .background(Circle().fill(lit ? Color.white : Color.white.opacity(outlined ? 0.1 : 0)))
-        .scaleEffect(isFocused ? 1.1 : 1)
+        .foregroundStyle(lit ? Color.dsBackground : Color.dsTextPrimary)
+        .background(Circle().fill(lit ? Color.dsTextPrimary
+                                      : Color.dsTextPrimary.opacity(outlined ? 0.1 : 0)))
+        .scaleEffect(ProfileControlLook.keyScale(isFocused: isFocused, isEnabled: isEnabled))
+        .opacity(ProfileControlLook.opacity(isEnabled: isEnabled))
         .animation(.easeOut(duration: 0.15), value: isFocused)
+        .animation(.easeOut(duration: 0.15), value: isEnabled)
     }
   }
 }

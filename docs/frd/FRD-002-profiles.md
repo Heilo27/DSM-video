@@ -85,7 +85,8 @@ would protect nothing. The owner may set a first PIN with no prior PIN, because 
 has a session at that point.
 
 **FR-213 [DESIGN]** Selecting a PIN-protected profile requires its PIN, verified **by the server** every time
-the profile is entered. The app never stores or checks PINs itself.
+the profile is entered. The app never stores or checks PINs itself. **[DESIGN, 2026-10-17, TASK-958]** While the
+server is checking, the keypad is disabled and every key is drawn dimmed, so it never looks tappable while taps do nothing.
 
 **FR-214 [DESIGN]** PINs are stored only as a salted, deliberately slow hash; the cost is tuned so one check
 stays well under a second on the slowest supported NAS CPU. A PIN is never stored in plain text, logged or
