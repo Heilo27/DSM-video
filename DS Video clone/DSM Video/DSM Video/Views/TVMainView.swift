@@ -1101,7 +1101,7 @@ private struct TVSettingsView: View {
   @AppStorage(SubtitleStyle.textColorKey) private var subtitleTextColor: String = "#FFFFFF"
   @AppStorage(SubtitleStyle.backgroundOpacityKey) private var subtitleBackgroundOpacity: Double = 0.0
   // Theme selection (Classic / Nitrate). Shared key with the app entry and iOS Settings.
-  @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
+  @AppStorage(ThemeID.storageKey) private var themeIDRaw: String = ThemeID.defaultRaw
   @FocusState private var switchProfileFocused: Bool
 
   var body: some View {

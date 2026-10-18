@@ -17,10 +17,21 @@ enum ThemeID: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The UserDefaults key the chosen theme is stored under. The one home for the key: the
+    /// app entry point, the iOS settings picker and the tvOS settings picker all read it here,
+    /// so a rename cannot leave one of them writing a value the others never read.
+    nonisolated static let storageKey = "dsReel.theme"
+
+    /// The theme a fresh install (or an unrecognised stored value) resolves to.
+    nonisolated static let defaultID: ThemeID = .classic
+
+    /// `defaultID` as the raw string `@AppStorage` stores; the default every reader passes.
+    nonisolated static let defaultRaw: String = defaultID.rawValue
+
     /// Resolve a raw stored value to its concrete Theme. Single source of truth so the
     /// app entry point and any future caller stay in sync as themes are added.
     static func theme(forRaw raw: String) -> Theme {
-        switch ThemeID(rawValue: raw) ?? .classic {
+        switch ThemeID(rawValue: raw) ?? defaultID {
         case .classic:   return .classic
         case .redesign:  return .redesign
         case .cinematic: return .cinematic

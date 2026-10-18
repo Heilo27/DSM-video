@@ -82,7 +82,7 @@ struct DS_Video_cloneApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     // Persisted theme selection. Default = Classic (byte-identical to the prior look).
-    @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
+    @AppStorage(ThemeID.storageKey) private var themeIDRaw: String = ThemeID.defaultRaw
 
     /// Resolve the persisted raw value to a concrete Theme, defaulting to Classic.
     var activeTheme: Theme {
@@ -93,7 +93,7 @@ struct DS_Video_cloneApp: App {
         // TASK-739: register subtitle-appearance defaults before any player reads them.
         SubtitleStyle.registerDefaults()
         // Seed the active theme before any view body reads a token accessor.
-        let raw = UserDefaults.standard.string(forKey: "dsReel.theme") ?? ThemeID.classic.rawValue
+        let raw = UserDefaults.standard.string(forKey: ThemeID.storageKey) ?? ThemeID.defaultRaw
         MainActor.assumeIsolated { ThemeHolder.shared.current = ThemeID.theme(forRaw: raw) }
     }
     // Track the prior phase so we only refresh on a real background→active return,
