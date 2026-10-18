@@ -1107,9 +1107,9 @@ actor LocalStore {
       let item = itemFromStatement(stmt)
 
       if deduplicateByShow {
-        // Deduplicate by show_name when available, fall back to show_folder_id.
-        // show_name may be null for shows where TMDb metadata was never fetched.
-        if let key = (item.showName ?? item.showFolderId).map({ $0.lowercased() }) {
+        // One entry per show, keyed by ItemSummary.showDedupKey (the single definition; the demo
+        // rails use the same one). show_name may be null where TMDb metadata was never fetched.
+        if let key = item.showDedupKey {
           if seenShows.contains(key) { continue }
           seenShows.insert(key)
         }

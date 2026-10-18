@@ -1865,21 +1865,26 @@ final class AppState {
       formatterFrac.date(from: iso) ?? formatter.date(from: iso) ?? .distantPast
     }
     func deduplicated(_ items: [ItemSummary]) -> [ItemSummary] {
+      // FR-021: a show is one entry, the first (newest, the caller sorts first) episode seen.
+      // The show key is ItemSummary.showDedupKey, the same one LocalStore.fetchItems uses.
       var seen = Set<String>()
-      return items.filter { seen.insert($0.title.lowercased() + "|\($0.type)").inserted }
+      return items.filter { item in
+        let key = item.showDedupKey.map { "show|" + $0 } ?? (item.title.lowercased() + "|\(item.type)")
+        return seen.insert(key).inserted
+      }
     }
     func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
       var seen = Set<String>()
       return items.filter { item in
         let key: String
-        if let showName = item.showName, !showName.isEmpty {
-          key = "tv|\(showName.lowercased())"
+        if let showKey = item.showDedupKey {
+          key = "show|\(showKey)"
         } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
           let base = item.title
             .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
             .lowercased()
-          key = "tv|\(base)"
+          key = "show|\(base)"
         } else {
           key = item.title.lowercased() + "|\(item.type)"
         }
