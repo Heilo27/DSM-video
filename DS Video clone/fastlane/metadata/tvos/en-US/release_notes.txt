@@ -3,7 +3,7 @@ Profiles: everyone in the house gets their own, and the kids only see what's rig
 PROFILES
 • Up to four profiles per account, each with its own Continue Watching, watchlist and history.
 • Give each profile an age rating limit. Titles above it are hidden everywhere: Home, libraries, search and Just Added. Unrated titles are hidden on every limited profile.
-• Kids' and Teen profiles browse by collections like Disney, Pixar and Holiday. Adult profiles browse by genre.
+• Kids' profiles browse by collections like Disney, Pixar and DreamWorks instead of genres. Teen profiles get collections alongside genres, and Adult profiles browse by genre.
 • Optional PIN on any profile. Managing profiles always asks for the owner's PIN, and if the owner forgets it, "Forgot PIN" resets it with the DSM password.
 • Apple TV asks who's watching each time it opens, since it's shared by the whole room.
 
