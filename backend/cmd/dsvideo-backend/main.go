@@ -6005,12 +6005,13 @@ func showGroupFolders(paths []string, showNames []sql.NullString, tvRoot string)
 	return out
 }
 
-// showIDGroupSeparator qualifies a show id when one folder holds more than one show.
+// showIDGroupSeparator is the qualifier in a "folder::groupKey" show id.
 //
 // "::" cannot appear in a folder name on any filesystem this server runs on, and the id is
-// already rejected if it contains "/" or "..", so this is unambiguous to split on. Kept as a
-// constant because the emit side and the resolve side must agree exactly — two spellings of
-// this would make qualified ids un-openable, which is worse than the duplicate it fixes.
+// already rejected if it contains "/" or "..", so this is unambiguous to split on. The list
+// no longer EMITS qualified ids: grouping resolves one show per folder, so a folder is never
+// ambiguous (TASK-1027, handleTVShowsList). Only the read side remains, so an id a client
+// persisted while the list did emit them still opens.
 const showIDGroupSeparator = "::"
 
 // splitShowID separates a show id into its folder and its optional group qualifier.
@@ -9684,39 +9685,19 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(showMap[sortedKeys[i]].displayName) < strings.ToLower(showMap[sortedKeys[j]].displayName)
 	})
 
-	// IDS ARE UNIQUE BY CONSTRUCTION, not by hoping the folder names differ.
-	//
-	// The id was info.folderName, and one folder can legitimately hold TWO shows —
-	// Daredevil/ carries 39 episodes of "Marvel's Daredevil" and 9 of "Daredevil: Born
-	// Again". Both groups then emitted the same id, and a client keyed on id renders one
-	// and silently loses the other (this is how Star Trek: The Next Generation disappeared
-	// from a real Apple TV — a collision elsewhere in the list ate it).
-	//
-	// The folder stays the id whenever it is unambiguous, which is the overwhelming
-	// majority and keeps every persisted id stable. Only a genuinely ambiguous folder gets
-	// a qualified id, and only the extra shows in it — so the first show in Daredevil/ keeps
-	// "Daredevil" and the second becomes "Daredevil::daredevil: born again". The detail
-	// endpoint splits on "::" and matches on the group key, so both resolve correctly.
-	folderUses := map[string]int{}
-	for _, key := range sortedKeys {
-		folderUses[showMap[key].folderName]++
-	}
-
+	// IDS ARE UNIQUE BY CONSTRUCTION. groupEpisodesByShow resolves ONE show name per folder
+	// (resolveFolderShowNames, a majority vote), so every folder maps to exactly one group key
+	// and no two groups here can carry the same folderName. A folder holding two shows
+	// (Daredevil/ with "Marvel's Daredevil" and "Daredevil: Born Again") lists as ONE show
+	// under the majority name. This used to qualify a second show in the same folder as
+	// "folder::key"; that branch could not be reached once grouping became per-folder, and
+	// was removed (TASK-1027). splitShowID still reads such ids, which clients may have
+	// persisted. dedupeByID below remains the guard if this invariant is ever broken.
 	shows := make([]map[string]any, 0, len(sortedKeys))
-	emittedFolder := map[string]bool{}
 	for _, key := range sortedKeys {
 		info := showMap[key]
 
 		showID := info.folderName
-		if folderUses[info.folderName] > 1 {
-			// Ambiguous folder. The first group out keeps the bare folder name so the
-			// common id does not churn; the rest are qualified with their group key,
-			// which is unique across the whole library by definition.
-			if emittedFolder[info.folderName] {
-				showID = info.folderName + showIDGroupSeparator + key
-			}
-			emittedFolder[info.folderName] = true
-		}
 		// id stays the FOLDER name, deliberately. The merged group key is the lowercased
 		// TMDb show name, which differs from the folder for nearly every matched show — so
 		// emitting it would invalidate every persisted id in the wild (watchlist, Top Shelf,
