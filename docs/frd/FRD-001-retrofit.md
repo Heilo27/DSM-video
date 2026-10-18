@@ -455,6 +455,9 @@ logo and avatar gradients all derive from it, so it cannot drift between themes.
 
 **FR-110 [STATED]** — Sign-in collects server address (IP **or** QuickConnect ID), username, and password;
 successful sign-in reaches library content. *Derivation:* design-spec B1.
+*Clarified 2026-10-18 (TASK-1015):* "localhost", with or without a port, is a server address, never a
+QuickConnect ID: the app connects to it directly and does not look it up with QuickConnect. A name made
+of letters, digits, hyphens and underscores with no dot or port is otherwise read as a QuickConnect ID.
 **FR-111 [STATED]** — QuickConnect and direct HTTPS are both supported connection paths, including for
 remote access.
 *Clarified 2026-10-17 (TASK-1030):* a device that signed in with a QuickConnect ID, or that received one

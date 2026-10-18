@@ -45,8 +45,11 @@ enum QuickConnectResolver {
       s = String(s.dropLast(qcDomain.count))
       return isQuickConnectIDShaped(s) ? s : nil
     }
-    // Bare ID: no dots or colons (e.g. "mynas")
-    if !s.contains(".") && !s.contains(":") && isQuickConnectIDShaped(s) { return s }
+    // Bare ID: no dots or colons (e.g. "mynas"). "localhost" has the same shape but is a host
+    // name on every device (TASK-1015, FR-110): looked up as an ID it went to Synology and came
+    // back "not found" instead of being connected to.
+    if !s.contains(".") && !s.contains(":") && isQuickConnectIDShaped(s)
+        && s.lowercased() != "localhost" { return s }
     return nil
   }
 
