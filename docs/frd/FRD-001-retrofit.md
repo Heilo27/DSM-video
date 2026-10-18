@@ -281,7 +281,8 @@ titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, 
 its newest synced titles stands in, under the same rules. *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
-player asks for 20; that divergence is open under TASK-920.
+player sends no `limit` on Just Added or Suggested and takes the server's default for each, so its Just
+Added rail is the same 16 as the native apps and the number lives only on the server. [TASK-920]
 **FR-089 [STATED]** — Search is reachable from the Home screen on iPhone and searches the **whole**
 library, not one section, across both movies and TV shows.
 **FR-090 [STATED]** — Search distinguishes "no results for <query>" from a connection error, and the

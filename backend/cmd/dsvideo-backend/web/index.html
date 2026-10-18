@@ -1937,8 +1937,10 @@
           // library; deriving either here would repeat the mistake the native clients made
           // — a rail that renders confidently stale content whenever the client's view of
           // the library falls behind, with nothing reporting a problem.
-          api('/api/v1/just-added?limit=20').catch(() => ({ items: [] })),
-          api('/api/v1/suggested?limit=20').catch(() => ({ genre: '', items: [] }))
+          // No `limit`: how many titles a rail holds is the server's rule too (FR-088 caps
+          // Just Added at 16), so the browser, iPhone and Apple TV show the same rail.
+          api('/api/v1/just-added').catch(() => ({ items: [] })),
+          api('/api/v1/suggested').catch(() => ({ genre: '', items: [] }))
         ]);
 
         const items = moviesData.items || [];
