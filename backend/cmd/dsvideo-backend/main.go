@@ -4003,16 +4003,21 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		return liveProbe
 	}
 
-	// TASK-1003: the realtime remux (handleRemuxStream) writes ONE fragmented MP4 with
-	// one audio stream, so a web title with a second language or a commentary track
-	// would lose it. Such a title goes to the HLS audio renditions (FR-061) instead,
-	// where every track is its own selectable rendition. A probe that cannot be read
-	// leaves the remux in place: playable, as before.
-	webRemuxWouldDropAudio := false
-	if isWebClient && playbackMode == transcode.RemuxOnly {
+	// TASK-1003 / TASK-1028: on the web plane a single served file gives the browser ONE
+	// reachable audio track, whichever way it is served. The realtime remux
+	// (handleRemuxStream) writes one fragmented MP4 with one audio stream; a direct-played
+	// file keeps all its tracks, but a browser <video> plays only the default one and,
+	// outside Safari, has no way to switch. So a web title with two or more audio tracks
+	// goes to the HLS audio renditions (FR-061) instead, where every track is its own
+	// selectable rendition. A direct-playable file goes there as RemuxOnly: its video is
+	// copied, never re-encoded. A probe that cannot be read leaves the single-file path
+	// in place: playable, as before.
+	webSingleFileDropsAudio := false
+	if isWebClient && (playbackMode == transcode.DirectPlay || playbackMode == transcode.RemuxOnly) {
 		if pr := livePlaybackProbe(); pr != nil && len(pr.AudioStreams) >= 2 {
-			webRemuxWouldDropAudio = true
-			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of the single-audio remux", itemID, len(pr.AudioStreams))
+			webSingleFileDropsAudio = true
+			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of single-file %s", itemID, len(pr.AudioStreams), playbackMode)
+			playbackMode = transcode.RemuxOnly
 		}
 	}
 
@@ -4086,7 +4091,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Determine playback kind based on mode
 	if playbackMode == transcode.DirectPlay {
 		ps.Kind = "direct"
-	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webRemuxWouldDropAudio {
+	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webSingleFileDropsAudio {
 		// For web clients needing remux (MKV+H264 or MP4+H264+AC3),
 		// stream a remuxed fragmented MP4 in real-time through ffmpeg.
 		// This is much faster than full HLS generation (just copies video stream).

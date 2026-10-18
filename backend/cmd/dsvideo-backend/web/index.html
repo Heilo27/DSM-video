@@ -1373,6 +1373,16 @@
       <h2 class="player-title" id="player-title">Video Title</h2>
       <div style="display:flex;align-items:center;gap:12px">
         <div class="player-menus">
+          <div class="player-menu-wrap" id="audio-menu-wrap" style="display:none">
+            <button class="player-menu-btn" onclick="togglePlayerMenu(event, 'audio-menu')" title="Audio">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/>
+              </svg>
+              <span id="audio-menu-label">Audio</span>
+            </button>
+            <div class="player-menu" id="audio-menu"></div>
+          </div>
           <div class="player-menu-wrap" id="subtitle-menu-wrap" style="display:none">
             <button class="player-menu-btn" id="subtitle-menu-btn" onclick="togglePlayerMenu(event, 'subtitle-menu')" title="Subtitles">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2953,6 +2963,8 @@
       // Track playback context for quality / subtitle switching.
       // A quality switch passes an explicit resume position via state.playback.pendingResume.
       const pendingResume = (state.playback && state.playback.pendingResume) || 0;
+      // A quality switch keeps the audio track the viewer picked (TASK-1028).
+      const pendingAudio = state.playback ? state.playback.pendingAudio : null;
 
       try {
         let pbUrl = `/api/v1/items/${itemId}/playback?client=web`;
@@ -2979,6 +2991,11 @@
         //   forcedActive — forced translation track currently auto-showing (NOT "subs on").
         //   hlsIdByJson  — map JSON index -> hls.js subtitle track id (resolved from manifest).
         const subs = data.subtitles || [];
+        // Audio model (TASK-1028): audioTracks[] is the server's list, in source order,
+        // labelled and defaulted exactly as the HLS master's audio renditions, so JSON
+        // index i is rendition i (hls.js audioTracks[i], Safari video.audioTracks[i]).
+        const audioTracks = data.audioTracks || [];
+        const defaultAudio = Math.max(0, audioTracks.findIndex(a => a && a.default));
         state.playback = {
           itemId,
           title,
@@ -2989,7 +3006,10 @@
           forcedActive: false,
           hlsIdByJson: {},
           isHls: url.includes('.m3u8'),
-          pendingResume: 0
+          audioTracks,
+          selectedAudio: (pendingAudio != null && pendingAudio < audioTracks.length) ? pendingAudio : defaultAudio,
+          pendingResume: 0,
+          pendingAudio: null
         };
         buildPlayerMenus(data);
 
@@ -3011,6 +3031,15 @@
               if (typeof state.hls.subtitleDisplay !== 'undefined') state.hls.subtitleDisplay = false;
               video.play();
             });
+            // Audio renditions: start on the chosen track, and follow hls.js when it
+            // settles on one so the menu's tick is the track actually playing.
+            state.hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => applyAudioTrack());
+            state.hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_e, d) => {
+              if (state.playback && d && typeof d.id === 'number') {
+                state.playback.selectedAudio = d.id;
+                renderAudioMenu();
+              }
+            });
             // Once hls.js has parsed the SUBTITLES renditions, map them back to our
             // JSON tracks (by URL / language) and apply the forced auto-enable.
             state.hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
@@ -3019,6 +3048,7 @@
             });
           } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             video.src = url;
+            video.addEventListener('loadedmetadata', () => applyAudioTrack(), { once: true });
             if (resumeAt) video.currentTime = resumeAt;
             video.play();
           }
@@ -3091,7 +3121,9 @@
       // Hide player overlay menus
       document.getElementById('subtitle-menu').classList.remove('visible');
       document.getElementById('quality-menu').classList.remove('visible');
+      document.getElementById('audio-menu').classList.remove('visible');
       document.getElementById('subtitle-menu-wrap').style.display = 'none';
+      document.getElementById('audio-menu-wrap').style.display = 'none';
       // Reset the CC button's translation state so it doesn't carry across plays.
       const subBtn = document.getElementById('subtitle-menu-btn');
       const subLabel = document.getElementById('subtitle-menu-label');
@@ -3112,6 +3144,9 @@
     }
 
     function buildPlayerMenus(data) {
+      // --- Audio (TASK-1028) ---
+      renderAudioMenu();
+
       // --- Subtitles (D) ---
       renderSubtitleMenu();
 
@@ -3310,6 +3345,57 @@
       return lang;
     }
 
+    // ---- Audio track menu (TASK-1028, FR-061) ----
+    // The server sends a title with two or more audio tracks to the web as HLS audio
+    // renditions, so switching is always a rendition switch: hls.js audioTrack, or the
+    // native audioTracks list where the browser plays HLS itself (Safari). A single
+    // track has nothing to choose, so the menu shows only for two or more.
+    function renderAudioMenu() {
+      const wrap = document.getElementById('audio-menu-wrap');
+      const menu = document.getElementById('audio-menu');
+      const pb = state.playback;
+      const tracks = (pb && pb.audioTracks) || [];
+      if (!pb || !pb.isHls || tracks.length < 2) {
+        wrap.style.display = 'none';
+        menu.innerHTML = '';
+        return;
+      }
+      wrap.style.display = '';
+      const check = `<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>`;
+      let html = `<div class="player-menu-heading">Audio</div>`;
+      tracks.forEach((a, i) => {
+        const label = (a && a.label) || `Track ${i + 1}`;
+        html += `<button class="player-menu-item ${i === pb.selectedAudio ? 'active' : ''}" onclick="selectAudio(${i})">
+          <span>${escapeHtml(label)}</span>${check}</button>`;
+      });
+      menu.innerHTML = html;
+    }
+
+    function selectAudio(index) {
+      document.getElementById('audio-menu').classList.remove('visible');
+      const pb = state.playback;
+      if (!pb || index < 0 || index >= pb.audioTracks.length) return;
+      pb.selectedAudio = index;
+      applyAudioTrack();
+      renderAudioMenu();
+    }
+
+    // Puts the player on pb.selectedAudio. A no-op until the renditions are known.
+    function applyAudioTrack() {
+      const pb = state.playback;
+      if (!pb) return;
+      const i = pb.selectedAudio;
+      if (state.hls) {
+        const n = (state.hls.audioTracks || []).length;
+        if (i < n && state.hls.audioTrack !== i) state.hls.audioTrack = i;
+        return;
+      }
+      const native = document.getElementById('video-player').audioTracks;
+      if (native && i < native.length) {
+        for (let t = 0; t < native.length; t++) native[t].enabled = (t === i);
+      }
+    }
+
     function selectQuality(quality) {
       document.getElementById('quality-menu').classList.remove('visible');
       if (!state.playback) return;
@@ -3319,6 +3405,7 @@
       const resumeAt = Math.floor(video.currentTime || 0);
       const { itemId, title } = state.playback;
       state.playback.pendingResume = resumeAt;
+      state.playback.pendingAudio = state.playback.selectedAudio;
       playVideo(itemId, title, quality);
     }
 
