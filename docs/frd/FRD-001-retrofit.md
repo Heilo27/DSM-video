@@ -465,6 +465,20 @@ product copy, and is flagged as such.
 **FR-117 [STATED]** — **Pairing:** a device signs in by entering a short on-screen code shown on an
 already-signed-in device; the account and server connection carry over with no password or server
 address re-entry. This works in both directions (iOS→tvOS and tvOS→iOS).
+*Clarified 2026-10-17 (TASK-972):* the code works on a device that has never connected to any server.
+The signed-in device's ways to reach the server (its home address, its away address, its QuickConnect
+ID) travel with the code. The new device finds the server on its own local network, redeems the code
+there, and keeps both the address that answered and the addresses that came with the code, so it can
+reach the server away from home afterwards. First-time pairing therefore needs the new device on the
+same network as the server; away from home, a never-connected device signs in with the server address
+instead. A device that already has an address uses that address and does not search, so a mistyped
+address fails as a mistyped address. If no server is found, the message says so; if Local Network
+access is off, it says that (FR-115, TASK-949). A wrong code is reported as a wrong code, never as an
+invalid server address (FR-118). On iPhone and iPad the code from a signed-in Apple TV is entered on the
+sign-in screen under "Have a code from your Apple TV?"; on Apple TV the code from a signed-in phone is
+entered on its sign-in screen. A code is single-use and short-lived, and once 20 wrong codes have been
+tried from any devices while codes are outstanding, every outstanding code stops working and a new one must be generated. Codes and
+session tokens never appear in logs (FR-144).
 **FR-118 [INFERRED]** — A wrong, expired, or already-used code is rejected with a message naming the
 code, leaves the device unpaired, creates no partial session, and allows a retry with a fresh code.
 **FR-119 [INFERRED]** — A session established by sign-in or pairing survives relaunch; the user is not

@@ -543,6 +543,27 @@ struct PairingCodeExchangeRequest: Encodable {
   let code: String
 }
 
+/// How the device that generated a pairing code reaches the server (TASK-972, FR-117). Sent
+/// with the generate request and handed back by the exchange, so a device that found the
+/// server on its local network can still reach it from anywhere else. Every field is
+/// optional: the server drops anything that is not a plain address, and an older server
+/// ignores the body and answers with no `server` at all.
+struct PairingServerInfo: Codable, Equatable {
+  var quickConnectId: String?
+  var lanAddress: String?
+  var wanAddress: String?
+
+  var isEmpty: Bool { quickConnectId == nil && lanAddress == nil && wanAddress == nil }
+}
+
+/// The pairing exchange's answer: a session, plus the generating device's connection details
+/// when it sent any.
+struct PairingExchangeResponse: Decodable {
+  let token: String
+  let user: LoginResponse.User
+  let server: PairingServerInfo?
+}
+
 // MARK: - Delta Sync
 
 struct ServerVersion: Decodable {

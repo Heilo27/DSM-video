@@ -250,6 +250,13 @@ final class AppState {
     try await QuickConnectResolver.resolveCandidates(id: $0)
   }
 
+  /// How a device with no server configured finds one to redeem a pairing code on (TASK-972,
+  /// FR-117). Production browses the local network for `_dsvideo._tcp`; a test answers with
+  /// its stub server, or with nothing.
+  var discoverPairingServers: @MainActor () async -> (urls: [URL], denied: Bool) = {
+    await AppState.browseForPairingServers(window: .seconds(4))
+  }
+
   var sessionToken: String? {
     didSet {
       guard !isDemoMode else {
@@ -764,6 +771,18 @@ final class AppState {
     return reordered
   }
 
+  /// Records the address a sign-in (password or pairing code) just succeeded on, so
+  /// reconnect() has a real URL to probe and the next launch tries it first rather than
+  /// re-discovering it from whatever order QuickConnect happens to return. Relay candidates
+  /// are skipped: relay URLs are ephemeral edge addresses.
+  private func adoptWinningAddress(_ candidate: QuickConnectResolver.Candidate) {
+    guard !candidate.requiresTunnelCookie else { return }
+    baseURL = candidate.url.absoluteString
+    useHTTPS = candidate.url.scheme == "https"
+    if let port = candidate.url.port { defaultPort = port }
+    lastGoodAddress = candidate.url.absoluteString
+  }
+
   func login() async {
     // TASK-780: re-entrancy guard. login() writes shared @Observable auth state
     // (sessionToken, api, baseURL, useHTTPS, defaultPort). Two concurrent logins — e.g. the
@@ -872,16 +891,7 @@ final class AppState {
           sessionToken = resp.token
           clearNetworkError()
           api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
-          // Update baseURL to the winning candidate so reconnect() has a real URL to probe.
-          // Skip relay candidates — relay URLs are ephemeral edge addresses.
-          if !candidate.requiresTunnelCookie {
-            baseURL = candidate.url.absoluteString
-            self.useHTTPS = candidate.url.scheme == "https"
-            if let port = candidate.url.port { self.defaultPort = port }
-            // Remember the winner so the next launch tries it first rather than
-            // re-discovering it from whatever order QuickConnect happens to return.
-            lastGoodAddress = candidate.url.absoluteString
-          }
+          adoptWinningAddress(candidate)
           if !savedPassword.isEmpty {
             Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
           }
@@ -1502,7 +1512,7 @@ final class AppState {
     }
 
     do {
-      let resp = try await api.generatePairingCode()
+      let resp = try await api.generatePairingCode(server: pairingServerInfo())
       pairingCode = resp.code
       pairingCodeExpiresInSeconds = resp.expiresInSeconds
     } catch {
@@ -1510,6 +1520,64 @@ final class AppState {
     }
   }
 
+  /// This device's way to the server, sent with a pairing code so the device that redeems it
+  /// can reach the server from anywhere, not only the network it found it on (TASK-972).
+  /// Values are the user's own settings; the server drops anything that is not an address.
+  func pairingServerInfo() -> PairingServerInfo {
+    let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+    let wan = wanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+    // After a QuickConnect sign-in the ID lives in wanAddress (ServerSetupView.connect) and
+    // baseURL holds the winning URL, so look in all three.
+    var info = PairingServerInfo(
+      quickConnectId: [raw, wan, lan].lazy.compactMap { QuickConnectResolver.extractBareID(from: $0) }.first
+    )
+    func direct(_ address: String) -> String? {
+      address.isEmpty || QuickConnectResolver.extractBareID(from: address) != nil ? nil : address
+    }
+    info.lanAddress = direct(lan)
+    info.wanAddress = direct(wan)
+    if let current = direct(raw) {
+      if Self.isPrivateLANAddress(current) {
+        if info.lanAddress == nil { info.lanAddress = current }
+      } else if info.wanAddress == nil {
+        info.wanAddress = current
+      }
+    }
+    return info
+  }
+
+  /// Shown when a device with no server configured looks for one on its network and finds none.
+  static let pairingNoServerFoundMessage =
+    "Couldn't find your DS Video server on this network. Make sure this device is on the same Wi-Fi as your server, or sign in with your server address."
+
+  /// Browses the local network for DS Video servers for up to `window`, returning as soon as
+  /// one answers (plus a short settle so a second interface can arrive) or access is refused.
+  static func browseForPairingServers(window: Duration) async -> (urls: [URL], denied: Bool) {
+    let discovery = BonjourDiscovery(noResultsTimeout: window)
+    discovery.startScan()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: window)
+    var settleUntil: ContinuousClock.Instant?
+    while clock.now < deadline, !Task.isCancelled {
+      if discovery.status == .denied { break }
+      if !discovery.servers.isEmpty {
+        if settleUntil == nil { settleUntil = clock.now.advanced(by: .milliseconds(300)) }
+        if let settle = settleUntil, clock.now >= settle { break }
+      }
+      try? await Task.sleep(for: .milliseconds(150))
+    }
+    // stopScan() clears `servers`: read them first.
+    let urls = discovery.servers.compactMap { URL(string: $0.baseURL) }
+    let denied = discovery.status == .denied
+    discovery.stopScan()
+    return (urls, denied)
+  }
+
+  /// Redeems a pairing code (FR-117). Works on a device that has never connected: with no
+  /// address configured it finds the server on the local network, and on success it keeps
+  /// the address that answered plus the connection details the generating device sent, so
+  /// it can reach the server again from anywhere (TASK-972).
   func exchangePairingCode(_ code: String) async {
     // TASK-780: share login()'s re-entrancy guard. This path also mutates the shared auth
     // state (sessionToken, api, baseURL) and uses the same isLoggingIn flag, so a concurrent
@@ -1524,58 +1592,84 @@ final class AppState {
     defer { isLoggingIn = false }
 
     let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    let nothingConfigured = raw.isEmpty
+      && lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-    // If baseURL is a QuickConnect ID, resolve candidates and try each with a
-    // short timeout — same strategy as login() so external networks work.
-    if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-      let candidates: [QuickConnectResolver.Candidate]
+    // Configured addresses: the same LAN → WAN → QuickConnect cascade sign-in uses (TASK-974
+    // reasons included). Discovery only for a device with nothing configured, so a typo'd
+    // address fails as a typo instead of silently pairing with whatever is on the network.
+    let candidates: [QuickConnectResolver.Candidate]
+    let quickConnectFailure: QuickConnectError?
+    var discoveryDenied = false
+    if nothingConfigured {
+      let found = await discoverPairingServers()
+      candidates = found.urls.map { .init(url: $0, requiresTunnelCookie: false) }
+      quickConnectFailure = nil
+      discoveryDenied = found.denied
+      dlog.info(.auth, "pairing: no server configured — discovery found \(candidates.count)\(found.denied ? " (local network denied)" : "")")
+    } else {
+      (candidates, quickConnectFailure) = await resolveCandidateSet()
+    }
+
+    guard !candidates.isEmpty else {
+      if nothingConfigured {
+        loginError = discoveryDenied ? LocalNetworkPermission.deniedMessage : Self.pairingNoServerFoundMessage
+      } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
+        loginError = quickConnectFailure?.userMessage ?? QuickConnectError.noAddress(id: qcID).userMessage
+      } else {
+        loginError = Self.invalidServerAddressMessage
+      }
+      return
+    }
+
+    var lastError: Error?
+    var localNetworkRefused = false
+    for candidate in candidates {
+      let timeout: TimeInterval = candidate.requiresTunnelCookie ? 15
+        : Self.isPrivateLANAddress(candidate.url.absoluteString) ? 4 : 8
       do {
-        candidates = try await quickConnectResolve(qcID)
+        var client = makeClient(baseURL: candidate.url, token: nil)
+        client.usesTunnelCookie = candidate.requiresTunnelCookie
+        let resp = try await client.exchangePairingCode(code: code, timeoutInterval: timeout)
+        sessionToken = resp.token
+        clearNetworkError()
+        api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+        adoptWinningAddress(candidate)
+        adoptPairedServerInfo(resp.server, winner: candidate)
+        startHeartbeatTimer()
+        dlog.info(.auth, "pairing OK via \(candidate.url.host ?? "?") token=\(DiagnosticLog.redact(resp.token))")
+        return
       } catch {
-        // Same reasons and sentences as sign-in (TASK-974): an unknown ID is not a network fault.
-        loginError = (error as? QuickConnectError)?.userMessage
-          ?? QuickConnectError.unreachable(id: qcID, code: (error as? URLError)?.code ?? .unknown).userMessage
-        return
+        dlog.warn(.auth, "pairing via \(candidate.url.host ?? "?") failed — \((error as? APIError)?.userMessage ?? error.localizedDescription)")
+        if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
+        lastError = error
+        // The server answered and refused the code: every other address is the same server,
+        // would refuse it too, and would count one more wrong code against it.
+        if let apiErr = error as? APIError, apiErr.serverReached { break }
       }
-      guard !candidates.isEmpty else {
-        loginError = QuickConnectError.noAddress(id: qcID).userMessage
-        return
-      }
-      var lastError: Error?
-      for candidate in candidates {
-        do {
-          var client = makeClient(baseURL: candidate.url, token: nil)
-          client.usesTunnelCookie = candidate.requiresTunnelCookie
-          let resp = try await client.exchangePairingCode(code: code, timeoutInterval: 7)
-          sessionToken = resp.token
-          api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
-          startHeartbeatTimer()
-          dlog.info(.auth, "pairing OK via QuickConnect \(candidate.url.host ?? "?") token=\(DiagnosticLog.redact(resp.token))")
-          return
-        } catch {
-          dlog.warn(.auth, "pairing via \(candidate.url.host ?? "?") failed — \((error as? APIError)?.userMessage ?? error.localizedDescription)")
-          lastError = error
-        }
-      }
-      dlog.error(.auth, "pairing FAILED — all QuickConnect candidates exhausted")
-      loginError = Self.pairingErrorMessage(lastError)
-      return
     }
+    dlog.error(.auth, "pairing FAILED — \(candidates.count) candidate(s) tried")
+    let serverAnswered = (lastError as? APIError)?.serverReached ?? false
+    loginError = !serverAnswered && localNetworkRefused
+      ? LocalNetworkPermission.deniedMessage
+      : Self.pairingErrorMessage(lastError)
+  }
 
-    // TASK-817: same LAN guard as updateAPI()/buildCandidates — never force https on a bare private IP.
-    let pairingEffectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
-    guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: pairingEffectiveHTTPS, defaultPort: defaultPort) else {
-      loginError = Self.invalidServerAddressMessage
-      return
+  /// Keeps the generating device's connection details so this one can reach the server once
+  /// it leaves the network it paired on. Never overwrites an address the user set (the same
+  /// rule login() applies to the LAN address QuickConnect reports).
+  private func adoptPairedServerInfo(_ info: PairingServerInfo?, winner: QuickConnectResolver.Candidate) {
+    if lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      if let lan = info?.lanAddress, !lan.isEmpty {
+        lanAddress = lan
+      } else if !winner.requiresTunnelCookie, Self.isPrivateLANAddress(winner.url.absoluteString) {
+        lanAddress = winner.url.absoluteString
+      }
     }
-
-    do {
-      let resp = try await makeClient(baseURL: serverURL, token: nil)
-        .exchangePairingCode(code: code)
-      sessionToken = resp.token
-      startHeartbeatTimer()
-    } catch {
-      loginError = Self.pairingErrorMessage(error)
+    if wanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+       let wan = [info?.wanAddress, info?.quickConnectId].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+      wanAddress = wan
     }
   }
 

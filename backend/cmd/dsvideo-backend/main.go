@@ -183,6 +183,8 @@ type Server struct {
 	// Pairing codes: code → pairingEntry (tvOS ↔ iOS device pairing)
 	pairingMu    sync.Mutex
 	pairingCodes map[string]pairingEntry
+	// Wrong codes since the last revocation, counted while a live code exists (pairing.go).
+	pairingFailures int
 
 	// Rate limiter for unauthenticated auth endpoints (login, pairing exchange).
 	// Keyed by remote IP; value is *authRateEntry. Each entry carries its own mutex —
@@ -232,6 +234,8 @@ type pairingEntry struct {
 	username  string
 	expiresAt time.Time
 	exchanged bool
+	// How the generating device reaches this server, returned on exchange (TASK-972).
+	server pairingServerInfo
 }
 
 type PlaySession struct {
@@ -662,6 +666,10 @@ func main() {
 				if now2.After(entry.expiresAt) {
 					delete(s.pairingCodes, code)
 				}
+			}
+			if len(s.pairingCodes) == 0 {
+				// Nothing left to guess at: stale wrong-code counts do not carry into the next code.
+				s.pairingFailures = 0
 			}
 			s.pairingMu.Unlock()
 
@@ -2449,8 +2457,10 @@ const (
 )
 
 // handlePairingGenerate — POST /api/v1/auth/pairing/generate
-// Requires authentication. Called by tvOS to obtain a short code that an iOS
-// device can type in to receive a session token for the same account.
+// Requires authentication. Called by a signed-in device (iOS or tvOS) to obtain a short code
+// another device types in to receive a session for the same account. The optional JSON body
+// carries how this device reaches the server (pairingServerInfo, TASK-972); the exchange
+// hands it to the new device.
 func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	if u.ID == "" {
@@ -2458,26 +2468,52 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a 6-digit numeric code using crypto/rand for uniform distribution.
-	codeBuf := make([]byte, 4)
-	if _, err := rand.Read(codeBuf); err != nil {
-		log.Printf("[pairing] crypto/rand failed: %v", err)
-		writeErr(w, http.StatusInternalServerError, "internal_error")
+	info, err := decodePairingGenerateBody(w, r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	// Map 4 random bytes to a number in [0, 1_000_000) then zero-pad to 6 digits.
-	n := (uint32(codeBuf[0])<<24 | uint32(codeBuf[1])<<16 | uint32(codeBuf[2])<<8 | uint32(codeBuf[3])) % 1_000_000
-	code := fmt.Sprintf("%06d", n)
+	info, dropped := info.sanitized()
+	if len(dropped) > 0 {
+		log.Printf("[pairing] ignored invalid connection field(s) %v from user=%s", dropped, u.Username)
+	}
 
 	entry := pairingEntry{
 		userID:    u.ID,
 		username:  u.Username,
 		expiresAt: time.Now().Add(pairingCodeTTL),
+		server:    info,
 	}
 
+	// Generate a 6-digit numeric code using crypto/rand for uniform distribution, never one
+	// that is already outstanding: overwriting another account's code would hand whoever
+	// redeems it THIS account's session.
+	var code string
 	s.pairingMu.Lock()
-	s.pairingCodes[code] = entry
+	for attempt := 0; attempt < 16 && code == ""; attempt++ {
+		codeBuf := make([]byte, 4)
+		if _, err := rand.Read(codeBuf); err != nil {
+			s.pairingMu.Unlock()
+			log.Printf("[pairing] crypto/rand failed: %v", err)
+			writeErr(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		// Map 4 random bytes to a number in [0, 1_000_000) then zero-pad to 6 digits.
+		n := (uint32(codeBuf[0])<<24 | uint32(codeBuf[1])<<16 | uint32(codeBuf[2])<<8 | uint32(codeBuf[3])) % 1_000_000
+		candidate := fmt.Sprintf("%06d", n)
+		if _, taken := s.pairingCodes[candidate]; !taken {
+			code = candidate
+		}
+	}
+	if code != "" {
+		s.pairingCodes[code] = entry
+	}
 	s.pairingMu.Unlock()
+	if code == "" {
+		log.Printf("[pairing] no free code after 16 draws")
+		writeErr(w, http.StatusServiceUnavailable, "pairing_busy")
+		return
+	}
 
 	log.Printf("[pairing] generated code for user=%s expires=%s", u.Username, entry.expiresAt.Format(time.RFC3339))
 
@@ -2507,10 +2543,12 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
+	revoked := -1
 	s.pairingMu.Lock()
 	entry, ok := s.pairingCodes[req.Code]
 	if ok {
-		if entry.exchanged || time.Now().After(entry.expiresAt) {
+		if entry.exchanged || now.After(entry.expiresAt) {
 			// Mark as consumed or detect expiry — either way, delete and deny.
 			delete(s.pairingCodes, req.Code)
 			ok = false
@@ -2519,9 +2557,15 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 			s.pairingCodes[req.Code] = entry
 		}
 	}
+	if !ok {
+		revoked = s.recordPairingFailureLocked(now)
+	}
 	s.pairingMu.Unlock()
 
 	if !ok {
+		if revoked >= 0 {
+			log.Printf("[pairing] %d wrong codes: revoked %d outstanding code(s)", pairingMaxFailures, revoked)
+		}
 		writeErr(w, http.StatusUnauthorized, "invalid_or_expired_code")
 		return
 	}
@@ -2537,14 +2581,20 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 
 	// Return the same shape as loginResponse so the iOS client can reuse its
 	// existing LoginResponse decoder (token + user object).
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"token": token,
 		"user": map[string]any{
 			"id":          entry.userID,
 			"username":    entry.username,
 			"displayName": entry.username,
 		},
-	})
+	}
+	// How the generating device reaches this server (TASK-972): the new device found us on
+	// its LAN, and needs these to keep working away from it.
+	if !entry.server.isEmpty() {
+		resp["server"] = entry.server
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // -------------------------

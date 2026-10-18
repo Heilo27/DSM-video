@@ -87,8 +87,15 @@ struct SetupConnectScreen: View {
   @State private var showHelp: Bool = false
   @State private var isReturningUser: Bool = false
 
+  #if os(iOS)
+  // Pairing with a code shown on a signed-in Apple TV (FR-117, TASK-972).
+  @State private var showPairingCode: Bool = false
+  @State private var pairingCode: String = ""
+  @State private var isPairing: Bool = false
+  #endif
+
   @FocusState private var focusedField: Field?
-  private enum Field: Hashable { case address, username, password }
+  private enum Field: Hashable { case address, username, password, pairingCode }
 
   private var trimmedAddress: String {
     address.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -134,6 +141,10 @@ struct SetupConnectScreen: View {
             .frame(maxWidth: .infinity, minHeight: 44)
           }
           .buttonStyle(.plain)
+
+          #if os(iOS)
+          pairingCodeSection
+          #endif
         }
         .padding(24)
       }
@@ -491,6 +502,101 @@ struct SetupConnectScreen: View {
     .accessibilityIdentifier(A11y.Setup.connectButton)
   }
 
+  #if os(iOS)
+  /// Sign in with a code shown on an Apple TV that is already signed in (FR-117). The other
+  /// direction, phone → TV, lives in Settings. No address is needed on a device that has
+  /// never connected: AppState finds the server on this network and keeps the addresses the
+  /// TV sent with the code.
+  private var pairingCodeSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Button {
+        withAnimation(.easeInOut(duration: 0.2)) { showPairingCode.toggle() }
+        if showPairingCode { focusedField = .pairingCode }
+      } label: {
+        HStack(spacing: 6) {
+          Image(systemName: "appletv")
+          Text("Have a code from your Apple TV?")
+          Image(systemName: showPairingCode ? "chevron.up" : "chevron.down")
+            .font(.footnote.weight(.semibold))
+        }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(Color.dsAccent)
+        .frame(maxWidth: .infinity, minHeight: 44)
+      }
+      .buttonStyle(.plain)
+      .accessibilityIdentifier(A11y.Setup.pairingCodeToggle)
+
+      if showPairingCode {
+        Text("On an Apple TV that's already signed in, choose Pair iOS Device at the top of Home, then enter the 6-digit code it shows.")
+          .font(.caption)
+          .foregroundStyle(Color.dsTextMuted)
+          .fixedSize(horizontal: false, vertical: true)
+
+        HStack(spacing: 12) {
+          TextField("6-digit code", text: $pairingCode)
+            .keyboardType(.numberPad)
+            .textContentType(.oneTimeCode)
+            .font(.title3.monospacedDigit())
+            .focused($focusedField, equals: .pairingCode)
+            .onChange(of: pairingCode) { _, new in
+              let digits = String(new.filter(\.isNumber).prefix(6))
+              if digits != new { pairingCode = digits }
+            }
+            .accessibilityLabel("Pairing code")
+            .accessibilityIdentifier(A11y.Setup.pairingCodeField)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 52)
+            .background(Color.dsSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+          Button {
+            Task { await pair() }
+          } label: {
+            ZStack {
+              if isPairing {
+                ProgressView().tint(Color.dsAccentOn)
+              } else {
+                Text("Pair")
+                  .font(.headline)
+                  .foregroundStyle(canPair ? Color.dsAccentOn : Color.dsTextMuted)
+              }
+            }
+            .frame(minWidth: 88, minHeight: 52)
+            .background(canPair && !isPairing ? Color.dsAccent : Color.dsSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          }
+          .buttonStyle(.plain)
+          .disabled(!canPair || isPairing)
+          .accessibilityLabel(isPairing ? "Pairing, please wait" : "Pair")
+          .accessibilityIdentifier(A11y.Setup.pairButton)
+        }
+      }
+    }
+  }
+
+  private var canPair: Bool { pairingCode.count == 6 && !isConnecting }
+
+  private func pair() async {
+    guard canPair, !isPairing else { return }
+    focusedField = nil
+    isPairing = true
+    connectError = nil
+    defer { isPairing = false }
+
+    // An address typed above is used as typed (a typo fails as a typo). Left empty on a
+    // device that has never connected, AppState looks for the server on this network.
+    if !trimmedAddress.isEmpty { appState.baseURL = trimmedAddress }
+
+    await appState.exchangePairingCode(pairingCode)
+
+    // exchangePairingCode always leaves a user-facing reason on failure; show it as is.
+    if appState.sessionToken == nil {
+      connectError = appState.loginError ?? "That code didn't work. Check it and try again."
+    }
+    // On success RootView transitions on sessionToken.
+  }
+  #endif
+
   // MARK: Behaviour
 
   private func prefill() {
@@ -531,6 +637,9 @@ struct SetupConnectScreen: View {
   /// Skipped while a connect attempt is in flight — that path owns connectError and sets
   /// it from the same source anyway.
   private func adoptPendingLoginError() {
+    #if os(iOS)
+    if isPairing { return }   // pair() owns connectError while it runs
+    #endif
     guard !isConnecting, let err = appState.loginError, !err.isEmpty else { return }
     connectError = friendlyError(err)
   }

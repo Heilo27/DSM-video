@@ -1619,17 +1619,14 @@ struct SettingsView: View {
         Text("Optional. Set both and the app picks whichever works from where you are — your local address at home, your remote one everywhere else. Leave these alone if one address already works.")
       }
 
-      // Pair Apple TV — the GENERATE half of the pairing flow.
+      // Pair Apple TV — the GENERATE half of the pairing flow (FR-117).
       //
-      // /auth/pairing/generate requires a bearer token; /auth/pairing/exchange does not. So a
-      // signed-in phone mints the code and a signed-out Apple TV redeems it. That asymmetry
-      // fixes the direction of the whole flow — it can only ever run phone → TV, never the
-      // reverse, because a first-time TV has no token to generate with.
-      //
-      // This section is where the code comes from. TVPairingView's code field is where it
-      // goes. (A PairingCodeView existed for the opposite direction — phone redeeming a
-      // TV-generated code — which the token requirement makes impossible; it was unreachable
-      // dead code and has been removed.)
+      // /auth/pairing/generate requires a bearer token; /auth/pairing/exchange does not. So
+      // whichever device is SIGNED IN mints the code and the signed-out one redeems it. Both
+      // directions work: this section mints for a new Apple TV (redeemed in TVPairingView),
+      // and a signed-in TV's "Pair iOS Device" mints for a new phone (redeemed in
+      // ServerSetupView's "Have a code from your Apple TV?"). The code carries this device's
+      // connection details, so the redeeming device needs no address typed (TASK-972).
       #if os(iOS)
       if appState.sessionToken != nil {
         Section {
