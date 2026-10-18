@@ -57,6 +57,14 @@ their files for this app; the app reads what is there.
   and the original is only ever moved aside (never deleted by the worker) and reclaimed after
   the retention window (default 7 days, at least the newest three kept). There is no
   time-of-day schedule: idleness is the schedule. [TASK-1001]
+  The manual bulk-conversion scripts (tools/convert-library.sh, scripts/sprint-convert.sh)
+  convert only files the scanner indexes, taking that list from the server itself
+  (`dsvideo-backend --list-video-files`), so they can never disagree with it about formats,
+  disc rips or the backup folder; with no usable server binary they stop rather than
+  guess. The parallel sprint script only stream-copies H.264 and leaves every other codec
+  to the worker; it files each original under its own path in the backup folder (never
+  overwriting a backup already there), dated the day it was moved so the retention window
+  starts then. [TASK-1025]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.

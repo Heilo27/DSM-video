@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -257,6 +258,20 @@ type PlaySession struct {
 }
 
 func main() {
+	// A listing for the conversion scripts (TASK-1025), answered before any database or
+	// server setup: it reads only the environment, for the originals dir, and the disk.
+	if len(os.Args) > 1 && os.Args[1] == "--list-video-files" {
+		out := bufio.NewWriter(os.Stdout)
+		err := listVideoFiles(out, os.Stderr, os.Args[2:], loadConfig().OriginalsDir)
+		if ferr := out.Flush(); err == nil {
+			err = ferr
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dsvideo-backend: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	log.Printf("DS Video backend starting... (build=%s)", BuildVersion)
 	cfg := loadConfig()
 	log.Printf("Config: listen=%s db=%s movies=%s tv=%s",
@@ -7904,6 +7919,84 @@ func isDiscRipFolder(dir string) bool {
 	return strings.EqualFold(name, "BDMV") && !strings.EqualFold(filepath.Base(filepath.Dir(dir)), "AVCHD")
 }
 
+// scanSkipsDir reports whether the library scanner never descends into dir, and whether
+// that is because dir is a disc rip (the walker logs those, once). This and scanIndexesFile
+// are the whole of the scanner's file filter; the walker and --list-video-files (the
+// conversion scripts' file list, TASK-1025) both use them, so neither can drift.
+func scanSkipsDir(dir, originalsDir string) (skip, discRip bool) {
+	// TASK-755: never descend into the auto-normalize backup tree. Originals moved there
+	// after conversion must NOT be re-indexed (they'd resurrect the non-DirectPlay rows we
+	// just replaced). Match both the configured originals dir and the conventional
+	// basename so a custom DSVIDEO_ORIGINALS_DIR is also skipped.
+	if originalsDir != "" && filepath.Clean(dir) == filepath.Clean(originalsDir) {
+		return true, false
+	}
+	if filepath.Base(dir) == "_dsvideo_originals" {
+		return true, false
+	}
+	// TASK-998, TASK-1026 (FRD-000 M1): a disc rip's VIDEO_TS/AUDIO_TS (DVD) or BDMV
+	// (Blu-ray) holds title FRAGMENTS (VTS_01_1.VOB ..., STREAM/00001.m2ts ...) that only
+	// play as a sequence or through the disc's playlists. Indexing each as a movie filled
+	// the library with unplayable rows, and joining them needs a concat pass too costly
+	// for NAS hardware. Skip the folder whole.
+	if isDiscRipFolder(dir) {
+		return true, true
+	}
+	return false, false
+}
+
+// scanIndexesFile reports whether the scanner indexes a file with this name (indexed), and
+// whether its extension is a video format at all (known; a known format it does not index
+// is logged by the walker).
+func scanIndexesFile(name string) (indexed, known bool) {
+	// TASK-755: skip in-progress conversion temps (".<stem>.converting.mp4"). Indexing a
+	// half-written temp created the ghost-row bug; the dotfile name is the marker.
+	if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".converting.mp4") {
+		return false, false
+	}
+	indexed, known = scanVideoExt[strings.ToLower(filepath.Ext(name))]
+	return indexed, known
+}
+
+// listVideoFiles writes every file under roots that the library scanner would index, each
+// path NUL-terminated (a file name can hold a newline), using the scanner's own filter.
+// It backs `dsvideo-backend --list-video-files ROOT...`: tools/convert-library.sh and
+// scripts/sprint-convert.sh take their file list from it instead of carrying a copy of the
+// extension list and the disc-rip rule, which had already drifted (TASK-1025). A folder it
+// cannot read is reported on stderr and skipped; an unreadable root is an error, so a
+// script never mistakes a failed listing for an empty library.
+func listVideoFiles(w io.Writer, stderr io.Writer, roots []string, originalsDir string) error {
+	if len(roots) == 0 {
+		return errors.New("--list-video-files needs at least one root folder")
+	}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				if path == root {
+					return fmt.Errorf("root %q unreadable: %w", root, err)
+				}
+				fmt.Fprintf(stderr, "list-video-files: cannot read %q: %v (skipped)\n", path, err)
+				return nil
+			}
+			if d.IsDir() {
+				if skip, _ := scanSkipsDir(path, originalsDir); skip {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if indexed, _ := scanIndexesFile(d.Name()); !indexed {
+				return nil
+			}
+			_, err = io.WriteString(w, path+"\x00")
+			return err
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
 // the 5-minute scan does not repeat the same line forever.
 var scanSkippedVideoLogged sync.Map
@@ -8129,40 +8222,20 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		}
 
 		if d.IsDir() {
-			// TASK-755: never descend into the auto-normalize backup tree. Originals
-			// moved there after conversion must NOT be re-indexed (they'd resurrect the
-			// non-DirectPlay rows we just replaced). Match both the configured originals
-			// dir and the conventional basename so a custom DSVIDEO_ORIGINALS_DIR is also
-			// skipped.
-			if s.cfg.OriginalsDir != "" && filepath.Clean(path) == filepath.Clean(s.cfg.OriginalsDir) {
-				return filepath.SkipDir
-			}
-			if d.Name() == "_dsvideo_originals" {
-				return filepath.SkipDir
-			}
-			// TASK-998, TASK-1026 (FRD-000 M1): a disc rip's VIDEO_TS/AUDIO_TS (DVD) or BDMV
-			// (Blu-ray) holds title FRAGMENTS (VTS_01_1.VOB ..., STREAM/00001.m2ts ...) that
-			// only play as a sequence or through the disc's playlists. Indexing each as a
-			// movie filled the library with unplayable rows, and joining them needs a concat
-			// pass too costly for NAS hardware. Skip the folder whole and say so, once.
-			if isDiscRipFolder(path) {
-				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
-					log.Printf("scan: library %s: skipping disc-rip folder %q — its video files are fragments of the disc's titles that do not play on their own; this server does not index disc rips", libraryID, path)
+			if skip, discRip := scanSkipsDir(path, s.cfg.OriginalsDir); skip {
+				if discRip {
+					if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
+						log.Printf("scan: library %s: skipping disc-rip folder %q — its video files are fragments of the disc's titles that do not play on their own; this server does not index disc rips", libraryID, path)
+					}
 				}
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		// TASK-755: skip in-progress conversion temps (".<stem>.converting.mp4"). Indexing
-		// a half-written temp created the ghost-row bug; the dotfile name is the marker.
-		if strings.HasPrefix(d.Name(), ".") && strings.HasSuffix(d.Name(), ".converting.mp4") {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if indexed, known := scanVideoExt[ext]; !indexed {
+		if indexed, known := scanIndexesFile(d.Name()); !indexed {
 			if known {
 				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
-					log.Printf("scan: library %s: skipping %q — %s is a video format this server does not index", libraryID, path, ext)
+					log.Printf("scan: library %s: skipping %q — %s is a video format this server does not index", libraryID, path, strings.ToLower(filepath.Ext(d.Name())))
 				}
 			}
 			return nil

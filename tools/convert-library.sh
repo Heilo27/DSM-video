@@ -57,6 +57,9 @@ find_bin() {
 }
 FFMPEG="${FFMPEG:-$(find_bin ffmpeg)}"
 FFPROBE="${FFPROBE:-$(find_bin ffprobe)}"
+# The server decides which files are videos (TASK-1025): this script converts exactly
+# what the library scanner indexes, so it carries no extension list of its own.
+BACKEND="${DSVIDEO_BACKEND:-$(find_bin dsvideo-backend)}"
 
 # ---- helpers ----------------------------------------------------------------
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
@@ -161,19 +164,35 @@ convert_one() {
   return 0
 }
 
+# Write the scanner's file list for ROOTS (NUL-separated) to $1. Fails loudly rather than
+# returning an empty list: a missing backend, one too old to have the flag (it would try
+# to start the server instead), or an unreadable root all stop the run.
+# (Same contract as list_video_files in scripts/sprint-convert.sh.)
+list_video_files() {
+  local out="$1"
+  [ -n "$BACKEND" ] && [ -x "$BACKEND" ] || { echo "dsvideo-backend not found (set DSVIDEO_BACKEND)"; return 1; }
+  grep -q -- '--list-video-files' "$BACKEND" || { echo "$BACKEND predates --list-video-files; update DSVideoServer"; return 1; }
+  # shellcheck disable=SC2086  # ROOTS is a space-separated list, split on purpose
+  "$BACKEND" --list-video-files $ROOTS > "$out" || { echo "listing video files under $ROOTS failed"; return 1; }
+}
+
 # ---- main -------------------------------------------------------------------
 [ -n "$FFMPEG" ]  || { echo "ffmpeg not found"; exit 1; }
 [ -n "$FFPROBE" ] || { echo "ffprobe not found"; exit 1; }
+FILE_LIST="$(mktemp "${TMPDIR:-/tmp}/convert-library.XXXXXX")" || exit 1
+trap 'rm -f "$FILE_LIST"' EXIT
+list_video_files "$FILE_LIST" || exit 1
 mkdir -p "$BACKUP_DIR"
 : > "$LOG" 2>/dev/null || true
 
 log "=== convert-library start ==="
-log "ffmpeg=$FFMPEG"
+log "ffmpeg=$FFMPEG backend=$BACKEND"
 log "mode=$MODE roots=$ROOTS backup=$BACKUP_DIR max_height=$MAX_HEIGHT preset=$PRESET crf=$CRF"
 
 declare -i n_skip=0 n_remux=0 n_encode=0 n_fail=0 n_total=0
 
-# Find all video files under the roots.
+# Every file the library scanner indexes under the roots (disc-rip folders, conversion
+# temps and the server's backup tree are already left out by the scanner's own rules).
 while IFS= read -r -d '' f; do
   n_total+=1
   # Skip our own temp/backup artifacts.
@@ -196,11 +215,7 @@ while IFS= read -r -d '' f; do
   else
     n_fail+=1
   fi
-done < <(find $ROOTS -type f \( \
-      -iname '*.mkv' -o -iname '*.avi' -o -iname '*.mp4' -o -iname '*.mov' \
-      -o -iname '*.m4v' -o -iname '*.wmv' -o -iname '*.flv' -o -iname '*.ts' \
-      -o -iname '*.webm' -o -iname '*.mpg' -o -iname '*.mpeg' -o -iname '*.m2ts' \
-   \) -print0 2>/dev/null)
+done < "$FILE_LIST"
 
 log "=== done: scanned=$n_total skipped=$n_skip remuxed=$n_remux encoded=$n_encode failed=$n_fail ==="
 log "Originals preserved under: $BACKUP_DIR"
