@@ -30,6 +30,8 @@ enum A11y {
     static let passwordField = "setup.password"
     static let connectButton = "setup.connect"
     static let errorText = "setup.error"
+    /// The "How to install the server" link under the error, shown only when no server answered (FR-152).
+    static let installLink = "setup.installLink"
     static let revealPasswordButton = "setup.revealPassword"
     /// Keyboard-accessory Done. The only way to reach Connect once the keyboard is up
     /// and the form is too short to scroll (TASK-906).

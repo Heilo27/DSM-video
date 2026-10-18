@@ -150,6 +150,9 @@ struct TVLoginView: View {
                   .foregroundStyle(Color.dsError)
                   .multilineTextAlignment(.leading)
                   .frame(maxWidth: 480, alignment: .leading)
+                if appState.loginErrorOffersInstall {
+                  TVInstallHelp()
+                }
               }
 
               Button {
@@ -164,7 +167,7 @@ struct TVLoginView: View {
                 // multi-candidate cascade — up to ~15s of a user with a CORRECT password
                 // reading "Incorrect username or password" while it was succeeding.
                 appState.loginError = nil
-                Task { await appState.login() }
+                Task { await appState.login(userInitiated: true) }
               } label: {
                 if appState.isLoggingIn {
                   ProgressView().tint(Color.dsAccentOn)

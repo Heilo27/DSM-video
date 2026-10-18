@@ -312,6 +312,9 @@ struct TVPairingView: View {
           .foregroundStyle(Color.dsError)
           .multilineTextAlignment(.center)
           .frame(maxWidth: 700)
+        if appState.loginErrorOffersInstall {
+          TVInstallHelp()
+        }
       }
 
       Button {

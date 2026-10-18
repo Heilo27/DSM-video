@@ -458,6 +458,22 @@ struct SetupConnectScreen: View {
   }
 
   private func errorRow(_ message: String) -> some View {
+    VStack(alignment: .leading, spacing: .dsSpaceSM) {
+      errorBox(message)
+      // FR-152: only when no DSVideo server answered. A wrong password, a permission refusal or
+      // a Local Network denial is not fixed by installing anything, so it gets no link.
+      if appState.loginErrorOffersInstall {
+        Link(destination: RecommendedServer.downloadURL) {
+          Label(ServerInstallGuide.linkTitle, systemImage: "arrow.up.right.square")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Color.dsAccent)
+        }
+        .accessibilityIdentifier(A11y.Setup.installLink)
+      }
+    }
+  }
+
+  private func errorBox(_ message: String) -> some View {
     HStack(alignment: .top, spacing: .dsSpaceSM) {
       Image(systemName: "exclamationmark.circle")
         .foregroundStyle(Color.dsError)
@@ -671,7 +687,7 @@ struct SetupConnectScreen: View {
       }
     }
 
-    await appState.login()
+    await appState.login(userInitiated: true)
 
     if let err = appState.loginError {
       connectError = friendlyError(err)
@@ -780,6 +796,13 @@ struct ConnectionHelpView: View {
             icon: "globe",
             title: "DDNS or a static IP",
             detail: "If you've already set up DDNS or port forwarding on your router, enter that hostname or address — for example mynas.duckdns.org, or 203.0.113.5:8080 with an explicit port."
+          )
+
+          HelpTopic(
+            icon: "square.and.arrow.down",
+            title: ServerInstallGuide.topicTitle,
+            detail: ServerInstallGuide.topicDetail,
+            steps: ServerInstallGuide.steps.map(\.detail)
           )
 
           HelpTopic(
