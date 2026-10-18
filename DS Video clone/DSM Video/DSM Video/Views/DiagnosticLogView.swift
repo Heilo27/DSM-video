@@ -50,7 +50,7 @@ struct DiagnosticLogView: View {
             }
           }
           .padding(.horizontal)
-          .padding(.vertical, 12)
+          .padding(.vertical, .dsSpaceMD)
         }
       }
     }
@@ -81,11 +81,11 @@ struct DiagnosticLogView: View {
   private var header: some View {
     let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
     let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-    return VStack(alignment: .leading, spacing: 4) {
+    return VStack(alignment: .leading, spacing: .dsSpaceXS) {
       Text("v\(v) (\(b))  •  \(appState.baseURL)")
         .font(.system(.headline, design: .monospaced))
         .foregroundStyle(.white)
-      HStack(spacing: 12) {
+      HStack(spacing: .dsSpaceMD) {
         // Plain Button rather than Toggle(.button): the .button toggle style does not exist
         // on tvOS. A Button reads its state in the label, works with the focus engine, and
         // behaves identically on both platforms.
@@ -128,8 +128,8 @@ struct DiagnosticLogView: View {
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal)
-    .padding(.top, 12)
-    .padding(.bottom, 8)
+    .padding(.top, .dsSpaceMD)
+    .padding(.bottom, .dsSpaceSM)
   }
 
   private func cycleFilter() {

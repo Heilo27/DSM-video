@@ -28,7 +28,7 @@ struct OfflineBanner: View {
 
   var body: some View {
     if let message {
-      HStack(spacing: 8) {
+      HStack(spacing: .dsSpaceSM) {
         Image(systemName: Self.symbol(isOffline: isOffline))
           .font(.footnote.weight(.semibold))
           .accessibilityHidden(true)
@@ -36,8 +36,8 @@ struct OfflineBanner: View {
           .font(.footnote.weight(.semibold))
       }
       .foregroundStyle(.white)
-      .padding(.horizontal, 16)
-      .padding(.vertical, 8)
+      .padding(.horizontal, .dsSpaceLG)
+      .padding(.vertical, .dsSpaceSM)
       .frame(maxWidth: .infinity)
       .background(Color.dsSurfaceRaised)
       .transition(.move(edge: .top).combined(with: .opacity))
@@ -67,8 +67,8 @@ struct ConnectionIndicator: View {
         Label(text, systemImage: OfflineBanner.symbol(isOffline: isOffline))
           .font(.callout.weight(.semibold))
           .foregroundStyle(.white)
-          .padding(.horizontal, 24)
-          .padding(.vertical, 12)
+          .padding(.horizontal, .dsSpaceXXL)
+          .padding(.vertical, .dsSpaceMD)
           .background(Capsule().fill(Color.dsSurfaceRaised))
           .transition(.opacity)
           .accessibilityElement(children: .combine)
@@ -99,7 +99,7 @@ struct TransientNoticeBanner: View {
           .font(.footnote.weight(.semibold))
           .foregroundStyle(.white)
           .multilineTextAlignment(.center)
-          .padding(.horizontal, 16)
+          .padding(.horizontal, .dsSpaceLG)
           .padding(.vertical, 10)
           .background(Capsule().fill(Color.dsSurfaceRaised))
           .transition(.move(edge: .bottom).combined(with: .opacity))

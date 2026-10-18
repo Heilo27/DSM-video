@@ -426,6 +426,36 @@ These components are used across multiple screens — build as reusable SwiftUI 
 
 ---
 
+## Spacing scale (`CGFloat.dsSpace*`, `App/DSSpacing.swift`)
+
+Padding and stack spacing read a named scale instead of bare numbers: `.padding(.dsSpaceLG)`,
+`HStack(spacing: .dsSpaceMD)`. The scale is theme-independent (spacing is layout, not skin).
+
+| Token | pt | Typical use |
+|-------|----|-------------|
+| `dsSpaceXXS` | 2 | Hairline gap between text lines |
+| `dsSpaceXS` | 4 | Icon-to-label gap, tight stacks |
+| `dsSpaceSM` | 8 | Gap inside a control or small row |
+| `dsSpaceMD` | 12 | Related elements in a card or form row |
+| `dsSpaceLG` | 16 | Default content inset and section gap |
+| `dsSpaceXL` | 20 | Roomy control padding |
+| `dsSpaceXXL` | 24 | Gap between groups |
+| `dsSpaceXXXL` | 32 | Gap between sections |
+| `dsSpaceJumbo` / `Huge` / `Giant` / `Colossal` | 40 / 48 / 64 / 80 | 10-foot gaps, insets and hero clearance |
+| `dsSpaceTitleSafe` | 60 | tvOS title-safe inset (constant) |
+| `dsSpaceGutter` | 16 iOS, 60 tvOS | Screen-edge inset |
+| `dsSpaceCompact` | 8 iOS, 16 tvOS | Tight control padding and gaps |
+
+Only `dsSpaceGutter` and `dsSpaceCompact` differ by platform; every other step is the same number
+on both. Off-scale literals (5, 6, 9, 10, 14, 18, 28, 56, 72, 120) and zero are not tokens: a value
+with no role is a layout one-off. The swap preserved layout exactly (only literals equal to a step
+were replaced).
+
+The app's `AccentColor` asset is the Classic accent `#D1262F`, so system chrome that reads the
+asset (tint, selection) matches `Color.dsAccent` before a theme loads.
+
+---
+
 ## Design Token Swift Package (Optional Refactor)
 
 If time permits, move all tokens into a `DSVideoDesignSystem` micro-package:
@@ -435,7 +465,7 @@ DSVideoDesignSystem/
   Sources/
     Colors.swift      — all Color extensions
     Typography.swift  — all Font extensions
-    Spacing.swift     — padding/gap constants
+    Spacing.swift     — padding/gap constants (today: App/DSSpacing.swift)
     Components/
       PosterCard.swift
       SectionHeader.swift

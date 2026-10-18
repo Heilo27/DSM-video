@@ -36,14 +36,14 @@ struct TVMainView: View {
           // (FR-137). Not focusable, so it never moves focus off the control just used.
           .overlay(alignment: .bottom) {
             TransientNoticeBanner(message: Bindable(appState).watchlistNotice)
-              .padding(.bottom, 60)
+              .padding(.bottom, .dsSpaceTitleSafe)
           }
           // The connection state (FR-130, FR-132, FR-141). On the root rather than the header
           // so it stays visible over pushed detail screens; top-centre sits in the header's
           // open space. Clears with the flags, so reconnecting needs no re-sign-in.
           .overlay(alignment: .top) {
             ConnectionIndicator(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
-              .padding(.top, 40)
+              .padding(.top, .dsSpaceJumbo)
           }
       }
     }
@@ -77,7 +77,7 @@ struct TVLoginView: View {
           // Left: Brand panel
           VStack(alignment: .leading, spacing: 0) {
             Spacer()
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: .dsSpaceLG) {
               RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
                 .fill(Color.dsAccent)
                 .frame(width: 72, height: 72)
@@ -105,13 +105,13 @@ struct TVLoginView: View {
           // Right: Sign-in form
           VStack(spacing: 0) {
             Spacer()
-            VStack(alignment: .leading, spacing: 32) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXXL) {
               Text("Sign In")
                 .font(.dsTVTitle)
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
 
-              VStack(spacing: 16) {
+              VStack(spacing: .dsSpaceLG) {
                 // No HTTPS toggle. login() overwrites useHTTPS from whichever candidate
                 // wins (AppState.swift:575) and buildCandidates() forces http on private
                 // IPs regardless — so the switch never controlled anything. Asking for it
@@ -211,7 +211,7 @@ private struct TVHomeView: View {
         ScrollView(.vertical, showsIndicators: false) {
           VStack(alignment: .leading, spacing: 56) {
             if let loadError = appState.homeError, appState.homeAllRailsEmpty {
-              VStack(spacing: 32) {
+              VStack(spacing: .dsSpaceXXXL) {
                 DSContentUnavailable(
             title: "Unable to Load",
             systemImage: "exclamationmark.triangle",
@@ -224,8 +224,8 @@ private struct TVHomeView: View {
                 } label: {
                   Label("Retry", systemImage: "arrow.clockwise")
                     .font(.dsTVHeadline)
-                    .padding(.horizontal, 48)
-                    .padding(.vertical, 20)
+                    .padding(.horizontal, .dsSpaceHuge)
+                    .padding(.vertical, .dsSpaceXL)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.dsAccent)
@@ -235,13 +235,13 @@ private struct TVHomeView: View {
                 } label: {
                   Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
                     .font(.dsTVHeadline)
-                    .padding(.horizontal, 48)
-                    .padding(.vertical, 20)
+                    .padding(.horizontal, .dsSpaceHuge)
+                    .padding(.vertical, .dsSpaceXL)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.dsSurfaceRaised)
               }
-              .padding(.top, 60)
+              .padding(.top, .dsSpaceTitleSafe)
             } else {
               // Continue Watching rail
               if !appState.homeContinueWatching.isEmpty {
@@ -302,7 +302,7 @@ private struct TVHomeView: View {
                   // FR-265: on an age-limited profile the ceiling may be why nothing shows.
                   RestrictedEmptyState(profile: profile, place: ProfileText.homeEmptyPlace)
                     .foregroundStyle(.white)
-                    .padding(.top, 40)
+                    .padding(.top, .dsSpaceJumbo)
                 } else {
                   DSContentUnavailable(
                     title: "No Libraries",
@@ -310,7 +310,7 @@ private struct TVHomeView: View {
                     description: "No video libraries were found on your NAS."
                   )
                   .foregroundStyle(.white)
-                  .padding(.top, 40)
+                  .padding(.top, .dsSpaceJumbo)
                 }
                 Button("Refresh") { Task { await appState.homeLoad() } }
                   .buttonStyle(.borderedProminent)
@@ -331,8 +331,8 @@ private struct TVHomeView: View {
           }
           // Reduced from 100: the header actions now sit in a .safeAreaInset above this
           // content rather than floating over it, so the old clearance is no longer needed.
-          .padding(.top, 24)
-          .padding(.bottom, 80)
+          .padding(.top, .dsSpaceXXL)
+          .padding(.bottom, .dsSpaceColossal)
         }
       }
       .navigationDestination(for: String.self) { itemID in
@@ -353,7 +353,7 @@ private struct TVHomeView: View {
       // the author never saw. A plain focusable HStack inside the scroll content is
       // positioned by us, respects title-safe, and joins the normal focus order.
       .safeAreaInset(edge: .top, spacing: 0) {
-        HStack(spacing: 24) {
+        HStack(spacing: .dsSpaceXXL) {
           // The active profile; selecting it opens the picker (FR-260). Absent for a
           // single-profile account (FR-205).
           ActiveProfileBadge(size: 56)
@@ -383,8 +383,8 @@ private struct TVHomeView: View {
             .accessibilityLabel("Pair iOS Device")
           }
         }
-        .padding(.horizontal, 60)   // title-safe
-        .padding(.vertical, 24)
+        .padding(.horizontal, .dsSpaceTitleSafe)   // title-safe
+        .padding(.vertical, .dsSpaceXXL)
         .background(Color.dsBackground.opacity(0.95))
       }
     }
@@ -504,11 +504,11 @@ private struct TVLandscapeRail: View {
   let items: [ItemSummary]
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 24) {
+    VStack(alignment: .leading, spacing: .dsSpaceXXL) {
       Text(title)
         .font(.dsTVSectionTitle)
         .foregroundStyle(.white)
-        .padding(.horizontal, 60)
+        .padding(.horizontal, .dsSpaceTitleSafe)
         .accessibilityAddTraits(.isHeader)
 
       ScrollView(.horizontal, showsIndicators: false) {
@@ -572,7 +572,7 @@ private struct TVLandscapeRail: View {
       // the focus effect to grow into. Trailing stays a full 60 — nothing grows off the
       // right edge, and a partially visible card there is a valid scroll cue.
       .padding(.leading, 60 - tvRailFocusInset)
-      .padding(.trailing, 60)
+      .padding(.trailing, .dsSpaceTitleSafe)
     }
   }
 }
@@ -599,7 +599,7 @@ private struct TVLibraryRail: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 24) {
+    VStack(alignment: .leading, spacing: .dsSpaceXXL) {
       // Library header — navigates to full grid
       NavigationLink {
         if isTVLibrary {
@@ -623,7 +623,7 @@ private struct TVLibraryRail: View {
       // the button's own frame started at x=0 and tvOS drew the focus highlight around
       // that frame — 14px into the left overscan band, where a real TV clips it. Padding
       // the button itself keeps the highlight inside title-safe too.
-      .padding(.horizontal, 60)
+      .padding(.horizontal, .dsSpaceTitleSafe)
       .accessibilityLabel(library.title)
       .accessibilityHint("Opens full library")
 
@@ -631,7 +631,7 @@ private struct TVLibraryRail: View {
         Text(error)
           .font(.footnote)
           .foregroundStyle(Color.dsTextMuted)
-          .padding(.horizontal, 60)
+          .padding(.horizontal, .dsSpaceTitleSafe)
       }
 
       // TASK-844: when the library has no content and no error, the ForEach below produced
@@ -642,13 +642,13 @@ private struct TVLibraryRail: View {
         if let profile = appState.activeProfile, profile.isRestricted {
           // FR-265: an empty rail on an age-limited profile names the level, not "no videos".
           RestrictedEmptyState(profile: profile, place: library.title)
-            .padding(.horizontal, 60)
+            .padding(.horizontal, .dsSpaceTitleSafe)
         } else {
           Text("No videos yet")
             .font(.dsTVBodyLarge)
             .foregroundStyle(Color.dsTextMuted)
-            .padding(.horizontal, 60)
-            .padding(.vertical, 12)
+            .padding(.horizontal, .dsSpaceTitleSafe)
+            .padding(.vertical, .dsSpaceMD)
         }
       } else {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -678,7 +678,7 @@ private struct TVLibraryRail: View {
         // Leading is 60 - tvRailFocusInset so the two sum to 60 — see the matching note on
         // TVLandscapeRail.
         .padding(.leading, 60 - tvRailFocusInset)
-        .padding(.trailing, 60)
+        .padding(.trailing, .dsSpaceTitleSafe)
       }
     }
     // TASK-432: stagger per-rail fetches to avoid N concurrent requests on home load.
@@ -821,7 +821,7 @@ private struct TVShowPortraitCard: View {
       }
       .frame(width: cardWidth, height: cardHeight)
 
-      VStack(alignment: .leading, spacing: 2) {
+      VStack(alignment: .leading, spacing: .dsSpaceXXS) {
         Text(show.title)
           .font(.dsTVCaptionEmphasis)
           .foregroundStyle(.white)
@@ -945,7 +945,7 @@ private struct TVLandscapeCard: View {
       .frame(width: cardWidth, height: cardHeight)
 
       // Title + year below card
-      VStack(alignment: .leading, spacing: 2) {
+      VStack(alignment: .leading, spacing: .dsSpaceXXS) {
         Text(item.title)
           .font(.dsTVCaptionEmphasis)
           .foregroundStyle(.white)
@@ -1047,7 +1047,7 @@ private struct TVPortraitCard: View {
       }
       .frame(width: cardWidth, height: cardHeight)
 
-      VStack(alignment: .leading, spacing: 2) {
+      VStack(alignment: .leading, spacing: .dsSpaceXXS) {
         Text(item.title)
           .font(.dsTVCaptionEmphasis)
           .foregroundStyle(.white)
@@ -1217,15 +1217,15 @@ private struct TVSearchView: View {
       ZStack {
         Color.dsBackground.ignoresSafeArea()
 
-        VStack(alignment: .leading, spacing: 40) {
+        VStack(alignment: .leading, spacing: .dsSpaceJumbo) {
           // Prominent search field — full-width, large text, auto-focuses keyboard
           TextField("Search movies and TV shows…", text: $searchText)
             .font(.dsTVField)
             .foregroundStyle(.white)
-            .padding(.horizontal, 48)
-            .padding(.vertical, 24)
+            .padding(.horizontal, .dsSpaceHuge)
+            .padding(.vertical, .dsSpaceXXL)
             .background(Color.dsSurfaceHigh, in: RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
-            .padding(.horizontal, 60)
+            .padding(.horizontal, .dsSpaceTitleSafe)
             .focused($searchFieldFocused)
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
@@ -1264,7 +1264,7 @@ private struct TVSearchView: View {
             } else if hasSearched && results.isEmpty {
               // TASK-801: give the empty-results region a focusable action so focus
               // has a home here (not only the search field / toolbar).
-              VStack(spacing: 24) {
+              VStack(spacing: .dsSpaceXXL) {
                 DSContentUnavailable(
             title: "No Results",
             systemImage: "magnifyingglass",
@@ -1304,7 +1304,7 @@ private struct TVSearchView: View {
                         ItemDetailView(itemID: item.id, fallbackTitle: item.title)
                       }
                     } label: {
-                      HStack(spacing: 16) {
+                      HStack(spacing: .dsSpaceLG) {
                         if let posterID = item.posterImageId {
                           AuthenticatedImage(
                             url: appState.api.imageURL(id: posterID, width: 120),
@@ -1319,7 +1319,7 @@ private struct TVSearchView: View {
                             .fill(Color.dsSurfaceRaised)
                             .frame(width: 60, height: 90)
                         }
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: .dsSpaceXS) {
                           Text(item.title)
                             .font(.dsTVSectionTitle)
                             .foregroundStyle(.white)
@@ -1331,13 +1331,13 @@ private struct TVSearchView: View {
                         }
                         Spacer()
                       }
-                      .padding(.vertical, 16)
-                      .padding(.horizontal, 60)
+                      .padding(.vertical, .dsSpaceLG)
+                      .padding(.horizontal, .dsSpaceTitleSafe)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
                     .accessibilityHint("Opens video details")
-                    Divider().background(Color.dsBorderSubtle).padding(.horizontal, 60)
+                    Divider().background(Color.dsBorderSubtle).padding(.horizontal, .dsSpaceTitleSafe)
                   }
                 }
                 .focusSection()
@@ -1345,7 +1345,7 @@ private struct TVSearchView: View {
               }
             } else if !hasSearched && SearchRules.needsExplicitSubmit(searchText) {
               // One character is below the live-search floor: say so (TASK-977).
-              VStack(spacing: 16) {
+              VStack(spacing: .dsSpaceLG) {
                 Image(systemName: "magnifyingglass")
                   .font(.system(size: 60))
                   .foregroundStyle(Color.dsTextMuted)
@@ -1358,7 +1358,7 @@ private struct TVSearchView: View {
               }
               .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             } else {
-              VStack(spacing: 16) {
+              VStack(spacing: .dsSpaceLG) {
                 Image(systemName: "magnifyingglass")
                   .font(.system(size: 60))
                   .foregroundStyle(Color.dsTextMuted)
@@ -1374,7 +1374,7 @@ private struct TVSearchView: View {
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
       }
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {

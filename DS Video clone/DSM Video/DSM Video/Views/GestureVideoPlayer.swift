@@ -516,7 +516,7 @@ struct GestureVideoPlayer: View {
 
     @ViewBuilder
     private func errorContent(err: String) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: .dsSpaceLG) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 44))
                 .foregroundStyle(.white.opacity(0.8))
@@ -527,8 +527,8 @@ struct GestureVideoPlayer: View {
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            HStack(spacing: 12) {
+                .padding(.horizontal, .dsSpaceXXXL)
+            HStack(spacing: .dsSpaceMD) {
                 // TASK-848: hide Retry when the failure was an expired session. Retrying
                 // re-fetches with the same dead token and fails identically every time —
                 // offering the button just invites the user to loop. The session has
@@ -542,7 +542,7 @@ struct GestureVideoPlayer: View {
                     .accessibilityIdentifier(A11y.Player.errorRetryButton)
                     .font(.headline)
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, .dsSpaceXXL)
                     .padding(.vertical, 10)
                     .background(Color.dsAccent.opacity(0.8), in: Capsule())
                 }
@@ -555,7 +555,7 @@ struct GestureVideoPlayer: View {
                 .accessibilityIdentifier(A11y.Player.errorDismissButton)
                 .font(.headline)
                 .foregroundStyle(.white)
-                .padding(.horizontal, 24)
+                .padding(.horizontal, .dsSpaceXXL)
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.2), in: Capsule())
             }
@@ -647,7 +647,7 @@ struct GestureVideoPlayer: View {
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
                         .frame(width: 44, height: 44)
-                        .padding(12)
+                        .padding(.dsSpaceMD)
                         .background(Color.white.opacity(0.12), in: Circle())
                 }
                 .accessibilityLabel("Close")
@@ -709,7 +709,7 @@ struct GestureVideoPlayer: View {
                 Spacer()
 
                 // Right actions: AirPlay + PiP + fill mode + speed selector
-                HStack(spacing: 16) {
+                HStack(spacing: .dsSpaceLG) {
                     // AirPlay button (iOS only)
                     #if os(iOS)
                     AirPlayButton()
@@ -830,7 +830,7 @@ struct GestureVideoPlayer: View {
                 return videoFillMode == .fill ? max(geometry.safeAreaInsets.top, 8) : 8
                 #endif
             }())
-            .padding(.bottom, 16)
+            .padding(.bottom, .dsSpaceLG)
             .background(
                 LinearGradient(
                     colors: [.black.opacity(0.7), .clear],
@@ -969,7 +969,7 @@ struct GestureVideoPlayer: View {
             // Bottom controls — scrub bar only
             // contentShape(Rectangle()) ensures taps on gradient background/dead-zone
             // are consumed here and don't bleed through to the gesture overlay below.
-            VStack(spacing: 4) {
+            VStack(spacing: .dsSpaceXS) {
                 // Skip intro button — shown when inside intro chapter bounds
                 let showSkipIntro = showSkipIntroNow
                 if showSkipIntro, let intro = introChapter {
@@ -990,7 +990,7 @@ struct GestureVideoPlayer: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Skip intro")
                         .accessibilityAddTraits(.isButton)
-                        .padding(.trailing, 4)
+                        .padding(.trailing, .dsSpaceXS)
                         #if os(tvOS)
                         // Was rendered with no focus binding at all: visible during every
                         // episode intro and impossible to select with the remote.
@@ -1009,7 +1009,7 @@ struct GestureVideoPlayer: View {
                 }
 
                 // Progress / scrub bar
-                HStack(spacing: 12) {
+                HStack(spacing: .dsSpaceMD) {
                     Text(formatTime(isScrubbing ? scrubTime : currentTime))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
@@ -1149,7 +1149,7 @@ struct GestureVideoPlayer: View {
     // MARK: - Indicator Overlays
 
     private var scrubPreviewOverlay: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: .dsSpaceSM) {
             #if os(iOS)
             // TASK-740: frame preview at the scrub position when trick-play is available.
             if let tp = trickplay, let thumb = tp.thumbnail(at: scrubTime) {
@@ -1170,7 +1170,7 @@ struct GestureVideoPlayer: View {
                 .font(.title3.monospacedDigit())
                 .foregroundStyle(delta >= 0 ? Color.dsSuccess : Color.dsError)
         }
-        .padding(24)
+        .padding(.dsSpaceXXL)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: .dsRadiusLg))
         .accessibilityHidden(true)
     }
@@ -1187,12 +1187,12 @@ struct GestureVideoPlayer: View {
                 skipBubble(direction: .forward)
             }
         }
-        .padding(.horizontal, 60)
+        .padding(.horizontal, .dsSpaceTitleSafe)
     }
 
     private func skipBubble(direction: SkipDirection) -> some View {
         let secs = direction == .backward ? skipBackwardSeconds : skipForwardSeconds
-        return VStack(spacing: 4) {
+        return VStack(spacing: .dsSpaceXS) {
             Image(systemName: direction == .backward ? "gobackward.15" : "goforward.15")
                 .font(.title)
                 .accessibilityLabel(direction == .backward ? "Skip backward" : "Skip forward")
@@ -1200,7 +1200,7 @@ struct GestureVideoPlayer: View {
                 .font(.caption)
         }
         .foregroundStyle(.white)
-        .padding(20)
+        .padding(.dsSpaceXL)
         .background(.ultraThinMaterial, in: Circle())
         .accessibilityHidden(true)
     }
@@ -2798,7 +2798,7 @@ private struct SubtitleAudioPickerView: View {
     @ViewBuilder
     private func imageSubtitleRow(_ meta: Subtitle) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                 Text(meta.name)
                 Text("Image subtitles — not supported")
                     .font(.caption)
@@ -2916,7 +2916,7 @@ private struct SubtitleAudioPickerView: View {
 
     private func trackRow(name: String, isSelected: Bool, detail: String? = nil) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                 Text(name)
                     .foregroundStyle(.primary)
                 if let detail {
@@ -3019,11 +3019,11 @@ private struct SubtitleDownloadSheet: View {
                         Button {
                             onDownload(result)
                         } label: {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                                 Text(result.fileName)
                                     .font(.subheadline)
                                     .foregroundStyle(.primary)
-                                HStack(spacing: 8) {
+                                HStack(spacing: .dsSpaceSM) {
                                     Text(result.language.uppercased())
                                         .font(.caption.weight(.medium))
                                         .foregroundStyle(Color.dsAccent)

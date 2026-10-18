@@ -82,7 +82,7 @@ struct TVShowsView: View {
   #else
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
   #endif
 
@@ -130,12 +130,12 @@ struct TVShowsView: View {
       if isLoading && shows.isEmpty {
         ProgressView("Loading TV shows")
           #if os(tvOS)
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
           #else
-          .padding(.top, 24)
+          .padding(.top, .dsSpaceXXL)
           #endif
       } else if let error {
-        VStack(spacing: 24) {
+        VStack(spacing: .dsSpaceXXL) {
           DSContentUnavailable(
             title: "Couldn't load shows",
             systemImage: "exclamationmark.triangle",
@@ -148,12 +148,12 @@ struct TVShowsView: View {
           .tint(Color.dsAccent)
         }
         #if os(tvOS)
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
         #else
-        .padding(.top, 24)
+        .padding(.top, .dsSpaceXXL)
         #endif
       } else if shows.isEmpty {
-        VStack(spacing: 24) {
+        VStack(spacing: .dsSpaceXXL) {
           if let profile = appState.activeProfile, profile.isRestricted {
             // FR-265: the list is filtered by the profile's level.
             RestrictedEmptyState(profile: profile, place: library.title)
@@ -172,9 +172,9 @@ struct TVShowsView: View {
           .tint(Color.dsAccent)
         }
         #if os(tvOS)
-        .padding(.top, 80)
+        .padding(.top, .dsSpaceColossal)
         #else
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
         #endif
       } else {
         #if os(tvOS)
@@ -200,11 +200,11 @@ struct TVShowsView: View {
           }
         }
         .privacySensitive()
-        .padding(.horizontal, 60)
-        .padding(.vertical, 48)
+        .padding(.horizontal, .dsSpaceTitleSafe)
+        .padding(.vertical, .dsSpaceHuge)
         #else
         // (an unreachable "No Results" branch wrapped this grid — see displayedShows)
-        LazyVGrid(columns: columns, spacing: 12) {
+        LazyVGrid(columns: columns, spacing: .dsSpaceMD) {
           // Keyed on POSITION — see the tvOS branch above. gridID collided whenever
           // two rows agreed on id AND title, which silently removed shows from the
           // grid. An offset cannot collide, so every show the server sends renders.
@@ -263,9 +263,9 @@ struct TVShowsView: View {
         TVShowDetailView(show: show, library: library)
       } rowLabel: { show in
         AnyView(
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             TVShowPosterCell(show: show).frame(width: 46)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
               Text(show.title).foregroundStyle(.white).lineLimit(1)
               if let y = show.year {
                 Text(String(y)).font(.caption).foregroundStyle(Color.dsTextSecondary)
@@ -418,7 +418,7 @@ private struct TVShowPosterCell: View {
         .clipped()
     } footer: {
       // Title + season label
-      VStack(alignment: .leading, spacing: 4) {
+      VStack(alignment: .leading, spacing: .dsSpaceXS) {
         Text(show.title)
           .font(.subheadline.weight(.medium))
           .foregroundStyle(.white)

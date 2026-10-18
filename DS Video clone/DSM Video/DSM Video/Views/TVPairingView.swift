@@ -38,7 +38,7 @@ struct TVPairingView: View {
 
       VStack(spacing: 0) {
         // Header
-        VStack(spacing: 16) {
+        VStack(spacing: .dsSpaceLG) {
           RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
             .fill(Color.dsAccent)
             .frame(width: 64, height: 64)
@@ -106,17 +106,17 @@ struct TVPairingView: View {
           ProgressView("Generating pairing code")
             .tint(.white)
             .scaleEffect(2.0)
-            .padding(.vertical, 40)
+            .padding(.vertical, .dsSpaceJumbo)
         } else if let code = pairingCode {
-          VStack(spacing: 32) {
+          VStack(spacing: .dsSpaceXXXL) {
             // Code + countdown grouped for VoiceOver
-            VStack(spacing: 16) {
+            VStack(spacing: .dsSpaceLG) {
               Text(code)
                 .font(.dsTVCode)
                 .foregroundStyle(.white)
                 .tracking(8)
                 .padding(.horizontal, 72)
-                .padding(.vertical, 40)
+                .padding(.vertical, .dsSpaceJumbo)
                 .background(Color.dsSurfaceHigh)
                 .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous))
                 .overlay(
@@ -128,7 +128,7 @@ struct TVPairingView: View {
                 .accessibilityLabel("Pairing code: \(code.map { String($0) }.joined(separator: " "))")
 
               if countdown > 0 {
-                HStack(spacing: 8) {
+                HStack(spacing: .dsSpaceSM) {
                   Image(systemName: "clock")
                     .font(.system(size: 17))
                     .foregroundStyle(Color.dsTextMuted)
@@ -151,14 +151,14 @@ struct TVPairingView: View {
             } label: {
               Text("Generate New Code")
                 .font(.dsTVLabel)
-                .padding(.horizontal, 40)
+                .padding(.horizontal, .dsSpaceJumbo)
                 .padding(.vertical, 18)
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.dsSurfaceRaised)
           }
         } else if let error {
-          VStack(spacing: 24) {
+          VStack(spacing: .dsSpaceXXL) {
             Image(systemName: "exclamationmark.circle")
               .font(.system(size: 48))
               .foregroundStyle(Color.dsError)
@@ -173,7 +173,7 @@ struct TVPairingView: View {
             } label: {
               Text("Try Again")
                 .font(.dsTVLabel)
-                .padding(.horizontal, 40)
+                .padding(.horizontal, .dsSpaceJumbo)
                 .padding(.vertical, 18)
             }
             .buttonStyle(.borderedProminent)
@@ -185,8 +185,8 @@ struct TVPairingView: View {
           } label: {
             Text("Generate Pairing Code")
               .font(.dsTVHeadline)
-              .padding(.horizontal, 64)
-              .padding(.vertical, 24)
+              .padding(.horizontal, .dsSpaceGiant)
+              .padding(.vertical, .dsSpaceXXL)
           }
           .buttonStyle(.borderedProminent)
           .tint(Color.dsAccent)
@@ -214,11 +214,11 @@ struct TVPairingView: View {
               .foregroundStyle(Color.dsTextSecondary)
           }
           .buttonStyle(.bordered)
-          .padding(.top, 40)
+          .padding(.top, .dsSpaceJumbo)
           .accessibilityHint("Connect by choosing a server on your network, or by typing your server address and password")
         }
       }
-      .padding(60)
+      .padding(.dsSpaceTitleSafe)
     }
     .privacySensitive()
     .fullScreenCover(isPresented: $showManualLogin) {
@@ -298,7 +298,7 @@ struct TVPairingView: View {
         }
 
       if isRedeeming {
-        HStack(spacing: 12) {
+        HStack(spacing: .dsSpaceMD) {
           ProgressView().tint(.white)
           Text("Connecting…")
             .font(.dsTVCaption)
@@ -317,8 +317,8 @@ struct TVPairingView: View {
       } label: {
         Text("Connect")
           .font(.dsTVHeadline)
-          .padding(.horizontal, 64)
-          .padding(.vertical, 24)
+          .padding(.horizontal, .dsSpaceGiant)
+          .padding(.vertical, .dsSpaceXXL)
       }
       .buttonStyle(.borderedProminent)
       .tint(Color.dsAccent)
@@ -405,8 +405,8 @@ private struct TVOtherWaysView: View {
       )
       .ignoresSafeArea()
 
-      VStack(spacing: 40) {
-        VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceJumbo) {
+        VStack(spacing: .dsSpaceMD) {
           Text("Other Ways To Connect")
             .font(.dsTVLargeTitle)
             .foregroundStyle(.white)
@@ -427,22 +427,22 @@ private struct TVOtherWaysView: View {
             .multilineTextAlignment(.center)
             .frame(maxWidth: 900)
         } else if !discovery.servers.isEmpty {
-          VStack(spacing: 16) {
+          VStack(spacing: .dsSpaceLG) {
             Text("Found on your network")
               .font(.dsTVHeadline)
               .foregroundStyle(Color.dsTextSecondary)
 
-            VStack(spacing: 12) {
+            VStack(spacing: .dsSpaceMD) {
               ForEach(discovery.servers) { server in
                 Button {
                   appState.baseURL = server.baseURL
                   onManualLogin()
                 } label: {
-                  HStack(spacing: 16) {
+                  HStack(spacing: .dsSpaceLG) {
                     Image(systemName: "server.rack")
                       .font(.system(size: 22))
                       .foregroundStyle(Color.dsAccent)
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                       Text(server.name)
                         .font(.dsTVLabel)
                         .foregroundStyle(.white)
@@ -455,7 +455,7 @@ private struct TVOtherWaysView: View {
                       .foregroundStyle(Color.dsTextMuted)
                       .accessibilityHidden(true)
                   }
-                  .padding(.horizontal, 32)
+                  .padding(.horizontal, .dsSpaceXXXL)
                   .padding(.vertical, 18)
                   .background(Color.dsSurfaceHigh)
                   .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
@@ -479,7 +479,7 @@ private struct TVOtherWaysView: View {
             .foregroundStyle(Color.dsTextMuted)
         } else {
           // .idle (first frame, before onAppear starts the scan) and .scanning.
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             ProgressView().tint(Color.dsTextMuted)
             Text("Scanning network…")
               .font(.dsTVCaption)
@@ -489,14 +489,14 @@ private struct TVOtherWaysView: View {
 
         // Always focusable, whatever discovery returns — a tvOS screen with no focusable
         // element cannot be escaped with the remote.
-        VStack(spacing: 20) {
+        VStack(spacing: .dsSpaceXL) {
           Button {
             onManualLogin()
           } label: {
             Text("Enter server address manually")
               .font(.dsTVHeadline)
-              .padding(.horizontal, 48)
-              .padding(.vertical, 20)
+              .padding(.horizontal, .dsSpaceHuge)
+              .padding(.vertical, .dsSpaceXL)
           }
           .buttonStyle(.borderedProminent)
           .tint(Color.dsAccent)
@@ -507,7 +507,7 @@ private struct TVOtherWaysView: View {
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
-      .padding(60)
+      .padding(.dsSpaceTitleSafe)
     }
     .onAppear { discovery.startScan() }
     .onDisappear { discovery.stopScan() }

@@ -16,7 +16,7 @@ struct ErrorRetryView: View {
   }
 
   var body: some View {
-    VStack(spacing: 12) {
+    VStack(spacing: .dsSpaceMD) {
       // Compose the themed empty state rather than re-rolling ContentUnavailableView with
       // a manual .foregroundStyle(.white). Two "canonical" components that didn't know
       // about each other meant a styling change to one silently skipped the other.
@@ -44,11 +44,11 @@ struct RefreshFailedNotice: View {
   let retry: () -> Void
 
   var body: some View {
-    HStack(spacing: 12) {
+    HStack(spacing: .dsSpaceMD) {
       Image(systemName: "exclamationmark.triangle")
         .foregroundStyle(Color.dsAccent)
         .accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 2) {
+      VStack(alignment: .leading, spacing: .dsSpaceXXS) {
         Text(LoadFailurePresentation.noticeTitle)
           .font(.footnote.weight(.semibold))
           .foregroundStyle(Color.dsTextPrimary)
@@ -61,8 +61,8 @@ struct RefreshFailedNotice: View {
       Button("Retry", action: retry)
         .accessibilityHint("Tries to refresh again")
     }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 8)
+    .padding(.horizontal, .dsSpaceLG)
+    .padding(.vertical, .dsSpaceSM)
     .frame(maxWidth: .infinity)
     .background(Color.dsSurface)
     .accessibilityElement(children: .contain)

@@ -256,7 +256,7 @@ struct ItemDetailView: View {
           .frame(width: geo.size.width, alignment: .bottom)
           .frame(maxHeight: geo.size.height * 0.52, alignment: .bottom)
           .clipped()
-          .padding(.bottom, 20)
+          .padding(.bottom, .dsSpaceXL)
       }
       .frame(width: geo.size.width, height: geo.size.height)
     }
@@ -464,7 +464,7 @@ struct ItemDetailView: View {
 
           #if os(tvOS)
           // tvOS: episode badge + title on left, action buttons on right — one row
-          HStack(alignment: .center, spacing: 16) {
+          HStack(alignment: .center, spacing: .dsSpaceLG) {
             // Episode badge + title (expands to fill available space)
             if seasonNumber != nil || episodeNumber != nil {
               let badge: String = {
@@ -490,7 +490,7 @@ struct ItemDetailView: View {
             // Action buttons — fixed width, right-aligned
             // Start Over is always in the layout (opacity 0 when no saved position)
             // so the Play button never shifts when progress loads asynchronously.
-            HStack(spacing: 12) {
+            HStack(spacing: .dsSpaceMD) {
               tvPlayButton
               tvStartOverButton
                 .opacity(savedPositionSeconds > 0 ? 1 : 0)
@@ -505,7 +505,7 @@ struct ItemDetailView: View {
           // iOS: action buttons row. Play + Start Over FLEX to share the available
           // width (was fixed 200pt each, which overflowed the panel); the icon
           // buttons stay fixed-size.
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             Button {
               guard !showPlayer else { return }  // TASK-796
               playFromBeginning = false
@@ -586,7 +586,7 @@ struct ItemDetailView: View {
                 // button 122pt tall against Play's 92pt — the secondary action physically
                 // larger than the primary one, and the biggest focus target on the screen.
                 // The two lines say the same thing a single line does at 10 feet.
-                HStack(spacing: 8) {
+                HStack(spacing: .dsSpaceSM) {
                   Text("Next Episode")
                     .font(.subheadline.weight(.semibold))
                   Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
@@ -595,7 +595,7 @@ struct ItemDetailView: View {
                     .lineLimit(1)
                 }
                 #else
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: .dsSpaceXXS) {
                   Text("Next Episode")
                     .font(.subheadline.weight(.semibold))
                   Text((next.episodeNumber.map { "E\($0) · " } ?? "") + next.title)
@@ -620,7 +620,7 @@ struct ItemDetailView: View {
               // Capped rather than hugging its text: the trailing episode title varies in
               // length, and a button that changes width per episode makes the row jump as
               // you move through a season.
-              .padding(.horizontal, 20)
+              .padding(.horizontal, .dsSpaceXL)
               .padding(.vertical, 10)
               .frame(maxWidth: 620, minHeight: 48, alignment: .leading)
               #else
@@ -649,7 +649,7 @@ struct ItemDetailView: View {
             .accessibilityLabel("Next Episode\(next.episodeNumber.map { ", Episode \($0)" } ?? ""): \(next.title)")
             .accessibilityHint("Opens episode detail")
           } else if isLastOfSeason {
-            HStack(spacing: 8) {
+            HStack(spacing: .dsSpaceSM) {
               Image(systemName: "flag.checkered")
                 #if os(tvOS)
                 .font(.body)
@@ -684,7 +684,7 @@ struct ItemDetailView: View {
             }()
             // iOS 26 deprecated Text + Text concatenation. HStack keeps the
             // two-color treatment (accent badge + white title) without it.
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: .dsSpaceSM) {
               Text(badge).foregroundStyle(Color.dsAccent)
               Text(shownTitle).foregroundStyle(.white)
             }
@@ -733,16 +733,16 @@ struct ItemDetailView: View {
         // NEXT one" rather than on Play. Scoping the whole panel is what makes the
         // preference binding below actually mean something.
         .focusScope(actionNamespace)
-        .padding(.horizontal, 60)
-        .padding(.top, 20)
-        .padding(.bottom, 24)
+        .padding(.horizontal, .dsSpaceTitleSafe)
+        .padding(.top, .dsSpaceXL)
+        .padding(.bottom, .dsSpaceXXL)
         .frame(maxWidth: .infinity, alignment: .leading)
         #else
-        .padding(.horizontal, 16)
+        .padding(.horizontal, .dsSpaceLG)
         .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
         .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.top, 16)
-        .padding(.bottom, 32)
+        .padding(.top, .dsSpaceLG)
+        .padding(.bottom, .dsSpaceXXXL)
         #endif
   }
   // end contentPanel
@@ -770,7 +770,7 @@ struct ItemDetailView: View {
       Color.dsBackground
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(
-          VStack(spacing: 12) {
+          VStack(spacing: .dsSpaceMD) {
             DSContentUnavailable(
             title: "Couldn't load details",
             systemImage: "exclamationmark.triangle",
@@ -800,8 +800,8 @@ struct ItemDetailView: View {
               Text("No metadata · Fix")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .padding(.horizontal, .dsSpaceSM)
+                .padding(.vertical, .dsSpaceXS)
                 .frame(minHeight: 44)
                 .background(Color.black.opacity(0.7))
                 .clipShape(Capsule())
@@ -842,7 +842,7 @@ struct ItemDetailView: View {
                     .minimumScaleFactor(0.6)
                     .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, .dsSpaceXL)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.bottom, geo.size.height - panelTop + 16)
               }
@@ -881,7 +881,7 @@ struct ItemDetailView: View {
         Text(shownTitle)
           .font(.title2.bold())
           .foregroundStyle(.white.opacity(0.7))
-          .padding(24)
+          .padding(.dsSpaceXXL)
           .accessibilityHidden(true)
       }
     }
@@ -908,7 +908,7 @@ struct ItemDetailView: View {
       ].compactMap { $0 }.joined(separator: ", ")
 
       ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 8) {
+        HStack(spacing: .dsSpaceSM) {
           if let year {
             MetadataPill(text: String(year))
           }
@@ -947,7 +947,7 @@ struct ItemDetailView: View {
             MetadataPill(text: genre)
           }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, .dsSpaceXXS)
       }
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(metaLabel)
@@ -1072,12 +1072,12 @@ struct ItemDetailView: View {
       // horizontal ScrollView here could never be driven by the remote and everyone past
       // the visible width was unreachable. Same reasoning already applied to the summary
       // text above. Show a bounded, fully-visible subset instead of a scroller that lies.
-      HStack(alignment: .top, spacing: 24) {
+      HStack(alignment: .top, spacing: .dsSpaceXXL) {
         ForEach(Array(ordered.prefix(6).enumerated()), id: \.offset) { _, person in
           castAvatar(person)
         }
       }
-      .padding(.vertical, 2)
+      .padding(.vertical, .dsSpaceXXS)
       #else
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(alignment: .top, spacing: 14) {
@@ -1085,7 +1085,7 @@ struct ItemDetailView: View {
             castAvatar(person)
           }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, .dsSpaceXXS)
       }
       #endif
     }
@@ -1283,7 +1283,7 @@ private struct MetadataFixerSheet: View {
             Button {
               Task { await apply(candidate) }
             } label: {
-              HStack(spacing: 12) {
+              HStack(spacing: .dsSpaceMD) {
                 AsyncImage(url: candidate.posterURL) { img in
                   img.resizable().scaledToFill()
                     .frame(width: 50, height: 75, alignment: .top)
@@ -1294,7 +1294,7 @@ private struct MetadataFixerSheet: View {
                 .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb))
                 .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: .dsSpaceXS) {
                   Text(candidate.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -1402,7 +1402,7 @@ private struct QualityBadge: View {
       .font(.caption2.weight(.bold))
       .foregroundStyle(Color.dsAccent)
       .padding(.horizontal, 9)
-      .padding(.vertical, 4)
+      .padding(.vertical, .dsSpaceXS)
       .overlay(Capsule().stroke(Color.dsAccent.opacity(0.6), lineWidth: 1))
       .clipShape(Capsule())
   }
@@ -1654,7 +1654,7 @@ private struct PlayerSheet: View {
           nextEpisodeOverlay(next: next)
         }
       } else if let error {
-        VStack(spacing: 20) {
+        VStack(spacing: .dsSpaceXL) {
           DSContentUnavailable(
             title: "Playback failed",
             systemImage: "exclamationmark.triangle",
@@ -1665,7 +1665,7 @@ private struct PlayerSheet: View {
             .buttonStyle(.borderedProminent)
         }
       } else {
-        VStack(spacing: 20) {
+        VStack(spacing: .dsSpaceXL) {
           ProgressView("Loading video")
             .tint(.white)
           Button("Cancel") { dismiss() }
@@ -1758,9 +1758,9 @@ private struct PlayerSheet: View {
       }
     )
     #else
-    VStack(spacing: 20) {
+    VStack(spacing: .dsSpaceXL) {
       Spacer()
-      VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceMD) {
         Text("Up Next")
           .font(.caption.weight(.semibold))
           .foregroundStyle(.white.opacity(0.7))
@@ -1774,7 +1774,7 @@ private struct PlayerSheet: View {
           .font(.subheadline)
           .foregroundStyle(.white.opacity(0.7))
           .monospacedDigit()
-        HStack(spacing: 16) {
+        HStack(spacing: .dsSpaceLG) {
           Button {
             countdownTask?.cancel()
             showNextEpisodeOverlay = false
@@ -1791,7 +1791,7 @@ private struct PlayerSheet: View {
             Text("Cancel")
               .font(.headline)
               .foregroundStyle(.white)
-              .padding(.horizontal, 24)
+              .padding(.horizontal, .dsSpaceXXL)
               .padding(.vertical, 10)
               .background(Color.white.opacity(0.2), in: Capsule())
           }
@@ -1800,8 +1800,8 @@ private struct PlayerSheet: View {
       }
       .padding(28)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
-      .padding(.horizontal, 32)
-      .padding(.bottom, 60)
+      .padding(.horizontal, .dsSpaceXXXL)
+      .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.black.opacity(0.45).ignoresSafeArea())
@@ -2017,9 +2017,9 @@ private struct _NextEpisodeOverlayView: View {
   enum OverlayButton: Hashable { case playNow, stay }
 
   var body: some View {
-    VStack(spacing: 20) {
+    VStack(spacing: .dsSpaceXL) {
       Spacer()
-      VStack(spacing: 12) {
+      VStack(spacing: .dsSpaceMD) {
         Text("UP NEXT")
           .font(.caption.weight(.semibold))
           .foregroundStyle(.white.opacity(0.7))
@@ -2032,7 +2032,7 @@ private struct _NextEpisodeOverlayView: View {
           .font(.subheadline)
           .foregroundStyle(.white.opacity(0.7))
           .monospacedDigit()
-        HStack(spacing: 24) {
+        HStack(spacing: .dsSpaceXXL) {
           Button(action: onPlayNow) {
             Text("Play Now")
           }
@@ -2060,8 +2060,8 @@ private struct _NextEpisodeOverlayView: View {
       .padding(28)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: theme.radiusLg))
       // 60 matches the title-safe inset used everywhere else on tvOS; 32 sat inside it.
-      .padding(.horizontal, 60)
-      .padding(.bottom, 60)
+      .padding(.horizontal, .dsSpaceTitleSafe)
+      .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.black.opacity(0.45).ignoresSafeArea())

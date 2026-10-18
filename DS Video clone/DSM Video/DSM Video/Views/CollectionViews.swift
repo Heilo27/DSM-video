@@ -27,7 +27,7 @@ struct CollectionTile: View {
     PosterCard { _, _ in
       art
     } footer: {
-      VStack(alignment: .leading, spacing: 2) {
+      VStack(alignment: .leading, spacing: .dsSpaceXXS) {
         Text(collection.title)
           .font(titleFont)
           .foregroundStyle(.white)
@@ -111,12 +111,12 @@ struct CollectionsRail: View {
           .padding(.leading, 28)
           .focusSection()
           #else
-          .padding(.horizontal, 16)
+          .padding(.horizontal, .dsSpaceLG)
           #endif
         }
         #if os(tvOS)
-        .padding(.leading, 32)
-        .padding(.trailing, 60)
+        .padding(.leading, .dsSpaceXXXL)
+        .padding(.trailing, .dsSpaceTitleSafe)
         #endif
       }
     case .noneYet:
@@ -141,10 +141,10 @@ struct CollectionsRail: View {
     Text("Collections")
       #if os(tvOS)
       .font(.dsTVSectionTitle)
-      .padding(.horizontal, 60)
+      .padding(.horizontal, .dsSpaceTitleSafe)
       #else
       .font(.title3.weight(.bold))
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
       #endif
       .foregroundStyle(.white)
       .accessibilityAddTraits(.isHeader)
@@ -265,7 +265,7 @@ struct CollectionGridView: View {
   var body: some View {
     ScrollView {
       if let error, items.isEmpty {
-        VStack(spacing: 24) {
+        VStack(spacing: .dsSpaceXXL) {
           DSContentUnavailable(title: "Couldn't Load", systemImage: "exclamationmark.triangle",
                                description: error)
           Button("Retry") { Task { await loadFirstPage() } }
@@ -275,17 +275,17 @@ struct CollectionGridView: View {
             .focused($focusedControl, equals: .gridRetry)
             #endif
         }
-        .padding(.top, 60)
+        .padding(.top, .dsSpaceTitleSafe)
       } else if total == 0 {
         // The server answers total 0 for an offered collection with nothing visible right now
         // (FR-275). On a restricted profile that is the ceiling at work (FR-265).
         if let profile = appState.activeProfile, profile.isRestricted {
           RestrictedEmptyState(profile: profile, place: collection.title)
-            .padding(.top, 60)
+            .padding(.top, .dsSpaceTitleSafe)
         } else {
           DSContentUnavailable(title: "Nothing Here Yet", systemImage: "rectangle.stack",
                                description: "\(collection.title) has no titles right now.")
-            .padding(.top, 60)
+            .padding(.top, .dsSpaceTitleSafe)
         }
       } else {
         LazyVGrid(columns: columns, spacing: gridSpacing) {
@@ -301,7 +301,7 @@ struct CollectionGridView: View {
         }
         .padding(gridPadding)
         if isLoading && !items.isEmpty {
-          ProgressView().padding(.bottom, 24)
+          ProgressView().padding(.bottom, .dsSpaceXXL)
         }
       }
     }
@@ -385,11 +385,11 @@ struct CollectionGridView: View {
   }
 
   #if os(tvOS)
-  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220), spacing: 48)] }
+  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 220), spacing: .dsSpaceHuge)] }
   private var gridSpacing: CGFloat { 48 }
   private var gridPadding: CGFloat { 48 }
   #else
-  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 110), spacing: 12)] }
+  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 110), spacing: .dsSpaceMD)] }
   private var gridSpacing: CGFloat { 12 }
   private var gridPadding: CGFloat { 12 }
   #endif

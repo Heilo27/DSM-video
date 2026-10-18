@@ -98,7 +98,7 @@ struct LibrariesView: View {
       } else if let error = content.blockingError {
         // FIX-18: retry button for transient network failures on the libraries screen.
         // Blocking only when there is no list to keep (FR-098, TASK-975).
-        VStack(spacing: 12) {
+        VStack(spacing: .dsSpaceMD) {
           DSContentUnavailable(
             title: "Couldn't load libraries",
             systemImage: "exclamationmark.triangle",
@@ -147,8 +147,8 @@ struct LibrariesView: View {
               }
             }
           }
-          .padding(.horizontal, 16)
-          .padding(.vertical, 20)
+          .padding(.horizontal, .dsSpaceLG)
+          .padding(.vertical, .dsSpaceXL)
         }
       }
     }
@@ -287,7 +287,7 @@ private struct LibraryCard: View {
           .accessibilityHidden(true)
       }
       .padding(.horizontal, 14)
-      .padding(.vertical, 12)
+      .padding(.vertical, .dsSpaceMD)
     }
     .frame(height: height)
     .clipShape(RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
@@ -339,14 +339,14 @@ private struct LibraryCard: View {
     } else if tiles.count == 1 {
       tileView(tiles[0])
     } else if tiles.count <= 3 {
-      HStack(spacing: 2) {
+      HStack(spacing: .dsSpaceXXS) {
         ForEach(Array(tiles.prefix(2).enumerated()), id: \.offset) { _, t in tileView(t) }
       }
     } else {
       let four = Array(tiles.prefix(4))
-      VStack(spacing: 2) {
-        HStack(spacing: 2) { tileView(four[0]); tileView(four[1]) }
-        HStack(spacing: 2) { tileView(four[2]); tileView(four[3]) }
+      VStack(spacing: .dsSpaceXXS) {
+        HStack(spacing: .dsSpaceXXS) { tileView(four[0]); tileView(four[1]) }
+        HStack(spacing: .dsSpaceXXS) { tileView(four[2]); tileView(four[3]) }
       }
     }
   }
@@ -464,7 +464,7 @@ struct LibraryHomeView: View {
           .accessibilityLabel("Loading content, please wait")
           .accessibilityAddTraits(.updatesFrequently)
       } else if let error = appState.homeError {
-        VStack(spacing: 16) {
+        VStack(spacing: .dsSpaceLG) {
           DSContentUnavailable(
             title: "Couldn't load content",
             systemImage: "exclamationmark.triangle",
@@ -531,7 +531,7 @@ struct LibraryHomeView: View {
             CollectionsRail()
           }
           .padding(.top, ThemeHolder.shared.current.usesCinematicChrome ? 0 : 16)
-          .padding(.bottom, 16)
+          .padding(.bottom, .dsSpaceLG)
         }
         .background(alignment: .top) {
           // Atmospheric light streaks sit behind all content (no-op on flat themes).
@@ -641,15 +641,15 @@ struct LibraryHomeView: View {
         }
         .accessibilityLabel("Search")
         .accessibilityHint("Search all movies and TV shows")
-        .padding(.trailing, 16)
-        .padding(.top, 8)
+        .padding(.trailing, .dsSpaceLG)
+        .padding(.top, .dsSpaceSM)
       }
     }
     .overlay(alignment: .topLeading) {
       if ThemeHolder.shared.current.usesCinematicChrome {
         ActiveProfileBadge(size: 32)
-          .padding(.leading, 16)
-          .padding(.top, 8)
+          .padding(.leading, .dsSpaceLG)
+          .padding(.top, .dsSpaceSM)
       }
     }
 
@@ -731,11 +731,11 @@ private struct ContinueWatchingCard: View {
         .foregroundStyle(.white)
         .lineLimit(2)
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, .dsSpaceSM)
+        .padding(.vertical, .dsSpaceXS)
         .frame(width: 200, alignment: .leading)
         .background(Color.black.opacity(0.75))
-        .padding(.bottom, 2)
+        .padding(.bottom, .dsSpaceXXS)
 
       // Progress bar
       // The shared card rule (PlaybackProgress.cardIndicator, FR-020), not a fraction of its own.
@@ -791,13 +791,13 @@ private struct HomeRail: View {
           }
           .font(.subheadline.weight(.medium))
           .foregroundStyle(Color.dsTextSecondary)
-          .padding(.vertical, 12)
-          .padding(.horizontal, 8)
+          .padding(.vertical, .dsSpaceMD)
+          .padding(.horizontal, .dsSpaceSM)
           .contentShape(Rectangle())
           .accessibilityLabel("See all in \(title)")
         }
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, .dsSpaceLG)
 
       // Horizontal scroll of poster/landscape cards
       ScrollView(.horizontal, showsIndicators: false) {
@@ -883,7 +883,7 @@ private struct HomeRail: View {
             }
           }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, .dsSpaceLG)
       }
     }
     // Warm the cache for this rail's posters as soon as the rail exists, so the cards

@@ -97,13 +97,13 @@ struct HomeHero: View {
           // the Watchlist button did nothing. Keeping the spacer here means the text
           // block's layout is byte-identical to before.
           buttonRow(for: current)
-            .padding(.top, 4)
+            .padding(.top, .dsSpaceXS)
             .hidden()
             .accessibilityHidden(true)
 
           if featured.count > 1 { dots }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, .dsSpaceXL)
         .padding(.bottom, 18)
         .frame(maxWidth: .infinity, alignment: .leading)
       }
@@ -122,7 +122,7 @@ struct HomeHero: View {
     // The real, tappable controls: outside the NavigationLink so their actions run.
     .overlay(alignment: .bottomLeading) {
       buttonRow(for: current)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, .dsSpaceXL)
         .padding(.bottom, heroButtonBottomInset)
     }
     .onAppear { startRotation() }

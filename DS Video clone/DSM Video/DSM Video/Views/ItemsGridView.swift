@@ -69,11 +69,11 @@ struct ItemsGridView: View {
   }
 
   #if os(tvOS)
-  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 280), spacing: 24)] }
+  private var columns: [GridItem] { [GridItem(.adaptive(minimum: 280), spacing: .dsSpaceXXL)] }
   #else
   private var columns: [GridItem] {
     let minimum: CGFloat = horizontalSizeClass == .regular ? 180 : 140
-    return [GridItem(.adaptive(minimum: minimum), spacing: 12)]
+    return [GridItem(.adaptive(minimum: minimum), spacing: .dsSpaceMD)]
   }
   #endif
 
@@ -82,16 +82,16 @@ struct ItemsGridView: View {
       if isLoading && items.isEmpty {
         ProgressView("Loading videos")
           #if os(tvOS)
-          .padding(.top, 60)
+          .padding(.top, .dsSpaceTitleSafe)
           #else
-          .padding(.top, 24)
+          .padding(.top, .dsSpaceXXL)
           #endif
       } else if let error {
         // FIX-18 / TASK-649: shared error+retry component.
         ErrorRetryView(title: "Couldn't load items", message: error) {
           Task { await load() }
         }
-        .padding(.top, 24)
+        .padding(.top, .dsSpaceXXL)
       } else {
         #if os(tvOS)
         let gridSpacing: CGFloat = 24
@@ -169,7 +169,7 @@ struct ItemsGridView: View {
             .font(.caption)
             .foregroundStyle(Color.dsTextTertiary)
             .frame(maxWidth: .infinity)
-            .padding(.bottom, 16)
+            .padding(.bottom, .dsSpaceLG)
             .accessibilityHidden(true)
         }
       }
@@ -224,9 +224,9 @@ struct ItemsGridView: View {
         ItemDetailView(itemID: item.id, fallbackTitle: item.title)
       } rowLabel: { item in
         AnyView(
-          HStack(spacing: 12) {
+          HStack(spacing: .dsSpaceMD) {
             ItemPosterCell(item: item).frame(width: 46)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
               Text(item.title).foregroundStyle(.white).lineLimit(1)
               if let y = item.year {
                 Text(String(y)).font(.caption).foregroundStyle(Color.dsTextSecondary)
@@ -248,7 +248,7 @@ struct ItemsGridView: View {
             .font(.caption2)
             .foregroundStyle(.white.opacity(0.5))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
+            .padding(.vertical, .dsSpaceXS)
             .background(Color.dsBackground)
         }
       }
@@ -526,7 +526,7 @@ struct ItemPosterCell: View {
 
   @ViewBuilder
   private var cellFooter: some View {
-    VStack(alignment: .leading, spacing: 2) {
+    VStack(alignment: .leading, spacing: .dsSpaceXXS) {
       Text(item.title)
         .font(.footnote.weight(.semibold))
         .foregroundStyle(.white)
@@ -540,8 +540,8 @@ struct ItemPosterCell: View {
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(.horizontal, 8)
-    .padding(.bottom, 8)
+    .padding(.horizontal, .dsSpaceSM)
+    .padding(.bottom, .dsSpaceSM)
     // TASK-857: cap scaling at .accessibility1. The card frame is a fixed 2:3 aspect ratio
     // that does not grow with the text, so past this point the footer stops gaining
     // legibility and only eats poster area — at AX5 it climbed over the artwork entirely
