@@ -72,38 +72,16 @@ private struct TVShowDetailSplitView: View {
   @ViewBuilder
   private var backdropPanel: some View {
     ZStack(alignment: .bottomLeading) {
-      // Background image
-      if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
-        Image(assetName)
-          .resizable()
-          .scaledToFill()
-          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-          .clipped()
-          .accessibilityHidden(true)
-      } else if let posterId = show.posterImageId {
-        AuthenticatedImage(
-          url: appState.api.imageURL(id: posterId, width: 1400, version: show.metadataVersion),
-          token: appState.sessionToken,
-          usesTunnelCookie: appState.api.usesTunnelCookie
-        )
-        .scaledToFill()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+      // Background art. It is an OVERLAY on a flexible clear base, never a sized child: a
+      // `scaledToFill()` image reports its fill size (taller than the panel for a 2:3
+      // poster), and as a ZStack child that size grew the ZStack, then the HStack, past the
+      // screen. That pushed the bottom-left title and year off the bottom edge and shifted
+      // the episode list down with it. As an overlay it is proposed the panel's size and
+      // cannot size it (TASK-1059).
+      Color.clear
+        .overlay(alignment: .top) { backdropArt }
         .clipped()
         .accessibilityHidden(true)
-      } else {
-        LinearGradient(
-          colors: [Color.dsSurfaceRaised, Color.dsBackground],
-          startPoint: .topTrailing,
-          endPoint: .bottomLeading
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(
-          Image(systemName: "tv.fill")
-            .font(.system(size: 80))
-            .foregroundStyle(.white.opacity(0.12))
-            .accessibilityHidden(true)
-        )
-      }
 
       // Right-edge gradient fade into the info panel
       HStack(spacing: 0) {
@@ -161,6 +139,34 @@ private struct TVShowDetailSplitView: View {
       .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  @ViewBuilder
+  private var backdropArt: some View {
+    if appState.isDemoMode, let assetName = DemoData.posterAssetNames[show.id] {
+      Image(assetName)
+        .resizable()
+        .scaledToFill()
+    } else if let posterId = show.posterImageId {
+      AuthenticatedImage(
+        url: appState.api.imageURL(id: posterId, width: 1400, version: show.metadataVersion),
+        token: appState.sessionToken,
+        usesTunnelCookie: appState.api.usesTunnelCookie
+      )
+      .scaledToFill()
+    } else {
+      LinearGradient(
+        colors: [Color.dsSurfaceRaised, Color.dsBackground],
+        startPoint: .topTrailing,
+        endPoint: .bottomLeading
+      )
+      .overlay(
+        Image(systemName: "tv.fill")
+          .font(.system(size: 80))
+          .foregroundStyle(.white.opacity(0.12))
+          .accessibilityHidden(true)
+      )
+    }
   }
 
   // MARK: Info + Episodes Panel
@@ -441,6 +447,7 @@ private struct TVSeasonSection: View {
             .accessibilityHidden(true)
         }
         .padding(.vertical, .dsSpaceXL)
+        .padding(.horizontal, .dsSpaceMD)
         // TASK-710: guarantee a tall, full-width hit/focus region so the d-pad reliably
         // lands on the season header rather than skipping past a thin frame.
         .frame(minHeight: 60)
@@ -450,11 +457,11 @@ private struct TVSeasonSection: View {
         )
         .contentShape(Rectangle())
       }
-      // .buttonStyle(.plain) suppresses tvOS's default focus chrome, so without an
-      // explicit highlight this header focused INVISIBLY — the user couldn't tell whether
-      // Select would collapse the season or open the first episode. Matches
-      // TVEpisodeNavRow, which sits directly beneath it and already does this.
-      .buttonStyle(.plain)
+      // TVRowButtonStyle draws no system focus chrome, so the dsFocusFill above is the
+      // only highlight (without one the header focused INVISIBLY — the user couldn't tell
+      // whether Select would collapse the season or open the first episode). Matches
+      // TVEpisodeNavRow, which sits directly beneath it.
+      .buttonStyle(TVRowButtonStyle())
       .focused($isHeaderFocused)
       .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
 
@@ -582,6 +589,21 @@ private struct TVSeasonSection: View {
   }
 }
 
+// MARK: - tvOS row button style
+
+/// Button style for the season header and episode rows (TASK-1059).
+///
+/// `.buttonStyle(.plain)` on tvOS still draws the system focus platter, a white slab taller
+/// than the row's own `dsFocusFill` that showed as a band above and below the focused Season
+/// header (`.focusEffectDisabled()` does not remove it). A custom style draws no platter, so
+/// the row's explicit `dsFocusFill` background is the one focus treatment. Same reason as
+/// `ProfileTileButtonStyle`. The call site keeps `.focused()` and the fill.
+private struct TVRowButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+  }
+}
+
 // MARK: - tvOS Episode Nav Row (plain button style to prevent focus-scale clipping)
 
 private struct TVEpisodeNavRow<Destination: View>: View {
@@ -603,7 +625,7 @@ private struct TVEpisodeNavRow<Destination: View>: View {
             .fill(isFocused ? Color.dsFocusFill : Color.clear)
         )
     }
-    .buttonStyle(.plain)
+    .buttonStyle(TVRowButtonStyle())
     .focused($isFocused)
     .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
   }

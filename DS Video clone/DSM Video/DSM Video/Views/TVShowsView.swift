@@ -233,8 +233,8 @@ struct TVShowsView: View {
       }
     }
     .background(Color.dsBackground.ignoresSafeArea())
-    .navigationTitle(library.title)
     #if !os(tvOS)
+    .navigationTitle(library.title)
     // Force white nav-bar content (the large title was rendering dim grey on black).
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
@@ -307,7 +307,10 @@ struct TVShowsView: View {
     // placement tvOS does not render. Those buttons compiled fine and were never visible,
     // leaving the TV Shows grid permanently stuck on its default sort with no way to change it.
     .safeAreaInset(edge: .top, spacing: 0) {
-      TVShowSortChipBar(selection: $sortOption)
+      VStack(spacing: 0) {
+        TVLibraryHeading(title: library.title)
+        TVShowSortChipBar(selection: $sortOption)
+      }
     }
     .onChange(of: sortOption) { _, new in
       UserDefaults.standard.set(new.rawValue, forKey: "dsReel.tvSortOption")
