@@ -215,7 +215,35 @@ final class AppState {
 
   private var networkMonitor: NWPathMonitor?
   private var heartbeatTimer: Timer?
-  private var reconnectRetryTask: Task<Void, Never>?
+  /// Readable so a test can stop the retry it drove; only startBackgroundReconnectRetry()
+  /// and the sign-out paths assign it.
+  private(set) var reconnectRetryTask: Task<Void, Never>?
+
+  /// Pacing for startBackgroundReconnectRetry(). A fast ladder for the first minutes, then a
+  /// slow steady cadence for as long as the session lives: running out of attempts is never a
+  /// reason to sign out (FR-120). Instance-level so a test can shrink the waits.
+  struct ReconnectRetryPolicy {
+    /// Waits before each fast attempt, in order.
+    var fastDelays: [Duration]
+    /// Wait before every attempt after the fast ladder is spent.
+    var slowInterval: Duration
+
+    /// 5, 10, 20, then 30s for 20 attempts in all (~9.5 min), then every 2 minutes.
+    static let standard = ReconnectRetryPolicy(
+      fastDelays: [.seconds(5), .seconds(10), .seconds(20)] + Array(repeating: .seconds(30), count: 17),
+      slowInterval: .seconds(120))
+
+    func delay(beforeAttempt attempt: Int) -> Duration {
+      attempt <= fastDelays.count ? fastDelays[attempt - 1] : slowInterval
+    }
+  }
+  var reconnectRetryPolicy = ReconnectRetryPolicy.standard
+
+  /// The QuickConnect lookup every candidate cascade goes through. Production asks
+  /// global.quickconnect.to; a test swaps in a resolver that fails or answers on cue.
+  var quickConnectResolve: (String) async throws -> [QuickConnectResolver.Candidate] = {
+    try await QuickConnectResolver.resolveCandidates(id: $0)
+  }
 
   var sessionToken: String? {
     didSet {
@@ -660,7 +688,7 @@ final class AppState {
 
     // If baseURL is a QC ID, append its full cascade after direct addresses
     if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-      let qcCandidates = (try? await QuickConnectResolver.resolveCandidates(id: qcID)) ?? []
+      let qcCandidates = (try? await quickConnectResolve(qcID)) ?? []
       // Avoid duplicating any LAN IP that QC also resolved
       let existing = Set(candidates.map(\.url.absoluteString))
       for c in qcCandidates where !existing.contains(c.url.absoluteString) {
@@ -927,22 +955,6 @@ final class AppState {
     Task { await localStore.clearAll() }
   }
 
-  /// Clears the session token (shows login screen) but keeps username and password
-  /// so the user can reconnect with a single tap of the Connect button.
-  /// Used for automatic session recovery when cold-start connection fails.
-  func softLogout(reason: String) {
-    Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-    sessionToken = nil
-    pairingCode = nil
-    loginError = reason
-    watchlistItems = []
-    reconnectRetryTask?.cancel()
-    reconnectRetryTask = nil
-    stopHeartbeatTimer()
-    clearHomeState()
-    // Keep savedPassword and username intact so Connect works immediately.
-  }
-
   /// TASK-848: classify a playback-fetch failure and, when it is an expired/rejected session,
   /// clear session state through the normal path. Returns true if the cause was auth.
   ///
@@ -1006,28 +1018,54 @@ final class AppState {
         attemptSilentReauth()
       case .network:
         serverUnreachable = true
+      // TASK-953: APIClient wraps EVERY transport failure as .connection(code), so this is
+      // the shape a timeout or refused connection actually arrives in. It used to fall to
+      // `default`, which made the URLError branch below unreachable from any APIClient call:
+      // a view hitting a dead server changed nothing, and the banner only appeared once some
+      // other path happened to notice. Same classification as a bare URLError.
+      case .connection(let code):
+        applyConnectionFailure(Self.connectionFailureKind(code))
       default:
         break  // transient, don't change state
       }
     } else if let urlErr = error as? URLError {
-      switch urlErr.code {
-      // Only .notConnectedToInternet means "this device has no network." Recovery for
-      // isOffline comes exclusively from NWPathMonitor, which fires on a PATH CHANGE.
-      //
-      // .networkConnectionLost must NOT set it: that error means one TCP connection died
-      // (server restart, NAT timeout, Wi-Fi hiccup) while the interface stayed satisfied.
-      // The path never changed, so the monitor never fired, so isOffline was never
-      // cleared — and homeLoad/foregroundRefresh/runDeltaSync all hard-return while it's
-      // set. One dropped connection pinned the app on "No internet connection." over
-      // stale rails until relaunch. It's a server-reachability failure, so treat it as one.
-      case .notConnectedToInternet:
-        isOffline = true
-      case .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .timedOut,
-           .dnsLookupFailed, .secureConnectionFailed:
-        serverUnreachable = true
-      default:
-        break
-      }
+      applyConnectionFailure(Self.connectionFailureKind(urlErr.code))
+    }
+  }
+
+  enum ConnectionFailureKind: Equatable {
+    case deviceOffline      // this device has no network at all
+    case serverUnreachable  // the network is up; the server didn't answer
+  }
+
+  /// The one classification of a transport error code, for both a bare URLError and
+  /// APIError.connection. nil = transient or not a connectivity failure; change nothing.
+  static func connectionFailureKind(_ code: URLError.Code) -> ConnectionFailureKind? {
+    switch code {
+    // Only .notConnectedToInternet means "this device has no network." Recovery for
+    // isOffline comes exclusively from NWPathMonitor, which fires on a PATH CHANGE.
+    //
+    // .networkConnectionLost must NOT set it: that error means one TCP connection died
+    // (server restart, NAT timeout, Wi-Fi hiccup) while the interface stayed satisfied.
+    // The path never changed, so the monitor never fired, so isOffline was never
+    // cleared — and homeLoad/foregroundRefresh/runDeltaSync all hard-return while it's
+    // set. One dropped connection pinned the app on "No internet connection." over
+    // stale rails until relaunch. It's a server-reachability failure, so treat it as one.
+    case .notConnectedToInternet:
+      return .deviceOffline
+    case .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .timedOut,
+         .dnsLookupFailed, .secureConnectionFailed:
+      return .serverUnreachable
+    default:
+      return nil
+    }
+  }
+
+  private func applyConnectionFailure(_ kind: ConnectionFailureKind?) {
+    switch kind {
+    case .deviceOffline: isOffline = true
+    case .serverUnreachable: serverUnreachable = true
+    case nil: break
     }
   }
 
@@ -1234,7 +1272,12 @@ final class AppState {
     guard sessionToken != nil, !isDemoMode else { return .failed }
     guard api.baseURL != AppState.fallbackURL else {
       // Never resolved (QC ID) — go straight to the full cascade.
-      return await reconnect() ? .switched : .failed
+      guard await reconnect() else { return .failed }
+      // `.switched` promises networkDidReconnect has been posted, and the foreground caller
+      // skips its own refresh on that promise. This branch used to return without posting,
+      // so a foreground that finally reached the server never reloaded the library.
+      NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
+      return .switched
     }
     // PREFER THE LAN WHENEVER IT IS REACHABLE — do not wait for the WAN path to die.
     //
@@ -1282,23 +1325,41 @@ final class AppState {
     return .stillGood
   }
 
-  /// Retries QC resolution in the background every ~8s for up to 5 minutes.
-  /// On success: clears serverUnreachable and triggers a fresh homeLoad.
-  /// Called when homeLoad() can't reach the server on cold start.
+  /// Retries the candidate cascade in the background until the server answers, the session
+  /// ends, or another path reconnects first. On success: clears serverUnreachable and
+  /// triggers a fresh homeLoad. Called when homeLoad() can't reach the server on cold start.
+  ///
+  /// TASK-973: this used to give up after 20 attempts (~10 min) and call softLogout(), which
+  /// deleted the Keychain token and sent the user to the login screen although no server had
+  /// rejected anything: a NAS that was off, or a QuickConnect outage, cost the user their
+  /// sign-in and put their downloads behind a password prompt. Only a server's 401 may end a
+  /// session (FR-121), so an unreachable server now leaves the session alone: the cached
+  /// library stays up under the "Can't reach your NAS" banner, retries slow to every two
+  /// minutes, and every foreground re-runs the cascade at once (revalidateConnection).
   private func startBackgroundReconnectRetry() {
     reconnectRetryTask?.cancel()
+    // The banner is the user's only sign the library is stale (FR-130). Cold start used to
+    // reach here without it, so the app sat on cached rails looking healthy for ten minutes.
+    serverUnreachable = true
+    let policy = reconnectRetryPolicy
     reconnectRetryTask = Task { @MainActor in
-      // Exponential backoff: 5, 10, 20, 30, 30, 30... seconds (capped at 30).
-      // 20 attempts ≈ 10 min max. QC resolution can take up to ~24s per attempt
-      // so a flat 8s delay caused attempts to pile up behind isReconnecting.
-      let maxAttempts = 20
-      var delay: Double = 5
-      for attempt in 1...maxAttempts {
-        guard !Task.isCancelled else { return }
-        try? await Task.sleep(for: .seconds(delay))
+      // QC resolution can take up to ~24s per attempt, so a flat short delay piled attempts
+      // up behind isReconnecting; the ladder backs off before settling on the slow cadence.
+      var attempt = 0
+      while !Task.isCancelled {
+        attempt += 1
+        let delay = policy.delay(beforeAttempt: attempt)
+        try? await Task.sleep(for: delay)
         guard !Task.isCancelled else { return }
         guard sessionToken != nil else { return }  // logged out — stop retrying
-        homeLog.info("backgroundReconnect: attempt \(attempt)/\(maxAttempts) (delay was \(delay)s)")
+        // Another path already reconnected (a foreground revalidate, a sign-in, a successful
+        // sync): each funnels through clearNetworkError(), which drops this flag.
+        guard serverUnreachable else {
+          homeLog.info("backgroundReconnect: connection restored elsewhere — stopping")
+          reconnectRetryTask = nil
+          return
+        }
+        homeLog.info("backgroundReconnect: attempt \(attempt) (waited \(delay))")
         let ok = await reconnect()
         if ok {
           homeLog.info("backgroundReconnect: succeeded on attempt \(attempt) — url=\(self.api.baseURL)")
@@ -1310,14 +1371,10 @@ final class AppState {
           await homeLoad()
           return
         }
-        delay = min(delay * 2, 30)
+        if attempt == policy.fastDelays.count {
+          homeLog.warning("backgroundReconnect: still unreachable after \(attempt) attempts — keeping the session, retrying every \(policy.slowInterval)")
+        }
       }
-      homeLog.warning("backgroundReconnect: all \(maxAttempts) attempts exhausted — soft-logging out for clean reconnect")
-      serverUnreachable = false
-      // Name the real cause. Ten minutes of failed reconnects means the SERVER was
-      // unreachable — the credentials were never in question. The old wording
-      // ("Sign in again to reconnect") sent users to retype a password that was fine.
-      softLogout(reason: "Couldn't reach your server for several minutes. Check that it's on, then sign in to reconnect.")
     }
   }
 
@@ -2507,6 +2564,10 @@ final class AppState {
     let apiSnapshot = api
     do {
       let beat = try await apiSnapshot.syncHeartbeat()
+      // The server answered, so a standing "Can't reach your NAS" is stale. Without this the
+      // flag outlives the outage: homeLoad and foregroundRefresh both skip while it is set,
+      // so the sync that would otherwise clear it never runs.
+      if serverUnreachable { clearNetworkError() }
       let cursors = await localStore.getSyncCursors()
 
       // A cursor AHEAD of the server means "sync" here, not "nothing to do".
@@ -2567,8 +2628,10 @@ final class AppState {
       // and switches us over so the next heartbeat lands. Guard against piling up behind
       // an in-flight reconnect.
       homeLog.debug("heartbeat: failed — \(error.localizedDescription); revalidating")
-      if !isReconnecting {
-        _ = await revalidateConnection()
+      // No address answered: say so. The heartbeat is the only thing watching an idle
+      // session, and it used to discard this result, leaving cached rails under no banner.
+      if !isReconnecting, await revalidateConnection() == .failed {
+        handleConnectionFailure(error)
       }
     }
   }
@@ -2995,7 +3058,7 @@ final class AppState {
   ///
   /// Without this, a failed load is indistinguishable from a genuinely empty watchlist:
   /// watchlistItems stays at its previous value — [] on a cold launch, and [] again after
-  /// logout/softLogout/handleConnectionFailure force-clear it — so WatchlistView renders
+  /// logout/handleConnectionFailure force-clear it — so WatchlistView renders
   /// its "nothing in your watchlist" empty state and tells the user their list is empty
   /// when in fact the request threw.
   ///

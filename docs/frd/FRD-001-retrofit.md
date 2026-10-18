@@ -365,8 +365,11 @@ address re-entry. This works in both directions (iOS→tvOS and tvOS→iOS).
 code, leaves the device unpaired, creates no partial session, and allows a retry with a fresh code.
 **FR-119 [INFERRED]** — A session established by sign-in or pairing survives relaunch; the user is not
 asked to re-authenticate after a cold start.
-**FR-120 [INFERRED]** — An unreachable server at launch does not sign the user out and does not report a
-credentials failure.
+**FR-120 [INFERRED; duration rule 2026-10-17, TASK-973]** — An unreachable server at launch does not sign
+the user out and does not report a credentials failure, **however long the outage lasts**. The app keeps
+trying to reach the server for as long as it stays unreachable (backing off to a slow cadence after the
+first few minutes, and trying again at once whenever the app returns to the foreground). Giving up on
+reaching the server never ends the session; only the server rejecting the session (FR-121) does.
 **FR-121 [INFERRED]** — An expired or revoked session is reported as a session problem with a path to
 re-authenticate — not as the server being offline or the media being unplayable. After re-authenticating,
 progress and watchlist are intact.
@@ -388,6 +391,10 @@ when a secure path was available.
 
 **FR-130 [STATED]** — With the NAS unreachable, the app states that the server is offline. It does not sign
 the user out and does not report a credentials error.
+*Clarified 2026-10-17 (TASK-973, TASK-953):* the server-offline indicator appears as soon as any request
+fails to reach the server, from any screen, including a cold start onto cached content. It is not
+deferred until a background check notices. It clears as soon as the server answers again. A cancelled
+request (for example, the user navigating away) is not an outage and changes nothing.
 **FR-131 [STATED]** — An unreachable server never renders as an empty library. "We could not load" and
 "there is nothing here" are distinct states on every surface (instance of FR-001, and the single
 highest-value requirement in this FRD).
