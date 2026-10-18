@@ -1026,12 +1026,27 @@ struct AppStateTests {
   //
   // Every code the server can emit must produce a sentence, never a raw identifier.
 
+  /// OC-1008 (TASK-967) · given each playback failure code the server can emit, when it is shown,
+  /// then the sentence names the real cause and the next step: busy converter -> try again later,
+  /// converter broken -> check the converter, file gone -> rescan. Literals, so a message that is
+  /// merely long and underscore-free (the old assertion) can no longer pass.
+  /// Red if: two causes share one message, a cause falls to the generic "Media missing." prose
+  /// of unmapped codes, or the next step is dropped.
   @Test func playbackErrorsAreActionableNotJargon() {
-    for code in ["transcode_busy", "media_missing", "ffmpeg_failed", "transcode_unavailable"] {
+    let busy = "The server is already converting other videos. Try again in a few minutes."
+    let converter = "This video can't be prepared for playback right now. Check that DSVideoServer's converter is working."
+    let missing = "The video file is missing or was moved. Rescan your library on the NAS."
+    let table: [(code: String, text: String)] = [
+      ("transcode_busy", busy),
+      ("transcode_unavailable", converter), ("ffmpeg_failed", converter), ("pipe_failed", converter),
+      ("media_missing", missing), ("path_not_allowed", missing), ("stat_failed", missing),
+    ]
+    for (code, text) in table {
       let msg = APIError.server(code, status: 500).userMessage
+      #expect(msg == text, "\(code) must name its own cause, got: \(msg)")
       #expect(!msg.contains("_"), "\(code) leaked a raw identifier: \(msg)")
-      #expect(msg.count > 20, "\(code) produced a uselessly terse message: \(msg)")
     }
+    #expect(Set([busy, converter, missing]).count == 3, "three causes, three different messages")
   }
 
   @Test func unmappedCodesStillReadAsSentences() {
