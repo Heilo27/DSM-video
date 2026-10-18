@@ -147,7 +147,7 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 	result := &ProbeResult{}
 
 	// Parse container format
-	result.Container = normalizeContainer(probeData.Format.FormatName)
+	result.Container = containerForFile(probeData.Format.FormatName, path)
 
 	// Parse duration
 	if probeData.Format.Duration != "" {
@@ -294,6 +294,21 @@ func normalizeContainer(format string) string {
 	default:
 		return first
 	}
+}
+
+// containerForFile is the container name the playback decision sees for a probed file.
+//
+// ffprobe names a 3GPP file "mov,mp4,m4a,3gp,3g2,mj2" (one demuxer serves the whole
+// ISO-BMFF family) and normalizeContainer keeps the first word, "mov". That is a
+// DirectPlay container, so a .3gp carrying H.264+AAC would be streamed as-is under a
+// .3gp name. The player is not promised to open that, so 3GPP files are named for what
+// they are and take the repackaging path (TASK-990).
+func containerForFile(formatName, path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".3gp", ".3g2":
+		return "3gp"
+	}
+	return normalizeContainer(formatName)
 }
 
 // normalizeVideoCodec standardizes video codec names.

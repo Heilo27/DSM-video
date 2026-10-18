@@ -170,7 +170,7 @@
     }
 
     .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); }
-    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    /* :active, :focus-visible and :disabled for every button live in ONE block, "Button states" below. */
 
     .btn-secondary {
       background: var(--bg-tertiary);
@@ -182,7 +182,7 @@
     .btn-sm { padding: 8px 14px; font-size: 13px; }
 
     .login-error {
-      background: rgba(255, 71, 87, 0.1);
+      background: color-mix(in srgb, var(--danger) 10%, transparent);
       border: 1px solid var(--danger);
       color: var(--danger);
       padding: 12px 16px;
@@ -982,21 +982,13 @@
     }
     .detail-credits span { color: var(--text-secondary); }
 
+    /* Composes .btn .btn-primary (markup: class="btn btn-primary btn-play"); only the size differs. */
     .btn-play {
-      display: inline-flex;
-      align-items: center;
+      width: auto;
       gap: 10px;
       padding: 14px 32px;
-      background: var(--accent);
-      color: white;
-      border: none;
-      border-radius: var(--radius-sm);
       font-size: 16px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all var(--transition);
     }
-    .btn-play:hover { background: var(--accent-hover); transform: translateY(-1px); }
     .btn-play svg { width: 20px; height: 20px; }
 
     /* Seasons & Episodes */
@@ -1095,6 +1087,38 @@
     .btn-next-episode.visible { display: inline-flex; }
     .btn-next-episode:hover { background: rgba(255,255,255,0.25); }
     .btn-next-episode svg { width: 16px; height: 16px; }
+
+    /* Button states (TASK-959). ONE home for pressed, keyboard focus and disabled across the
+       button family. Placed after every component rule so it wins ties on specificity (the
+       :hover lift on .btn-primary must not apply to a disabled or pressed button). */
+    .btn:focus-visible,
+    .btn-close:focus-visible,
+    .player-menu-btn:focus-visible,
+    .btn-next-episode:focus-visible,
+    .filter-pill:focus-visible,
+    .sidebar-item:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .btn:active:not(:disabled),
+    .btn-close:active:not(:disabled),
+    .player-menu-btn:active:not(:disabled),
+    .btn-next-episode:active:not(:disabled),
+    .filter-pill:active:not(:disabled),
+    .sidebar-item:active:not(:disabled) {
+      transform: scale(0.97);
+      filter: brightness(0.9);
+    }
+    .btn:disabled,
+    .btn-close:disabled,
+    .player-menu-btn:disabled,
+    .btn-next-episode:disabled,
+    .filter-pill:disabled,
+    .sidebar-item:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
 
     @media (max-width: 768px) {
       .detail-header { flex-direction: column; align-items: center; text-align: center; }
@@ -1937,8 +1961,10 @@
           // library; deriving either here would repeat the mistake the native clients made
           // — a rail that renders confidently stale content whenever the client's view of
           // the library falls behind, with nothing reporting a problem.
-          api('/api/v1/just-added?limit=20').catch(() => ({ items: [] })),
-          api('/api/v1/suggested?limit=20').catch(() => ({ genre: '', items: [] }))
+          // No `limit`: how many titles a rail holds is the server's rule too (FR-088 caps
+          // Just Added at 16), so the browser, iPhone and Apple TV show the same rail.
+          api('/api/v1/just-added').catch(() => ({ items: [] })),
+          api('/api/v1/suggested').catch(() => ({ genre: '', items: [] }))
         ]);
 
         const items = moviesData.items || [];
@@ -2649,7 +2675,7 @@
                 ${item.director ? `<div class="detail-credits">Director: <span>${escapeHtml(item.director)}</span></div>` : ''}
                 ${item.cast && item.cast.length ? `<div class="detail-credits">Cast: <span>${item.cast.map(c => escapeHtml(c.name)).join(', ')}</span></div>` : ''}
                 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                  <button class="btn-play" onclick="playVideo('${itemId}', '${escapeAttr(item.title)}')">
+                  <button class="btn btn-primary btn-play" onclick="playVideo('${itemId}', '${escapeAttr(item.title)}')">
                     <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                     Play
                   </button>

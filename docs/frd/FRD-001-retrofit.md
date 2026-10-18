@@ -256,7 +256,7 @@ than failing after the tap.
 ## 6. Library (browse, shows, search, sort/filter, watchlist)
 
 **FR-080 [STATED]** — The app lists every library the server exposes, with content organised using the
-server's metadata — posters, episode guides, descriptions.
+server's metadata — posters, episode guides, descriptions. The server exposes every library it is configured to scan — Movies, TV Shows and Home Videos — and no library whose folder is not configured. [TASK-985]
 **FR-081 [INFERRED]** — Zero libraries, or an empty library, presents as an explanatory empty state;
 failure to load presents as an error with retry (instance of FR-001).
 **FR-082 [INFERRED]** — All titles in a library are reachable, each exactly once, across pagination
@@ -267,7 +267,8 @@ matching what the server reports.
 **FR-084 [INFERRED]** — A show whose episodes are split across multiple folders/paths on the NAS
 appears exactly once, with its episodes merged. On a restricted profile the merge is decided from the episodes that profile can
 see, in the show list and the show's seasons and episodes alike, so the detail lists the episodes the
-header counted (FRD-002 FR-250). [TASK-924]
+header counted (FRD-002 FR-250). [TASK-924] The DS Video web plane (`TVShow` / `TVShowEpisode`
+`list` and `getinfo`) follows the same rule, and its result never depends on database row order. [TASK-995]
 **FR-085 [STATED]** — The detail screen shows title, year, runtime, genre, rating, director, cast, and
 description. *Derivation:* design-spec B4 §4/§6/§7.
 **FR-086 [INFERRED]** — Missing optional metadata is omitted cleanly — never rendered as "null"/"nil" or
@@ -280,7 +281,8 @@ titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, 
 its newest synced titles stands in, under the same rules. *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
-player asks for 20; that divergence is open under TASK-920.
+player sends no `limit` on Just Added or Suggested and takes the server's default for each, so its Just
+Added rail is the same 16 as the native apps and the number lives only on the server. [TASK-920]
 **FR-089 [STATED]** — Search is reachable from the Home screen on iPhone and searches the **whole**
 library, not one section, across both movies and TV shows.
 **FR-090 [STATED]** — Search distinguishes "no results for <query>" from a connection error, and the
@@ -336,6 +338,14 @@ focused. If nothing matches, it opens search with the phrase filled in and says 
 "Find <title> in DSM Video" opens search results for the phrase. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
 an Apple TV-app catalog partnership, not an API. Siri results obey the active profile's ceiling (FRD-002
 FR-264). *Derivation:* 542d543.
+**FR-148 [DESIGN, 2026-10-17, TASK-959]** — *Every control in the /web player shows when it is pressed,
+focused from the keyboard, and disabled.* One shared style covers all buttons (primary, secondary, close,
+player menu, next episode, filter chips, sidebar items): a pressed button visibly dips, a keyboard-focused
+one draws a clear outline, a disabled one is dimmed with a not-allowed cursor and does not lift on hover.
+There is one primary-button look; the Play button is that button, only larger. The sign-in error tint
+follows the theme's danger colour in both light and dark. *Derivation:* TRUTHS S2 (every control works and
+can be reached). Which accent the web player carries (its blue, or the apps' brand red) is not decided
+here; it is open for Ryan under TASK-959.
 
 ---
 
