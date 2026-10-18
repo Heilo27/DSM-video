@@ -116,6 +116,8 @@ enum A11y {
     static let offlineBanner = "shared.offlineBanner"
     /// This device's local store could not open (TASK-1012).
     static let localStoreBanner = "shared.localStoreBanner"
+    /// This device's local store was damaged and rebuilt empty on this launch (TASK-1034).
+    static let localStoreRecoveryBanner = "shared.localStoreRecoveryBanner"
     /// A short-lived message about a change that just failed (TASK-989).
     static let transientNotice = "shared.transientNotice"
     static let loadingIndicator = "shared.loading"

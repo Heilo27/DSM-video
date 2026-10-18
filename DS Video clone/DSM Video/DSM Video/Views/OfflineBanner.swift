@@ -130,6 +130,8 @@ struct TransientNoticeBanner: View {
 /// on tvOS. The text is LocalStore.unavailableReason, passed through AppState.
 struct LocalStoreBanner: View {
   let message: String?
+  /// Lets LocalStoreRecoveryBanner reuse this look under its own identifier.
+  var identifier: String = A11y.Shared.localStoreBanner
 
   var body: some View {
     ZStack {
@@ -151,12 +153,35 @@ struct LocalStoreBanner: View {
           .multilineTextAlignment(.center)
           .transition(.opacity)
           .accessibilityElement(children: .combine)
-          .accessibilityIdentifier(A11y.Shared.localStoreBanner)
+          .accessibilityIdentifier(identifier)
           .onAppear { AccessibilityNotification.Announcement(message).post() }
       }
     }
     .focusable(false)
     .allowsHitTesting(false)
     .animation(.easeInOut(duration: 0.3), value: message)
+  }
+}
+
+/// This device's local store was found damaged and rebuilt empty on this launch (TASK-1034,
+/// FR-015). The store works, so this is information rather than a fault: it explains why the
+/// library is empty for a moment, then clears itself after `displaySeconds`. Same look as
+/// LocalStoreBanner; never takes focus on tvOS. The text is LocalStore.recoveryNotice,
+/// passed through AppState.
+struct LocalStoreRecoveryBanner: View {
+  @Binding var message: String?
+
+  /// Longer than TransientNoticeBanner's 4 seconds: this is two sentences the user has to
+  /// read, not a one-line confirmation.
+  static let displaySeconds: UInt64 = 12
+
+  var body: some View {
+    LocalStoreBanner(message: message, identifier: A11y.Shared.localStoreRecoveryBanner)
+      // Keyed on the message, and only clears the message it was started for.
+      .task(id: message) {
+        guard let shown = message else { return }
+        try? await Task.sleep(nanoseconds: Self.displaySeconds * 1_000_000_000)
+        if !Task.isCancelled, message == shown { message = nil }
+      }
   }
 }

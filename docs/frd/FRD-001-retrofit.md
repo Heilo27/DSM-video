@@ -130,6 +130,12 @@ locally, so this promise cannot hold and the user is told (FR-005). From launch,
 lasts, a banner on iPhone, iPad and Apple TV says watch history can't be saved on this device and that
 where you stop is saved only while the NAS is reachable. It never promises a later sync. A store that
 opens shows no banner.
+*Clarified 2026-10-18 (TASK-1034):* when this device's local store was found damaged and was rebuilt
+empty, the store works but starts with no library, which would otherwise look like lost data. On the
+launch where that happens, a notice on iPhone, iPad and Apple TV says the offline library was damaged and
+rebuilt, and that videos reappear as they sync from the server. It is information, not a fault: it is
+distinct from the unavailable-store banner above, clears itself after a few seconds (nothing to tap on
+Apple TV), and does not return on later launches. A store that opened normally shows no notice.
 **FR-016 [STATED]** — Continue Watching contains exactly the titles with progress strictly between zero
 and complete, ordered most-recently-watched first. *Derivation:* design-spec B2 data requirements.
 **Complete [DESIGN, 2026-10-17, TASK-962]** — "Complete" means one thing everywhere: the position is above

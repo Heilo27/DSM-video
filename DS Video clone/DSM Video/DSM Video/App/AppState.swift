@@ -257,6 +257,12 @@ final class AppState {
   /// server write is the only copy of a watch position. Shown by LocalStoreBanner on iOS and
   /// tvOS (FR-015, TASK-1012); nil when healthy. Only checkLocalStoreHealth() assigns it.
   private(set) var localStoreUnavailableMessage: String?
+  /// Set when this launch found the on-disk store corrupt and rebuilt it empty (FR-015,
+  /// TASK-1034). Shown once by LocalStoreRecoveryBanner, which clears it itself, so it is
+  /// not `private(set)`: the banner writes nil through a binding. Only
+  /// checkLocalStoreHealth() ever sets it, and the store reports a recovery only on the
+  /// launch where the rebuild happened.
+  var localStoreRecoveryNotice: String?
   /// Warn once per launch, not once per progress tick.
   private var hasWarnedStoreUnavailable = false
   // FIX-16: Guard flag so concurrent reconnect() calls don't race.
@@ -2907,6 +2913,7 @@ final class AppState {
   func checkLocalStoreHealth() async {
     await localStore.ensureReady()
     localStoreUnavailableMessage = await localStore.unavailableReason
+    localStoreRecoveryNotice = await localStore.recoveryNotice
   }
 
   /// Optimistic progress write: update the local store immediately (durability), mark it

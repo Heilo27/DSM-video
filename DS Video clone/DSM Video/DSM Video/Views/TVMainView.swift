@@ -47,6 +47,8 @@ struct TVMainView: View {
                                   localNetworkDenied: appState.localNetworkDenied)
               // Watch history cannot be kept on this device (TASK-1012, FR-015).
               LocalStoreBanner(message: appState.localStoreUnavailableMessage)
+              // The offline library was damaged and rebuilt empty on this launch (TASK-1034).
+              LocalStoreRecoveryBanner(message: Bindable(appState).localStoreRecoveryNotice)
             }
             .padding(.top, .dsSpaceJumbo)
           }
