@@ -276,7 +276,7 @@ struct ProfilePickerView: View {
         .tint(.white)
         .focused($focusedControl, equals: .manage)
         .accessibilityHint("Requires the owner's PIN")
-        .accessibilityIdentifier("profilePicker.manage")
+        .accessibilityIdentifier(A11y.Profile.Picker.manageButton)
         Spacer(minLength: 0)
       }
       .padding(.horizontal, .dsSpaceTitleSafe)
@@ -312,7 +312,7 @@ struct ProfilePickerView: View {
       .focused($focusedProfile, equals: profile.id)
       .accessibilityLabel(profile.name)
       .accessibilityHint(profile.hasPin ? "Protected by a PIN" : "Opens this profile")
-      .accessibilityIdentifier("profilePicker.profile.\(profile.name)")
+      .accessibilityIdentifier(A11y.Profile.Picker.profileTile(named: profile.name))
     }
     let add = Group {
       if appState.canAddProfile {
@@ -322,7 +322,7 @@ struct ProfilePickerView: View {
         .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
         .focused($focusedProfile, equals: Self.addTileID)
         .accessibilityHint("Requires the owner's PIN")
-        .accessibilityIdentifier("profilePicker.add")
+        .accessibilityIdentifier(A11y.Profile.Picker.addButton)
       }
     }
     #if os(tvOS)
@@ -408,7 +408,7 @@ struct PinPadView<Header: View>: View {
         .font(ProfileMetrics.body)
         .multilineTextAlignment(.center)
         .frame(maxWidth: 900)
-        .accessibilityIdentifier("pinPad.message")
+        .accessibilityIdentifier(A11y.Profile.PinPad.message)
         keypad
       }
       .padding(.dsSpaceJumbo)
@@ -432,7 +432,7 @@ struct PinPadView<Header: View>: View {
           .buttonStyle(.bordered)
           .disabled(busy)
           .focused($focusedKey, equals: .forgot)
-          .accessibilityIdentifier("pinPad.forgot")
+          .accessibilityIdentifier(A11y.Profile.PinPad.forgotButton)
       }
       .padding(.horizontal, ProfileMetrics.spacing)
       .padding(.top, ProfileMetrics.spacing * 0.5)
@@ -479,11 +479,11 @@ struct PinPadView<Header: View>: View {
       HStack(spacing: 18) {
         command("Cancel", symbol: nil, action: cancel)
           .focused($focusedKey, equals: .cancel)
-          .accessibilityIdentifier("pinPad.cancel")
+          .accessibilityIdentifier(A11y.Profile.PinPad.cancelButton)
         key("0").focused($focusedKey, equals: .k0)
         command("Delete", symbol: "delete.left", action: deleteLast)
           .focused($focusedKey, equals: .delete)
-          .accessibilityIdentifier("pinPad.delete")
+          .accessibilityIdentifier(A11y.Profile.PinPad.deleteButton)
       }
     }
     .disabled(busy)
@@ -499,7 +499,7 @@ struct PinPadView<Header: View>: View {
         .frame(width: ProfileMetrics.key, height: ProfileMetrics.key)
     }
     .buttonStyle(PinKeyStyle())
-    .accessibilityIdentifier("pinPad.key.\(digit)")
+    .accessibilityIdentifier(A11y.Profile.PinPad.key(digit))
   }
 
   private func command(_ title: String, symbol: String?, action: @escaping () -> Void) -> some View {
@@ -765,7 +765,7 @@ struct ProfileManagementView: View {
             .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
             .focused($focusedProfile, equals: profile.id)
             .accessibilityLabel("Edit \(profile.name)")
-            .accessibilityIdentifier("profileManage.profile.\(profile.name)")
+            .accessibilityIdentifier(A11y.Profile.Manage.profileRow(named: profile.name))
           }
           if appState.canAddProfile {
             Button { editing = .create } label: {
@@ -773,7 +773,7 @@ struct ProfileManagementView: View {
             }
             .buttonStyle(ProfileTileButtonStyle(scalesLabel: false))
             .focused($focusedProfile, equals: Self.addTileID)
-            .accessibilityIdentifier("profileManage.add")
+            .accessibilityIdentifier(A11y.Profile.Manage.addButton)
           }
         }
         #if os(tvOS)
@@ -789,7 +789,7 @@ struct ProfileManagementView: View {
         Button("Done", action: close)
           .dsSecondaryButton(minWidth: 200)
           .focused($focusedControl, equals: .done)
-          .accessibilityIdentifier("profileManage.done")
+          .accessibilityIdentifier(A11y.Profile.Manage.doneButton)
         Spacer(minLength: 0)
       }
       .padding(.horizontal, .dsSpaceTitleSafe)
@@ -884,7 +884,7 @@ struct OwnerPinResetView: View {
             .textFieldStyle(.roundedBorder)
             #endif
             .frame(maxWidth: 700)
-            .accessibilityIdentifier("ownerPinReset.password")
+            .accessibilityIdentifier(A11y.Profile.OwnerPinReset.passwordField)
           TextField("Verification code (two-factor sign-in only)", text: $form.code)
             .textContentType(.oneTimeCode)
             .autocorrectionDisabled()
@@ -894,7 +894,7 @@ struct OwnerPinResetView: View {
             #endif
             .focused($focusedField, equals: .code)
             .frame(maxWidth: 700)
-            .accessibilityIdentifier("ownerPinReset.code")
+            .accessibilityIdentifier(A11y.Profile.OwnerPinReset.codeField)
 
           // tvOS: full-width focus sections, as in the editor, so Down always finds the row.
           #if os(tvOS)
@@ -910,7 +910,7 @@ struct OwnerPinResetView: View {
               .font(ProfileMetrics.body)
               .foregroundStyle(Color.dsError)
               .fixedSize(horizontal: false, vertical: true)
-              .accessibilityIdentifier("ownerPinReset.error")
+              .accessibilityIdentifier(A11y.Profile.OwnerPinReset.error)
           }
 
           HStack(spacing: 28) {
@@ -922,12 +922,12 @@ struct OwnerPinResetView: View {
             .dsPrimaryButton(.card, minWidth: 160)
             .disabled(!form.canSubmit || sending)
             .focused($focusedField, equals: .reset)
-            .accessibilityIdentifier("ownerPinReset.reset")
+            .accessibilityIdentifier(A11y.Profile.OwnerPinReset.resetButton)
 
             Button("Cancel", action: cancel)
               .buttonStyle(.bordered)
               .focused($focusedField, equals: .cancel)
-              .accessibilityIdentifier("ownerPinReset.cancel")
+              .accessibilityIdentifier(A11y.Profile.OwnerPinReset.cancelButton)
           }
           .font(ProfileMetrics.body.weight(.semibold))
           #if os(tvOS)
@@ -962,7 +962,7 @@ struct OwnerPinResetView: View {
       Button(form.newPin == nil ? "Choose New PIN" : "Change New PIN") { choosingPin = true }
         .buttonStyle(.bordered)
         .focused($focusedField, equals: .choosePin)
-        .accessibilityIdentifier("ownerPinReset.choosePin")
+        .accessibilityIdentifier(A11y.Profile.OwnerPinReset.choosePin)
     }
     .font(ProfileMetrics.body.weight(.semibold))
   }
@@ -1052,7 +1052,7 @@ struct ProfileEditorView: View {
                 .textFieldStyle(.roundedBorder)
                 #endif
                 .frame(maxWidth: 700)
-                .accessibilityIdentifier("profileEditor.name")
+                .accessibilityIdentifier(A11y.Profile.Editor.nameField)
               nameFeedback
             }
           }
@@ -1085,7 +1085,7 @@ struct ProfileEditorView: View {
             Text(error)
               .font(ProfileMetrics.body)
               .foregroundStyle(Color.dsError)
-              .accessibilityIdentifier("profileEditor.error")
+              .accessibilityIdentifier(A11y.Profile.Editor.error)
           }
 
           HStack(spacing: 28) {
@@ -1097,12 +1097,12 @@ struct ProfileEditorView: View {
             .dsPrimaryButton(.card, minWidth: 160)
             .disabled(!nameValid || saving)
             .focused($focusedControl, equals: .save)
-            .accessibilityIdentifier("profileEditor.save")
+            .accessibilityIdentifier(A11y.Profile.Editor.saveButton)
 
             Button("Cancel", action: close)
               .buttonStyle(.bordered)
               .focused($focusedControl, equals: .cancel)
-              .accessibilityIdentifier("profileEditor.cancel")
+              .accessibilityIdentifier(A11y.Profile.Editor.cancelButton)
 
             Spacer()
 
@@ -1112,7 +1112,7 @@ struct ProfileEditorView: View {
               }
               .buttonStyle(.bordered)
               .focused($focusedControl, equals: .delete)
-              .accessibilityIdentifier("profileEditor.delete")
+              .accessibilityIdentifier(A11y.Profile.Editor.deleteButton)
             }
           }
           .font(ProfileMetrics.body.weight(.semibold))
@@ -1156,13 +1156,13 @@ struct ProfileEditorView: View {
       if let reason {
         Text(reason)
           .foregroundStyle(over ? Color.dsError : Color.dsTextSecondary)
-          .accessibilityIdentifier("profileEditor.nameReason")
+          .accessibilityIdentifier(A11y.Profile.Editor.nameReason)
       }
       Spacer(minLength: 0)
       Text(ProfileNameRules.counter(for: name))
         .monospacedDigit()
         .foregroundStyle(over ? Color.dsError : Color.dsTextTertiary)
-        .accessibilityIdentifier("profileEditor.nameCounter")
+        .accessibilityIdentifier(A11y.Profile.Editor.nameCounter)
     }
     .font(ProfileMetrics.body)
     .frame(maxWidth: 700)
@@ -1215,7 +1215,7 @@ struct ProfileEditorView: View {
         .buttonStyle(ProfileTileButtonStyle())
         .focused($focusedLevel, equals: value)
         .accessibilityAddTraits(level == value ? .isSelected : [])
-        .accessibilityIdentifier("profileEditor.level.\(value)")
+        .accessibilityIdentifier(A11y.Profile.Editor.level(value))
       }
     }
     .focusSection()
@@ -1258,7 +1258,7 @@ struct ProfileEditorView: View {
         .buttonStyle(ProfileTileButtonStyle())
         .focused($focusedLevel, equals: value)
         .accessibilityAddTraits(level == value ? .isSelected : [])
-        .accessibilityIdentifier("profileEditor.level.\(value)")
+        .accessibilityIdentifier(A11y.Profile.Editor.level(value))
       }
     }
     #endif
@@ -1275,12 +1275,12 @@ struct ProfileEditorView: View {
       Button(willHavePin ? "Change PIN" : "Set PIN") { choosingPin = true }
         .buttonStyle(.bordered)
         .focused($focusedControl, equals: .pinSet)
-        .accessibilityIdentifier("profileEditor.pinSet")
+        .accessibilityIdentifier(A11y.Profile.Editor.pinSet)
       if willHavePin && !ownerKeepsPin {
         Button("Remove PIN") { pinChange = existing?.hasPin == true ? .clear : nil }
           .buttonStyle(.bordered)
           .focused($focusedControl, equals: .pinRemove)
-          .accessibilityIdentifier("profileEditor.pinRemove")
+          .accessibilityIdentifier(A11y.Profile.Editor.pinRemove)
       }
     }
     .font(ProfileMetrics.body.weight(.semibold))
@@ -1388,7 +1388,7 @@ struct ActiveProfileBadge: View {
       .focused($focused)
       .accessibilityLabel("Profile: \(profile.name)")
       .accessibilityHint("Switch profile")
-      .accessibilityIdentifier("home.activeProfile")
+      .accessibilityIdentifier(A11y.Profile.activeProfileChip)
     }
   }
 }
@@ -1413,7 +1413,7 @@ struct ManageProfilesSettingsRow: View {
       }
       .focused($focused)
       .accessibilityHint("Add, edit or remove profiles. Requires the owner's PIN")
-      .accessibilityIdentifier("settings.manageProfiles")
+      .accessibilityIdentifier(A11y.Profile.manageProfilesRow)
       .fullScreenCover(item: $management) { entry in
         ProfileManagementView(startWithAdd: entry == .add) { management = nil }
           .environment(appState)
@@ -1443,7 +1443,7 @@ struct RestrictedEmptyState: View {
       description: ProfileText.restrictedEmpty(
         levelLabel: appState.ageLevelLabel(profile.maxAgeLevel), place: place))
     .task { await appState.loadAgeLevelsIfNeeded() }
-    .accessibilityIdentifier("emptyState.restricted")
+    .accessibilityIdentifier(A11y.Profile.restrictedEmptyState)
   }
 }
 

@@ -129,4 +129,55 @@ enum A11y {
     static let serverUpdateDownload = "shared.serverUpdate.download"
     static let serverUpdateDismiss = "shared.serverUpdate.dismiss"
   }
+
+  // MARK: - Profiles (FRD-002)
+
+  /// Every profile control's identifier. Their one home; UIID.Profile in UITestSupport.swift mirrors them.
+  enum Profile {
+    static let activeProfileChip = "home.activeProfile"
+    static let manageProfilesRow = "settings.manageProfiles"
+    static let restrictedEmptyState = "emptyState.restricted"
+
+    enum Picker {
+      static let manageButton = "profilePicker.manage"
+      static let addButton = "profilePicker.add"
+      static func profileTile(named name: String) -> String { "profilePicker.profile.\(name)" }
+    }
+
+    enum PinPad {
+      static let message = "pinPad.message"
+      static let forgotButton = "pinPad.forgot"
+      static let cancelButton = "pinPad.cancel"
+      static let deleteButton = "pinPad.delete"
+      static func key(_ digit: String) -> String { "pinPad.key.\(digit)" }
+    }
+
+    enum Manage {
+      static let addButton = "profileManage.add"
+      static let doneButton = "profileManage.done"
+      static func profileRow(named name: String) -> String { "profileManage.profile.\(name)" }
+    }
+
+    enum OwnerPinReset {
+      static let passwordField = "ownerPinReset.password"
+      static let codeField = "ownerPinReset.code"
+      static let error = "ownerPinReset.error"
+      static let resetButton = "ownerPinReset.reset"
+      static let cancelButton = "ownerPinReset.cancel"
+      static let choosePin = "ownerPinReset.choosePin"
+    }
+
+    enum Editor {
+      static let nameField = "profileEditor.name"
+      static let error = "profileEditor.error"
+      static let saveButton = "profileEditor.save"
+      static let cancelButton = "profileEditor.cancel"
+      static let deleteButton = "profileEditor.delete"
+      static let nameReason = "profileEditor.nameReason"
+      static let nameCounter = "profileEditor.nameCounter"
+      static let pinSet = "profileEditor.pinSet"
+      static let pinRemove = "profileEditor.pinRemove"
+      static func level(_ value: Int) -> String { "profileEditor.level.\(value)" }
+    }
+  }
 }

@@ -89,18 +89,15 @@ final class DSReelUITests: XCTestCase {
 
     let address = app.textFields[UIID.Setup.addressField]
     requireExists(address, "the server address field", timeout: UITest.launchTimeout)
-    address.tap()
-    address.typeText("198.51.100.1")
+    focusAndType(address, "198.51.100.1")
 
     let username = app.textFields[UIID.Setup.usernameField]
     requireExists(username, "the username field")
-    username.tap()
-    username.typeText("tester")
+    focusAndType(username, "tester")
 
     let password = app.secureTextFields[UIID.Setup.passwordField]
     requireExists(password, "the password field")
-    password.tap()
-    password.typeText("not-a-real-password")
+    focusAndType(password, "not-a-real-password")
 
     // The keyboard is now up, focus is in the last field, and the form is complete.
     let connect = app.buttons[UIID.Setup.connectButton]
@@ -131,7 +128,6 @@ final class DSReelUITests: XCTestCase {
     let address = app.textFields[UIID.Setup.addressField]
     requireExists(address, "the server address field", timeout: UITest.launchTimeout)
 
-    address.tap()
     // Must be a PRIVATE address that REFUSES FAST.
     //
     // Two constraints, and getting either wrong tests the wrong thing:
@@ -147,17 +143,15 @@ final class DSReelUITests: XCTestCase {
     //
     // 127.0.0.1 is private, and a closed port there returns ECONNREFUSED immediately
     // (measured: 0.015s) — the genuine "server unreachable" path, deterministically.
-    address.typeText("127.0.0.1:65123")
+    focusAndType(address, "127.0.0.1:65123")
 
     let username = app.textFields[UIID.Setup.usernameField]
     requireExists(username, "the username field")
-    username.tap()
-    username.typeText("tester")
+    focusAndType(username, "tester")
 
     let password = app.secureTextFields[UIID.Setup.passwordField]
     requireExists(password, "the password field")
-    password.tap()
-    password.typeText("not-a-real-password")
+    focusAndType(password, "not-a-real-password")
 
     // The keyboard is up over the button after the last field. Use the app's own Done
     // accessory rather than a coordinate tap — see dismissKeyboard's note.
