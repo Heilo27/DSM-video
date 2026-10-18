@@ -162,6 +162,10 @@ never sits at 100% (TASK-971).
 TASK-782's title.
 **FR-033 [INFERRED]** — A download failure message names the real cause (server unreachable, storage
 full, server error) and never blames the video's format or the user's credentials (instance of FR-002).
+*Clarified 2026-10-17 (TASK-961):* only a server answer that the session is gone says the session
+expired. A download the server refuses for a title above the profile's age rating names the age rating;
+a download refused because its profile no longer exists names that and returns to the profile picker
+like any other request (FRD-002 FR-206). A refusal with no stated reason never claims the session expired.
 **FR-034 [INFERRED]** — Completed downloads and their bookkeeping survive relaunch and are playable
 after a cold start with no server contact.
 **FR-035 [STATED]** — A download can be deleted, via swipe-to-delete among other paths. *Derivation:*

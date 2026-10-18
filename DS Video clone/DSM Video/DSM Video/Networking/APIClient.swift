@@ -896,8 +896,12 @@ enum APIError: Error {
       // Name the cause, not the wire status. A raw "Server error (403)" tells the user
       // nothing they can act on.
       switch code {
-      case 401, 403:
+      case 401:
         return "Your session expired. Sign in again."
+      case 403:
+        // A bare 403 says nothing about the session (TASK-961): the backend's session failures
+        // are all 401, and its 403s are permission, profile and content refusals.
+        return "The server refused that request. This account or profile may not have access to it."
       case 404:
         return "The server couldn't find that item. It may have been moved or removed."
       case 429:
@@ -927,6 +931,8 @@ enum APIError: Error {
         return Self.pinLockedMessage(retryAfterSeconds: detail?.retryAfterSeconds)
       case "password_incorrect":
         return "Incorrect DSM password or verification code."
+      case "otp_required":
+        return "This DSM account uses two-factor sign-in. Enter your DSM verification code along with your password."
       case "invalid_pin_format":
         return "A PIN must be exactly 4 digits."
       case "invalid_profile_name":
@@ -1033,14 +1039,18 @@ enum APIError: Error {
     // 403 → forever, with no message explaining that the fix is in DSM's Application
     // Privileges. Those cases surface their own actionable error via userMessage instead.
     if isAccountStateFailure { return false }
-    // 403 is NOT blanket-auth. The backend emits exactly three 403 codes and only one of them
-    // concerns the session:
+    // 403 is NOT auth. None of the backend's 403 codes concerns the session:
     //   permission_denied  — account state, handled above (re-auth cannot fix it)
     //   admin_required     — this USER lacks a privilege; the session is perfectly valid
-    //   path_not_allowed   — the requested FILE is outside the media roots; nothing to do
-    //                        with credentials at all
-    // Treating the last two as auth failures deleted the Keychain token and claimed the
+    //   path_not_allowed   — the requested FILE is outside the media roots
+    //   forbidden          — a route refused this account
+    //   unknown_profile, content_restricted, profile_restricted, owner_pin_required,
+    //   pin_incorrect, password_incorrect, otp_required
+    //                      — profile and PIN refusals (FRD-002 §10, FR-217: none is a session
+    //                        failure)
+    // Treating any of them as an auth failure deleted the Keychain token and claimed the
     // session had expired, so a moved or renamed file could silently sign the user out.
+    // The session failures (missing_token, invalid_token, token_revoked) are all 401, and
     // 401 remains unconditional — every 401 the server emits is genuinely a token problem.
     switch self {
     case .http(let code):
