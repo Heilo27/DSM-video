@@ -1136,6 +1136,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		r.Get("/libraries/summary", s.handleLibrariesSummary)
 		r.Get("/items", s.handleItems)
 		r.Get("/items/{id}", s.handleItemDetail)
+		r.Get("/items/{id}/similar", s.handleItemSimilar) // FR-151 (TASK-747)
 		r.Get("/items/{id}/playback", s.handlePlayback)
 		r.Get("/progress/all", s.handleProgressAll)
 		r.Get("/progress", s.handleProgressBatch)
@@ -2982,67 +2983,18 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, typ, title, addedAt string
-		var year, duration, seasonNumber, episodeNumber sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, overview, showName sql.NullString
-		var progPos, progDur sql.NullInt64
-		var progUpdatedAt sql.NullString
-		var showFolderIDCol, contentRating sql.NullString
+		var row itemSummaryRow
+		var overview sql.NullString // selected for column parity; the summary does not carry it
 
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath, &overview,
-			&showName, &seasonNumber, &episodeNumber,
-			&progPos, &progDur, &progUpdatedAt,
-			&showFolderIDCol, &contentRating); err != nil {
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath, &overview,
+			&row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ProgPos, &row.ProgDur, &row.ProgUpdatedAt,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
-
-		var p map[string]any
-		if progPos.Valid {
-			p = map[string]any{
-				"positionSeconds": progPos.Int64,
-				"durationSeconds": progDur.Int64,
-				"updatedAt":       progUpdatedAt.String,
-			}
-		}
-
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           title,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-		}
-		putRating(item, contentRating)
-
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-		if showName.Valid && showName.String != "" {
-			item["showName"] = showName.String
-		}
-		if seasonNumber.Valid {
-			item["seasonNumber"] = seasonNumber.Int64
-		}
-		if episodeNumber.Valid {
-			item["episodeNumber"] = episodeNumber.Int64
-		}
-		if showFolderIDCol.Valid && showFolderIDCol.String != "" {
-			item["showFolderId"] = showFolderIDCol.String
-		}
-		if p != nil {
-			item["progress"] = p
-		}
-		items = append(items, item)
+		items = append(items, itemSummary(row))
 	}
 	if err := rows.Err(); err != nil {
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)

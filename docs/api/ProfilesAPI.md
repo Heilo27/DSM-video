@@ -269,6 +269,7 @@ filtered). **X** = exempt.
 |---|---|---|
 | `GET /items` | F | `continueWatching` / `recentlyPlayed` sections also P |
 | `GET /items/{id}` | R | |
+| `GET /items/{id}/similar` | F, R | More Like This (FR-151): the seed above the ceiling is refused; the matches above it are left out |
 | `GET /items/{id}/playback` | R | gate is at session creation (FR-252) |
 | `POST /items/{id}/progress` | P | accepted at any level (FR-231) |
 | `GET /items/{id}/tmdb-search`, `POST /items/{id}/tmdb-fix` | U | plus the existing server-admin rule |

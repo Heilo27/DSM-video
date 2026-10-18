@@ -181,6 +181,66 @@ populated for new scans and, over time, for existing libraries by a paced backgr
 as `NR`, `Not Rated` or `Unrated`. A `null` can also mean the backfill has not reached that
 title yet; clients should treat both as "no rating known" and must not infer an age level from it.
 
+### GET `/items/{id}/similar`
+More Like This (FR-151): other library titles like this one, best match first. Computed locally from
+the library; no outbound calls.
+
+Query:
+- `limit` (optional): default `12`, clamped to `1`-`30`; an unparseable value uses the default
+
+A title is a match when it shares a genre with the item or is in one of the same collections (the
+Collections rails' definitions). Score: 3 per shared genre, 4 per shared collection, +2 same release
+decade (+1 adjacent decade), +1.5 same kind (movie/show). Ties: higher `rating`, then title. Episodes
+collapse to one entry per show (`title` and `showName` are the show's name, `year` the earliest,
+`addedAt` the newest); the seed, and for an episode seed its whole show, are excluded.
+
+Response `200`: `{"items": [...]}`, each element exactly the `/items` list element (including
+`contentRating`, `ageLevel` and `progress` when present). `items` is `[]` when the item has no genres
+and is in no collection.
+
+```json
+{
+  "items": [
+    {
+      "id": "it_def",
+      "type": "movie",
+      "title": "Wildlife 2",
+      "year": 2011,
+      "durationSeconds": 5400,
+      "addedAt": "2026-01-02T10:00:00Z",
+      "rating": 7.4,
+      "posterImageId": "it_def",
+      "backdropImageId": null,
+      "contentRating": "PG",
+      "ageLevel": 2
+    },
+    {
+      "id": "it_ep1",
+      "type": "episode",
+      "title": "Planet Show",
+      "year": 2008,
+      "durationSeconds": 2700,
+      "addedAt": "2026-03-01T09:30:00Z",
+      "rating": null,
+      "posterImageId": "it_ep1",
+      "backdropImageId": null,
+      "contentRating": "TV-PG",
+      "ageLevel": 2,
+      "showName": "Planet Show",
+      "seasonNumber": 1,
+      "episodeNumber": 1,
+      "showFolderId": "sf_9"
+    }
+  ]
+}
+```
+
+Errors:
+- `404 {"error":"not_found"}`: unknown id.
+- `403 {"error":"content_restricted"}`: the item is above the viewing profile's age ceiling (the same
+  answer `GET /items/{id}` gives). Entries above the ceiling, and unrated entries under a ceiling, are
+  never returned (FR-250).
+
 ### GET `/search`
 Query:
 - `q` (required)
@@ -361,14 +421,14 @@ Trigger a library re-scan (requires auth).
 
 ## Route inventory (generated)
 
-The prose sections above document the **19 routes the iOS/tvOS clients actually call** —
+The prose sections above document the **20 routes the iOS/tvOS clients actually call** —
 the browsing, playback, progress and auth surface — with request/response shapes. That is the
 contract worth describing by hand, and it is deliberately not the whole route table.
 
 For completeness, every route the server registers is listed below, with ✅ marking the ones
 documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 
-**88 routes total: 77 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
+**89 routes total: 78 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
 
 ### Client-facing
 
@@ -396,6 +456,7 @@ documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 | `/items/{id}` | GET | ✅ |
 | `/items/{id}/playback` | GET | ✅ |
 | `/items/{id}/progress` | POST | ✅ |
+| `/items/{id}/similar` | GET | ✅ |
 | `/items/{id}/tmdb-fix` | POST | — |
 | `/items/{id}/tmdb-search` | GET | — |
 | `/just-added` | GET | — |
