@@ -125,6 +125,15 @@ The Continue Watching and Recently Watched rails, the poster-card indicator and 
 page's Resume-or-next-episode choice (FR-011) and the restart-from-zero on reopening all read that one
 rule (`PlaybackProgress.isFinished`; the rail SQL mirrors it). A 22-minute episode stopped 80 seconds from the
 end is therefore complete: its show offers the next episode, not a resume.
+**Thresholds, one set [DESIGN, 2026-10-18, TASK-1017]** — Three numbers, all in `PlaybackProgress`, and
+nothing else in the app carries a threshold of its own. *Started* is 5% and up (inclusive): only a started
+title is a resume point and belongs in Continue Watching. *Complete* is past 95%, or within the last 90
+seconds. *Indicator* is any position above zero that is not complete. They are different questions with
+different answers below 5%: a title at 3% is unwatched (not a resume point, not in Continue Watching, and
+on a show page it is the next episode to play, not skipped), yet its card and its episode row still draw
+a bar of 3%, because progress above zero is shown. Every surface reads them: the rails, poster cards, the
+episode rows on the show page (check when complete, ring otherwise, nothing at zero), the downloaded-item
+resume bar, and the show page's Resume-or-next-episode choice.
 **FR-017 [INFERRED]** — With zero in-progress titles the rail is absent rather than rendered empty, and
 its absence is not an error.
 **FR-018 [STATED]** — Mark as Watched sets a title to fully watched, removes it from Continue Watching,

@@ -741,18 +741,16 @@ private struct ContinueWatchingCard: View {
         .padding(.bottom, 2)
 
       // Progress bar
-      if let progress = item.progress, progress.durationSeconds > 0 {
-        let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-        if frac < 1.0 {
-          GeometryReader { geo in
-            ZStack(alignment: .leading) {
-              Rectangle().fill(Color.dsBorderStrong).frame(height: 3)
-              Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 3)
-            }
+      // The shared card rule (PlaybackProgress.cardIndicator, FR-020), not a fraction of its own.
+      if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+        GeometryReader { geo in
+          ZStack(alignment: .leading) {
+            Rectangle().fill(Color.dsBorderStrong).frame(height: 3)
+            Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 3)
           }
-          .frame(height: 3)
-          .accessibilityHidden(true)
         }
+        .frame(height: 3)
+        .accessibilityHidden(true)
       }
     }
     .frame(width: 200, height: 120)

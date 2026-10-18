@@ -105,8 +105,11 @@ nonisolated enum PlaybackProgress {
     /// - `nil` when neither exists (everything watched, or nothing to scan); the caller
     ///   falls back to the first episode.
     ///
-    /// An episode with progress below `startedThreshold` is neither a resume point nor
-    /// "unwatched" here, exactly as both scans behaved before this was extracted.
+    /// An episode with progress below `startedThreshold` was never genuinely started (FRD-001
+    /// FR-016 "started from 5%"), so it is `.unwatched` like an episode with no record: it can be
+    /// the first-unwatched pick, and it does not advance past an earlier unwatched one. Before
+    /// TASK-1017 such an episode was skipped by the walk entirely, so a show whose next episode
+    /// had been sampled for a few seconds offered the episode AFTER it, or nothing.
     struct ShowResumePick: Equatable {
         let index: Int
         let isResume: Bool
@@ -125,7 +128,7 @@ nonisolated enum PlaybackProgress {
                 case .watched:
                     firstUnwatched = nil
                 case .unwatched:
-                    break
+                    if firstUnwatched == nil { firstUnwatched = i }
                 }
             } else if firstUnwatched == nil {
                 firstUnwatched = i
