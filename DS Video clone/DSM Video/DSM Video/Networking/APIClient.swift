@@ -1042,12 +1042,30 @@ enum APIError: Error {
         return "Too many requests. Wait a moment and try again."
       case "db_error", "internal_error":
         return "The server hit an internal error. Check the DSVideoServer logs on your NAS."
+      case "server_error":
+        // TASK-1040: the profile endpoints return this when the server failed to generate an
+        // ID or secure a PIN, before anything was written (profiles.go), so "nothing was
+        // saved" is true of every path that reaches it.
+        return "The server couldn't finish that and nothing was saved. Try again; if it keeps happening, check the DSVideoServer logs on your NAS."
+
+      // ── QuickConnect lookup (POST /auth/quickconnect/resolve) ─────────────────
+      case "quickconnect_resolve_failed":
+        // The NAS asked QuickConnect's lookup service and got no usable answer, so the
+        // ID itself is not at fault (an unknown ID is QuickConnectError.notFound).
+        return "Your NAS couldn't reach QuickConnect to look up that ID. Check that the NAS has an internet connection, or sign in with its address instead."
+      case "missing_quickconnect_id":
+        return "Enter a QuickConnect ID to look up."
+
+      // ── Profile picture ───────────────────────────────────────────────────────
+      case "invalid_avatar":
+        return "The server doesn't accept that profile picture. Choose a different one."
 
       default:
         // Anything unmapped still reaches the user, but as a readable sentence rather than
         // a raw identifier. Malformed-request codes (invalid_json, missing_show_id, …) land
         // here deliberately: they indicate a client bug, not something a user can fix, and
-        // the diagnostic log carries the exact code for us.
+        // the diagnostic log carries the exact code for us. A code a user CAN act on gets
+        // its own case above (TASK-1040).
         let readable = msg.replacingOccurrences(of: "_", with: " ")
         return readable.prefix(1).uppercased() + readable.dropFirst() + "."
       }

@@ -63,6 +63,14 @@ empty library — and the converse for each. Distinguishable categories at minim
 credentials rejected, account not permitted, session expired, media unplayable, insufficient storage.
 *Derivation:* tvOS release notes — "Signing in no longer shows an old error message while a correct
 password is working"; competitive research Error States — the named categories.
+*Clarified 2026-10-18 (TASK-1040):* a server failure is never reported as a bare "Server error." or as a
+code turned into a sentence. A profile change the server could not complete (it failed to generate an ID
+or secure a PIN before writing anything) says the server failed, that nothing was saved, and to try
+again and check the server logs on the NAS. A QuickConnect lookup the NAS could not complete says the
+lookup service could not be reached from the NAS, points at the NAS's internet connection, and offers
+signing in by address instead; it is never reported as an ID that was not found (that is its own message,
+FR-115). A code the app has no copy for is still shown as a plain sentence, but only for malformed
+requests the user cannot act on.
 
 **FR-003 [STATED]** — *No indefinite spinner is an acceptable terminal state.* Any loading indicator must
 resolve, within a bounded time, to either content or a named error with a retry affordance.

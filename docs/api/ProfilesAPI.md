@@ -318,4 +318,5 @@ filtered). **X** = exempt.
 | `owner_profile_immutable` | 409 | — |
 | `invalid_avatar` | 400 | — |
 | `dsm_unavailable` | 503 | — |
+| `server_error` | 500 | — |
 | `unknown_collection` | 404 | — |
