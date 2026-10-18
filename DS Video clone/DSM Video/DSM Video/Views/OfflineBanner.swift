@@ -56,14 +56,18 @@ struct OfflineBanner: View {
 struct ConnectionIndicator: View {
   let isOffline: Bool
   let serverUnreachable: Bool
+  /// TASK-1006 (FR-115): named on Apple TV exactly as on iPhone.
+  var localNetworkDenied: Bool = false
 
-  static func text(isOffline: Bool, serverUnreachable: Bool) -> String? {
-    OfflineBanner.cause(isOffline: isOffline, serverUnreachable: serverUnreachable)
+  static func text(isOffline: Bool, serverUnreachable: Bool, localNetworkDenied: Bool = false) -> String? {
+    OfflineBanner.cause(isOffline: isOffline, serverUnreachable: serverUnreachable,
+                        localNetworkDenied: localNetworkDenied)
   }
 
   var body: some View {
     ZStack {
-      if let text = Self.text(isOffline: isOffline, serverUnreachable: serverUnreachable) {
+      if let text = Self.text(isOffline: isOffline, serverUnreachable: serverUnreachable,
+                              localNetworkDenied: localNetworkDenied) {
         Label(text, systemImage: OfflineBanner.symbol(isOffline: isOffline))
           .font(.callout.weight(.semibold))
           .foregroundStyle(.white)
@@ -78,7 +82,7 @@ struct ConnectionIndicator: View {
     }
     .focusable(false)
     .allowsHitTesting(false)
-    .animation(.easeInOut(duration: 0.3), value: isOffline || serverUnreachable)
+    .animation(.easeInOut(duration: 0.3), value: isOffline || serverUnreachable || localNetworkDenied)
   }
 }
 

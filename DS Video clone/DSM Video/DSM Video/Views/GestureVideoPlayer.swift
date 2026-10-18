@@ -31,6 +31,9 @@ private nonisolated let orientLog = Logger(subsystem: "com.dsm.orientation", cat
 struct GestureVideoPlayer: View {
     // Used by the tvOS Menu handler to close the player once controls are already hidden.
     @Environment(\.dismiss) private var dismiss
+    /// Optional so previews and tests can host the player without one. Read only to name a
+    /// Local Network denial the stream's own error may not carry (TASK-1006, FR-115).
+    @Environment(AppState.self) private var appState: AppState?
     let url: URL
     let title: String
     var resumePosition: Double = 0
@@ -218,6 +221,9 @@ struct GestureVideoPlayer: View {
         let t = isScrubbing ? scrubTime : currentTime
         return t >= intro.startSecs && t < intro.endSecs
     }
+
+    /// The app's Local Network state for error wording; false without an AppState.
+    private var localNetworkDenied: Bool { appState?.localNetworkDenied ?? false }
 
     var body: some View {
         playerContent
@@ -1610,7 +1616,7 @@ struct GestureVideoPlayer: View {
             let underlying = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
             Task { @MainActor in
                 isBuffering = false
-                playerError = underlying.map { Self.friendlyPlayerError($0) }
+                playerError = underlying.map { Self.friendlyPlayerError($0, localNetworkDenied: localNetworkDenied) }
                     ?? "Lost connection to the server. Check that your NAS is reachable, then try again." 
             }
         }
@@ -1661,9 +1667,11 @@ struct GestureVideoPlayer: View {
             .receive(on: DispatchQueue.main)
             .sink { [weak playerItem] status in
                 if status == .failed {
-                    let msg = playerItem?.error.map { GestureVideoPlayer.friendlyPlayerError($0) } ?? "Unable to play this video."
+                    let failure = playerItem?.error
                     Task { @MainActor in
-                        playerError = msg
+                        playerError = failure.map {
+                            GestureVideoPlayer.friendlyPlayerError($0, localNetworkDenied: localNetworkDenied)
+                        } ?? "Unable to play this video."
                         isBuffering = false
                     }
                 } else if status == .readyToPlay, let item = playerItem {
@@ -2412,10 +2420,14 @@ extension GestureVideoPlayer {
     /// NSUnderlyingErrorKey, often behind a CoreMedia error. The chain is searched
     /// for a transport cause first, so a lost connection is not reported as a
     /// corrupt file (FR-054, FR-002).
-    nonisolated static func friendlyPlayerError(_ error: Error) -> String {
+    ///
+    /// TASK-1006: `localNetworkDenied` is the app's own knowledge that Local Network access is
+    /// off (AppState). AVFoundation loads the stream out of process, so the -1009 it reports may
+    /// have lost the path that says why; the flag names the cause when the error cannot.
+    nonisolated static func friendlyPlayerError(_ error: Error, localNetworkDenied: Bool = false) -> String {
         let nsError = error as NSError
         for link in underlyingChain(of: nsError) {
-            if let message = transportMessage(for: link) { return message }
+            if let message = transportMessage(for: link, localNetworkDenied: localNetworkDenied) { return message }
         }
         if nsError.domain == AVFoundationErrorDomain {
             switch nsError.code {
@@ -2447,10 +2459,16 @@ extension GestureVideoPlayer {
     /// The most likely errors for a NAS on home Wi-Fi are transport failures, not
     /// AVFoundation ones. Left unmapped they fall through to Apple's opaque
     /// "The operation could not be completed", which tells the user nothing.
-    nonisolated private static func transportMessage(for nsError: NSError) -> String? {
+    nonisolated private static func transportMessage(for nsError: NSError, localNetworkDenied: Bool) -> String? {
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorNotConnectedToInternet:
+                // FR-115: a Local Network denial is never "No network connection". The one
+                // classification is APIError.transport, which reads the path URLSession attaches.
+                if localNetworkDenied { return LocalNetworkPermission.deniedMessage }
+                if case .localNetworkDenied = APIError.transport(URLError(_nsError: nsError)) {
+                    return LocalNetworkPermission.deniedMessage
+                }
                 return "No network connection."
             case NSURLErrorNetworkConnectionLost:
                 return "Lost connection to the server mid-playback. Check your network and try again."

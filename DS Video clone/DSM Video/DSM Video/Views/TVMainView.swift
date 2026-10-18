@@ -42,7 +42,8 @@ struct TVMainView: View {
           // so it stays visible over pushed detail screens; top-centre sits in the header's
           // open space. Clears with the flags, so reconnecting needs no re-sign-in.
           .overlay(alignment: .top) {
-            ConnectionIndicator(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
+            ConnectionIndicator(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable,
+                                localNetworkDenied: appState.localNetworkDenied)
               .padding(.top, 40)
           }
       }

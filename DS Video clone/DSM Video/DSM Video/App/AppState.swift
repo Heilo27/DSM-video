@@ -3188,8 +3188,9 @@ final class AppState {
   var watchlistNotice: String?
 
   /// The watchlist-failure message, naming the real cause when the connection is down.
-  static func watchlistNotice(isOffline: Bool, serverUnreachable: Bool) -> String {
-    guard let cause = OfflineBanner.cause(isOffline: isOffline, serverUnreachable: serverUnreachable) else {
+  static func watchlistNotice(isOffline: Bool, serverUnreachable: Bool, localNetworkDenied: Bool = false) -> String {
+    guard let cause = OfflineBanner.cause(isOffline: isOffline, serverUnreachable: serverUnreachable,
+                                          localNetworkDenied: localNetworkDenied) else {
       return "Couldn't update your watchlist. Try again."
     }
     return "Couldn't update your watchlist. \(cause)."
@@ -3223,7 +3224,8 @@ final class AppState {
         // looking authenticated. loadWatchlist already routes failures this way.
         handleConnectionFailure(error)
         // After handleConnectionFailure, so the flags it sets name the cause (FR-137).
-        watchlistNotice = Self.watchlistNotice(isOffline: isOffline, serverUnreachable: serverUnreachable)
+        watchlistNotice = Self.watchlistNotice(isOffline: isOffline, serverUnreachable: serverUnreachable,
+                                               localNetworkDenied: localNetworkDenied)
       }
     } else {
       watchlistItems.insert(item, at: 0)
@@ -3233,7 +3235,8 @@ final class AppState {
         guard homeResultIsCurrent(generation, "toggleWatchlist rollback") else { return }
         watchlistItems.removeAll(where: { $0.id == item.id })
         handleConnectionFailure(error)
-        watchlistNotice = Self.watchlistNotice(isOffline: isOffline, serverUnreachable: serverUnreachable)
+        watchlistNotice = Self.watchlistNotice(isOffline: isOffline, serverUnreachable: serverUnreachable,
+                                               localNetworkDenied: localNetworkDenied)
       }
     }
   }

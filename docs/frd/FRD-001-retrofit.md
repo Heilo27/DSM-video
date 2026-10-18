@@ -448,6 +448,9 @@ as such wherever it stops something: the server search, sign-in, and a request m
 It is never reported as "No network connection" or as the device being offline, because the device's
 network works. On iPhone the message offers a way straight to the app's Settings. When the saved
 remote address still works, the app keeps using it as for any unreachable local server.
+*Clarified 2026-10-17 (TASK-1006):* "wherever it stops something" includes a video that fails to play,
+the Apple TV connection indicator, and the message after a watchlist change that could not be saved.
+Each names Local Network access, in the same words as iPhone's banner and permission message.
 *Note on account permission:* this one is derived from operational project memory rather than from
 product copy, and is flagged as such.
 **FR-116 [INFERRED]** — Concurrent sign-in attempts yield exactly one session and one definite outcome.
