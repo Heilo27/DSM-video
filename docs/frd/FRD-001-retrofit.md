@@ -508,6 +508,11 @@ through pairing, keeps that ID and tries it whenever it connects again: at launc
 the next sign-in, alongside any home or away address it also knows. Connecting successfully through an
 address QuickConnect returned does not replace the ID. The sign-in screen shows the ID, not the address
 that answered. Signing in with a direct address instead stops the device from using the old ID.
+*Clarified 2026-10-18 (TASK-1053):* looking up a QuickConnect ID through the server is limited like
+signing in: ten lookups a minute from one device address, shared with the sign-in and pairing limit, after
+which the answer is `rate_limit_exceeded` and the sign-in page says to wait a minute. An ID that is not
+letters, digits, hyphens or underscores (at most 64, starting with a letter or digit) is refused as
+`invalid_quickconnect_id` without contacting Synology, so the NAS cannot be used to look up arbitrary names.
 **FR-112 [STATED]** — The NAS is discovered automatically on the local network; manual IP entry is not
 required.
 **FR-113 [INFERRED]** — When nothing is discovered, manual entry remains available and the absence of

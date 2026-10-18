@@ -95,7 +95,9 @@ func TestWebQuickConnectHasASentenceForEveryServerAnswer(t *testing.T) {
 			t.Errorf("the server answers %q but QC_PROBLEMS has no sentence for it", c[1])
 		}
 	}
-	for _, key := range []string{"page_server_unreachable", "no_page_server", "no_address", "unexpected"} {
+	// rate_limit_exceeded comes from checkAuthRateLimit, not a writeErr in the handler body,
+	// so the scan above cannot see it; it is pinned by name (TASK-1053).
+	for _, key := range []string{"page_server_unreachable", "no_page_server", "no_address", "unexpected", "rate_limit_exceeded"} {
 		if !strings.Contains(table, key+":") {
 			t.Errorf("QC_PROBLEMS has no %q sentence", key)
 		}

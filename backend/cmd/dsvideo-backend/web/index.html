@@ -1575,6 +1575,10 @@
       // The server answered 502: it could not reach Synology's QuickConnect service.
       quickconnect_resolve_failed: (id) => `Your DSVideo server couldn't reach QuickConnect to look up "${id}". Check the NAS's internet connection and try again, or enter your NAS's address instead.`,
       missing_quickconnect_id: () => 'Enter your QuickConnect ID.',
+      // TASK-1053: the server rejects an ID that is not letters, digits, hyphens or underscores.
+      invalid_quickconnect_id: (id) => `"${id}" isn't a valid QuickConnect ID. Check the spelling (letters, numbers and hyphens only), then try again, or enter your NAS's address instead.`,
+      // TASK-1053: the lookup shares the sign-in attempt limit (10 a minute per address).
+      rate_limit_exceeded: () => 'Too many sign-in attempts from this device. Wait a minute, then try again.',
       invalid_json: (id) => `The server couldn't read the lookup for "${id}". Reload the page and try again.`,
       // QuickConnect answered with no address (an unregistered ID, or a NAS not sharing one).
       no_address: (id) => `QuickConnect has no address for "${id}". Check the spelling and that QuickConnect is turned on in DSM, or enter your NAS's address instead.`,

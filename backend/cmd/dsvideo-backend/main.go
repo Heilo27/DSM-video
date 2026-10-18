@@ -114,6 +114,11 @@ type Server struct {
 	cfg Config
 	db  *sql.DB
 
+	// quickConnectResolver is the outbound lookup behind /auth/quickconnect/resolve. nil
+	// means the real Synology resolver; tests inject a counting fake to prove a rejected
+	// request never reaches the network.
+	quickConnectResolver func(ctx context.Context, quickConnectID string) ([]qcCandidate, error)
+
 	mu             sync.RWMutex
 	playSessions   map[string]PlaySession
 	lastScanAt     time.Time
@@ -2628,6 +2633,12 @@ type qcCandidate struct {
 }
 
 func (s *Server) handleQuickConnectResolve(w http.ResponseWriter, r *http.Request) {
+	// TASK-1053: unauthenticated and forwards the caller's ID to Synology, so it shares the
+	// per-IP auth budget (the same limiter and 429 shape as login and pairing) and runs
+	// BEFORE any validation, so a sweep of junk IDs burns the budget too.
+	if s.checkAuthRateLimit(w, r) {
+		return
+	}
 	var req qcResolveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json")
@@ -2638,7 +2649,16 @@ func (s *Server) handleQuickConnectResolve(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "missing_quickconnect_id")
 		return
 	}
-	candidates, err := resolveQuickConnect(r.Context(), id)
+	// Same shape check pairing applies (one definition), before anything leaves the NAS.
+	if !quickConnectIDPattern.MatchString(id) {
+		writeErr(w, http.StatusBadRequest, "invalid_quickconnect_id")
+		return
+	}
+	resolve := s.quickConnectResolver
+	if resolve == nil {
+		resolve = resolveQuickConnect
+	}
+	candidates, err := resolve(r.Context(), id)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "quickconnect_resolve_failed")
 		return

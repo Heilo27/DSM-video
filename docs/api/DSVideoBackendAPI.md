@@ -30,6 +30,15 @@ Response:
 }
 ```
 
+Unauthenticated, so it is guarded before it can reach Synology (TASK-1053):
+- **Rate limit.** Shares the per-IP auth budget with `/auth/login` and pairing: 10 requests per 60 seconds per
+  client address. Beyond that: `429 {"error":"rate_limit_exceeded"}` with `Retry-After: 60`. The limit counts
+  every request, including ones rejected below, and runs first.
+- **ID format.** `quickConnectId` (after trimming surrounding whitespace) must be 1-64 characters of letters,
+  digits, `-` or `_`, starting with a letter or digit (the same rule pairing applies). Otherwise
+  `400 {"error":"invalid_quickconnect_id"}`, with no outbound call.
+- Other errors: `400 invalid_json`, `400 missing_quickconnect_id`, `502 quickconnect_resolve_failed`.
+
 ### POST `/auth/login`
 Log in using **DSM credentials** (proxy validation via `SYNO.API.Auth`). On success the backend issues an app token.
 
