@@ -36,21 +36,40 @@ extension View {
     }
 }
 
-// MARK: Press-scale interaction
+// MARK: Press and disabled interaction
+
+/// The opacity every custom button style uses for its pressed and disabled states, so
+/// the states read the same across the app (TRUTHS S2: a custom ButtonStyle must render
+/// pressed and disabled visibly differently from idle).
+enum DSInteractionOpacity {
+    /// Label opacity while pressed on flat themes; matches the dim `.plain` gave.
+    static let pressed: Double = 0.6
+    /// Label opacity when the control is disabled.
+    static let disabled: Double = 0.4
+}
 
 private struct DSPressableStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     func makeBody(configuration: Configuration) -> some View {
         let theme = ThemeHolder.shared.current
-        let scale = configuration.isPressed ? theme.pressScale : 1.0
+        let cinematic = theme.usesCinematicChrome
+        let pressed = configuration.isPressed
+        // Cinematic signals a press with the themed scale; flat themes (Classic / Nitrate)
+        // dim the label instead, which is what `.plain` did before this style replaced it.
+        let opacity: Double = !isEnabled ? DSInteractionOpacity.disabled
+            : (pressed && !cinematic ? DSInteractionOpacity.pressed : 1.0)
         return configuration.label
-            .scaleEffect(theme.usesCinematicChrome ? scale : 1.0)
-            .animation(.easeOut(duration: theme.motionDuration * 0.5), value: configuration.isPressed)
+            .scaleEffect(cinematic && pressed ? theme.pressScale : 1.0)
+            .opacity(opacity)
+            .animation(.easeOut(duration: theme.motionDuration * 0.5), value: pressed)
     }
 }
 
 extension View {
-    /// Wraps the view in a plain button with a themed press-scale. On flat themes the
-    /// scale is fixed at 1.0 so behavior matches the prior `.buttonStyle(.plain)`.
+    /// Plain-button replacement with a themed pressed state (scale on Cinematic, opacity
+    /// dim on flat themes) and a dimmed disabled state. Unlike `.buttonStyle(.plain)`,
+    /// this is a custom style, so it must draw its own pressed and disabled looks.
     func dsPressable() -> some View {
         buttonStyle(DSPressableStyle())
     }

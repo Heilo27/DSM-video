@@ -373,6 +373,7 @@ These components are used across multiple screens — build as reusable SwiftUI 
 | `AirPlayButton` | Video Player | Wraps `AVRoutePickerView` |
 | `ErrorBanner` | Search, Player | Red-tinted, icon + title + subtitle + retry |
 | `dsToolbarIcon()` | Every toolbar glyph button | One home for the 44x44pt tap-target rule (FRD-001 FR-007): 20pt semibold glyph, `minWidth/minHeight 44`, `contentShape(Rectangle())` |
+| `dsPressable()` | Library poster grids (Movies, TV Shows, Collections) | Custom ButtonStyle. Pressed: scale on Cinematic, opacity dim (0.6) on Classic/Nitrate. Disabled: opacity 0.4 on every theme. Opacities live in `DSInteractionOpacity` |
 
 ---
 

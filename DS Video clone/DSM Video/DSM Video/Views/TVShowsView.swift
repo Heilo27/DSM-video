@@ -215,9 +215,8 @@ struct TVShowsView: View {
             } label: {
               TVShowPosterCell(show: show)
             }
-            // dsPressable() == .plain + the Cinematic theme's press-scale (a no-op on flat
-            // themes). The style existed with zero call sites, so the theme's press
-            // feedback never rendered anywhere.
+            // dsPressable() draws its own pressed state: press-scale on Cinematic, an
+            // opacity dim on flat themes (the dim .plain gave), and a dimmed disabled look.
             .dsPressable()
             .accessibilityLabel("\(show.title)\(show.year.map { ", \($0)" } ?? "")")
             .accessibilityHint("Opens show details")
