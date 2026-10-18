@@ -1,7 +1,7 @@
 package main
 
 import (
-	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -196,7 +196,7 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 	rows, err := s.db.Query(`
 		SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number,
-		       i.library_id, i.path, i.content_rating
+		       i.library_id, i.path, i.show_folder_id, i.content_rating
 		FROM items i
 		`+where+`
 		ORDER BY i.added_at DESC
@@ -207,12 +207,11 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 	defer rows.Close()
 
 	// Pass 1: read every candidate, and count show names per folder as we go.
+	// The progress columns of the embedded summary row are never scanned: this rail is shared
+	// by every profile, so it carries no progress (FR-230).
 	type candidate struct {
-		id, typ, title, addedAt, libID, folder string
-		year, duration, season, episode        sql.NullInt64
-		rating                                 sql.NullFloat64
-		posterPath, backdropPath, showName     sql.NullString
-		contentRating                          *string
+		itemSummaryRow
+		libID, folder string
 	}
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	var cands []candidate
@@ -220,14 +219,14 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 	for rows.Next() {
 		var c candidate
 		var path string
-		if err := rows.Scan(&c.id, &c.typ, &c.title, &c.year, &c.duration, &c.addedAt,
-			&c.rating, &c.posterPath, &c.backdropPath, &c.showName, &c.season, &c.episode,
-			&c.libID, &path, &c.contentRating); err != nil {
-			continue
+		if err := rows.Scan(&c.ID, &c.Type, &c.Title, &c.Year, &c.Duration, &c.AddedAt,
+			&c.Rating, &c.PosterPath, &c.BackdropPath, &c.ShowName, &c.SeasonNumber, &c.EpisodeNumber,
+			&c.libID, &path, &c.ShowFolderID, &c.ContentRating); err != nil {
+			return nil, fmt.Errorf("scan just-added candidate: %w", err)
 		}
 		var ref episodeRef
-		if c.typ == "episode" {
-			ref = episodeRef{Path: path, ShowName: c.showName}
+		if c.Type == "episode" {
+			ref = episodeRef{Path: path, ShowName: c.ShowName}
 		}
 		cands = append(cands, c)
 		refs = append(refs, ref)
@@ -244,16 +243,13 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 	out := make([]map[string]any, 0, justAddedCacheSize)
 	seenShows := map[string]bool{}
 	for i, c := range cands {
-		id, typ, title, addedAt, libID := c.id, c.typ, c.title, c.addedAt, c.libID
-		year, duration, seasonNumber, episodeNumber := c.year, c.duration, c.season, c.episode
-		rating := c.rating
-		posterPath, backdropPath := c.posterPath, c.backdropPath
+		typ, title := c.Type, c.Title
 		c.folder = groups[i].Folder
 
 		// The FOLDER's resolved name, not this episode's — an unmatched episode groups
 		// with its siblings rather than forming a show of its own. An episode that files
 		// under no folder is listed as a title of its own, like a film.
-		showName := c.showName
+		showName := c.ShowName
 		var key string
 		if typ == "episode" && c.folder != "" {
 			showName = groups[i].ShowName
@@ -279,36 +275,13 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 			}
 		}
 
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           display,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
-			"libraryId":       libID,
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-			// ProfilesAPI.md "Item fields": unrated is null / level 4 (FR-242).
-			"contentRating": c.contentRating,
-			"ageLevel":      agerating.LevelPtr(c.contentRating),
-		}
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-		if showName.Valid && showName.String != "" {
-			item["showName"] = showName.String
-		}
-		if seasonNumber.Valid {
-			item["seasonNumber"] = seasonNumber.Int64
-		}
-		if episodeNumber.Valid {
-			item["episodeNumber"] = episodeNumber.Int64
-		}
+		// Standard summary with the rail's own label and the folder-resolved show name on
+		// top, plus libraryId (the rail spans libraries). No progress: it is not scanned.
+		row := c.itemSummaryRow
+		row.Title = display
+		row.ShowName = showName
+		item := itemSummary(row)
+		item["libraryId"] = c.libID
 		out = append(out, item)
 
 		if len(out) >= justAddedCacheSize {

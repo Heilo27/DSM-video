@@ -28,7 +28,7 @@ CREATE TABLE items(
   id TEXT PRIMARY KEY, library_id TEXT, type TEXT, title TEXT,
   year INT, path TEXT, duration_seconds INT, added_at TEXT, updated_at TEXT,
   rating REAL, poster_path TEXT, backdrop_path TEXT, show_name TEXT,
-  season_number INT, episode_number INT,
+  season_number INT, episode_number INT, show_folder_id TEXT,
   content_rating TEXT); -- FRD-002 FR-240, as in production
 `
 

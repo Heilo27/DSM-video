@@ -690,6 +690,17 @@ server logs when a library is large enough to hit the 2,000 limit.
 *Derivation:* P1 and A2 (a pick of what to watch next, built from what the user already owns, with no data
 leaving the NAS); S4. This is the server half of More Like This; the app screens that show it are a
 separate piece of work. [TASK-747]
+*One shape for every title list [TASK-1058, 2026-10-18]:* a title looks the same wherever the server lists
+it. The library list, More Like This, search, the just-watched rail, playlists, downloads, the watchlist, a
+show's episode list, Just Added, Suggested and the Collections rails all describe a title with the same
+fields, built in one place, so a field added to one reaches all of them. The only differences are the ones
+the API doc names: Just Added and Collections carry no watch progress (they are not per-profile), and
+Just Added, the watchlist and Collections also say which library a title is in. Search, just-watched,
+the watchlist and a show's episode list now also give an episode's show name, season, episode number and
+show folder, and playlists and downloads also give the date added, rating and the profile's progress; the
+apps can ignore what they do not use. A title the database cannot read now fails the request (a database
+error) instead of being left out of the list without a word; Just Added recomputes its rail on the next
+request instead of keeping the short one for up to 12 hours.
 
 **FR-152 [DESIGN, 2026-10-18, TASK-748]** — *A person with no server is shown how to install one, and the
 first connection to a server says what it found.* Three parts.
