@@ -454,7 +454,7 @@ private struct TVSeasonSection: View {
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
-  /// Drives the season header's focus highlight — `.buttonStyle(.plain)` provides none.
+  /// Drives the season header's focus highlight — `dsPlainButton()` provides none.
   @FocusState private var isHeaderFocused: Bool
   /// Set once the user has focused an episode inside this section. Latches deliberately:
   /// a late async resolve must never collapse a section the user has entered, and focus
@@ -526,11 +526,11 @@ private struct TVSeasonSection: View {
         )
         .contentShape(Rectangle())
       }
-      // TVRowButtonStyle draws no system focus chrome, so the dsFocusFill above is the
+      // dsPlainButton() draws no system focus chrome, so the dsFocusFill above is the
       // only highlight (without one the header focused INVISIBLY — the user couldn't tell
       // whether Select would collapse the season or open the first episode). Matches
       // TVEpisodeNavRow, which sits directly beneath it.
-      .buttonStyle(TVRowButtonStyle())
+      .dsPlainButton()
       .focused($isHeaderFocused)
       .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
 
@@ -658,21 +658,6 @@ private struct TVSeasonSection: View {
   }
 }
 
-// MARK: - tvOS row button style
-
-/// Button style for the season header and episode rows (TASK-1059).
-///
-/// `.buttonStyle(.plain)` on tvOS still draws the system focus platter, a white slab taller
-/// than the row's own `dsFocusFill` that showed as a band above and below the focused Season
-/// header (`.focusEffectDisabled()` does not remove it). A custom style draws no platter, so
-/// the row's explicit `dsFocusFill` background is the one focus treatment. Same reason as
-/// `ProfileTileButtonStyle`. The call site keeps `.focused()` and the fill.
-private struct TVRowButtonStyle: ButtonStyle {
-  func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-  }
-}
-
 // MARK: - tvOS Episode Nav Row (plain button style to prevent focus-scale clipping)
 
 private struct TVEpisodeNavRow<Destination: View>: View {
@@ -694,7 +679,7 @@ private struct TVEpisodeNavRow<Destination: View>: View {
             .fill(isFocused ? Color.dsFocusFill : Color.clear)
         )
     }
-    .buttonStyle(TVRowButtonStyle())
+    .dsPlainButton()
     .focused($isFocused)
     .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
   }
@@ -1046,7 +1031,7 @@ private struct StillWatchingOverlay: View {
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
-    .buttonStyle(.plain)
+    .dsPlainButton()
     .focusEffectDisabled()
     .focused($focused, equals: button)
   }
@@ -1808,7 +1793,8 @@ private struct TVShowMetadataFixerSheet: View {
               let base = "\(candidate.title)\(candidate.year.map { ", \($0)" } ?? "")"
               return isDuplicate ? "\(base), TMDb ID \(candidate.tmdbId)" : base
             }())
-            .buttonStyle(.plain)
+            .dsPlainButton()
+            .dsFocusFill()
             .disabled(isApplying)
             .listRowBackground(Color.dsSurfaceHigh)
           }

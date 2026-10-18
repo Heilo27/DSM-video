@@ -639,7 +639,8 @@ private struct TVLibraryRail: View {
             .accessibilityHidden(true)
         }
       }
-      .buttonStyle(.plain)
+      .dsPlainButton()
+      .dsFocusFill()
       // Title-safe padding goes OUTSIDE the Button, not inside its label. With it inside,
       // the button's own frame started at x=0 and tvOS drew the focus highlight around
       // that frame — 14px into the left overscan band, where a real TV clips it. Padding
@@ -1355,7 +1356,8 @@ private struct TVSearchView: View {
                       .padding(.vertical, .dsSpaceLG)
                       .padding(.horizontal, .dsSpaceTitleSafe)
                     }
-                    .buttonStyle(.plain)
+                    .dsPlainButton()
+                    .dsFocusFill()
                     .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
                     .accessibilityHint("Opens video details")
                     Divider().background(Color.dsBorderSubtle).padding(.horizontal, .dsSpaceTitleSafe)

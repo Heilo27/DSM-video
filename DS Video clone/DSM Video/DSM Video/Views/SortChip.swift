@@ -40,7 +40,7 @@ struct SortChip: View {
         .scaleEffect(focused ? 1.06 : 1.0)
         .animation(.easeOut(duration: 0.15), value: focused)
     }
-    .buttonStyle(.plain)
+    .dsPlainButton()
     .focused($focused)
     .accessibilityLabel(accessibilityLabel)
     .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)

@@ -84,6 +84,53 @@ extension View {
     }
 }
 
+extension View {
+    /// The app's replacement for `.buttonStyle(.plain)` (TASK-1060).
+    ///
+    /// On tvOS `.plain` draws the system focus platter, a white slab behind the focused
+    /// control that `.focusEffectDisabled()` does not remove. A custom ButtonStyle draws no
+    /// platter, so tvOS gets the one pressable style (`DSPressableStyle`); every other
+    /// platform keeps `.plain`, whose look is unchanged. The control then owns its focus
+    /// treatment: bind it with `.focused(...)` and draw a fill/scale, or add `dsFocusFill()`.
+    /// scripts/check-tvos-focus.sh fails a tvOS-compiled `.buttonStyle(.plain)` that is not
+    /// marked `// plain-exempt: <reason>`.
+    @ViewBuilder
+    func dsPlainButton() -> some View {
+        #if os(tvOS)
+        buttonStyle(DSPressableStyle())
+        #else
+        buttonStyle(.plain)
+        #endif
+    }
+}
+
+// MARK: Focus fill for rows
+
+private struct DSFocusFillModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    @FocusState private var isFocused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .focused($isFocused)
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(isFocused ? Color.dsFocusFill : Color.clear)
+            )
+    }
+}
+
+extension View {
+    /// Focus highlight for a row whose button style draws none (`dsPlainButton()` on tvOS):
+    /// binds the control's focus and fills a rounded rect behind it while focused, so focus
+    /// stays visible without the white system platter. Apply it to the NavigationLink/Button
+    /// after `dsPlainButton()`. A row that needs the focus state itself (to scale, or to
+    /// report it upward) keeps its own `@FocusState` and `Color.dsFocusFill`.
+    func dsFocusFill(cornerRadius: CGFloat = .dsRadiusMd) -> some View {
+        modifier(DSFocusFillModifier(cornerRadius: cornerRadius))
+    }
+}
+
 // MARK: Atmospheric background (blurred light streaks)
 
 /// The filmic-glow signature: a few heavily-blurred, tilted accent streaks drawn behind
