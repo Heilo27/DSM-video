@@ -207,6 +207,7 @@ var routeDisposition = map[string]string{
 	"GET /playlists/{id}": "F", "GET /downloads": "F", "GET /watchlist": "F", "GET /search": "F",
 
 	"GET /items/{id}": "R", "GET /items/{id}/playback": "R",
+	"GET /items/{id}/similar": "F/R", // FR-151: seed above the ceiling refused, matches filtered
 	"GET /trickplay/{itemId}/trickplay.vtt": "R", "GET /trickplay/{itemId}/trickplay.jpg": "R",
 	"GET /shows/{showName}": "R", "GET /tv/shows/{showId}/seasons": "R", "GET /tv/shows/{showId}/episodes": "R",
 	"POST /playlists/{id}/items": "R", "POST /downloads/{itemId}": "R", "POST /watchlist/{itemId}": "R",

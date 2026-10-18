@@ -660,6 +660,37 @@ work well together, and given the way to fix it). S4 and A2 hold: the version is
 NAS, nothing is sent to anyone else, and the download page is not in the media or credential path.
 Ryan, 2026-10-18: "for anyone using the iOS/tvos app. If it detects that their server is not updated, it
 suggests downloading the update and installing it." [TASK-1055]
+**FR-151 [DESIGN, 2026-10-18, TASK-747]** — *More Like This: for any title, the server can name other titles
+in the library that are like it.* The server computes the list from the user's own library alone; nothing
+is sent to any outside service. A title counts as like the one being looked at when it shares at least one
+genre with it, or belongs to the same collection (the same collections the Collections rails offer, one
+definition). Among those, the best match comes first. A match is stronger for each genre shared and for each
+collection shared, a shared collection counting a little more than a shared genre; being from the same
+decade (or the next one over) and being the same kind of thing (movie with movie, show with show) add a
+smaller nudge, which mostly settles the order between titles that already share a genre or collection and
+never lets a title with nothing in common appear. Equal scores go to the better-rated title, then
+alphabetically, so the same library gives the same answer every time.
+*What is in the list:* a show appears once, however many of its episodes match, and its entry is the same
+show entry the Collections rails show (named for the show, the earliest year, the newest added date), ranked
+by its best-matching episode. The
+title being looked at is never in its own list; looking at an episode, the rest of that episode's show is
+left out too. A title with no genres and in no collection has nothing to be like, so its list is empty (a
+normal, successful answer, not an error). The list is at most 12 titles unless the caller asks for a
+different number, and never more than 30; a number below 1 is treated as 1 and an unreadable one as the
+default. Each entry has exactly the fields a title in the library list has (FR-230 progress included), so
+the app draws it with the same card.
+*Age ceiling (FR-250):* the profile's ceiling is applied exactly as on every other list. A title above the
+viewing profile's ceiling, and an unrated title when a ceiling is set, never appears in anyone's More Like
+This for that profile. If the title being looked at is itself above the ceiling, the answer is the same
+"content restricted" refusal that opening that title gives, not an empty list, so the app can say why.
+An id the library does not have is "not found".
+*Cost:* one lookup for the title, one for its collections, and one pass over the library to gather at most
+2,000 candidates, scored in memory; fast enough for a NAS library of tens of thousands of titles, and the
+server logs when a library is large enough to hit the 2,000 limit.
+*Derivation:* P1 and A2 (a pick of what to watch next, built from what the user already owns, with no data
+leaving the NAS); S4. This is the server half of More Like This; the app screens that show it are a
+separate piece of work. [TASK-747]
+
 **FR-152 [DESIGN, 2026-10-18, TASK-748]** — *A person with no server is shown how to install one, and the
 first connection to a server says what it found.* Three parts.
 *(1) Install the server.* The help sheet on the sign-in screen has an **Install the server** topic, and
