@@ -351,6 +351,10 @@ is reachable and activatable with the tvOS remote.
 safely at both ends of the runtime.
 **FR-066 [STATED]** — On tvOS, Menu closes the controls overlay when it is visible and exits playback
 when it is not; Menu is never trapped.
+*Clarified 2026-10-18 (TASK-1047):* while the playback-failed screen is up, the player behind it is
+inert. Play/Pause, skip, seek, the lock-screen and Control Center transport commands and the VoiceOver
+transport actions do nothing; Select and the d-pad stay on Retry and Dismiss; and Menu is Dismiss, with
+no earlier press spent on controls that are not on screen.
 **FR-067 [STATED]** — Pressing Menu during the next-episode countdown cancels it and does **not** start
 the next episode.
 **FR-068 [INFERRED]** — A completed countdown starts the correct next episode by season/episode

@@ -319,6 +319,9 @@ struct GestureVideoPlayer: View {
                 }
             }
         }
+        .onChange(of: playerError) { _, _ in
+            applyRemoteCommandAvailability()
+        }
         #if os(tvOS)
         // When a failure appears, put focus on its first live button; when it clears, hand
         // focus back to where the screen was before.
@@ -408,11 +411,15 @@ struct GestureVideoPlayer: View {
             // at a time — hide the controls first, and only exit if they were already
             // hidden (which is what the user means by Menu on a bare video).
             .onExitCommand {
-                if showControls {
+                switch Self.menuAction(playerError: playerError, controlsShowing: showControls) {
+                case .hideControls:
                     hideControlsTask?.cancel()
                     withAnimation(.easeInOut(duration: 0.25)) { showControls = false }
-                } else {
+                case .exitPlayer:
                     dismiss()
+                case .dismissError:
+                    // The same exit the failure screen's Dismiss button takes.
+                    if let onDismiss { onDismiss() } else { dismiss() }
                 }
             }
             #endif
@@ -1923,6 +1930,22 @@ struct GestureVideoPlayer: View {
             updateNowPlayingPlayback()
             return .success
         }
+        applyRemoteCommandAvailability()
+    }
+
+    /// Enables or disables the system transport commands (lock screen, Control Center,
+    /// headphones, Siri Remote via MediaPlayer) by the one rule. The handlers above are closures
+    /// over a snapshot of this view, so they cannot be trusted to read a live `playerError`;
+    /// switching the commands off is state the system holds, and it holds regardless (TASK-1047).
+    private func applyRemoteCommandAvailability() {
+        let enabled = Self.transportCommandsEnabled(playerError: playerError)
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.isEnabled = enabled
+        center.pauseCommand.isEnabled = enabled
+        center.togglePlayPauseCommand.isEnabled = enabled
+        center.skipForwardCommand.isEnabled = enabled
+        center.skipBackwardCommand.isEnabled = enabled
+        center.changePlaybackPositionCommand.isEnabled = enabled
     }
 
     /// Refresh just the volatile Now Playing fields (position + rate). Cheap; called
@@ -2060,6 +2083,7 @@ struct GestureVideoPlayer: View {
     }
 
     private func togglePlayPause() {
+        guard Self.transportCommandsEnabled(playerError: playerError) else { return }
         Haptics.play(.medium)
         if isPlaying {
             player?.pause()
@@ -2079,6 +2103,7 @@ struct GestureVideoPlayer: View {
     ///   With 2s HLS segments keyframes are at most 2s away, so this lands accurately
     ///   without the multi-segment overshoot that .positiveInfinity caused.
     private func seek(to time: Double, tight: Bool = false) {
+        guard Self.transportCommandsEnabled(playerError: playerError) else { return }
         // Coalesce rapid seeks. If a seek is already running, just record the
         // latest target (overwriting any earlier pending one) and bail — the
         // completion handler will drain to it. This prevents AVPlayer from
@@ -2125,6 +2150,7 @@ struct GestureVideoPlayer: View {
     }
 
     private func skipForward() {
+        guard Self.transportCommandsEnabled(playerError: playerError) else { return }
         let newTime = min(duration, currentTime + skipForwardSeconds)
         seek(to: newTime)
         currentTime = newTime
@@ -2134,6 +2160,7 @@ struct GestureVideoPlayer: View {
     }
 
     private func skipBackward() {
+        guard Self.transportCommandsEnabled(playerError: playerError) else { return }
         let newTime = max(0, currentTime - skipBackwardSeconds)
         seek(to: newTime)
         currentTime = newTime
@@ -2506,6 +2533,31 @@ extension GestureVideoPlayer {
             }
         }
         return error.localizedDescription
+    }
+
+    /// What the Siri Remote's Menu button does (TASK-1047).
+    nonisolated enum RemoteMenuAction: Equatable {
+        /// Back out one level: hide the transport overlay.
+        case hideControls
+        /// Nothing left to back out of: leave the player.
+        case exitPlayer
+        /// The failure screen is up: leave through its Dismiss button.
+        case dismissError
+    }
+
+    /// Whether the transport (play/pause, skip, seek, lock-screen and Control Center commands,
+    /// VoiceOver actions) may act on the player. While the failure screen is up the player behind
+    /// it is hidden and broken, so a Play/Pause or skip would drive something nobody can see.
+    /// One rule for every entry point (TASK-1047).
+    nonisolated static func transportCommandsEnabled(playerError: String?) -> Bool {
+        playerError == nil
+    }
+
+    /// Menu on the failure screen is Dismiss. Without this it first "hid the controls" that
+    /// are not on screen, costing a dead press, and only then left.
+    nonisolated static func menuAction(playerError: String?, controlsShowing: Bool) -> RemoteMenuAction {
+        if playerError != nil { return .dismissError }
+        return controlsShowing ? .hideControls : .exitPlayer
     }
 
     /// Whether a playback error is a network failure that the network returning can cure
