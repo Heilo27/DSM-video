@@ -285,13 +285,20 @@ private struct TVHomeView: View {
                   && appState.homeRecentlyWatched.isEmpty
                   && appState.homeSuggested.isEmpty
                   && appState.homeLibraries.isEmpty {
-                DSContentUnavailable(
-            title: "No Libraries",
-            systemImage: "film.stack",
-            description: "No video libraries were found on your NAS."
-          )
-                .foregroundStyle(.white)
-                .padding(.top, 40)
+                if let profile = appState.activeProfile, profile.isRestricted {
+                  // FR-265: on an age-limited profile the ceiling may be why nothing shows.
+                  RestrictedEmptyState(profile: profile, place: ProfileText.homeEmptyPlace)
+                    .foregroundStyle(.white)
+                    .padding(.top, 40)
+                } else {
+                  DSContentUnavailable(
+                    title: "No Libraries",
+                    systemImage: "film.stack",
+                    description: "No video libraries were found on your NAS."
+                  )
+                  .foregroundStyle(.white)
+                  .padding(.top, 40)
+                }
                 Button("Refresh") { Task { await appState.homeLoad() } }
                   .buttonStyle(.borderedProminent)
                   .tint(Color.dsAccent)
@@ -619,11 +626,17 @@ private struct TVLibraryRail: View {
       // library name leading to a grid the user can't tell is empty until they push into it.
       // Render an explicit inline empty state instead.
       if isEmptyState {
-        Text("No videos yet")
-          .font(.system(size: 22))
-          .foregroundStyle(Color.dsTextMuted)
-          .padding(.horizontal, 60)
-          .padding(.vertical, 12)
+        if let profile = appState.activeProfile, profile.isRestricted {
+          // FR-265: an empty rail on an age-limited profile names the level, not "no videos".
+          RestrictedEmptyState(profile: profile, place: library.title)
+            .padding(.horizontal, 60)
+        } else {
+          Text("No videos yet")
+            .font(.system(size: 22))
+            .foregroundStyle(Color.dsTextMuted)
+            .padding(.horizontal, 60)
+            .padding(.vertical, 12)
+        }
       } else {
         ScrollView(.horizontal, showsIndicators: false) {
           LazyHStack(alignment: .top, spacing: 28) {
@@ -1131,19 +1144,24 @@ private struct TVSettingsView: View {
           }
         }
 
-        if appState.profiles.count > 1 {
+        // "Manage Profiles" is always here, even for a single-profile account (no picker, so no
+        // other way to add a second profile; FR-205, FR-211).
+        if appState.profiles.count > 1 || appState.canManageProfiles {
           Section("Profile") {
-            if let profile = appState.activeProfile {
-              LabeledContent("Watching as", value: profile.name)
+            if appState.profiles.count > 1 {
+              if let profile = appState.activeProfile {
+                LabeledContent("Watching as", value: profile.name)
+              }
+              Button {
+                dismiss()
+                appState.notePickerTrigger(.switchRequested)
+              } label: {
+                Label("Switch Profile", systemImage: "person.2")
+              }
+              .focused($switchProfileFocused)
+              .accessibilityIdentifier("settings.switchProfile")
             }
-            Button {
-              dismiss()
-              appState.notePickerTrigger(.switchRequested)
-            } label: {
-              Label("Switch Profile", systemImage: "person.2")
-            }
-            .focused($switchProfileFocused)
-            .accessibilityIdentifier("settings.switchProfile")
+            ManageProfilesSettingsRow()
           }
         }
 

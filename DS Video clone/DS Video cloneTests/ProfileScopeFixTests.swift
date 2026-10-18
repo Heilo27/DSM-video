@@ -1,6 +1,5 @@
 import Testing
 import Foundation
-import SQLite3
 @testable import DSM_Video
 
 // MARK: - TASK-919 L2 · profile scope fixes (TASK-935, TASK-936, TASK-921, TASK-922)
@@ -13,16 +12,18 @@ import SQLite3
 // Two layers:
 //  - isolated: a LocalStore on a temp file and an ActiveProfileStore on a private UserDefaults
 //    suite, so nothing shared is touched and persistence is read back through a FRESH instance.
-//  - wiring: AppState against the profile stub server, over the shared stores, because
-//    refreshProfiles/recordProgress only ever talk to LocalStore.shared. Those run inside
-//    ProfileStateGate (shared with ProfileScreensServerTests) and put every shared store back.
+//  - wiring: AppState against the profile stub server, over its own injected stores (TASK-925:
+//    withIsolatedAppState), because refreshProfiles/recordProgress talk to the AppState's
+//    profileStore and localStore. Those run inside ProfileStateGate (shared with
+//    ProfileScreensServerTests) only for the stub's process-wide route table.
 
 // MARK: Helpers
 
-/// One test at a time may hold the shared stores (ActiveProfileStore.shared, LocalStore.shared's
-/// scope) and the stub server's route table. Swift Testing runs suites in parallel, and these
-/// tests interleave at every `await`, so without this two suites would overwrite each other's
-/// routes and scopes mid-run. FIFO; ownership is handed to the next waiter without a gap.
+/// One test at a time may hold the stub server's route table and request log. Swift Testing
+/// runs suites in parallel, and these tests interleave at every `await`, so without this two
+/// suites would overwrite each other's routes mid-run. (The profile and catalog stores are no
+/// longer shared: each test owns its own, TASK-925.) FIFO; ownership is handed to the next
+/// waiter without a gap.
 @MainActor
 final class ProfileStateGate {
   static let shared = ProfileStateGate()
@@ -67,22 +68,6 @@ private func prof(_ id: String, level: Int, owner: Bool = false, kids: Bool = fa
 private func titleItem(_ id: String, level: Int?, seq: Int = 1) -> ItemSummary {
   ItemSummary(id: id, type: "movie", title: id, durationSeconds: 7200,
               addedAt: "2026-01-01T00:00:00Z", libraryId: "lib_t", changeSeq: seq, ageLevel: level)
-}
-
-/// Rewinds the shared store's `age_level_backfill` attempt counter through a second SQLite
-/// connection to the same file (WAL permits it). The counter is persistent state of the app's
-/// own database and the store offers no way to clear it; without this the wiring test could
-/// run only three times per simulator install.
-private func resetSharedBackfillAttempts() -> Bool {
-  guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-  else { return false }
-  var handle: OpaquePointer?
-  defer { sqlite3_close(handle) }
-  guard sqlite3_open_v2(docs.appendingPathComponent("dsreel.db").path, &handle,
-                        SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { return false }
-  sqlite3_busy_timeout(handle, 3000)
-  return sqlite3_exec(handle, "DELETE FROM sync_cursors WHERE key = 'age_level_backfill'",
-                      nil, nil, nil) == SQLITE_OK
 }
 
 /// A visible-ids set read through the same path the app reads (fetchItems, under the store's
@@ -280,27 +265,21 @@ struct ProfileScopeFixTests {
   /// restricted; given a ladder top of 4 and an unrated level of 5, the same profile is NOT.
   /// Red if: Profile.isRestricted compares against a literal 4, a static, or the unrated level
   /// (the second half would read restricted, the first half would read unrestricted).
-  @Test func isRestrictedFollowsTheStoredLadderTopNotTheUnratedLevel() async {
-    await ProfileStateGate.shared.run {
-      let store = ActiveProfileStore.shared
-      let savedList = store.cachedProfiles
-      let savedTop = store.unrestrictedLevel
-      let savedUnrated = store.unratedLevel
-      let adult = prof("pf_adult", level: 4, owner: true)
+  @Test func isRestrictedFollowsTheStoredLadderTopNotTheUnratedLevel() {
+    let store = ActiveProfileStore(defaults: privateDefaults("isrestricted"))
+    let list = [prof("pf_adult", level: 4, owner: true)]
+    let adult = list[0]
 
-      store.setUnratedLevel(4)
-      store.setCachedProfiles(savedList, unrestrictedLevel: 5)
-      #expect(adult.isRestricted, "level 4 is below a ladder that now reaches 5")
-      #expect(prof("pf_top", level: 5).isRestricted == false)
+    store.setUnratedLevel(4)
+    store.setCachedProfiles(list, unrestrictedLevel: 5)
+    #expect(adult.isRestricted(in: store), "level 4 is below a ladder that now reaches 5")
+    #expect(prof("pf_top", level: 5).isRestricted(in: store) == false)
 
-      store.setUnratedLevel(5)
-      store.setCachedProfiles(savedList, unrestrictedLevel: 4)
-      #expect(adult.isRestricted == false, "level 4 is the top of a 4-level ladder, whatever unrated is")
-      #expect(prof("pf_teen", level: 3).isRestricted, "control: a lower profile is restricted")
-
-      store.setUnratedLevel(savedUnrated)
-      store.setCachedProfiles(savedList, unrestrictedLevel: savedTop)
-    }
+    store.setUnratedLevel(5)
+    store.setCachedProfiles(list, unrestrictedLevel: 4)
+    #expect(adult.isRestricted(in: store) == false,
+            "level 4 is the top of a 4-level ladder, whatever unrated is")
+    #expect(prof("pf_teen", level: 3).isRestricted(in: store), "control: a lower profile is restricted")
   }
 
   /// OC: TASK-922 AC2 · given titles at levels 1...5 plus one with no level, when each ceiling
@@ -356,18 +335,17 @@ struct ProfileScopeFixTests {
       cached: [viewer], active: viewer,
       routes: ["GET /api/v1/profiles/age-levels": .json(200, ladder)]
     ) { state in
-      let store = ActiveProfileStore.shared
-      let savedUnrated = store.unratedLevel
+      let store = state.profileStore
       let topBefore = store.unrestrictedLevel
-      await LocalStore.shared.ensureReady()
+      await state.localStore.ensureReady()
 
       // Precondition: unrated 4, a ceiling-4 viewer, one rated and one unrated title.
       store.setUnratedLevel(4)
-      await LocalStore.shared.setActiveProfile(store.activeScope)
-      await LocalStore.shared.upsertItems([titleItem("t922-rated", level: 4),
+      await state.localStore.setActiveProfile(store.activeScope)
+      await state.localStore.upsertItems([titleItem("t922-rated", level: 4),
                                            titleItem("t922-unrated", level: nil, seq: 2)])
       @MainActor func mine() async -> Set<String> {
-        Set(await LocalStore.shared.fetchItems(forLibraryId: "lib_t").map { $0.id }
+        Set(await state.localStore.fetchItems(forLibraryId: "lib_t").map { $0.id }
           .filter { $0.hasPrefix("t922-") })
       }
       #expect(await mine() == ["t922-rated", "t922-unrated"], "precondition: unrated 4 shows it")
@@ -375,13 +353,12 @@ struct ProfileScopeFixTests {
       await state.loadAgeLevelsIfNeeded()
 
       #expect(state.ageLevels.map(\.level) == [1, 2])
-      #expect(ActiveProfileStore.shared.unratedLevel == 5)
-      #expect(ActiveProfileStore.shared.unrestrictedLevel == topBefore, "the ladder top is untouched")
-      #expect(await LocalStore.shared.activeScope.unratedLevel == 5)
+      #expect(state.profileStore.unratedLevel == 5)
+      #expect(state.profileStore.unrestrictedLevel == topBefore, "the ladder top is untouched")
+      #expect(await state.localStore.activeScope.unratedLevel == 5)
       #expect(await mine() == ["t922-rated"], "the unrated title is now above a ceiling of 4")
 
-      await LocalStore.shared.deleteItems(["t922-rated", "t922-unrated"])
-      store.setUnratedLevel(savedUnrated)
+      await state.localStore.deleteItems(["t922-rated", "t922-unrated"])
     }
   }
 
@@ -395,15 +372,13 @@ struct ProfileScopeFixTests {
     await host.withAccount(
       routes: ["GET /api/v1/profiles/age-levels": .json(200, noLevel)]
     ) { state in
-      let store = ActiveProfileStore.shared
-      let savedUnrated = store.unratedLevel
+      let store = state.profileStore
       store.setUnratedLevel(5)
 
       await state.loadAgeLevelsIfNeeded()
 
       #expect(state.ageLevels.isEmpty)
-      #expect(ActiveProfileStore.shared.unratedLevel == 5)
-      store.setUnratedLevel(savedUnrated)
+      #expect(state.profileStore.unratedLevel == 5)
     }
   }
 
@@ -540,23 +515,23 @@ struct ProfileScopeFixTests {
         "POST /api/v1/items/t936-vanish/progress": progressOK,
       ]
     ) { state in
-      await LocalStore.shared.ensureReady()
-      await LocalStore.shared.deleteProfileData(profileID: "pf_ryan")
+      await state.localStore.ensureReady()
+      await state.localStore.deleteProfileData(profileID: "pf_ryan")
       await state.refreshProfiles()
-      let scope = await LocalStore.shared.activeScope
+      let scope = await state.localStore.activeScope
       #expect(scope.isUnchosen, "precondition: the window is open")
 
       await state.recordProgress(itemId: "t936-vanish", positionSeconds: 600, durationSeconds: 7200)
 
       #expect(postCount() == 0, "nothing uploaded")
       for bucket in ["", ProfileScope.unchosenID, "pf_ryan", "pf_maya"] {
-        let rows = await LocalStore.shared.pendingProgress(profileID: bucket)
+        let rows = await state.localStore.pendingProgress(profileID: bucket)
         #expect(rows.filter { $0.itemId == "t936-vanish" }.isEmpty, "row under '\(bucket)'")
       }
-      await LocalStore.shared.claimLegacyRows(ownerID: "pf_ryan")
-      let owned = await LocalStore.shared.pendingProgress(profileID: "pf_ryan")
+      await state.localStore.claimLegacyRows(ownerID: "pf_ryan")
+      let owned = await state.localStore.pendingProgress(profileID: "pf_ryan")
       #expect(owned.filter { $0.itemId == "t936-vanish" }.isEmpty, "the owner was handed the save")
-      await LocalStore.shared.deleteProfileData(profileID: "pf_ryan")
+      await state.localStore.deleteProfileData(profileID: "pf_ryan")
     }
   }
 
@@ -572,7 +547,7 @@ struct ProfileScopeFixTests {
       cached: [a, b], active: a,
       routes: ["POST /api/v1/items/t936-as/progress": progressOK]
     ) { state in
-      let store = LocalStore.shared
+      let store = state.localStore
       await store.ensureReady()
       await store.deleteProfileData(profileID: a.id)
       await store.deleteProfileData(profileID: b.id)
@@ -669,10 +644,8 @@ struct ProfileScopeFixTests {
     await host.withAccount(
       routes: ["GET /api/v1/profiles": profilesReply([ryanJSON])]
     ) { state in
-      let store = LocalStore.shared
+      let store = state.localStore
       await store.ensureReady()
-      let savedSeq = await store.getSyncCursors().itemSeq
-      #expect(resetSharedBackfillAttempts(), "precondition: attempt counter rewound")
       await store.upsertItems([titleItem("t935-null", level: nil, seq: 10)])
       await store.setItemSeq(500)
       #expect(await store.getSyncCursors().itemSeq == 500, "precondition")
@@ -681,7 +654,6 @@ struct ProfileScopeFixTests {
 
       #expect(await store.getSyncCursors().itemSeq == 0)
       await store.deleteItems(["t935-null"])
-      await store.setItemSeq(savedSeq)
     }
   }
 
@@ -738,7 +710,7 @@ struct ProfileScopeFixTests {
     await host.withAccount(
       routes: ["GET /api/v1/profiles": profilesReply([ryanJSON, keep])]
     ) { state in
-      let store = LocalStore.shared
+      let store = state.localStore
       await store.ensureReady()
       for stale in await store.storedProfileIDs() { await store.deleteProfileData(profileID: stale) }
       await store.upsertSingleProgress(itemId: "t935-g1", positionSeconds: 600, durationSeconds: 7200, profileID: "pf_t935_gone")
@@ -768,7 +740,7 @@ struct ProfileScopeFixTests {
     await host.withAccount(
       routes: ["GET /api/v1/profiles": profilesReply([plainProfile("pf_t935_a"), plainProfile("pf_t935_b")])]
     ) { state in
-      let store = LocalStore.shared
+      let store = state.localStore
       await store.ensureReady()
       for stale in await store.storedProfileIDs() { await store.deleteProfileData(profileID: stale) }
       await store.deleteProfileData(profileID: "pf_ryan")

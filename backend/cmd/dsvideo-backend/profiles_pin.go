@@ -8,9 +8,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -120,9 +122,15 @@ const (
 	pinMaxLockout  = 3600 * time.Second
 )
 
-// pinLimiter counts consecutive PIN failures per profile id, in memory (a restart resetting
-// it is acceptable, FR-215). Every PIN-accepting endpoint for a profile shares its entry;
-// owner-PIN checks on management calls use the owner profile's id.
+// pinLimiter counts consecutive PIN failures per profile id. Every PIN-accepting endpoint
+// for a profile shares its entry; owner-PIN checks on management calls use the owner
+// profile's id.
+//
+// State is persisted in profile_pin_lockouts (TASK-932 SEC-7) so a package restart does
+// not hand an attacker a fresh failure budget or reset the lockout escalation. Memory is a
+// cache: an entry loads its row on first use and writes it back after every change; a row
+// exists only while a profile has failures or lockouts outstanding. With no database
+// (tests that build &Server{}), the limiter is memory-only.
 //
 // Each entry has its own mutex, held for the whole check-verify-record sequence, so
 // concurrent guesses against one profile are serialized and cannot overshoot the 5-failure
@@ -130,11 +138,14 @@ const (
 type pinLimiter struct {
 	mu      sync.Mutex
 	now     func() time.Time
+	db      *sql.DB
 	entries map[string]*pinEntry
 }
 
 type pinEntry struct {
 	mu          sync.Mutex
+	loaded      bool      // the persisted row has been read into this entry
+	dropped     bool      // reset removed this entry from the map; callers must re-fetch
 	failures    int       // consecutive failures since the last success or lockout
 	lockouts    int       // lockouts since the last success; each doubles the wait
 	lockedUntil time.Time // zero when not locked
@@ -147,11 +158,28 @@ type pinResult struct {
 	AttemptsRemaining int // set on a wrong PIN; 0 means this failure started a lockout
 }
 
-func newPinLimiter(now func() time.Time) *pinLimiter {
+// migratePinLockouts creates the persisted limiter state. Additive: a new table, nothing
+// existing touched. locked_until_ms is Unix milliseconds, 0 when not locked.
+func migratePinLockouts(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS profile_pin_lockouts (
+  profile_id TEXT PRIMARY KEY,
+  failures INTEGER NOT NULL DEFAULT 0,
+  lockouts INTEGER NOT NULL DEFAULT 0,
+  locked_until_ms INTEGER NOT NULL DEFAULT 0
+);`)
+	if err != nil {
+		return fmt.Errorf("create profile_pin_lockouts: %w", err)
+	}
+	return nil
+}
+
+// newPinLimiter returns a limiter persisting to db, or memory-only when db is nil.
+func newPinLimiter(now func() time.Time, db *sql.DB) *pinLimiter {
 	if now == nil {
 		now = time.Now
 	}
-	return &pinLimiter{now: now, entries: make(map[string]*pinEntry)}
+	return &pinLimiter{now: now, db: db, entries: make(map[string]*pinEntry)}
 }
 
 func (l *pinLimiter) setNow(now func() time.Time) {
@@ -174,11 +202,82 @@ func (l *pinLimiter) entry(id string) (*pinEntry, func() time.Time) {
 	return e, l.now
 }
 
+// lockedEntry returns id's entry with its mutex held and its persisted state loaded.
+func (l *pinLimiter) lockedEntry(id string) (*pinEntry, func() time.Time) {
+	for {
+		e, nowFn := l.entry(id)
+		e.mu.Lock()
+		if e.dropped { // reset raced us; its replacement is in the map
+			e.mu.Unlock()
+			continue
+		}
+		if !e.loaded {
+			e.loaded = l.load(id, e)
+		}
+		return e, nowFn
+	}
+}
+
+// load reads id's persisted state into e (caller holds e.mu). A read failure is logged
+// and reported as not loaded, so the next attempt retries; until then the in-memory
+// count still applies.
+func (l *pinLimiter) load(id string, e *pinEntry) bool {
+	if l.db == nil {
+		return true
+	}
+	var failures, lockouts int
+	var untilMs int64
+	err := l.db.QueryRow(
+		`SELECT failures, lockouts, locked_until_ms FROM profile_pin_lockouts WHERE profile_id = ?`, id,
+	).Scan(&failures, &lockouts, &untilMs)
+	switch {
+	case err == sql.ErrNoRows:
+		return true
+	case err != nil:
+		log.Printf("[pin] lockout state for profile %s not loaded: %v", id, err)
+		return false
+	}
+	// Persisted state only ever adds to what this process has counted since the entry
+	// was created (normally nothing).
+	e.failures = max(e.failures, failures)
+	e.lockouts = max(e.lockouts, lockouts)
+	if untilMs > 0 {
+		if t := time.UnixMilli(untilMs); t.After(e.lockedUntil) {
+			e.lockedUntil = t
+		}
+	}
+	return true
+}
+
+// persist writes e's state for id (caller holds e.mu): the row is deleted when nothing is
+// outstanding. A write failure is logged; the in-memory state still applies.
+func (l *pinLimiter) persist(id string, e *pinEntry) {
+	if l.db == nil {
+		return
+	}
+	var err error
+	if e.failures == 0 && e.lockouts == 0 && e.lockedUntil.IsZero() {
+		_, err = l.db.Exec(`DELETE FROM profile_pin_lockouts WHERE profile_id = ?`, id)
+	} else {
+		var untilMs int64
+		if !e.lockedUntil.IsZero() {
+			untilMs = e.lockedUntil.UnixMilli()
+		}
+		_, err = l.db.Exec(`
+INSERT INTO profile_pin_lockouts (profile_id, failures, lockouts, locked_until_ms) VALUES (?, ?, ?, ?)
+ON CONFLICT(profile_id) DO UPDATE SET failures = excluded.failures, lockouts = excluded.lockouts,
+  locked_until_ms = excluded.locked_until_ms`,
+			id, e.failures, e.lockouts, untilMs)
+	}
+	if err != nil {
+		log.Printf("[pin] lockout state for profile %s not persisted: %v", id, err)
+	}
+}
+
 // attempt runs verify for profile id unless it is locked out, and records the outcome.
 // While locked, verify is not called at all: even a correct PIN is refused (AC-002-19).
 func (l *pinLimiter) attempt(id string, verify func() bool) pinResult {
-	e, nowFn := l.entry(id)
-	e.mu.Lock()
+	e, nowFn := l.lockedEntry(id)
 	defer e.mu.Unlock()
 
 	now := nowFn()
@@ -190,11 +289,16 @@ func (l *pinLimiter) attempt(id string, verify func() bool) pinResult {
 		return pinResult{Locked: true, RetryAfterSeconds: secs}
 	}
 	if verify() {
+		hadState := e.failures != 0 || e.lockouts != 0 || !e.lockedUntil.IsZero()
 		e.failures, e.lockouts, e.lockedUntil = 0, 0, time.Time{}
+		if hadState {
+			l.persist(id, e)
+		}
 		return pinResult{OK: true}
 	}
 	e.failures++
 	if e.failures < pinMaxFailures {
+		l.persist(id, e)
 		return pinResult{AttemptsRemaining: pinMaxFailures - e.failures}
 	}
 	// The 5th wrong answer is itself reported as pin_incorrect with 0 remaining and starts
@@ -209,13 +313,26 @@ func (l *pinLimiter) attempt(id string, verify func() bool) pinResult {
 	e.lockouts++
 	e.failures = 0
 	e.lockedUntil = now.Add(wait)
+	l.persist(id, e)
 	return pinResult{AttemptsRemaining: 0}
 }
 
-// reset forgets a profile's failures and lockouts: its PIN was set, changed or cleared,
-// or the profile was deleted.
+// reset forgets a profile's failures and lockouts, in memory and on disk: its PIN was
+// set, changed or cleared, or the profile was deleted. It holds the limiter mutex
+// throughout (lock order: l.mu, then an entry's mu; attempt never takes them the other way
+// round), so an attempt already holding the old entry finishes before the row is deleted
+// and cannot write it back, and no new entry can load the row before it is gone.
 func (l *pinLimiter) reset(id string) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[id]
+	if !ok {
+		e = &pinEntry{}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	delete(l.entries, id)
-	l.mu.Unlock()
+	e.dropped = true
+	e.failures, e.lockouts, e.lockedUntil = 0, 0, time.Time{}
+	l.persist(id, e)
 }

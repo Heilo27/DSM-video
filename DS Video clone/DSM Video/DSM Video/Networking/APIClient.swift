@@ -10,6 +10,9 @@ struct APIClient {
   /// never carry a profile id that can go stale. Work that must stay with ONE profile even
   /// if the user switches mid-flight (progress sync, the outbox) pins it with `pinned(to:)`.
   var profileHeader: ProfileHeaderSource = .activeProfile
+  /// The store `.activeProfile` reads. Always `.shared` in production; AppState hands every
+  /// client its own `profileStore`, which is how a test isolates the profile header (TASK-925).
+  var profileStore: ActiveProfileStore = .shared
 
   /// A copy whose requests always name `profileID` (nil = send no header).
   func pinned(to profileID: String?) -> APIClient {
@@ -293,10 +296,12 @@ struct APIClient {
   /// Returns whether the server actually stored the write. `false` means it was
   /// superseded by a newer write and silently discarded — not an error, but not a
   /// success either, so callers must not treat a 200 alone as "saved".
+  ///
+  /// - Parameter watchedAt: RFC3339 time the viewer was at this position. The server orders
+  ///   writes by it (FRD-001 FR-014: the later watch wins), so pass it on every write: the
+  ///   current time for a live write, the stored time when replaying an outbox backlog. Nil
+  ///   falls back to the server's receive time.
   @discardableResult
-  /// - Parameter watchedAt: RFC3339 time the viewer was at this position. Pass nil for a
-  ///   live write (the server's receive time is right); pass the stored time when replaying
-  ///   an outbox backlog, or every replayed row collapses onto the flush's timestamp.
   func setProgress(id: String, positionSeconds: Int, durationSeconds: Int,
                    watchedAt: String? = nil) async throws -> Bool {
     let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
@@ -703,7 +708,7 @@ struct APIClient {
     if authorized, let token {
       req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
       switch profileHeader {
-      case .activeProfile: sentProfileID = ActiveProfileStore.shared.activeProfileID
+      case .activeProfile: sentProfileID = profileStore.activeProfileID
       case .pinned(let id): sentProfileID = id
       }
       ActiveProfileStore.setHeader(sentProfileID, on: &req)

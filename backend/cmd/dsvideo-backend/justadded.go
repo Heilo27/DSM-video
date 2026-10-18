@@ -172,8 +172,8 @@ func (s *Server) refreshJustAdded() {
 // user added the same week — which is precisely what the clients' rails looked like.
 //
 // The grouping is the codebase's ONE answer for "which show is this episode part of":
-// showFolderFromPath → resolveFolderShowNames → showGroupKey, the same three calls the
-// list endpoints make. This rail originally keyed episodes on their own title, which is
+// groupEpisodesByShow (showFolderFromPath → resolveFolderShowNames → showGroupKey), the
+// same assembly the list endpoints call. This rail originally keyed episodes on their own title, which is
 // the one thing that is NOT stable across a show's episodes — an unmatched import whose
 // show_name is NULL gave every episode a distinct key and nine of the rail's 24 slots went
 // to one anime series. The folder is what those episodes actually share.
@@ -216,7 +216,7 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 	}
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	var cands []candidate
-	nameCounts := map[string]map[string]int{}
+	var refs []episodeRef // parallel to cands; zero for a film, which groups nowhere
 	for rows.Next() {
 		var c candidate
 		var path string
@@ -225,42 +225,39 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 			&c.libID, &path, &c.contentRating); err != nil {
 			continue
 		}
+		var ref episodeRef
 		if c.typ == "episode" {
-			c.folder = showFolderFromPath(path, tvRoot)
-			if c.folder != "" {
-				if nameCounts[c.folder] == nil {
-					nameCounts[c.folder] = map[string]int{}
-				}
-				if c.showName.Valid && c.showName.String != "" {
-					nameCounts[c.folder][c.showName.String]++
-				}
-			}
+			ref = episodeRef{Path: path, ShowName: c.showName}
 		}
 		cands = append(cands, c)
+		refs = append(refs, ref)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	// One name per folder, so a part-matched folder does not split into two shows.
-	folderNames := resolveFolderShowNames(nameCounts)
+	// One name per folder, so a part-matched folder does not split into two shows. Decided
+	// within the over-fetched window: these are the rows this rail has.
+	groups := groupEpisodesByShow(refs, tvRoot)
 
 	// Pass 2: emit newest-first, one entry per show.
 	out := make([]map[string]any, 0, justAddedCacheSize)
 	seenShows := map[string]bool{}
-	for _, c := range cands {
+	for i, c := range cands {
 		id, typ, title, addedAt, libID := c.id, c.typ, c.title, c.addedAt, c.libID
 		year, duration, seasonNumber, episodeNumber := c.year, c.duration, c.season, c.episode
 		rating := c.rating
 		posterPath, backdropPath := c.posterPath, c.backdropPath
+		c.folder = groups[i].Folder
 
 		// The FOLDER's resolved name, not this episode's — an unmatched episode groups
-		// with its siblings rather than forming a show of its own.
+		// with its siblings rather than forming a show of its own. An episode that files
+		// under no folder is listed as a title of its own, like a film.
 		showName := c.showName
 		var key string
 		if typ == "episode" && c.folder != "" {
-			showName = folderNames[c.folder]
-			key = "tv|" + showGroupKey(c.folder, showName)
+			showName = groups[i].ShowName
+			key = "tv|" + groups[i].Key
 		} else {
 			// A film is its own show.
 			key = strings.ToLower(title) + "|" + typ

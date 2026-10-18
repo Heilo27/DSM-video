@@ -108,9 +108,13 @@ position advanced on one device under a profile is the position offered on every
 **same** profile, and it is never offered to a different profile. A request that names no profile (an app
 build without profile support) reads and writes progress as the account's most restricted profile if one
 exists, otherwise as the owner profile (FRD-002 FR-221). An account with only its owner profile behaves
-exactly as before. FR-014–FR-024 apply per profile.
-**FR-014 [INFERRED]** — Conflict resolution is last-watch-wins; a device must not overwrite a newer
-position from elsewhere with its own older one.
+exactly as before. FR-014–FR-025 apply per profile.
+**FR-014 [INFERRED; DESTRUCTIVE rule stated 2026-10-17, TASK-960]** — Conflict resolution is
+last-watch-wins, by when the viewer watched, not by when the save reached the server. A device must not
+overwrite a newer position from elsewhere with its own older one, even when it was offline and its older
+save arrives last. A device whose clock runs ahead is treated as watching when the server received the save,
+so a wrong clock cannot pin a position forever. A device whose save loses re-fetches the position that
+stands, so it never keeps showing its own stale one.
 **FR-015 [INFERRED]** — A position recorded while the server is unreachable is retained locally and
 reconciled to the server when connectivity returns; it is never discarded.
 **FR-016 [STATED]** — Continue Watching contains exactly the titles with progress strictly between zero
@@ -121,7 +125,8 @@ its absence is not an error.
 and clears its stray resume point. Mark as Unwatched reverses this.
 **FR-019 [INFERRED]** — A cleared resume point must not be resurrected by a later sync from stale
 server state. (Treated as **destructive**: the user deliberately destroyed state and it must stay
-destroyed.)
+destroyed.) This includes an older save replayed from an offline device after the clear, or after a
+title was marked watched: it never brings back the resume point or un-watches the title (TASK-960).
 **FR-020 [STATED]** — Poster cards show a progress indicator only when progress is above zero and below
 complete, and a watched badge when complete. *Derivation:* design-spec B3 §3–4.
 **FR-021 [INFERRED]** — A TV show contributes at most one Continue Watching entry, identifying the
@@ -131,6 +136,11 @@ specific partially-watched episode.
 overwritten by the furthest point previously reached.
 **FR-024 [INFERRED]** — Failure to load Continue Watching presents as a load failure, never as an empty
 watch history (instance of FR-001).
+**FR-025 [DESIGN, 2026-10-17, TASK-941]** — When the server re-keys a title (for example after its file
+moves or is converted to a new container), every profile's watch progress follows the title to its new
+identity, and every device picks that up at its next sync: no device keeps offering the position under
+the title's old identity, and none needs any other progress change to happen first. A re-key that
+touches no progress causes no progress refetch.
 
 ---
 
@@ -145,7 +155,9 @@ reported as completed.
 *Derivation:* iOS release notes — "Play is clearly unavailable for videos that aren't downloaded when
 your NAS is offline"; this is only meaningful if the converse holds.
 **FR-032 [STATED]** — A download failure is surfaced to the user. A failing download must not silently
-vanish from the list.
+vanish from the list. A transfer that finishes but whose file cannot be kept on the device leaves
+Downloading for a retryable Failed row naming storage as the cause, leaves no orphaned bytes behind, and
+never sits at 100% (TASK-971).
 *Derivation:* FR-005 plus the stated commitment to clear messages; corroborated as in-scope by ticket
 TASK-782's title.
 **FR-033 [INFERRED]** — A download failure message names the real cause (server unreachable, storage
@@ -172,6 +184,20 @@ with the server offline, Play on a non-downloaded title is presented as unavaila
 to be playable.
 **FR-044 [INFERRED, DESTRUCTIVE]** — Sign-out handles downloaded media in one consistent, stated way;
 partial removal leaving orphaned bytes or entries pointing at missing files is a defect.
+Unfinished downloads (in flight, paused or failed) and their records go with sign-out too; none comes back
+as the next user's paused or failed row (TASK-947).
+**FR-045 [INFERRED]** — **Downloads survive the app being closed.** The system may end the app while a
+transfer continues in the background (TASK-947):
+- A transfer that finishes while the app is closed lands as a completed download with the title and
+  age level it started with, or as a Failed row stating the cause; it is never silently discarded.
+- A transfer still running when the app comes back is shown downloading with its progress, and tapping
+  Download for that title joins it; a second transfer for the same title never starts (FR-040).
+- A transfer stopped with progress kept (paused, network lost, app force-quit) shows as paused and
+  continues from where it stopped. If the server no longer holds the session it was cut from, it starts
+  over on a fresh one rather than failing. A stop with nothing to continue shows as Failed, naming why
+  (connection, storage, app closed, Background App Refresh off, system stopped it).
+- An unfinished download whose transfer was lost with the app shows as Failed ("interrupted") and can be
+  started again.
 
 ---
 
@@ -239,14 +265,22 @@ design-spec B3 §5.)*
 **FR-083 [STATED]** — TV content is organised as show → season → episode, with seasons and episodes
 matching what the server reports.
 **FR-084 [INFERRED]** — A show whose episodes are split across multiple folders/paths on the NAS
-appears exactly once, with its episodes merged.
+appears exactly once, with its episodes merged. On a restricted profile the merge is decided from the episodes that profile can
+see, in the show list and the show's seasons and episodes alike, so the detail lists the episodes the
+header counted (FRD-002 FR-250). [TASK-924]
 **FR-085 [STATED]** — The detail screen shows title, year, runtime, genre, rating, director, cast, and
 description. *Derivation:* design-spec B4 §4/§6/§7.
 **FR-086 [INFERRED]** — Missing optional metadata is omitted cleanly — never rendered as "null"/"nil" or
 an orphaned separator — and **missing artwork must not prevent the detail screen from loading.**
 **FR-087 [INFERRED]** — Failed artwork is visually distinguishable from still-loading artwork.
-**FR-088 [STATED]** — The Just Added rail surfaces recently added movies and episodes, most recent
-first, capped at the documented maximum (10). *Derivation:* description + design-spec B2.
+**FR-088 [DESIGN, 2026-09-16, Ryan; reconciled 2026-10-17, TASK-920]** — The server decides what is new.
+Just Added shows the newest titles as the server reports them, newest first, at most **16**. A show with
+new episodes appears once, as that show, not once per episode. On a restricted profile the rail holds only
+titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, the device's own list of
+its newest synced titles stands in, under the same rules. *Derivation:* 0c9b4cd (Ryan: "the server decides
+what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
+cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
+player asks for 20; that divergence is open under TASK-920.
 **FR-089 [STATED]** — Search is reachable from the Home screen on iPhone and searches the **whole**
 library, not one section, across both movies and TV shows.
 **FR-090 [STATED]** — Search distinguishes "no results for <query>" from a connection error, and the
@@ -283,9 +317,25 @@ comes back restores its positions. Of the original files kept after a video is c
 kept whatever their age; older ones follow the retention window. (Each change narrows a deletion path;
 flagged to Ryan.)
 
-**FR-144 [DESIGN, 2026-10-17, TASK-929]** — *Secrets never reach the server log.* Request logging records
-method and path only: no query string, no body. Passwords, one-time codes, session ids, tokens and DSM's
-trusted-device token are redacted wherever a request is logged.
+**FR-144 [DESIGN, 2026-10-17, TASK-929]** — *Secrets never reach the server log.* Request logging never
+records a body. A query string may be logged, but passwords, one-time codes, session ids, tokens and DSM's
+trusted-device token are redacted from it, and from any URL, wherever a request is logged.
+**FR-145 [DESIGN, 2026-09-15, TASK-920]** — *Suggested is decided by the server.* The Suggested rail
+offers titles that share a genre with what the viewer watched most recently, from one server request, and
+leaves out anything the viewer has already started. It never draws on another profile's history, and with
+no history it is simply absent rather than filled with guesses. *Derivation:* 0a117a4; DSVideoBackendAPI.md
+`/suggested`; FRD-002 FR-250 for the profile ceiling.
+**FR-146 [DESIGN, 2026-09-16, TASK-920]** — *The Apple TV Top Shelf gets you back into what you were
+watching.* It shows Continue Watching, with resume bars, as widescreen artwork, and falls back to Just Added
+when nothing is in progress, so a caught-up viewer still sees content rather than a bare icon. It refreshes
+when Continue Watching changes, so a title just finished does not linger. On an account with a restricted
+profile, FRD-002 FR-264 narrows this. *Derivation:* 38c6cb5.
+**FR-147 [DESIGN, 2026-09-16, TASK-920]** — *Siri can find a title and open it.* App-scoped phrases
+resolve against the library. "Play <title> in DSM Video" opens the title's detail page, with Play already
+focused. If nothing matches, it opens search with the phrase filled in and says so, rather than failing silently.
+"Find <title> in DSM Video" opens search results for the phrase. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
+an Apple TV-app catalog partnership, not an API. Siri results obey the active profile's ceiling (FRD-002
+FR-264). *Derivation:* 542d543.
 
 ---
 

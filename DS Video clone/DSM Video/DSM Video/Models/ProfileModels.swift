@@ -52,7 +52,10 @@ nonisolated struct Profile: Codable, Identifiable, Hashable, Sendable {
   /// Restricted = below the ladder's top (FRD-002 §1). The top comes from the server, stored
   /// once in ActiveProfileStore. Whether an unrated title shows is a separate question
   /// (ProfileScope.allows, with the server's unrated level).
-  var isRestricted: Bool { maxAgeLevel < ActiveProfileStore.shared.unrestrictedLevel }
+  var isRestricted: Bool { isRestricted(in: .shared) }
+
+  /// The one rule behind `isRestricted`, against an explicit store (tests pass an isolated one).
+  func isRestricted(in store: ActiveProfileStore) -> Bool { maxAgeLevel < store.unrestrictedLevel }
 }
 
 /// GET /profiles

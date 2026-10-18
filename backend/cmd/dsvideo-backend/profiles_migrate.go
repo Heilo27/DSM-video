@@ -26,6 +26,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"dsvideo/backend/internal/sqltx"
 )
 
 const profilesSchemaSQL = `
@@ -148,6 +150,12 @@ func backupBeforeProfiles(db *sql.DB, dbPath string) (string, error) {
 		_ = os.Remove(backup)
 		return "", fmt.Errorf("pre-migration copy %s missing or empty after VACUUM INTO", backup)
 	}
+	// The copy holds every account's history. VACUUM INTO creates it 0644, so on the NAS
+	// (backend runs as root) it would sit world-readable in var/. Owner-only, like a secret.
+	if err := os.Chmod(backup, 0o600); err != nil {
+		_ = os.Remove(backup)
+		return "", fmt.Errorf("restricting pre-migration copy %s to owner-only: %w", backup, err)
+	}
 	return backup, nil
 }
 
@@ -234,16 +242,14 @@ func countByAccount(ctx context.Context, tx *sql.Tx, table string) (accountCount
 }
 
 func migrateProfilesTx(ctx context.Context, db *sql.DB) (string, error) {
-	tx, err := db.BeginTx(ctx, nil)
+	// sqltx, not a bare BeginTx: a COMMIT SQLite refuses but keeps open must not go back to
+	// the pool holding the write lock, or every later write at startup fails (TASK-941).
+	stx, err := sqltx.Begin(ctx, db)
 	if err != nil {
 		return "", fmt.Errorf("begin: %w", err)
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
+	defer stx.Close()
+	tx := stx.Tx
 
 	if _, err := tx.ExecContext(ctx, profilesSchemaSQL); err != nil {
 		return "", fmt.Errorf("creating profiles table: %w", err)
@@ -358,10 +364,9 @@ UNION SELECT user_id FROM settings  WHERE user_id <> ''`)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := stx.Commit(); err != nil {
 		return "", fmt.Errorf("commit: %w", err)
 	}
-	committed = true
 	return fmt.Sprintf("%d accounts, %d progress rows, %d watchlist rows assigned to owner profiles",
 		len(accounts), sumCounts(afterProgress), sumCounts(afterWatchlist)), nil
 }

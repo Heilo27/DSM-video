@@ -93,8 +93,10 @@ returned.
 **FR-215 [DESIGN]** PIN checks are rate-limited per profile. Every endpoint that accepts a PIN, owner-PIN
 management calls included, shares one failure counter for that profile. After 5 consecutive failures the
 profile's PIN checks are refused for 5 minutes with `pin_locked` and a `retryAfterSeconds`. Each further
-lockout doubles the wait, up to 1 hour. A success resets the counter. The counter may live in memory; a
-server restart resetting it is acceptable, because a viewer cannot trigger a restart.
+lockout doubles the wait, up to 1 hour. A success resets the counter. The counter, the lockout count and
+any running lockout survive a server restart: restarting never hands back a fresh set of guesses or a
+shorter wait. Setting, changing or clearing a profile's PIN, or deleting the profile, clears its counter.
+[2026-10-17, TASK-932]
 
 **FR-216 [DESIGN]** A forgotten owner PIN is reset by re-entering the **DSM password** (and OTP, if the
 account has one), checked against DSM exactly as at sign-in and subject to the sign-in rate limit. This
@@ -159,7 +161,7 @@ never offers them.
 profile, and every existing progress and watchlist row is assigned to it. No row is deleted, and no position
 or watchlist entry changes value. Safety envelope, all required:
 1. Before migrating, the server writes a full copy of the database file next to the original and logs its
-   path. If that copy cannot be written, the migration does not run and the server does not start. It
+   path. The copy holds every account's history, so only the server's own user can read it. If that copy cannot be written, the migration does not run and the server does not start. It
    logs the real cause (for example, "Profiles migration needs N MB free next to the database; X MB
    available") so DSM shows the package as failed to start. There is no dual-schema serving mode (Friday,
    2026-10-17: running both schemas would double every progress and watchlist query, to cover a disk-full
@@ -240,8 +242,13 @@ explicitly with TV-Y7 rather than left to fail closed. Four tiers is the smalles
 three common child stages from adult, and the unrated rule needs nothing more than "restricted vs not".
 
 **FR-244 [DESIGN]** Changing the ladder is a server migration. It must bump the change sequence of every
-item whose level changes, or devices keep the old levels in their cache. [Not yet implemented: the
-server records no ladder version, so nothing bumps the sequence when the ladder changes. TASK-939.]
+item whose level changes, or devices keep the old levels in their cache. The server remembers which
+ladder it last served; when it starts on a different one, it gives every title whose level moved a new
+change sequence, so the next sync re-sends exactly those titles with their new levels. Titles whose
+level did not move are not re-sent, and a ladder change that moves no title re-sends nothing. If the
+server cannot tell which ladder it served before, it re-sends every title once. A server upgrading
+from a release that recorded no ladder treats its current ladder as the one devices hold (the ladder
+has not changed since levels first shipped). [2026-10-17, TASK-939]
 
 **Known consequence [RYAN rule, flagged]:** home videos, and anything TMDb has no US certification for, are
 hidden on restricted profiles. Until a manual rating override exists (deferred, §13), a family's own home
@@ -273,8 +280,11 @@ route's class is listed in `docs/api/ProfilesAPI.md` §"Enforcement by route". T
   The device filters every read (FR-262). Reason in ADR-001: filtering a delta stream per profile breaks
   the delta semantics, because switching profiles changes what is visible without changing any item, so
   every switch would force a full re-sync, which is ~100x slower over WAN.
-- **Exempt.** `/images/{id}` and `/tmdb/image` (public artwork, reachable only by an id taken from a
-  filtered listing) and `/playback/{sessionId}/*` (the session id is the capability, and the session was
+- **Exempt.** `/images/{id}` and `/tmdb/image` serve artwork only, never video, subtitles or metadata.
+  They are not filtered by ceiling, and an image id is not a secret. It is derived from the file's path,
+  and `/sync/items` sends every account item's ids unfiltered. So a restricted profile can fetch the
+  poster of a title above its ceiling if it has the id. Accepted (SEC-8, TASK-932): the poster is
+  public artwork, and the title itself stays unplayable and unlisted. And `/playback/{sessionId}/*` (the session id is the capability, and the session was
   gated when it was created).
 - **Session bound to its profile.** A play session belongs to the profile it was started for, and it
   survives a server restart with that profile. A request on `/playback/{sessionId}/*` that names a
@@ -320,13 +330,22 @@ known level is treated as unrated until the device learns its level. Switching p
 download. Devices upgraded from before age levels fill in levels for titles they already hold without any
 action from the user. [2026-10-17, TASK-927, TASK-935]
 
+A **new** download takes its level from the server's title details when the server sent one, since that is
+the freshest answer and the device's catalog may not have synced the title yet or may predate a re-rating.
+Without one it takes the on-device catalog's level, and if neither knows it, the level is unknown, which is
+hidden on every restricted profile (FR-242). The device never invents a default level. When the device
+later refreshes the levels of titles it already holds, a level it knows is never erased or replaced by
+"unknown": if the catalog has no entry for the title, or no level, the stored level stays. A newer level
+from the catalog (the title was re-rated) does replace it. [2026-10-17, TASK-942]
+
 **FR-263 [DESIGN]** Offline: the cached profile list is shown. Profiles without a PIN can be entered. A
 PIN-protected profile cannot be entered offline, and the picker says why ("Your NAS needs to be reachable
 to check this PIN"). A profile already active stays active through a connection loss.
 
 **FR-264 [DESIGN]** The Top Shelf extension, widgets and Siri/App Intents (PlayVideoIntent,
 ShowInAppSearchResultsIntent) act for the active profile, shared through the app group, and never surface a
-title above its ceiling. With no known active profile they show nothing profile-specific.
+title above its ceiling. With no known active profile they show nothing profile-specific. Siri acts under
+the active profile and never starts playback itself (FRD-001 FR-147).
 **Top Shelf on an account with any restricted profile** shows only Just Added titles allowed to the most
 restricted profile, with no Continue Watching and no resume bars, at all times: the Apple TV home screen
 is shared and has no chosen viewer between sessions. An account with no restricted profile keeps the
@@ -335,6 +354,12 @@ active profile's Continue Watching. [Friday, 2026-10-17, TASK-923/928; Ryan may 
 **FR-265 [DESIGN]** On a restricted profile, an empty grid, rail or collection caused by the ceiling says
 so, naming the profile's level ("No Little Kids titles in Movies yet"). That message is distinct from
 "this library is empty" and from "couldn't load" (FRD-001 FR-001, FR-131).
+Home is covered too: a restricted profile whose Home rails are empty sees the level-named message
+("No Little Kids titles in your library yet."), never "Add videos to your NAS" or "No Libraries", on
+iOS and tvOS, and a tvOS library rail with nothing in it names the level instead of "No videos yet".
+The level is named even with the NAS unreachable on a cold launch: the device keeps the last age ladder
+the server sent. Only a device that has never received the ladder falls back to wording without the
+level name. [2026-10-17, TASK-968]
 
 **FR-266 [DESIGN]** Profile management in the app asks for the owner PIN first, and confirms deletion under
 FR-206. A failed PIN shows the real cause: wrong PIN, locked (with time remaining), or NAS unreachable.
@@ -343,6 +368,16 @@ FR-206. A failed PIN shows the real cause: wrong PIN, locked (with time remainin
 picker and send `X-DSVideo-Profile` in the same release that turns on server enforcement (FRD-000 standard
 of done 3). Under FR-221 an iPhone build without the header is held to the most restricted profile in any
 family account, so a tvOS-only release would lock owners out of their own library on the phone.
+
+**FR-268 [DESIGN] Manage Profiles is reachable with only the owner profile.** Settings, on iOS/iPadOS and
+tvOS, always offers "Manage Profiles" once the account's owner profile is known, whatever the number of
+profiles. A single-profile account has no picker (FR-205), so Settings is its only way in; without it a
+second profile could never be created in the app. The entry opens the same management screen as the
+picker's "Manage Profiles" and "Add Profile", with the same owner-PIN rule (FR-266), including setting the
+owner's first PIN when none exists (FR-212). Home stays as FR-205 says: no picker, no profile badge, no PIN
+prompt. "Switch Profile" in Settings still appears only when there is more than one profile to switch
+between. With no known profile list (an older server, or offline with nothing cached) there is nothing to
+manage and Settings shows no entry.
 
 ## 9. Kids' collections
 
@@ -462,7 +497,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | FR-240 certification storage | P1 (enriched detail: the existing FR-085 "rating" field gets a real value) | S1 | none | KEEP |
 | FR-241, 242, 244 ladder, unrated rule | S5 | S1 (one server home) | none | KEEP |
 | FR-250–252 enforcement | S5 | S2 (`content_restricted` names the cause) | none | KEEP |
-| FR-260–266 apps | S5 | S2 | none | KEEP |
+| FR-260–266, FR-268 apps | S5 | S2 | none | KEEP |
 | FR-267 both platforms | FRD-000 standard 3 | S1 | none | KEEP (if the feature ships) |
 | FR-270, 273 (kids' scope), 276 kids' collections | S5 | S2 | none | KEEP |
 | FR-271, 272, 274 (adult row), 275 collections for Teens/Adult | P1 (findable: browse that reflects what the user is looking for, M2) | S1 | A1/A3: none (reads TMDb metadata only) | KEEP |
@@ -513,6 +548,7 @@ Server (TASK-916)
 tvOS (TASK-917)
 - **AC-002-40** Given an account with more than one profile, on tvOS the picker appears after pairing, at every cold launch, and on return from more than 30 minutes in the background. Given a single-profile account, the app goes straight to home. (FR-205, FR-260)
 - **AC-002-40a** Given an account with more than one profile on iOS, the picker appears after sign-in. A relaunch opens straight into the remembered profile without asking again. "Switch profile" opens the picker. A remembered profile that has been deleted brings back the picker. (FR-260)
+- **AC-002-40b** Given an account with only its owner profile, on iOS/iPadOS and tvOS, Settings offers "Manage Profiles", which asks for the owner's PIN (or to set one) and then offers "Add Profile"; home shows no picker and no profile badge. Once a second profile exists, the picker appears at the next picker moment and Settings also offers "Switch Profile". (FR-205, FR-212, FR-266, FR-268)
 - **AC-002-41** Given a PIN-protected profile, entering it requires a PIN the server accepts. A wrong PIN says so, a lockout shows the time remaining, and an unreachable NAS is named as the cause. (FR-213, FR-266)
 - **AC-002-42** Given a switch from profile A to profile B, no rail, grid or watchlist entry from A is visible at any point after the switch. (FR-261)
 - **AC-002-43** Given a restricted profile offline, no local read shows a title above its level. Given a PIN-protected profile offline, it cannot be entered, and the picker explains why. (FR-262, FR-263)
@@ -520,7 +556,7 @@ tvOS (TASK-917)
 - **AC-002-45** Given a device upgraded with stored positions, those positions appear under the owner profile, and local progress written later is kept per profile. (FR-233)
 - **AC-002-45a** Given an upgraded device in a family account holding unsent positions, launched offline, or whose profile list fails to load, or which syncs before the list loads: no position is lost and none appears under a restricted profile; they appear under the owner once the list loads. (FR-233, FR-221)
 - **AC-002-46** Given a profile deletion, the confirmation says that the profile's history and watchlist will be permanently deleted. (FR-206, FR-266)
-- **AC-002-47** Given a restricted profile and a library with no titles at its level, the empty state names the level, and it differs from both the empty-library state and the load-failure state. (FR-265)
+- **AC-002-47** Given a restricted profile and a library with no titles at its level, the empty state names the level, and it differs from both the empty-library state and the load-failure state. Given a restricted profile whose Home rails are all empty, Home shows that same level-named state on iOS and tvOS, not "Add videos to your NAS" or "No Libraries", and an adult profile's truly empty library still shows the generic state with no level named. Given a restricted profile on a cold launch with the NAS unreachable, the level is still named. (FR-265)
 - **AC-002-48** Given the release that enables server enforcement, the iOS/iPadOS app also offers the picker and sends `X-DSVideo-Profile`. (FR-267)
 
 Collections (TASK-918)
@@ -531,4 +567,5 @@ Collections (TASK-918)
 - **AC-002-64** Given an undefined collection id, or one not offered to the profile's tier, `/collections/{id}/items` returns `404 unknown_collection`; given an offered collection with no visible titles, it returns `200` with an empty page. (FR-275)
 - **AC-002-65** Given a kids' profile on tvOS, browse shows collections in place of genres. With none visible, it says there are no collections yet, distinct from a load failure. (FR-270, FR-276)
 - **AC-002-66** Given the server source, collection ids, rules and titles are defined in exactly one place. (FR-271)
+- **AC-002-67** Given a new download of a title the server rates 4 and the device's catalog has no row for, then the download is stored at level 4 and is neither listed nor playable on a level-1 profile offline. Given the server sends no level, then the catalog's level is used, else unknown (hidden on restricted profiles). Given a refresh of stored levels, then a known level is never replaced by "unknown" and a newer catalog level replaces it. (FR-262, FR-242)
 

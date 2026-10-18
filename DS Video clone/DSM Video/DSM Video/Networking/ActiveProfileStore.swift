@@ -19,6 +19,9 @@ import Foundation
 /// `@unchecked Sendable`: the only stored state is a `UserDefaults`, which is documented as
 /// thread-safe. No other mutable state exists.
 nonisolated final class ActiveProfileStore: @unchecked Sendable {
+  /// The app group's one definition for the app targets (this store, and AppState's Top Shelf
+  /// snapshot file). TopShelfExtension/TopShelfProvider.swift keeps a separate copy because
+  /// that target does not compile this file: it MUST match, as must both entitlements files.
   static let appGroupID = "group.HeiloProjects.DSReel"
   /// The request and response header naming the profile (FR-220, FR-222).
   static let headerName = "X-DSVideo-Profile"
@@ -32,6 +35,7 @@ nonisolated final class ActiveProfileStore: @unchecked Sendable {
     static let cachedProfiles = "dsReel.profile.cachedProfiles"
     static let unrestrictedLevel = "dsReel.profile.unrestrictedLevel"
     static let unratedLevel = "dsReel.profile.unratedLevel"
+    static let ageLevels = "dsReel.profile.ageLevels"
   }
 
   private let defaults: UserDefaults
@@ -88,6 +92,21 @@ nonisolated final class ActiveProfileStore: @unchecked Sendable {
     defaults.set(level, forKey: Keys.unratedLevel)
   }
 
+  /// The ladder's display labels as GET /profiles/age-levels last stated them. Persisted so a
+  /// cold launch with the NAS unreachable still names a profile's level (FR-265, OC-2186).
+  /// Display only; empty before the endpoint ever answered on this device.
+  var cachedAgeLevels: [AgeLevelsResponse.Level] {
+    guard let data = defaults.data(forKey: Keys.ageLevels) else { return [] }
+    return (try? JSONDecoder().decode([AgeLevelsResponse.Level].self, from: data)) ?? []
+  }
+
+  /// Stores the ladder after a successful fetch. An empty ladder is not an answer and keeps
+  /// the last good one.
+  func setCachedAgeLevels(_ levels: [AgeLevelsResponse.Level]) {
+    guard !levels.isEmpty, let data = try? JSONEncoder().encode(levels) else { return }
+    defaults.set(data, forKey: Keys.ageLevels)
+  }
+
   /// Sets (or clears, with nil) the active profile.
   func setActive(_ profile: Profile?) {
     if let profile {
@@ -125,6 +144,7 @@ nonisolated final class ActiveProfileStore: @unchecked Sendable {
     defaults.removeObject(forKey: Keys.cachedProfiles)
     defaults.removeObject(forKey: Keys.unrestrictedLevel)
     defaults.removeObject(forKey: Keys.unratedLevel)
+    defaults.removeObject(forKey: Keys.ageLevels)
   }
 
   /// Adds the profile header to a hand-built request (downloads, trickplay). APIClient

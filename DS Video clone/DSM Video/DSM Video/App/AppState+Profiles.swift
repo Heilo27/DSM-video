@@ -13,6 +13,14 @@ extension AppState {
   /// still refuses a fifth with `profile_limit_reached`.
   var canAddProfile: Bool { profiles.count < maxProfiles }
 
+  /// Whether Settings offers "Manage Profiles" (FR-205, FR-211, FR-212). It does as soon as
+  /// the account's profile list is known to name its owner, whatever the count: a
+  /// single-profile account has no picker, so Settings is the only way in, and without it a
+  /// second profile could never be created. An unknown list (old server, or offline with
+  /// nothing cached) has nothing to manage yet, so no entry. The picker's own "Manage
+  /// Profiles" button is separate: it only exists once the picker does (more than one profile).
+  var canManageProfiles: Bool { profiles.contains(where: \.isOwner) }
+
   /// FR-213: asks the server to check `pin` for `profile`, every time it is entered.
   func verifyProfilePin(_ profile: Profile, pin: String) async -> Result<Void, Error> {
     do {
@@ -91,6 +99,9 @@ nonisolated enum ProfileText {
     "\(name)'s watch history, progress and watchlist will be permanently deleted. "
       + "Your videos and other profiles are not affected. This can't be undone."
   }
+
+  /// FR-265: the `place` for a restricted profile's empty Home (no one library is meant).
+  static let homeEmptyPlace = "your library"
 
   /// FR-265, AC-002-47: an empty grid on a restricted profile names the profile's level, so
   /// it reads differently from an empty library and from a load failure.

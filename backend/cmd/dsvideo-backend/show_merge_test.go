@@ -281,7 +281,7 @@ func TestResolveShowFolders(t *testing.T) {
 	tvRoot := testTVRoot + "/"
 
 	for _, id := range []string{"Daredevil", "Daredevil (2015)"} {
-		got := s.resolveShowFolders(id, tvRoot)
+		got := s.resolveShowFolders(viewer{MaxAgeLevel: rating.MaxLevel}, id, tvRoot)
 		if len(got) != 2 {
 			t.Errorf("resolveShowFolders(%q) = %v, want both folders", id, got)
 		}
@@ -295,14 +295,14 @@ func TestResolveShowFolders(t *testing.T) {
 		"The Bear", 1, 1, "2024-03-01T00:00:00Z", 20); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	got := s.resolveShowFolders("The Bear", tvRoot)
+	got := s.resolveShowFolders(viewer{MaxAgeLevel: rating.MaxLevel}, "The Bear", tvRoot)
 	if len(got) != 1 || got[0] != "The Bear" {
 		t.Errorf("single-folder show resolved to %v, want [The Bear]", got)
 	}
 
 	// An id with no matching folder falls back to itself rather than returning nothing,
 	// so the show_name fallback downstream still gets its chance to fire.
-	got = s.resolveShowFolders("Nonexistent", tvRoot)
+	got = s.resolveShowFolders(viewer{MaxAgeLevel: rating.MaxLevel}, "Nonexistent", tvRoot)
 	if len(got) != 1 || got[0] != "Nonexistent" {
 		t.Errorf("unknown id resolved to %v, want [Nonexistent]", got)
 	}

@@ -164,7 +164,7 @@ NavigationView
 
 **Data requirements:**
 - "Continue Watching" = items where `watchedPercent > 0 && watchedPercent < 100`, sorted by `lastWatched` desc
-- "Just Added" = sorted by `addedDate` desc, first 10
+- "Just Added" = decided by the server (`GET /just-added`): newest first, one entry per show, at most 16; offline, the device's own newest list stands in (FRD-001 FR-088)
 - "Recently Watched" = items where `watchedPercent == 100`, sorted by `lastWatched` desc
 
 ---

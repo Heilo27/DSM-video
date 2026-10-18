@@ -163,6 +163,10 @@ type HLSSession struct {
 	stopped            bool // true when StopSession has already decremented g.active
 	forceSoftware      bool // TASK-729: set on HW-failure retry to force the libx264 path
 	forceRemuxReencode bool // set on RemuxOnly copy-failure retry to force the libx264 re-encode path
+	// done is closed when this session's transcode goroutine has returned: ffmpeg has been
+	// reaped and nothing will write into OutputDir again. StopSession waits on it before
+	// removing OutputDir. nil for a session that never started a transcode goroutine.
+	done chan struct{}
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -470,6 +474,7 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		StartedAt:      time.Now(),
 		LastAccess:     time.Now(),
 		cancel:         cancel,
+		done:           make(chan struct{}),
 	}
 
 	g.sessions[sessionID] = session
@@ -478,6 +483,7 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 
 	// Start transcoding in background
 	go func() {
+		defer close(session.done)
 		err := g.runTranscode(ctx, session)
 
 		g.mu.Lock()
@@ -557,7 +563,13 @@ func (g *HLSGenerator) SessionError(sessionID string) (error, bool) {
 	return session.Error, true
 }
 
-// StopSession stops and cleans up a session.
+// stopSessionWait bounds how long StopSession waits for a killed session's transcode
+// goroutine to return. A SIGKILLed ffmpeg is reaped in milliseconds; this only guards a
+// goroutine wedged somewhere unexpected.
+const stopSessionWait = 5 * time.Second
+
+// StopSession stops and cleans up a session. When it returns, the session's transcode
+// goroutine has exited (or stopSessionWait elapsed) and its OutputDir has been removed.
 func (g *HLSGenerator) StopSession(sessionID string) error {
 	g.mu.Lock()
 	session, ok := g.sessions[sessionID]
@@ -593,6 +605,20 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 
 	delete(g.sessions, sessionID)
 	g.mu.Unlock()
+
+	// Wait for the transcode goroutine to return before removing OutputDir. Until it does,
+	// it can still write there: ffmpeg is not reaped yet, and runTranscode's copy-failure
+	// retry removes and re-creates OutputDir and opens a fresh ffmpeg.log. Removing the
+	// directory first let that goroutine bring it back after StopSession had returned, so
+	// no caller could rely on the directory being gone (TASK-941). Bounded so a wedged
+	// goroutine cannot hang the caller; on timeout we fall through to the removal anyway.
+	if session.done != nil {
+		select {
+		case <-session.done:
+		case <-time.After(stopSessionWait):
+			log.Printf("[HLS] session %s transcode still running %v after stop; removing its dir anyway", sessionID, stopSessionWait)
+		}
+	}
 
 	// Clean up output directory. ffmpeg may still hold segment files for a beat
 	// after the kill signal on slow NAS I/O, so retry briefly rather than leaking

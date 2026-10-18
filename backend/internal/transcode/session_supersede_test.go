@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -19,8 +20,31 @@ import (
 
 const testOwner = "user1|it_film"
 
+// stopSessionsOnCleanup stops every session g still holds when the test ends. Each test in
+// this file that calls StartSession starts a REAL transcode: a goroutine that runs ffmpeg
+// (wherever one is installed) against the fake source, and on its failure runs the
+// copy-failure retry, which removes and re-creates the session's OutputDir under the
+// generator's TempDir and opens a new ffmpeg.log there. A test that returned with that
+// goroutine alive raced t.TempDir()'s RemoveAll: "TempDir RemoveAll cleanup: unlinkat
+// .../new: directory not empty", about 1 run in 20 (TASK-941). StopSession now returns only
+// after the goroutine has exited, so stopping here leaves nothing writing.
+//
+// Call it AFTER NewHLSGenerator(...t.TempDir()...): cleanups run last-registered-first, so
+// the sessions stop before their TempDir is removed.
+func stopSessionsOnCleanup(t *testing.T, g *HLSGenerator) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, id := range g.AllSessions() {
+			if err := g.StopSession(id); err != nil {
+				t.Errorf("StopSession(%s): %v", id, err)
+			}
+		}
+	})
+}
+
 func TestSeekStormDoesNotLockOutPlayback(t *testing.T) {
 	g := NewHLSGenerator(HLSConfig{MaxConcurrent: 3, TempDir: t.TempDir()})
+	stopSessionsOnCleanup(t, g)
 	now := time.Now()
 
 	// A scrub burst: three sessions for the SAME viewer and title, all recent enough that
@@ -43,12 +67,6 @@ func TestSeekStormDoesNotLockOutPlayback(t *testing.T) {
 	if sess == nil {
 		t.Fatal("expected a session")
 	}
-	// This is the one test here that starts a REAL session, so it is the one that must stop
-	// it. StartSession spawns ffmpeg writing segments into the generator's TempDir; without
-	// this the test returns while that process is still writing and t.TempDir()'s RemoveAll
-	// races it — an intermittent "TempDir RemoveAll cleanup: unlinkat ...: directory not
-	// empty" that fails the package only under the load of a full `go test ./...` run.
-	t.Cleanup(func() { _ = g.StopSession(sess.SessionID) })
 
 	// The three superseded sessions must be gone — they were transcoding positions nobody
 	// will ever watch.
@@ -66,6 +84,7 @@ func TestSeekStormDoesNotLockOutPlayback(t *testing.T) {
 // something else is genuine contention and must not be cancelled.
 func TestSupersedeDoesNotTouchOtherViewers(t *testing.T) {
 	g := NewHLSGenerator(HLSConfig{MaxConcurrent: 3, TempDir: t.TempDir()})
+	stopSessionsOnCleanup(t, g)
 	g.sessions["other"] = &HLSSession{
 		SessionID:  "other",
 		OwnerKey:   "user2|it_other",
@@ -86,6 +105,7 @@ func TestSupersedeDoesNotTouchOtherViewers(t *testing.T) {
 // sessions wholesale.
 func TestEmptyOwnerKeySupersedesNothing(t *testing.T) {
 	g := NewHLSGenerator(HLSConfig{MaxConcurrent: 3, TempDir: t.TempDir()})
+	stopSessionsOnCleanup(t, g)
 	g.sessions["a"] = &HLSSession{SessionID: "a", OwnerKey: "", OutputDir: t.TempDir(), LastAccess: time.Now()}
 	g.sessions["b"] = &HLSSession{SessionID: "b", OwnerKey: testOwner, OutputDir: t.TempDir(), LastAccess: time.Now()}
 	g.active = 2
@@ -106,6 +126,7 @@ func TestEmptyOwnerKeySupersedesNothing(t *testing.T) {
 // session sitting on roughly a gigabyte of segments for up to two hours.
 func TestCompletedSessionsAreReclaimed(t *testing.T) {
 	g := NewHLSGenerator(HLSConfig{MaxConcurrent: 3, TempDir: t.TempDir()})
+	stopSessionsOnCleanup(t, g)
 	old := time.Now().Add(-10 * time.Minute)
 	fresh := time.Now()
 
@@ -137,6 +158,7 @@ func TestCompletedSessionsAreReclaimed(t *testing.T) {
 // would spend the single eviction attempt and still fail the re-check.
 func TestEvictionPrefersLiveSessionsOverCompletedOnes(t *testing.T) {
 	g := NewHLSGenerator(HLSConfig{MaxConcurrent: 1, TempDir: t.TempDir()})
+	stopSessionsOnCleanup(t, g)
 	ancient := time.Now().Add(-time.Hour)
 
 	// Completed and very idle — the most tempting victim by LastAccess alone, but useless.
@@ -156,5 +178,29 @@ func TestEvictionPrefersLiveSessionsOverCompletedOnes(t *testing.T) {
 	}
 	if _, still := g.sessions["live"]; still {
 		t.Error("the live session held the slot and should have been evicted")
+	}
+}
+
+// StopSession's contract: when it returns, the session's transcode goroutine has exited and
+// its OutputDir is gone for good. It used to return as soon as it had signalled ffmpeg and
+// removed the directory, while the goroutine could still re-create the directory in its
+// copy-failure retry and open a new ffmpeg.log in it (TASK-941).
+func TestStopSessionWaitsForTranscodeToExit(t *testing.T) {
+	g := NewHLSGenerator(HLSConfig{MaxConcurrent: 1, TempDir: t.TempDir()})
+	stopSessionsOnCleanup(t, g)
+	sess, err := g.StartSession(nil, "s", "/tmp/x.mkv", RemuxOnly, 0, nil, 0, "")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := g.StopSession("s"); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
+	select {
+	case <-sess.done:
+	default:
+		t.Fatal("StopSession returned while the session's transcode goroutine was still running")
+	}
+	if _, err := os.Stat(sess.OutputDir); !os.IsNotExist(err) {
+		t.Fatalf("OutputDir %s still exists after StopSession (stat err %v)", sess.OutputDir, err)
 	}
 }

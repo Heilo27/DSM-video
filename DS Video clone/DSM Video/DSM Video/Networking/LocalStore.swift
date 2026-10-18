@@ -754,11 +754,17 @@ actor LocalStore {
 
   /// Writes progress locally and marks it pending upload. `pending_sync` is cleared only by
   /// `markProgressSynced(_:)` after the server has actually accepted the value.
+  ///
+  /// Returns the watch time it stamped (RFC3339), even when the store could not take the
+  /// write: the caller sends it as the live write's `watchedAt`, so the server orders this
+  /// write by the same clock as every replay from this device (FRD-001 FR-014).
+  @discardableResult
   func upsertSingleProgress(itemId: String, positionSeconds: Int, durationSeconds: Int,
-                            profileID: String? = nil) {
-    guard let db else { return }
+                            profileID: String? = nil) -> String {
+    let now = iso8601Formatter.string(from: Date())
+    guard let db else { return now }
     let pid = profileID ?? activeScope.id
-    guard !refusesWrites(for: pid, "upsertSingleProgress") else { return }
+    guard !refusesWrites(for: pid, "upsertSingleProgress") else { return now }
     var stmt: OpaquePointer?
     let sql = """
       INSERT INTO progress(item_id, position_seconds, duration_seconds, updated_at, pending_sync, profile_id)
@@ -771,10 +777,9 @@ actor LocalStore {
     """
     guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
       log.error("upsertSingleProgress: sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
-      return
+      return now
     }
     defer { sqlite3_finalize(stmt) }
-    let now = iso8601Formatter.string(from: Date())
     sqlite3_bind_text(stmt, 1, itemId, -1, SQLITE_TRANSIENT)
     sqlite3_bind_int64(stmt, 2, Int64(positionSeconds))
     sqlite3_bind_int64(stmt, 3, Int64(durationSeconds))
@@ -786,6 +791,7 @@ actor LocalStore {
       let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
       log.error("upsertSingleProgress: step failed [\(rc)] for item \(itemId): \(msg)")
     }
+    return now
   }
 
   // MARK: - Progress Outbox

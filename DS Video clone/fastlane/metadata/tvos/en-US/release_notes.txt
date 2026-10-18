@@ -1,25 +1,17 @@
-Just say what you want to watch, and your Home screen finally stays up to date.
+Profiles: everyone in the house gets their own, and the kids only see what's right for them.
 
-SIRI
-• Hold the microphone button and say "Play Blade Runner in DSM Video" or "Find Blade Runner in DSM Video" — it opens straight to the title. No more typing on the on-screen keyboard.
+PROFILES
+• Up to four profiles per account, each with its own Continue Watching, watchlist and history.
+• Give each profile an age limit. Titles above it are hidden everywhere: Home, libraries, search and Just Added. Unrated titles are hidden on every limited profile.
+• Kids' profiles browse by collections like Disney, Pixar and Holiday instead of genres.
+• Optional PIN on any profile. Managing profiles always asks for the owner's PIN.
+• Apple TV asks who's watching each time it opens, since it's shared by the whole room.
 
-A HOME SCREEN THAT'S CURRENT
-• Just Added now comes from your server rather than being guessed at on the device, so recently added films actually appear. A show that gained a season counts as one new thing instead of twelve, so it can't push everything else off the row.
-• New Suggested row, picked by genre from what you've been watching.
+TOP SHELF
+• On a family account, the Top Shelf shows only titles safe for the youngest profile, and never anyone's watch history.
 
-SHOWS THAT WERE HIDING
-• A series split across two folders, or with only some episodes matched, now appears once instead of twice — or not at all. Star Trek: The Next Generation and others are back.
-• Episode names are correct where they used to show the filename.
+FIXES
+• Watching on two devices: an older position saved offline no longer overwrites a newer one, or un-watches a title you finished.
+• You can create a second profile when your account only has one.
 
-REMOTE AND FOCUS
-• Play is selected when you open a video, instead of Next Episode.
-• Next Episode is no longer oversized next to Play.
-
-PLAYBACK
-• HEVC videos that played as audio-only now play properly.
-• Scrubbing repeatedly no longer locks you out of your own video.
-• Faster startup, smoother seeking, and deeper buffering.
-
-CONNECTION
-• The app switches between your home network and remote access on its own, without a restart.
-• The library keeps syncing instead of quietly stopping while appearing fine.
+Profiles need DSVideo Server 0.3.9 or later on your NAS (free download).

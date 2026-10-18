@@ -88,6 +88,22 @@ cp -r "$SPK_DIR/scripts" "$PACKAGE_DIR/"
 echo "🔨 Cross-compiling Go backend for ${GOOS}/${GOARCH}..."
 cd "$REPO_ROOT/backend"
 
+# backend/go.mod's `toolchain` line is the single home for the minimum Go version
+# (security floor: older stdlib releases carry reachable net/http and crypto vulns).
+# GOTOOLCHAIN=local, or a stale PATH go with switching disabled, would silently
+# build with an older stdlib, so force auto-switching and refuse to package anything older.
+if [ "${GOTOOLCHAIN:-auto}" = "local" ]; then
+    echo "⚠️  GOTOOLCHAIN=local would ignore go.mod's toolchain line; overriding to auto"
+fi
+export GOTOOLCHAIN=auto
+REQUIRED_GO=$(sed -n 's/^toolchain go//p' go.mod)
+ACTUAL_GO=$(go env GOVERSION | sed 's/^go//')
+if [ -n "$REQUIRED_GO" ] && [ "$(printf '%s\n%s\n' "$REQUIRED_GO" "$ACTUAL_GO" | sort -V | head -1)" != "$REQUIRED_GO" ]; then
+    echo "❌ ERROR: building with go${ACTUAL_GO}, but backend/go.mod requires go${REQUIRED_GO}+"
+    exit 1
+fi
+echo "   Go toolchain: go${ACTUAL_GO} (floor go${REQUIRED_GO:-unset})"
+
 # Force cross-compilation with CGO disabled (required for static binaries)
 export CGO_ENABLED=0
 export GOOS=$GOOS

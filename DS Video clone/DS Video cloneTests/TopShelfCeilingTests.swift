@@ -51,8 +51,7 @@ struct TopShelfCeilingTests {
       .appendingPathComponent("TopShelfCeilingTests-\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("topshelf.json")
-    let state = AppState()
-    state.topShelfProfileStore = store
+    let state = AppState(profileStore: store)
     state.topShelfSnapshotURL = url
     return (state, url, store)
   }

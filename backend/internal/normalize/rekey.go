@@ -1,9 +1,11 @@
 package normalize
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
+	"dsvideo/backend/internal/sqltx"
 	"dsvideo/backend/internal/transcode"
 )
 
@@ -35,7 +37,9 @@ var fkItemTables = []string{"progress", "watchlist", "downloads", "playlist_item
 //
 // On any error the whole transaction rolls back and the caller falls back to a path-only
 // repoint (preserving the 404 fix even if re-keying fails).
-func RekeyAndMigrate(db *sql.DB, oldID, newID, cleanPath string, probe *transcode.ProbeResult, seq int64) (err error) {
+//
+// It does not touch progress_seq; the server's caller of RekeyAndMigrateTx does (see there).
+func RekeyAndMigrate(db *sql.DB, oldID, newID, cleanPath string, probe *transcode.ProbeResult, seq int64) error {
 	if db == nil {
 		return fmt.Errorf("rekey: nil db")
 	}
@@ -46,22 +50,12 @@ func RekeyAndMigrate(db *sql.DB, oldID, newID, cleanPath string, probe *transcod
 		return fmt.Errorf("rekey: newID == oldID (%s) — caller should use the same-path update", oldID)
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("rekey: begin tx: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	if err = RekeyAndMigrateTx(tx, oldID, newID, cleanPath, probe, seq); err != nil {
+	// sqltx: a refused COMMIT must not leave the connection holding the write lock (TASK-941).
+	err := sqltx.Run(context.Background(), db, func(tx *sql.Tx) error {
+		_, err := RekeyAndMigrateTx(tx, oldID, newID, cleanPath, probe, seq)
 		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("rekey: commit: %w", err)
-	}
-	return nil
+	})
+	return err // RekeyAndMigrateTx's errors carry "rekey:"; sqltx.Run prefixes a commit failure
 }
 
 // RekeyAndMigrateTx is RekeyAndMigrate inside a transaction the caller owns (and commits).
@@ -72,21 +66,28 @@ func RekeyAndMigrate(db *sql.DB, oldID, newID, cleanPath string, probe *transcod
 // this row is still uncommitted. Allocating outside (autocommit) and writing afterwards
 // opened exactly that window, and a device whose cursor passed the later sequence never
 // fetched this row (TASK-919).
-func RekeyAndMigrateTx(tx *sql.Tx, oldID, newID, cleanPath string, probe *transcode.ProbeResult, seq int64) error {
+//
+// progressRows is how many progress rows the re-key changed: re-pointed at newID, or
+// dropped as stale duplicates of a newID row. Devices learn about progress changes only from
+// a progress_seq bump (they refetch /progress/all when it moves), so when progressRows > 0
+// the caller must allocate a progress_seq in this same transaction and publish it after
+// commit. Without that, every device kept the position under the old id, which no longer
+// exists, until some unrelated progress write moved the counter (TASK-941).
+func RekeyAndMigrateTx(tx *sql.Tx, oldID, newID, cleanPath string, probe *transcode.ProbeResult, seq int64) (progressRows int64, err error) {
 	if tx == nil {
-		return fmt.Errorf("rekey: nil tx")
+		return 0, fmt.Errorf("rekey: nil tx")
 	}
 	if probe == nil {
-		return fmt.Errorf("rekey: nil probe")
+		return 0, fmt.Errorf("rekey: nil probe")
 	}
 	if newID == oldID {
-		return fmt.Errorf("rekey: newID == oldID (%s) — caller should use the same-path update", oldID)
+		return 0, fmt.Errorf("rekey: newID == oldID (%s) — caller should use the same-path update", oldID)
 	}
 
 	// 1. Clear any items row already sitting on the destination id (a rescan that beat us).
 	//    After this DELETE the UPDATE below cannot PK-collide.
 	if _, err := tx.Exec(`DELETE FROM items WHERE id = ?`, newID); err != nil {
-		return fmt.Errorf("rekey: clear conflicting newID row: %w", err)
+		return 0, fmt.Errorf("rekey: clear conflicting newID row: %w", err)
 	}
 
 	// 2. Re-key the converted row: stamp the new id + path + probe codec columns + seq.
@@ -99,27 +100,34 @@ func RekeyAndMigrateTx(tx *sql.Tx, oldID, newID, cleanPath string, probe *transc
 		probe.AudioChannels, seq, oldID,
 	)
 	if err != nil {
-		return fmt.Errorf("rekey: update items: %w", err)
+		return 0, fmt.Errorf("rekey: update items: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("rekey: no items row with id %s", oldID)
+		return 0, fmt.Errorf("rekey: no items row with id %s", oldID)
 	}
 
 	// 3. Migrate loose FK references. UPDATE OR IGNORE skips rows that would collide with a
 	//    pre-existing (newID, …) PK; the follow-up DELETE drops the now-stale (oldID, …)
 	//    rows so nothing is orphaned and no duplicate FK rows linger.
 	for _, table := range fkItemTables {
-		if _, err := tx.Exec(
+		moved, err := tx.Exec(
 			fmt.Sprintf(`UPDATE OR IGNORE %s SET item_id = ? WHERE item_id = ?`, table),
 			newID, oldID,
-		); err != nil {
-			return fmt.Errorf("rekey: migrate %s: %w", table, err)
+		)
+		if err != nil {
+			return 0, fmt.Errorf("rekey: migrate %s: %w", table, err)
 		}
-		if _, err := tx.Exec(
+		pruned, err := tx.Exec(
 			fmt.Sprintf(`DELETE FROM %s WHERE item_id = ?`, table), oldID,
-		); err != nil {
-			return fmt.Errorf("rekey: prune stale %s: %w", table, err)
+		)
+		if err != nil {
+			return 0, fmt.Errorf("rekey: prune stale %s: %w", table, err)
+		}
+		if table == "progress" {
+			m, _ := moved.RowsAffected()
+			p, _ := pruned.RowsAffected()
+			progressRows = m + p
 		}
 	}
-	return nil
+	return progressRows, nil
 }

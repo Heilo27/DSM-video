@@ -212,7 +212,7 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 	}
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	var all []row
-	nameCounts := map[string]map[string]int{}
+	var refs []episodeRef // parallel to all; zero for a film, which groups nowhere
 	for rows.Next() {
 		var r row
 		var path string
@@ -221,33 +221,29 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 			&r.libID, &path, &r.contentRating); err != nil {
 			return nil, fmt.Errorf("collection %s scan: %w", d.ID, err)
 		}
+		var ref episodeRef
 		if r.typ == "episode" {
-			r.folder = showFolderFromPath(path, tvRoot)
-			if r.folder != "" {
-				if nameCounts[r.folder] == nil {
-					nameCounts[r.folder] = map[string]int{}
-				}
-				if r.showName.Valid && r.showName.String != "" {
-					nameCounts[r.folder][r.showName.String]++
-				}
-			}
+			ref = episodeRef{Path: path, ShowName: r.showName}
 		}
 		all = append(all, r)
+		refs = append(refs, ref)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("collection %s rows: %w", d.ID, err)
 	}
 
-	// The codebase's one answer for "which show is this episode part of" (see /just-added).
-	folderNames := resolveFolderShowNames(nameCounts)
+	// The codebase's one answer for "which show is this episode part of", decided over the
+	// collection's visible members (see groupEpisodesByShow).
+	groups := groupEpisodesByShow(refs, tvRoot)
 
 	var members []collectionMember
 	showIdx := map[string]int{} // show group key → index in members
-	for _, r := range all {
+	for i, r := range all {
 		hasPoster := r.posterPath.Valid && r.posterPath.String != ""
+		r.folder = groups[i].Folder
 		if r.typ == "episode" && r.folder != "" {
-			showName := folderNames[r.folder]
-			key := showGroupKey(r.folder, showName)
+			showName := groups[i].ShowName
+			key := groups[i].Key
 			if i, seen := showIdx[key]; seen {
 				m := &members[i]
 				if r.addedAt > m.addedAt {

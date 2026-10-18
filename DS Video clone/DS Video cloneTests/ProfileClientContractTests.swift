@@ -260,24 +260,26 @@ private func ccProfile(_ id: String, _ name: String, level: Int = 2, owner: Bool
   Profile(id: id, name: name, avatar: "cat", maxAgeLevel: level, hasPin: false, isOwner: owner)
 }
 
-/// Runs `body` with `profile` as the device's active profile, then puts the shared store back
-/// exactly as it was (id AND ceiling).
+/// Runs `body` with `profile` as the active profile of a private ActiveProfileStore (a
+/// throwaway UserDefaults suite, TASK-925), handed to `body` so it builds its client on it.
+/// Nothing in the app group is read or written.
 @MainActor
-private func ccWithActiveProfile(_ profile: Profile?, _ body: () async -> Void) async {
-  let store = ActiveProfileStore.shared
-  let saved = store.activeProfileID.map {
-    Profile(id: $0, name: "saved", avatar: "cat", maxAgeLevel: store.activeScope.maxAgeLevel,
-            hasPin: false, isOwner: false)
+private func ccWithActiveProfile(_ profile: Profile?, _ body: (ActiveProfileStore) async -> Void) async {
+  let suite = "ClientContract.\(UUID().uuidString)"
+  guard let defaults = UserDefaults(suiteName: suite) else {
+    Issue.record("could not create the throwaway UserDefaults suite")
+    return
   }
+  defer { defaults.removePersistentDomain(forName: suite) }
+  let store = ActiveProfileStore(defaults: defaults)
   store.setActive(profile)
-  await body()
-  store.setActive(saved)
+  await body(store)
 }
 
-/// Holds ProfileStateGate for a whole test: ActiveProfileStore.shared, ClientContractStub's
-/// route table and its request log are process-wide, and Swift Testing runs suites in
-/// parallel (ProfileScopeFixTests, ProfileScreensServerTests and DeleteConfirmationTests use
-/// them too). Reset, exercise and read-back must all happen inside it.
+/// Holds ProfileStateGate for a whole test: ClientContractStub's route table and its request
+/// log are process-wide, and Swift Testing runs suites in parallel (ProfileScopeFixTests,
+/// ProfileScreensServerTests and DeleteConfirmationTests use stubs too). Reset, exercise and
+/// read-back must all happen inside it.
 @MainActor
 private func ccGated(_ work: () async -> Void) async {
   await ProfileStateGate.shared.run(work)
@@ -287,8 +289,11 @@ private func ccGated(_ work: () async -> Void) async {
 @Suite("AC-002-44/48 · X-DSVideo-Profile is sent", .serialized)
 struct ProfileHeaderOnTheWireTests {
   private let watchlistRoute: [String: (Int, String)] = ["GET /api/v1/watchlist": (200, #"{"items":[]}"#)]
-  private var api: APIClient {
-    APIClient(baseURL: URL(string: "http://\(ClientContractStub.host)")!, token: "tok")
+  /// A client whose `.activeProfile` header reads `store`, not the app's shared one.
+  private func api(_ store: ActiveProfileStore) -> APIClient {
+    var client = APIClient(baseURL: URL(string: "http://\(ClientContractStub.host)")!, token: "tok")
+    client.profileStore = store
+    return client
   }
 
   private func sentHeaders() -> [String?] {
@@ -301,8 +306,8 @@ struct ProfileHeaderOnTheWireTests {
   @Test func anActiveProfileIsNamedOnEveryRequest() async throws {
     await ccGated {
       ClientContractStub.reset(watchlistRoute)
-      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) {
-        _ = try? await api.watchlist()
+      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) { store in
+        _ = try? await api(store).watchlist()
       }
       #expect(sentHeaders() == ["pf_maya"])
     }
@@ -314,8 +319,8 @@ struct ProfileHeaderOnTheWireTests {
   @Test func noActiveProfileSendsNoHeader() async throws {
     await ccGated {
       ClientContractStub.reset(watchlistRoute)
-      await ccWithActiveProfile(nil) {
-        _ = try? await api.watchlist()
+      await ccWithActiveProfile(nil) { store in
+        _ = try? await api(store).watchlist()
       }
       #expect(ClientContractStub.count("GET /api/v1/watchlist") == 1, "precondition: the request was made")
       #expect(sentHeaders() == [nil])
@@ -329,10 +334,10 @@ struct ProfileHeaderOnTheWireTests {
   @Test func aProfileSwitchIsPickedUpByAnExistingClient() async throws {
     await ccGated {
       ClientContractStub.reset(watchlistRoute)
-      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) {
-        let client = api
+      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) { store in
+        let client = api(store)
         _ = try? await client.watchlist()
-        ActiveProfileStore.shared.setActive(ccProfile("pf_leo", "Leo", level: 3))
+        store.setActive(ccProfile("pf_leo", "Leo", level: 3))
         _ = try? await client.watchlist()
       }
       #expect(sentHeaders() == ["pf_maya", "pf_leo"])
@@ -345,8 +350,8 @@ struct ProfileHeaderOnTheWireTests {
   @Test func aPinnedClientSendsThePinnedIdNotTheActiveOne() async throws {
     await ccGated {
       ClientContractStub.reset(watchlistRoute)
-      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) {
-        _ = try? await api.pinned(to: "pf_leo").watchlist()
+      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) { store in
+        _ = try? await api(store).pinned(to: "pf_leo").watchlist()
       }
       #expect(sentHeaders() == ["pf_leo"])
     }
@@ -358,8 +363,8 @@ struct ProfileHeaderOnTheWireTests {
   @Test func pinningToNothingSendsNoHeaderEvenWhenAProfileIsActive() async throws {
     await ccGated {
       ClientContractStub.reset(watchlistRoute)
-      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) {
-        _ = try? await api.pinned(to: nil).watchlist()
+      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) { store in
+        _ = try? await api(store).pinned(to: nil).watchlist()
       }
       #expect(ClientContractStub.count("GET /api/v1/watchlist") == 1, "precondition: the request was made")
       #expect(sentHeaders() == [nil])
@@ -372,8 +377,8 @@ struct ProfileHeaderOnTheWireTests {
   @Test func theProfileListRouteSendsNoHeader() async throws {
     await ccGated {
       ClientContractStub.reset(["GET /api/v1/profiles": (200, #"{"maxProfiles":4,"activeProfileId":null,"profiles":[]}"#)])
-      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) {
-        _ = try? await api.profiles()
+      await ccWithActiveProfile(ccProfile("pf_maya", "Maya")) { store in
+        _ = try? await api(store).profiles()
       }
       #expect(ClientContractStub.count("GET /api/v1/profiles") == 1)
       #expect(ClientContractStub.requests.first?.profileHeader == nil)
@@ -620,39 +625,15 @@ struct DeleteConfirmationTests {
   private var mayaProfile: Profile { ccProfile("pf_maya", "Maya") }
   private var ryanProfile: Profile { ccProfile("pf_ryan", "Ryan", level: 4, owner: true) }
 
-  /// A signed-in AppState pointed at the stub, with the shared stores put back afterwards.
+  /// A signed-in AppState pointed at the stub, over its own profile store and catalog
+  /// (TASK-925). Gated only because the stub's route table is process-wide and the other
+  /// stub-backed suites run in parallel with this one.
   private func withAccount(routes: [String: (Int, String)], _ body: (AppState) async -> Void) async {
-    // Same gate as ProfileScreensServerTests / ProfileScopeFixTests: the shared stores are
-    // process-wide and those suites run in parallel with this one.
-    await ProfileStateGate.shared.run { await runAccount(routes: routes, body) }
-  }
-
-  private func runAccount(routes: [String: (Int, String)], _ body: (AppState) async -> Void) async {
-    let store = ActiveProfileStore.shared
-    let savedID = store.activeProfileID
-    let savedLevel = store.activeScope.maxAgeLevel
-    let savedCache = store.cachedProfiles
-    let savedScope = await LocalStore.shared.activeScope
-    let state = AppState()
-    let savedBase = state.baseURL, savedHTTPS = state.useHTTPS, savedRemember = state.rememberMe
-
-    ClientContractStub.reset(routes)
-    store.setCachedProfiles([ryanProfile, mayaProfile])
-    store.setActive(ryanProfile)
-    state.rememberMe = false            // never write the stub token to the Keychain
-    state.useHTTPS = false
-    state.baseURL = ClientContractStub.host
-    state.sessionToken = "stub-token"
-    await body(state)
-
-    store.setActive(savedID.map {
-      Profile(id: $0, name: "saved", avatar: "cat", maxAgeLevel: savedLevel, hasPin: false, isOwner: false)
-    })
-    store.setCachedProfiles(savedCache)
-    await LocalStore.shared.setActiveProfile(savedScope)
-    state.baseURL = savedBase
-    state.useHTTPS = savedHTTPS
-    state.rememberMe = savedRemember
+    await ProfileStateGate.shared.run {
+      ClientContractStub.reset(routes)
+      await withIsolatedAppState(cached: [ryanProfile, mayaProfile], active: ryanProfile,
+                                 stubHost: ClientContractStub.host, body)
+    }
   }
 
   /// OC: AC-002-46, OC-2040 · given a profile named Maya, when the owner chooses Delete, then

@@ -232,6 +232,11 @@ struct ItemDetail: Decodable, Identifiable {
   let episodeNumber: Int?
   let episodeTitle: String?
 
+  /// The title's age level as the server computed it (FR-241; `putRating` on GET /items/{id}).
+  /// nil = the field is absent or null (an older server): unknown, never a default level. A
+  /// new download stamps this in preference to the local catalog's copy (FR-262).
+  let ageLevel: Int?
+
   init(id: String, type: String, title: String, originalTitle: String? = nil,
        year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
        rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
@@ -239,7 +244,8 @@ struct ItemDetail: Decodable, Identifiable {
        videoCodec: String? = nil, audioCodec: String? = nil, container: String? = nil,
        width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil,
        showName: String? = nil, seasonNumber: Int? = nil, episodeNumber: Int? = nil,
-       episodeTitle: String? = nil) {
+       episodeTitle: String? = nil, ageLevel: Int? = nil) {
+    self.ageLevel = ageLevel
     self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
     self.year = year; self.durationSeconds = durationSeconds; self.contentRating = contentRating
     self.rating = rating; self.summary = summary; self.genres = genres
@@ -422,10 +428,10 @@ struct ProgressRequest: Encodable {
   let state: String?
   /// When the viewer was actually at this position (RFC3339), not when this is uploaded.
   ///
-  /// Omitted for a live write, where the two are the same and the server's receive time is
-  /// correct. Sent by the outbox flush, where they are NOT: a backlog replayed after a
-  /// reconnect would otherwise land with one server timestamp across every row, and both
-  /// home rails sort on it. Optional so an older server ignores it harmlessly.
+  /// The server orders writes by this time (FRD-001 FR-014): the later watch wins, so an
+  /// offline backlog replayed after a reconnect cannot overwrite a newer position from another
+  /// device. A time later than the server's receive time counts as the receive time. Nil
+  /// falls back to the receive time; optional so an older server ignores it harmlessly.
   let watchedAt: String?
 
   /// Defaulted so a live write reads as it always did — `watchedAt` is only meaningful when
@@ -441,7 +447,7 @@ struct ProgressRequest: Encodable {
 struct ProgressResponse: Decodable {
   let ok: Bool
   /// Whether the server actually STORED this write, or discarded it as superseded by a
-  /// newer one (its upsert is guarded by `excluded.write_seq > progress.write_seq`).
+  /// write that happened later (ordered by `watchedAt`, ties by arrival; FRD-001 FR-014).
   /// The server added this field specifically so a discarded write stops looking like a
   /// successful one — a flat 200 is how "Mark Unwatched" appeared to work while changing
   /// nothing. Optional so older servers that omit it still decode.

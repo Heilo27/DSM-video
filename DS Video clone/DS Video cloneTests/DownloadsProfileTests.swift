@@ -103,6 +103,37 @@ struct DownloadsProfileTests {
     #expect(relaunched.getDownloadedItem(itemId: "mv-old")?.ageLevel == 2, "the backfill is on disk")
   }
 
+  /// TASK-942 · FR-262. A refresh never erases a level the device already knows: a title the
+  /// catalog has no row for (lookup returns nil) keeps its stored level, so a download that is
+  /// hidden stays hidden and a visible one stays visible. A newer non-nil catalog level does
+  /// replace it (the title was re-rated), in both directions, and the result is on disk.
+  /// Red if: refreshAgeLevels writes the lookup's nil over a stored level (rows mv-keep/mv-gone
+  /// become unknown) or stops applying a changed level (mv-up/mv-down keep their old value).
+  @Test func refreshingAgeLevelsNeverEmptiesAKnownLevelButAppliesANewerOne() async throws {
+    let container = try makeContainer("refresh-never-empties")
+    defer { try? FileManager.default.removeItem(at: container) }
+    try seed("[\(entry("mv-keep", ageLevel: 2)),\(entry("mv-gone", ageLevel: 4)),"
+             + "\(entry("mv-up", ageLevel: 1)),\(entry("mv-down", ageLevel: 4)),"
+             + "\(entry("mv-unknown", ageLevel: nil))]",
+             ids: ["mv-keep", "mv-gone", "mv-up", "mv-down", "mv-unknown"], in: container)
+    let teenStore = isolatedStore(active: teen, cached: [owner, teen])
+    // The catalog: no row for mv-keep, mv-gone or mv-unknown; re-rated mv-up to 4, mv-down to 2.
+    let manager = DownloadManager(containerForTesting: container, profileStore: teenStore,
+                                  ageLevelLookup: { id in ["mv-up": 4, "mv-down": 2][id] })
+    await manager.refreshAgeLevels()
+    await manager.refreshAgeLevels()   // idempotent
+
+    let relaunched = DownloadManager(containerForTesting: container, profileStore: teenStore)
+    func level(_ id: String) -> Int?? { relaunched.getDownloadedItem(itemId: id).map(\.ageLevel) }
+    #expect(level("mv-keep") == .some(2), "no catalog row: the known level stays")
+    #expect(level("mv-gone") == .some(4), "no catalog row: the known level stays")
+    #expect(level("mv-up") == .some(4), "re-rated up: the newer level applies")
+    #expect(level("mv-down") == .some(2), "re-rated down: the newer level applies")
+    #expect(level("mv-unknown") == .some(nil), "never known stays unknown, not a default")
+    #expect(Set(relaunched.visibleDownloadedItems().map(\.id)) == ["mv-keep", "mv-down"],
+            "level 3 teen: 2 visible, 4 hidden, unknown hidden")
+  }
+
   /// TASK-936 (offline part) · FR-233. The pre-profiles position (600s) migrates to the owner
   /// and is never lost; a kid starts at 0 and neither profile's save moves the other's.
   @Test func offlineResumePositionsAreIndependentPerProfile() throws {
@@ -156,5 +187,69 @@ struct DownloadsProfileTests {
       let item = try #require(after.playableDownloadedItem(itemId: id), "\(id) still plays")
       #expect(FileManager.default.fileExists(atPath: item.videoPath), "\(id) still on disk")
     }
+  }
+
+  // MARK: TASK-942 · a new download takes the server's level (FR-262)
+
+  /// TASK-942 AC-1. The detail payload's `ageLevel` is decoded; an absent or null field is
+  /// unknown (nil), never a default level.
+  /// Red if: ItemDetail stops decoding ageLevel (always nil) or defaults a missing one.
+  @Test func itemDetailDecodesTheServersAgeLevelAndAMissingOneIsNil() throws {
+    func detail(_ extra: String) throws -> ItemDetail {
+      let json = #"{"id":"mv-1","type":"movie","title":"T"\#(extra)}"#
+      return try JSONDecoder().decode(ItemDetail.self, from: Data(json.utf8))
+    }
+    #expect(try detail(#","ageLevel":3"#).ageLevel == 3)
+    #expect(try detail(#","ageLevel":1"#).ageLevel == 1)
+    #expect(try detail("").ageLevel == nil, "an older server omits the field")
+    #expect(try detail(#","ageLevel":null"#).ageLevel == nil)
+  }
+
+  /// TASK-942 AC-2. The level a new download is stamped with: the server's when it sent one
+  /// (even against a catalog that disagrees), else the catalog's, else unknown.
+  /// Red if: the catalog wins over the server (row 2), or the fallback is dropped (row 3).
+  @Test func aNewDownloadPrefersTheServersLevelThenTheCatalogs() async throws {
+    let container = try makeContainer("resolve-level")
+    defer { try? FileManager.default.removeItem(at: container) }
+    let manager = DownloadManager(containerForTesting: container,
+                                  ageLevelLookup: { $0 == "mv-cat" ? 1 : nil })
+    #expect(await manager.resolveAgeLevel(itemId: "mv-cat", serverLevel: 4) == 4,
+            "the server's fresh re-rating beats a stale catalog row")
+    #expect(await manager.resolveAgeLevel(itemId: "mv-cat", serverLevel: nil) == 1,
+            "no server level: the catalog's")
+    #expect(await manager.resolveAgeLevel(itemId: "mv-none", serverLevel: nil) == nil,
+            "neither knows: unknown, not a default")
+    #expect(await manager.resolveAgeLevel(itemId: "mv-none", serverLevel: 2) == 2)
+  }
+
+  /// TASK-942 AC-3 · FR-262. A film the local catalog has never heard of, rated 4 by the server,
+  /// is downloaded; the stored level is 4, it survives a relaunch, and on a level-1 profile it
+  /// is neither listed nor playable (no server in the loop), while the owner still sees it.
+  /// Red if: the stamp comes from the catalog alone (nil here: stored unknown) or from a
+  /// default; the restricted-profile half fails if the level is stored as anything below 4.
+  @Test func aDownloadMissingFromTheCatalogStillGetsTheServerLevelAndIsHiddenOnARestrictedProfile() async throws {
+    let container = try makeContainer("server-level")
+    defer { try? FileManager.default.removeItem(at: container) }
+    let kidStore = isolatedStore(active: littleKid, cached: [owner, littleKid])
+    let manager = DownloadManager(containerForTesting: container, profileStore: kidStore,
+                                  ageLevelLookup: { _ in nil })   // the catalog knows nothing
+
+    let level = await manager.resolveAgeLevel(itemId: "mv-new", serverLevel: 4)
+    manager.startDownload(
+      itemId: "mv-new", title: "New R film", year: 2024,
+      videoURL: URL(string: "http://127.0.0.1:9/never.mp4")!, posterURL: nil, token: nil,
+      durationSeconds: 7200, ageLevel: level)
+    let finished = container.appendingPathComponent("incoming.tmp")
+    try Data("fake-mp4-bytes".utf8).write(to: finished)
+    manager.completeDownload(itemId: "mv-new", tempURL: finished)
+
+    let relaunched = DownloadManager(containerForTesting: container, profileStore: kidStore)
+    #expect(relaunched.getDownloadedItem(itemId: "mv-new")?.ageLevel == 4, "the server's level is on disk")
+    #expect(relaunched.visibleDownloadedItems().isEmpty, "level 4 is above a level-1 profile")
+    #expect(relaunched.playableDownloadedItem(itemId: "mv-new") == nil)
+
+    let ownerView = DownloadManager(containerForTesting: container,
+                                    profileStore: isolatedStore(active: owner, cached: [owner, littleKid]))
+    #expect(ownerView.visibleDownloadedItems().map(\.id) == ["mv-new"])
   }
 }

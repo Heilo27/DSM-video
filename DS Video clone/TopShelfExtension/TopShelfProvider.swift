@@ -53,6 +53,11 @@ private struct TopShelfSnapshot: Codable {
 /// The App Group shared with the parent app. File scope, not a property: os.log string
 /// interpolation is a closure, so referencing an instance property inside a log line would
 /// require explicit `self` under Swift 6 strict concurrency.
+///
+/// MUST MATCH `ActiveProfileStore.appGroupID` (the app's one definition, which AppState's
+/// Top Shelf writer and deleter use) and the App Groups entitlement of both targets. This
+/// extension is a separate target and does not compile ActiveProfileStore, so its copy is
+/// necessary; if the group is renamed, change all of them together (TASK-926).
 private let appGroupID = "group.HeiloProjects.DSReel"
 
 // MARK: - Provider

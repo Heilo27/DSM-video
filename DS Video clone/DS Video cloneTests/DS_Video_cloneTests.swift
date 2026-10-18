@@ -628,15 +628,18 @@ struct AppStateTests {
     #expect(state.pairingError == nil)
   }
 
-  @Test func logoutClearsSessionState() {
-    let state = AppState()
-    state.sessionToken = "token"
-    state.pairingCode = "code"
+  /// Isolated stores (TASK-925): logout() clears the active profile and the offline catalog,
+  /// which on `.shared` would wipe the app-group defaults and the device's own library.
+  @Test func logoutClearsSessionState() async {
+    await withIsolatedAppState { state in
+      state.sessionToken = "token"
+      state.pairingCode = "code"
 
-    state.logout()
+      state.logout()
 
-    #expect(state.sessionToken == nil)
-    #expect(state.pairingCode == nil)
+      #expect(state.sessionToken == nil)
+      #expect(state.pairingCode == nil)
+    }
   }
 
   @Test func setPasswordUpdatesPassword() {
@@ -3445,7 +3448,7 @@ struct ProfilePickerGateTests {
 }
 
 /// FR-261 / AC-002-42: after a switch from A to B nothing from A is visible, and a load that
-/// started under A cannot land afterwards. Serialized: it drives the shared profile store.
+/// started under A cannot land afterwards. Runs over an isolated AppState (TASK-925).
 @Suite("Profile switch", .serialized)
 @MainActor
 struct ProfileSwitchTests {
@@ -3484,32 +3487,21 @@ struct ProfileSwitchTests {
   }
 
   @Test func switchClearsEverythingFromTheOldProfileAndFencesItsLoads() async throws {
-    // ActiveProfileStore.shared / LocalStore.shared's scope are process-wide and the
-    // ProfileStateGate suites rewrite them in parallel with this one: hold the same gate.
+    // The AppState runs over its own profile store and catalog (TASK-925), so this neither
+    // touches the app-group defaults nor races any other suite: no gate, no save and restore.
+    let a = Profile(id: "p-a", name: "A", avatar: "fox", maxAgeLevel: 4, hasPin: false, isOwner: true)
+    let b = Profile(id: "p-b", name: "B", avatar: "owl", maxAgeLevel: 1, hasPin: false, isOwner: false)
     var failure: Error?
-    await ProfileStateGate.shared.run {
-      do { try await runSwitchScenario() } catch { failure = error }
+    await withIsolatedAppState(cached: [a, b], active: a) { state in
+      do { try await runSwitchScenario(state, a: a, b: b) } catch { failure = error }
     }
     if let failure { throw failure }
   }
 
-  private func runSwitchScenario() async throws {
-    let store = ActiveProfileStore.shared
-    let savedActive = store.activeProfileID
-    let savedCache = store.cachedProfiles
-    let savedScope = await LocalStore.shared.activeScope
-    defer {
-      store.setActive(savedCache.first(where: { $0.id == savedActive }))
-      store.setCachedProfiles(savedCache)
-    }
+  private func runSwitchScenario(_ state: AppState, a: Profile, b: Profile) async throws {
+    let store = state.profileStore
+    await state.localStore.setActiveProfile(ProfileScope(profile: a))
 
-    let a = Profile(id: "p-a", name: "A", avatar: "fox", maxAgeLevel: 4, hasPin: false, isOwner: true)
-    let b = Profile(id: "p-b", name: "B", avatar: "owl", maxAgeLevel: 1, hasPin: false, isOwner: false)
-    store.setCachedProfiles([a, b])
-    store.setActive(a)
-    await LocalStore.shared.setActiveProfile(ProfileScope(profile: a))
-
-    let state = AppState()
     // A file this test owns, so it neither depends on the app group container existing in
     // the test host nor races other tests over the real topshelf.json.
     let shelfURL = FileManager.default.temporaryDirectory
@@ -3528,7 +3520,7 @@ struct ProfileSwitchTests {
     await state.switchProfile(to: b)
 
     #expect(store.activeProfileID == "p-b")
-    #expect(await LocalStore.shared.activeScope.id == "p-b", "local reads now scoped to B")
+    #expect(await state.localStore.activeScope.id == "p-b", "local reads now scoped to B")
     #expect(!state.needsProfilePicker)
     #expect(visibleIDs(state).isDisjoint(with: aIDs), "no rail, Suggested or watchlist entry from A")
     #expect(!state.watchlistLoadFailed)
@@ -3548,6 +3540,5 @@ struct ProfileSwitchTests {
     #expect(shelf.contains("b-ja"), "B's Just Added is on the shelf")
     #expect(!aIDs.contains(where: { shelf.contains($0) }), "Top Shelf snapshot still names A's items")
     #expect(!shelf.contains("b-cw"), "no Continue Watching on an account with a restricted profile (FR-264)")
-    await LocalStore.shared.setActiveProfile(savedScope)
   }
 }

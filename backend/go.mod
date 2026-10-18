@@ -1,9 +1,11 @@
 module dsvideo/backend
 
-go 1.22
+go 1.23
+
+toolchain go1.26.9
 
 require (
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/golang-jwt/jwt/v5 v5.2.3
 	modernc.org/sqlite v1.36.0
 )

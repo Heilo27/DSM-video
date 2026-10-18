@@ -164,23 +164,26 @@ final class AppState {
   /// The account's profiles as last known (fresh list, else the cached one) (FR-263).
   var profiles: [Profile] {
     _ = profileRevision
-    return ActiveProfileStore.shared.cachedProfiles
+    return profileStore.cachedProfiles
   }
 
   /// The profile this device is acting for, if one is chosen and still listed.
   var activeProfile: Profile? {
     _ = profileRevision
-    guard let id = ActiveProfileStore.shared.activeProfileID else { return nil }
-    return ActiveProfileStore.shared.cachedProfiles.first { $0.id == id }
+    guard let id = profileStore.activeProfileID else { return nil }
+    return profileStore.cachedProfiles.first { $0.id == id }
   }
 
   /// FR-200's limit, owner included. The server enforces it (`profile_limit_reached`).
   var maxProfiles: Int { serverMaxProfiles ?? 4 }
 
-  /// The display label for an age level ("Little Kids"), or nil before the server has sent
-  /// the ladder. Callers fall back to wording that does not name the level.
+  /// The display label for an age level ("Little Kids"): this session's ladder, else the one
+  /// the device last stored (so an offline cold launch still names it, FR-265). nil only if the
+  /// server has never sent a ladder to this device; callers then fall back to wording that
+  /// does not name the level.
   func ageLevelLabel(_ level: Int) -> String? {
-    ageLevels.first { $0.level == level }?.label
+    if let live = ageLevels.first(where: { $0.level == level }) { return live.label }
+    return profileStore.cachedAgeLevels.first { $0.level == level }?.label
   }
   /// When the app last went to the background, for the tvOS 30-minute rule.
   private var enteredBackgroundAt: Date?
@@ -235,8 +238,24 @@ final class AppState {
 
   var savedPassword: String = ""
 
+  /// The ONE home of the active profile and the cached profile list for this AppState
+  /// (FR-220, FR-264). Production is always `.shared`; tests pass a store on a throwaway
+  /// UserDefaults suite so they never touch the app-group defaults (TASK-925). Every
+  /// APIClient this AppState builds reads its `X-DSVideo-Profile` header from this same store.
+  let profileStore: ActiveProfileStore
+  /// The offline catalog this AppState reads and writes. Production is always `.shared`;
+  /// tests pass a store on a temp database (`LocalStore.makeForTesting`).
+  let localStore: LocalStore
+
   // Use custom REST API client (our backend)
   private(set) var api: APIClient
+
+  /// Every APIClient this AppState makes goes through here so it carries `profileStore`.
+  private func makeClient(baseURL: URL, token: String?, usesTunnelCookie: Bool = false) -> APIClient {
+    var client = APIClient(baseURL: baseURL, token: token, usesTunnelCookie: usesTunnelCookie)
+    client.profileStore = profileStore
+    return client
+  }
 
   private func updateAPI() {
     // If baseURL is a bare QuickConnect ID, we can't build a usable URL without
@@ -252,13 +271,15 @@ final class AppState {
     // harmlessly; a client holding a stale token while `sessionToken` says otherwise does not.
     let url = normalizedBaseURL(baseURL, forceHTTPS: effectiveHTTPS, defaultPort: defaultPort)
       ?? Self.fallbackURL
-    api = APIClient(
+    api = makeClient(
       baseURL: url,
       token: sessionToken
     )
   }
 
-  init() {
+  init(profileStore: ActiveProfileStore = .shared, localStore: LocalStore = .shared) {
+    self.profileStore = profileStore
+    self.localStore = localStore
     #if DEBUG
     // Must run BEFORE any stored value is read below, or this launch would load the state it
     // is supposed to be clearing.
@@ -309,10 +330,9 @@ final class AppState {
     let initEffectiveHTTPS = Self.isPrivateLANAddress(storedBaseURL) ? false : storedUseHTTPS
     let resolvedInitURL = isQCID ? Self.fallbackURL
       : (normalizedBaseURL(storedBaseURL, forceHTTPS: initEffectiveHTTPS, defaultPort: storedDefaultPort) ?? Self.fallbackURL)
-    api = APIClient(
-      baseURL: resolvedInitURL,
-      token: storedToken
-    )
+    var initialClient = APIClient(baseURL: resolvedInitURL, token: storedToken)
+    initialClient.profileStore = profileStore
+    api = initialClient
     startNetworkMonitoring()
     startHeartbeatTimer()
     // SEC-02: proactively check JWT expiry so users aren't surprised by mid-session logout.
@@ -506,7 +526,7 @@ final class AppState {
     do {
       let resp = try await api.refreshToken()
       sessionToken = resp.token
-      api = APIClient(baseURL: api.baseURL, token: resp.token, usesTunnelCookie: api.usesTunnelCookie)
+      api = makeClient(baseURL: api.baseURL, token: resp.token, usesTunnelCookie: api.usesTunnelCookie)
       homeLog.info("refreshSession: token refreshed without password")
     } catch {
       // Refresh unavailable or rejected — fall back to a full login only if we can.
@@ -761,7 +781,7 @@ final class AppState {
       var attemptFailures: [String] = []
       for (index, candidate) in candidates.enumerated() {
         do {
-          var tempClient = APIClient(baseURL: candidate.url, token: nil)
+          var tempClient = makeClient(baseURL: candidate.url, token: nil)
           tempClient.usesTunnelCookie = candidate.requiresTunnelCookie
           // LAN candidates (first lanCount entries) get 2s — fail-fast so WAN isn't delayed
           // when the user is away from home. Relay gets 15s. WAN direct gets 8s.
@@ -777,7 +797,7 @@ final class AppState {
           let resp = try await tempClient.login(username: username, password: savedPassword, timeoutInterval: timeout)
           sessionToken = resp.token
           clearNetworkError()
-          api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+          api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
           // Update baseURL to the winning candidate so reconnect() has a real URL to probe.
           // Skip relay candidates — relay URLs are ephemeral edge addresses.
           if !candidate.requiresTunnelCookie {
@@ -881,7 +901,7 @@ final class AppState {
     // Profiles belong to the account: the next sign-in must re-learn support and must not
     // send this account's profile id.
     profileSupport = .unknown
-    ActiveProfileStore.shared.clearAll()
+    profileStore.clearAll()
     serverMaxProfiles = nil
     ageLevels = []
     profileRevision += 1
@@ -891,7 +911,7 @@ final class AppState {
     // TASK-807: purge on-device content so a shared device leaves no cross-user residue.
     // Downloads are @MainActor (sync); the SQLite cache is an actor (async).
     DownloadManager.shared.clearAll()
-    Task { await LocalStore.shared.clearAll() }
+    Task { await localStore.clearAll() }
   }
 
   /// Clears the session token (shows login screen) but keeps username and password
@@ -1108,7 +1128,7 @@ final class AppState {
     }()
 
     for (index, candidate) in candidates.enumerated() {
-      let probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: candidate.requiresTunnelCookie)
+      let probe = makeClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: candidate.requiresTunnelCookie)
       let versionTimeout: TimeInterval
       if candidate.requiresTunnelCookie { versionTimeout = 15 }
       else if index < lanCount { versionTimeout = 2 }
@@ -1186,7 +1206,7 @@ final class AppState {
     guard let candidates = try? await buildCandidates() else { return nil }
     for candidate in candidates where !candidate.requiresTunnelCookie {
       guard Self.isPrivateLANAddress(candidate.url.absoluteString) else { continue }
-      let probe = APIClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: false)
+      let probe = makeClient(baseURL: candidate.url, token: sessionToken, usesTunnelCookie: false)
       if (try? await probe.serverVersion(timeout: 1.5)) != nil {
         return candidate.url
       }
@@ -1227,7 +1247,7 @@ final class AppState {
       lastGoodAddress = lanCandidate.absoluteString
       if let port = lanCandidate.port { defaultPort = port }
       useHTTPS = lanCandidate.scheme == "https"
-      api = APIClient(baseURL: lanCandidate, token: sessionToken, usesTunnelCookie: false)
+      api = makeClient(baseURL: lanCandidate, token: sessionToken, usesTunnelCookie: false)
       clearNetworkError()
       NotificationCenter.default.post(name: .networkDidReconnect, object: nil)
       return .switched
@@ -1392,11 +1412,11 @@ final class AppState {
       var lastError: Error?
       for candidate in candidates {
         do {
-          var client = APIClient(baseURL: candidate.url, token: nil)
+          var client = makeClient(baseURL: candidate.url, token: nil)
           client.usesTunnelCookie = candidate.requiresTunnelCookie
           let resp = try await client.exchangePairingCode(code: code, timeoutInterval: 7)
           sessionToken = resp.token
-          api = APIClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+          api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
           startHeartbeatTimer()
           dlog.info(.auth, "pairing OK via QuickConnect \(candidate.url.host ?? "?") token=\(DiagnosticLog.redact(resp.token))")
           return
@@ -1418,7 +1438,7 @@ final class AppState {
     }
 
     do {
-      let resp = try await APIClient(baseURL: serverURL, token: nil)
+      let resp = try await makeClient(baseURL: serverURL, token: nil)
         .exchangePairingCode(code: code)
       sessionToken = resp.token
       startHeartbeatTimer()
@@ -1561,9 +1581,6 @@ final class AppState {
     forSecurityApplicationGroupIdentifier: ActiveProfileStore.appGroupID
   )?.appendingPathComponent("topshelf.json")
 
-  /// The profile list and unrestricted level the shelf policy reads (FR-264). A stored
-  /// property only so tests do not have to mutate the process-wide store.
-  @ObservationIgnored var topShelfProfileStore: ActiveProfileStore = .shared
 
   var homeAllRailsEmpty: Bool {
     homeContinueWatching.isEmpty && homeJustAdded.isEmpty && homeRecentlyWatched.isEmpty
@@ -1949,16 +1966,17 @@ final class AppState {
     defer { homeIsCacheDecoding = false }
     let generation = homeStateGeneration
     // Ensure setup has completed before any store access (TASK-420).
-    await LocalStore.shared.ensureReady()
+    let localStore = self.localStore
+    await localStore.ensureReady()
     let hasLocal = await Task.detached(priority: .userInitiated) {
-      await LocalStore.shared.hasItems()
+      await localStore.hasItems()
     }.value
 
     if hasLocal {
       homeLog.info("homeLoad[\(callID)]: PATH=cold-start — local DB has data, loading rails")
       dlog.info(.home, "homeLoad: cold start from local DB")
       let rails = await Task.detached(priority: .userInitiated) {
-        await LocalStore.shared.queryRails()
+        await localStore.queryRails()
       }.value
       applyRails(rails, startedAt: generation)
       homeIsCacheDecoding = false
@@ -2055,7 +2073,7 @@ final class AppState {
     homeBackgroundFetchTask?.cancel()
     homeBackgroundFetchTask = nil
     homeIsBackgroundRefreshing = false
-    await LocalStore.shared.setItemSeq(0)
+    await localStore.setItemSeq(0)
     homeIsLoading = true
     homeError = nil
     defer { homeIsLoading = false }   // see homeLoad(): cancellation must not latch the flag
@@ -2149,7 +2167,7 @@ final class AppState {
       await refreshProfiles()
     }
     // One profile for the whole pass, even if the user switches mid-sync (FR-233).
-    let scope = await LocalStore.shared.activeScope
+    let scope = await localStore.activeScope
     let progressAllowed = ProfileGate.progressSyncAllowed(scope: scope, support: profileSupport)
     let progressAPI = apiSnapshot.pinned(to: scope.headerValue)
 
@@ -2162,7 +2180,7 @@ final class AppState {
     do {
       // Step 1: Get server seq numbers and our local cursors
       let status = try await apiSnapshot.syncStatus()
-      var cursors = await LocalStore.shared.getSyncCursors(profileID: scope.id)
+      var cursors = await localStore.getSyncCursors(profileID: scope.id)
       homeLog.info("runDeltaSync: server itemSeq=\(status.itemSeq) local=\(cursors.itemSeq) | server progressSeq=\(status.progressSeq) local=\(cursors.progressSeq)")
 
       // A local cursor AHEAD of the server's is impossible, and it is a permanent stall.
@@ -2197,12 +2215,12 @@ final class AppState {
         // stream is genuinely new to us. This costs one full item re-fetch, once, which is
         // the same work a fresh install does.
         if cursors.itemSeq > status.itemSeq {
-          await LocalStore.shared.setItemSeq(0)
+          await localStore.setItemSeq(0)
         }
         if cursors.progressSeq > status.progressSeq {
-          await LocalStore.shared.setProgressSeq(0, profileID: scope.id)
+          await localStore.setProgressSeq(0, profileID: scope.id)
         }
-        cursors = await LocalStore.shared.getSyncCursors(profileID: scope.id)
+        cursors = await localStore.getSyncCursors(profileID: scope.id)
       }
 
       // Step 2: Fetch libraries (always fast, small payload)
@@ -2218,7 +2236,7 @@ final class AppState {
       dlog.info(.library, "sync: server itemSeq=\(status.itemSeq) local=\(cursors.itemSeq) progressSeq=\(status.progressSeq)/\(cursors.progressSeq)")
 
       // Step 3: Fetch item deltas if server has new items
-      let localCount = await LocalStore.shared.totalItemCount()
+      let localCount = await localStore.totalItemCount()
 
       // A cursor that agrees with the server but a LIBRARY that does not.
       //
@@ -2252,16 +2270,16 @@ final class AppState {
             serverNewest = newest
           }
         }
-        let localNewest = await LocalStore.shared.newestAddedAt()
+        let localNewest = await localStore.newestAddedAt()
         if !serverNewest.isEmpty, !localNewest.isEmpty, serverNewest > localNewest {
           homeLog.warning("""
             runDeltaSync: server has items newer than local             (server \(serverNewest) > local \(localNewest)) while cursors agree —             the delta stream is not delivering; forcing a resync
             """)
           dlog.warn(.library, "library is behind the server — forcing a full resync")
-          await LocalStore.shared.setItemSeq(0)
+          await localStore.setItemSeq(0)
           // The pass's own profile, not the active one: a switch mid-pass must not hand
           // this pass another profile's progress cursor.
-          cursors = await LocalStore.shared.getSyncCursors(profileID: scope.id)
+          cursors = await localStore.getSyncCursors(profileID: scope.id)
           forceResync = true
         }
       }
@@ -2325,7 +2343,7 @@ final class AppState {
             break
           }
           if !page.items.isEmpty {
-            await LocalStore.shared.upsertItems(page.items)
+            await localStore.upsertItems(page.items)
             since = page.nextSeq
             afterRowid = page.hasMore ? page.nextAfterRowid : nil
             pageCount += 1
@@ -2343,7 +2361,7 @@ final class AppState {
             // Checkpointing here makes the sync resumable under all of them. Deliberately
             // NOT capped at status.itemSeq: `since` is the server's own nextSeq, which is
             // exactly what the next request should ask from.
-            await LocalStore.shared.setItemSeq(min(since, status.itemSeq))
+            await localStore.setItemSeq(min(since, status.itemSeq))
 
             // Non-advancing cursor: the next request would be byte-identical to the
             // one we just made, so we'd refetch the same page indefinitely. Stop and
@@ -2361,7 +2379,7 @@ final class AppState {
             }
             // After first page on cold start, show rails immediately
             if !background && pageCount == 1 {
-              let rails = await LocalStore.shared.queryRails()
+              let rails = await localStore.queryRails()
               applyRails(rails, startedAt: generation)
             }
             if !page.hasMore {
@@ -2391,7 +2409,7 @@ final class AppState {
             let deleted = try await apiSnapshot.syncDeleted(since: cursors.itemSeq)
             if !deleted.deletedIds.isEmpty {
               homeLog.info("runDeltaSync: \(deleted.deletedIds.count) deleted items")
-              await LocalStore.shared.deleteItems(deleted.deletedIds)
+              await localStore.deleteItems(deleted.deletedIds)
             }
             deletionSucceeded = true
           } catch {
@@ -2409,7 +2427,7 @@ final class AppState {
           // committed, so the un-fetched remainder is re-requested next cycle instead of
           // being skipped forever.
           let committedSeq = reachedEndOfChanges ? status.itemSeq : min(since, status.itemSeq)
-          await LocalStore.shared.setItemSeq(committedSeq)
+          await localStore.setItemSeq(committedSeq)
           if reachedEndOfChanges {
             homeLog.info("runDeltaSync: item sync complete — \(pageCount) page(s)")
           } else {
@@ -2431,17 +2449,17 @@ final class AppState {
         homeLog.info("runDeltaSync: fetching fresh progress (server=\(status.progressSeq) local=\(cursors.progressSeq))")
         let progressMap = try await progressAPI.progressAll().progress
         if !progressMap.isEmpty {
-          await LocalStore.shared.upsertProgress(progressMap, profileID: scope.id)
+          await localStore.upsertProgress(progressMap, profileID: scope.id)
         }
         // Only advance cursor if server reports a real seq, otherwise stay at 0
         // so we re-check on next launch until the server starts tracking
         if status.progressSeq > 0 {
-          await LocalStore.shared.setProgressSeq(status.progressSeq, profileID: scope.id)
+          await localStore.setProgressSeq(status.progressSeq, profileID: scope.id)
         }
       }
 
       // Step 5: Recompute rails from local store and update UI
-      let rails = await LocalStore.shared.queryRails()
+      let rails = await localStore.queryRails()
       clearNetworkError()
       // Cursors and the store are account-wide and already committed above; only the
       // screen belongs to the profile, so a superseded pass stops here.
@@ -2476,7 +2494,7 @@ final class AppState {
     let apiSnapshot = api
     do {
       let beat = try await apiSnapshot.syncHeartbeat()
-      let cursors = await LocalStore.shared.getSyncCursors()
+      let cursors = await localStore.getSyncCursors()
 
       // A cursor AHEAD of the server means "sync" here, not "nothing to do".
       //
@@ -2548,7 +2566,7 @@ final class AppState {
   func refreshProgressFromLocal() async {
     guard !isDemoMode else { return }
     let generation = homeStateGeneration
-    let rails = await LocalStore.shared.queryRails()
+    let rails = await localStore.queryRails()
     // Via applyRails so Suggested refreshes too. This is the site where it matters most:
     // the viewer has just finished something, which is precisely when the seed — and so
     // the suggestion — should change. Assigning the three rails directly here would leave
@@ -2577,7 +2595,7 @@ final class AppState {
   func recordProgress(itemId: String, positionSeconds: Int, durationSeconds: Int,
                       asProfile profileID: String? = nil) async {
     guard !isDemoMode else { return }
-    let scope = await LocalStore.shared.activeScope
+    let scope = await localStore.activeScope
     if scope.isUnchosen {
       homeLog.warning("recordProgress: dropped for \(itemId) — no profile is chosen on this profile account")
       return
@@ -2586,16 +2604,16 @@ final class AppState {
       homeLog.warning("recordProgress: dropped for \(itemId) — playback began as another profile than the active one")
       return
     }
-    await LocalStore.shared.upsertSingleProgress(
+    let watchedAt = await localStore.upsertSingleProgress(
       itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds,
       profileID: scope.id)
 
     // If the store could not be opened, the write above was a silent no-op and the outbox
     // has nothing to replay — so the server write is the ONLY copy. Surface the degraded
     // state once rather than letting positions vanish while the UI looks healthy.
-    if await LocalStore.shared.isUnavailable, !hasWarnedStoreUnavailable {
+    if await localStore.isUnavailable, !hasWarnedStoreUnavailable {
       hasWarnedStoreUnavailable = true
-      localStoreUnavailableMessage = await LocalStore.shared.unavailableReason
+      localStoreUnavailableMessage = await localStore.unavailableReason
       homeLog.error("recordProgress: LocalStore unavailable — progress depends on the server write alone")
     }
 
@@ -2609,18 +2627,20 @@ final class AppState {
 
     do {
       let applied = try await api.pinned(to: scope.headerValue).setProgress(
-        id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds)
+        id: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds,
+        watchedAt: watchedAt)
       // TASK-891: honour the server's `applied` flag, which the API documents as "callers
       // must not treat a 200 alone as saved". Both outcomes clear the pending flag, but for
       // different reasons, and the log must not claim a save that did not happen:
       //  - applied:true  → stored. Synced.
       //  - applied:false → a NEWER write superseded this one. This value is stale, so
       //    requeueing it would later overwrite fresher progress. Clear it, don't retry it.
-      await LocalStore.shared.markProgressSynced(
+      await localStore.markProgressSynced(
         itemId: itemId, positionSeconds: positionSeconds, durationSeconds: durationSeconds,
         profileID: scope.id)
       if !applied {
         homeLog.info("recordProgress: server superseded the write for \(itemId) — a newer position already won")
+        await forceProgressRefetch(profileID: scope.id)
       }
     } catch {
       // Stays flagged pending — flushPendingProgress() will retry on the next foreground,
@@ -2652,6 +2672,14 @@ final class AppState {
     await refreshProgressFromLocal()
   }
 
+  /// A write the server refused as older than what it holds (applied:false) means this
+  /// device's copy of that title is stale. The server moves no progress counter for a refused
+  /// write, so nothing else would prompt a refetch; resetting the cursor makes the next sync
+  /// (or heartbeat) fetch /progress/all and take the row that stands.
+  private func forceProgressRefetch(profileID: String) async {
+    await localStore.setProgressSeq(0, profileID: profileID)
+  }
+
   /// Uploads progress the server has not confirmed. Idempotent and safe to call often —
   /// returns immediately when the outbox is empty.
   ///
@@ -2659,17 +2687,18 @@ final class AppState {
   /// so a device that recorded progress offline pushes it as soon as the NAS is reachable
   /// again. Ordering is oldest-first so a replay reconstructs the real watch sequence.
   ///
-  /// On the server side each write is stamped with a monotone progress.write_seq and the
-  /// upsert only applies when the incoming seq is higher, so a replayed backlog cannot
-  /// clobber a newer value written from another device.
+  /// Each replayed row carries the time it was WATCHED (`watchedAt`), and the server keeps
+  /// the later watch: a row is applied only if its watch time is later than the stored one's
+  /// (same second: arrival order), with any time ahead of the server's clock counted as the
+  /// receive time (backend profiles.go, upsertProgress; FRD-001 FR-014, FR-019). So a backlog
+  /// replayed after a long offline stretch cannot overwrite a position watched later on another
+  /// device, nor undo a later Mark Watched / Unwatched. A refused row answers applied:false;
+  /// the local copy is then stale, so the progress cursor is reset to refetch the row that stands.
   ///
-  /// This comment previously claimed the server ran "a last-writer-wins comparison [that]
-  /// discards anything staler than what it holds." That was FALSE when written — the
-  /// ON CONFLICT had no WHERE clause at all, making the server a pure last-write-wins sink,
-  /// and a replay from an upgraded device destroyed newer progress (proven live 2026-08-05:
-  /// POST 7500 then POST 6000 left the row at 6000). The guarantee is real NOW because
-  /// aabc29a implemented it; it is described here as mechanism, not assumption. Verify
-  /// against handleProgress before trusting it again.
+  /// History: this comment once claimed a last-writer-wins comparison that did not exist (the
+  /// upsert had no WHERE), and later that ordering by the server's arrival write_seq protected
+  /// replays. It did the opposite: a late replay always arrived last and won (TASK-960).
+  /// Verify against upsertProgress before trusting this again.
   func flushPendingProgress() async {
     guard !isDemoMode, sessionToken != nil, !isOffline, !serverUnreachable else { return }
 
@@ -2691,14 +2720,14 @@ final class AppState {
     // One profile for the whole drain, and none at all while the gate is shut: legacy rows
     // stay pending until claimLegacyRows hands them to the owner, then upload under the
     // owner's header. Never header-less (FR-221 would file them under a kid).
-    let scope = await LocalStore.shared.activeScope
+    let scope = await localStore.activeScope
     guard ProfileGate.progressSyncAllowed(scope: scope, support: profileSupport) else {
       homeLog.info("flushPendingProgress: held — no active profile yet (support=\(String(describing: self.profileSupport)))")
       return
     }
     let progressAPI = api.pinned(to: scope.headerValue)
 
-    let pending = await LocalStore.shared.pendingProgress(profileID: scope.id)
+    let pending = await localStore.pendingProgress(profileID: scope.id)
     guard !pending.isEmpty else { return }
 
     homeLog.info("flushPendingProgress: \(pending.count) queued progress row(s) to upload")
@@ -2717,13 +2746,14 @@ final class AppState {
         // An applied:false means a newer write superseded this one — the row is obsolete, so
         // clearing it is correct, but count it separately from a real upload so the log
         // doesn't claim progress that never landed.
-        await LocalStore.shared.markProgressSynced(
+        await localStore.markProgressSynced(
           itemId: row.itemId, positionSeconds: row.positionSeconds, durationSeconds: row.durationSeconds,
           profileID: scope.id)
         if applied {
           uploaded += 1
         } else {
           superseded += 1
+          if superseded == 1 { await forceProgressRefetch(profileID: scope.id) }
         }
       } catch {
         // A PERMANENT rejection must not block the queue behind it.
@@ -2745,7 +2775,7 @@ final class AppState {
           // user kept watching during the flush, the row now holds a different position and
           // the guarded update matches nothing — the row stayed pending and was retried on
           // every subsequent flush, exactly the stall this drop path exists to prevent.
-          await LocalStore.shared.dropPendingProgress(itemId: row.itemId, profileID: scope.id)
+          await localStore.dropPendingProgress(itemId: row.itemId, profileID: scope.id)
           dropped += 1
           continue
         }
@@ -2773,7 +2803,7 @@ final class AppState {
     do {
       let resp = try await api.profiles()
       profileSupport = .supported
-      ActiveProfileStore.shared.setCachedProfiles(
+      profileStore.setCachedProfiles(
         resp.profiles, unrestrictedLevel: resp.unrestrictedLevel)
       serverMaxProfiles = resp.maxProfiles
       defer { profileRevision += 1 }
@@ -2781,19 +2811,19 @@ final class AppState {
       // without one. The cursor reset is read by this session's sync: runDeltaSync calls
       // refreshProfiles BEFORE it reads the cursor, and from any other caller the heartbeat
       // (every 30s, both platforms) sees item_seq 0 behind the server and starts a sync.
-      if await LocalStore.shared.beginAgeLevelBackfillIfNeeded() {
+      if await localStore.beginAgeLevelBackfillIfNeeded() {
         homeLog.info("refreshProfiles: titles without an age level — catalog re-fetch armed")
       }
       if let owner = resp.profiles.first(where: \.isOwner) {
-        await LocalStore.shared.claimLegacyRows(ownerID: owner.id)
+        await localStore.claimLegacyRows(ownerID: owner.id)
         // FR-206 on this device: a profile the server no longer lists was deleted (here or
         // on another device while this one was away). Its positions, unsent outbox and
         // cursor leave this device. Only from a list that names its owner: a list without
         // one is malformed, and deleting against it could erase live profiles' data.
         let listed = Set(resp.profiles.map(\.id))
-        for gone in await LocalStore.shared.storedProfileIDs().subtracting(listed) {
+        for gone in await localStore.storedProfileIDs().subtracting(listed) {
           homeLog.warning("refreshProfiles: profile \(gone) is gone — removing its local progress")
-          await LocalStore.shared.deleteProfileData(profileID: gone)
+          await localStore.deleteProfileData(profileID: gone)
         }
       } else {
         homeLog.error("refreshProfiles: list has no owner — legacy progress left unclaimed, no purge")
@@ -2802,39 +2832,39 @@ final class AppState {
       // everything shown for it; the picker (or the single-profile auto-enter) takes over.
       // Reads fall to the unchosen scope (fail closed), never legacy: a save in this window
       // must not reach the bucket the owner claims.
-      if let remembered = ActiveProfileStore.shared.activeProfileID,
+      if let remembered = profileStore.activeProfileID,
          !resp.profiles.contains(where: { $0.id == remembered }) {
         homeLog.warning("refreshProfiles: remembered profile is gone — back to the picker")
-        ActiveProfileStore.shared.setActive(nil)
-        await LocalStore.shared.setActiveProfile(ActiveProfileStore.shared.activeScope)
+        profileStore.setActive(nil)
+        await localStore.setActiveProfile(profileStore.activeScope)
         discardProfileScopedHomeState()
-      } else if let remembered = ActiveProfileStore.shared.activeProfileID,
+      } else if let remembered = profileStore.activeProfileID,
                 let fresh = resp.profiles.first(where: { $0.id == remembered }),
-                fresh.maxAgeLevel != ActiveProfileStore.shared.activeScope.maxAgeLevel {
+                fresh.maxAgeLevel != profileStore.activeScope.maxAgeLevel {
         // The active profile's age level was changed (here or on another device). The local
         // fallback must filter by the NEW ceiling from now on (FR-262); the next home load
         // re-reads under it. Same profile, so nothing else is discarded.
         homeLog.info("refreshProfiles: active profile's level is now \(fresh.maxAgeLevel)")
-        ActiveProfileStore.shared.setActive(fresh)
-        await LocalStore.shared.setActiveProfile(ProfileScope(profile: fresh))
+        profileStore.setActive(fresh)
+        await localStore.setActiveProfile(ProfileScope(profile: fresh))
       }
-      if ActiveProfileStore.shared.activeProfileID == nil, resp.profiles.count == 1,
+      if profileStore.activeProfileID == nil, resp.profiles.count == 1,
          let only = resp.profiles.first {
-        ActiveProfileStore.shared.setActive(only)
-        await LocalStore.shared.setActiveProfile(ProfileScope(profile: only))
+        profileStore.setActive(only)
+        await localStore.setActiveProfile(ProfileScope(profile: only))
       }
       // Whatever the store now says is the scope reads must use: covers the first list on a
       // device that was legacy (now unchosen until a profile is chosen), an unchosen ceiling
       // that moved with the list, and a new ladder top from the server.
-      let wanted = ActiveProfileStore.shared.activeScope
-      let current = await LocalStore.shared.activeScope
+      let wanted = profileStore.activeScope
+      let current = await localStore.activeScope
       if current != wanted {
-        await LocalStore.shared.setActiveProfile(wanted)
+        await localStore.setActiveProfile(wanted)
         if current.id != wanted.id { discardProfileScopedHomeState() }
       }
       evaluateProfilePicker(listIsFresh: true)
       await loadAgeLevelsIfNeeded()
-      homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(ActiveProfileStore.shared.activeProfileID ?? "none") picker=\(self.needsProfilePicker)")
+      homeLog.info("refreshProfiles: \(resp.profiles.count) profile(s); active=\(self.profileStore.activeProfileID ?? "none") picker=\(self.needsProfilePicker)")
       writeTopShelfSnapshot()  // the list sets the shelf's ceiling (FR-264, TopShelfPolicy)
     } catch {
       profileSupport = ProfileGate.support(afterProfilesError: error)
@@ -2852,13 +2882,14 @@ final class AppState {
     do {
       let resp = try await api.ageLevels()
       ageLevels = resp.levels
-      ActiveProfileStore.shared.setUnratedLevel(resp.unratedLevel)
+      profileStore.setCachedAgeLevels(resp.levels)
+      profileStore.setUnratedLevel(resp.unratedLevel)
       // refreshProfiles hands LocalStore its scope BEFORE calling here, so a changed unrated
       // level must reach the offline reads now, not at the next list fetch. Same profile, so
       // nothing shown is discarded.
-      let wanted = ActiveProfileStore.shared.activeScope
-      if await LocalStore.shared.activeScope != wanted {
-        await LocalStore.shared.setActiveProfile(wanted)
+      let wanted = profileStore.activeScope
+      if await localStore.activeScope != wanted {
+        await localStore.setActiveProfile(wanted)
       }
     } catch {
       // Display labels only: empty states and the tier picker fall back to wording that
@@ -2900,7 +2931,7 @@ final class AppState {
   /// (kept fresh by refreshProfiles). A trigger that did not open the picker is settled only
   /// against a fresh list: the cached one may predate a deletion, or be empty after pairing.
   func evaluateProfilePicker(listIsFresh: Bool) {
-    let store = ActiveProfileStore.shared
+    let store = profileStore
     let show = ProfileGate.shouldShowPicker(
       platform: .current, trigger: pendingPickerTrigger,
       profileIDs: store.cachedProfiles.map(\.id), activeID: store.activeProfileID)
@@ -2921,7 +2952,7 @@ final class AppState {
   /// otherwise have captured the in-between generation. Only then does home reload.
   /// The caller has already checked the PIN; this does no authorisation.
   func switchProfile(to profile: Profile) async {
-    let wasActive = ActiveProfileStore.shared.activeProfileID == profile.id
+    let wasActive = profileStore.activeProfileID == profile.id
     needsProfilePicker = false
     pendingPickerTrigger = nil
     defer { profileRevision += 1 }
@@ -2932,12 +2963,12 @@ final class AppState {
       return
     }
     clearHomeState()
-    ActiveProfileStore.shared.setActive(profile)
-    await LocalStore.shared.setActiveProfile(ProfileScope(profile: profile))
+    profileStore.setActive(profile)
+    await localStore.setActiveProfile(ProfileScope(profile: profile))
     // Rows recorded in the legacy bucket since the last refresh still belong to the owner
     // (FR-233). Claiming is idempotent, so doing it on every switch is safe.
-    if let owner = ActiveProfileStore.shared.cachedProfiles.first(where: \.isOwner) {
-      await LocalStore.shared.claimLegacyRows(ownerID: owner.id)
+    if let owner = profileStore.cachedProfiles.first(where: \.isOwner) {
+      await localStore.claimLegacyRows(ownerID: owner.id)
     }
     discardProfileScopedHomeState()
     await homeLoad()
@@ -2966,7 +2997,7 @@ final class AppState {
     let generation = homeStateGeneration
     // Header-less, this would show the most restricted profile's list (FR-221).
     guard ProfileGate.progressSyncAllowed(
-      scope: await LocalStore.shared.activeScope, support: profileSupport) else {
+      scope: await localStore.activeScope, support: profileSupport) else {
       homeLog.info("loadWatchlist: held — no active profile yet")
       return
     }
@@ -2995,7 +3026,7 @@ final class AppState {
     guard !isDemoMode else { return }
     // Header-less, the write would land on the most restricted profile's list (FR-221).
     guard ProfileGate.progressSyncAllowed(
-      scope: await LocalStore.shared.activeScope, support: profileSupport) else {
+      scope: await localStore.activeScope, support: profileSupport) else {
       homeLog.warning("toggleWatchlist: held — no active profile yet")
       return
     }
@@ -3067,9 +3098,9 @@ final class AppState {
     // longer have access to. The same holds when the ceiling filters everything out.
     guard let content = TopShelfPolicy.content(
       continueWatching: homeContinueWatching, justAdded: homeJustAdded,
-      profiles: topShelfProfileStore.cachedProfiles,
-      unrestrictedLevel: topShelfProfileStore.unrestrictedLevel,
-      unratedLevel: topShelfProfileStore.unratedLevel
+      profiles: profileStore.cachedProfiles,
+      unrestrictedLevel: profileStore.unrestrictedLevel,
+      unratedLevel: profileStore.unratedLevel
     ) else {
       deleteTopShelfSnapshot()
       return

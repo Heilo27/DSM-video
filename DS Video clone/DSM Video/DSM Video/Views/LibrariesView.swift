@@ -470,11 +470,17 @@ struct LibraryHomeView: View {
             .accessibilityLabel("Retry loading content")
         }
       } else if appState.homeAllRailsEmpty && !appState.homeIsLoading && !appState.homeIsCacheDecoding {
-        DSContentUnavailable(
+        if let profile = appState.activeProfile, profile.isRestricted {
+          // FR-265: on an age-limited profile the rails are filtered by the server, so empty
+          // rails are about the profile's level, not an empty NAS ("Add videos" would be false).
+          RestrictedEmptyState(profile: profile, place: ProfileText.homeEmptyPlace)
+        } else {
+          DSContentUnavailable(
             title: "Nothing here yet",
             systemImage: "play.rectangle",
             description: "Add videos to your NAS to get started."
           )
+        }
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {

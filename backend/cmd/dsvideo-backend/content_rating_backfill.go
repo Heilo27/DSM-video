@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"dsvideo/backend/internal/metadata"
+	"dsvideo/backend/internal/sqltx"
 )
 
 // TASK-915: content-rating / studio / keyword backfill.
@@ -331,10 +332,12 @@ func (s *Server) recordExtras(ctx context.Context, ids []string, extras metadata
 			end = len(ids)
 		}
 		var maxSeq int64
-		tx, err := s.db.BeginTx(ctx, nil)
+		// TASK-941: sqltx so a refused COMMIT releases the write lock; Close covers panics.
+		tx, err := sqltx.Begin(ctx, s.db)
 		if err != nil {
 			return fmt.Errorf("begin: %w", err)
 		}
+		defer tx.Close()
 		for _, id := range ids[start:end] {
 			var seq int64
 			var res sql.Result
@@ -343,7 +346,7 @@ func (s *Server) recordExtras(ctx context.Context, ids []string, extras metadata
 					`UPDATE items SET tmdb_extras_checked_at = ? WHERE id = ? AND tmdb_extras_checked_at IS NULL`,
 					now, id)
 			} else {
-				if err = allocItemSeqTx(ctx, tx, &seq); err != nil || seq <= 0 {
+				if err = allocItemSeqTx(ctx, tx.Tx, &seq); err != nil || seq <= 0 {
 					_ = tx.Rollback()
 					return fmt.Errorf("allocate change_seq for %s: %v", id, err)
 				}
@@ -364,7 +367,7 @@ func (s *Server) recordExtras(ctx context.Context, ids []string, extras metadata
 				}
 				continue
 			}
-			if err := replaceItemTags(ctx, tx, id, extras); err != nil {
+			if err := replaceItemTags(ctx, tx.Tx, id, extras); err != nil {
 				_ = tx.Rollback()
 				return fmt.Errorf("write tags %s: %w", id, err)
 			}

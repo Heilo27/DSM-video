@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"dsvideo/backend/internal/rating"
+	"dsvideo/backend/internal/sqltx"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -65,7 +66,7 @@ type profileState struct {
 }
 
 func (s *Server) pinLimiter() *pinLimiter {
-	s.profiles.once.Do(func() { s.profiles.limiter = newPinLimiter(time.Now) })
+	s.profiles.once.Do(func() { s.profiles.limiter = newPinLimiter(time.Now, s.db) })
 	return s.profiles.limiter
 }
 
@@ -528,11 +529,99 @@ func (s *Server) requireUnrestricted(next http.Handler) http.Handler {
 	})
 }
 
-// upsertProgress is the one progress write. The write_seq guard is the same as the
-// pre-profiles statement (see handleProgress): a lower or equal write_seq never overwrites.
-// The caller holds s.progressMu and runs this inside writeWithSeq(…, "progress_seq", …),
-// which allocates writeSeq in the same transaction and publishes it only after commit.
-func (s *Server) upsertProgress(tx *sql.Tx, v viewer, itemID string, pos, dur int, updatedAt string, writeSeq int64) (sql.Result, error) {
+// ── Progress write ordering (FRD-001 FR-014, FR-019, FR-023) ────────────────────────────
+//
+// Progress is last-WATCH-wins: of two writes for one title and profile, the one the viewer
+// made later stands, whatever order they reach the NAS in. A device that was offline replays
+// its outbox long after the fact; ordering by arrival (write_seq alone, the rule until
+// TASK-960) let that older replay overwrite a newer position from another device and bring
+// back a title the viewer had marked watched or unwatched since.
+//
+// The order key is (watch time, write_seq):
+//   - watch time is the client's watchedAt, or the receive time when a client sends none
+//     (older apps, the DS Video WebAPI). It is stored as progress.updated_at, the same column
+//     the home rails sort on, so "newer" means the same thing everywhere.
+//   - No watch time counts as later than the server's own clock. A write cannot have
+//     happened after the NAS received it, so a claimed future time (a device clock set
+//     ahead) is stored as the receive time, and a stored row dated in the future (written
+//     under the old one-day allowance, or before the NAS clock was set back) compares as
+//     "now". A wrong clock on either side therefore degrades to arrival order, never to a
+//     row that refuses every later write.
+//   - write_seq breaks ties: RFC3339 is one-second granular, so two writes stamped in the
+//     same second (a position then "mark unwatched") keep arrival order.
+//
+// A refused write changes nothing, so its progress_seq allocation is rolled back and no
+// device is told to refetch (writeProgress).
+
+// progressClock is when one progress write happened, for ordering it.
+type progressClock struct {
+	at  string // RFC3339 UTC, stored as progress.updated_at; never later than now
+	now int64  // the server's clock at receipt, unix seconds: the cap on any watch time
+}
+
+// newProgressClock resolves a write's watch time from the client's claim (empty when the
+// client sent none) and the receive time.
+func newProgressClock(claimed string, received time.Time) progressClock {
+	received = received.UTC().Truncate(time.Second)
+	at := received
+	if claimed != "" {
+		if t, err := time.Parse(time.RFC3339, claimed); err != nil {
+			log.Printf("[progress] unparseable watchedAt %q — using receive time", claimed)
+		} else if t = t.UTC(); t.After(received) {
+			// Common and harmless by a second or two (clocks are never identical); worth a
+			// log line only when the device is clearly set wrong.
+			if t.Sub(received) > time.Minute {
+				log.Printf("[progress] watchedAt %q is ahead of the server clock — using receive time", claimed)
+			}
+		} else {
+			at = t
+		}
+	}
+	return progressClock{at: at.Format(time.RFC3339), now: received.Unix()}
+}
+
+// errProgressSuperseded rolls back a progress write the ordering rule refused, together with
+// its progress_seq allocation.
+var errProgressSuperseded = errors.New("progress write superseded by a later watch")
+
+// writeProgress is the one progress write, for every route (REST and DS Video WebAPI).
+// applied=false means the stored row was watched later and stands; that is not an error.
+//
+// It holds s.progressMu and runs the upsert inside writeWithSeq(…, "progress_seq", …), which
+// allocates the write_seq in the same transaction and publishes progress_seq only after
+// commit (TASK-919). Any failure answers err, and the caller's 500 makes the client's outbox
+// retry: a write is never silently dropped by a transient database error.
+func (s *Server) writeProgress(v viewer, itemID string, pos, dur int, clk progressClock) (applied bool, err error) {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	_, err = s.writeWithSeq(context.Background(), "progress_seq", func(tx *sql.Tx, writeSeq int64) error {
+		res, err := s.upsertProgress(tx, v, itemID, pos, dur, clk, writeSeq)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errProgressSuperseded
+		}
+		return nil
+	})
+	if errors.Is(err, errProgressSuperseded) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// upsertProgress is the one progress statement; call it through writeProgress. Its WHERE is
+// the ordering rule above, as a row-value comparison of (watch time, write_seq). unixepoch()
+// reads the stored text as a time rather than comparing strings, and an unreadable stored
+// value counts as the oldest possible, so it can never block a write.
+func (s *Server) upsertProgress(tx *sql.Tx, v viewer, itemID string, pos, dur int, clk progressClock, writeSeq int64) (sql.Result, error) {
 	return tx.Exec(
 		"INSERT INTO progress(item_id, user_id, profile_id, position_seconds, duration_seconds, updated_at, write_seq) VALUES(?,?,?,?,?,?,?) "+
 			"ON CONFLICT(item_id, profile_id) DO UPDATE SET "+
@@ -540,8 +629,9 @@ func (s *Server) upsertProgress(tx *sql.Tx, v viewer, itemID string, pos, dur in
 			"duration_seconds=excluded.duration_seconds, "+
 			"updated_at=excluded.updated_at, "+
 			"write_seq=excluded.write_seq "+
-			"WHERE excluded.write_seq > progress.write_seq",
-		itemID, v.UserID, v.ProfileID, pos, dur, updatedAt, writeSeq,
+			"WHERE (unixepoch(excluded.updated_at), excluded.write_seq) > "+
+			"(COALESCE(MIN(unixepoch(progress.updated_at), ?), 0), progress.write_seq)",
+		itemID, v.UserID, v.ProfileID, pos, dur, clk.at, writeSeq, clk.now,
 	)
 }
 
@@ -1011,11 +1101,11 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteProfileData(ctx context.Context, userID, profileID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqltx.Begin(ctx, s.db)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Close() // TASK-941: rolls back on every early return and panic; a failed Commit releases the write lock
 	for _, q := range []string{
 		`DELETE FROM progress WHERE profile_id = ?`,
 		`DELETE FROM watchlist WHERE profile_id = ?`,

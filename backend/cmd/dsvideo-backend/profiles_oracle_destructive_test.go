@@ -141,10 +141,8 @@ func TestOC2100_WatchlistDeleteAboveCeilingIsAllowedAndSticks(t *testing.T) {
 // is not re-sent.
 // Red if recordExtras stops bumping change_seq (the delta would be empty and devices keep the
 // old level), or ageLevel is computed from a stale value.
-// NOT covered: a ladder edit itself. The ladder is a compile-time table (internal/rating) and
-// ageLevel is derived at read time; no migration bumps change_seq when the ladder moves (see
-// the TASK-938 report). The golden TestAC00210_TiersMatchTheAPIDocTableExactly is the only
-// tripwire for that.
+// The ladder-edit half of OC-2135 is TestOC2135_LadderChangeReachesDeltaSyncWithNewAgeLevel
+// (rating_ladder_seq_test.go, TASK-939).
 func TestOC2135_CertificationChangeReachesDeltaSyncWithNewAgeLevel(t *testing.T) {
 	e := newQAEnv(t)
 	owner := e.setOwnerPin(qaAlice, "0420")

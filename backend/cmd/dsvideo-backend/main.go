@@ -35,6 +35,7 @@ import (
 
 	"dsvideo/backend/internal/metadata"
 	"dsvideo/backend/internal/normalize"
+	"dsvideo/backend/internal/sqltx"
 	// Aliased: main.go uses `rating` as a local name for the TMDb score in many handlers.
 	agerating "dsvideo/backend/internal/rating"
 	"dsvideo/backend/internal/transcode"
@@ -363,7 +364,10 @@ func main() {
 			// change_seq is renumbered by current order, so relative ordering (all that
 			// delta sync depends on) is preserved exactly. Clients whose stored cursor is
 			// now above item_seq will re-sync once, then stay quiet.
-			tx, txErr := db.Begin()
+			// sqltx, not db.Begin: a refused COMMIT must not return this connection to the
+			// pool still holding the write lock (TASK-941). Commit discards it; Close
+			// rolls back and releases on the failure branch.
+			tx, txErr := sqltx.Begin(context.Background(), db)
 			if txErr == nil {
 				_, e1 := tx.Exec(`
 					WITH renum AS (
@@ -387,7 +391,7 @@ func main() {
 					log.Printf("[sync] repaired runaway item_seq: %d -> %d across %d items (was %.0fx item count)",
 						itemSeq, itemCount, itemCount, float64(itemSeq)/float64(itemCount))
 				} else {
-					_ = tx.Rollback()
+					tx.Close()
 					log.Printf("[sync] runaway item_seq detected (%d for %d items) but repair failed", itemSeq, itemCount)
 				}
 			}
@@ -732,6 +736,11 @@ func main() {
 	// cancellation actually kills the child rather than just abandoning it.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
+
+	// FRD-002 FR-244: if this release changed the age-rating ladder, re-sequence every
+	// item whose level moved so devices re-sync it. Before the first scan, so it reads
+	// content_rating while nothing else is writing items. Logged, never fatal.
+	s.startupReconcileRatingLadder(bgCtx)
 
 	// Periodic background scanner — runs every 5 minutes regardless of client activity.
 	// This ensures the DB stays current when files are added/removed via the filesystem,
@@ -1663,6 +1672,15 @@ CREATE INDEX IF NOT EXISTS idx_item_keywords_lookup ON item_keywords(keyword_id,
 	// TASK-931: which DSM user owns each account key (account_identity.go). Additive:
 	// a new table, no existing row touched.
 	if err := migrateAccountClaims(db); err != nil {
+		return err
+	}
+
+	// TASK-932 SEC-7: PIN lockout state survives a restart (profiles_pin.go). TASK-939
+	// FR-244: the ladder this database last served (rating_ladder_seq.go). Both additive.
+	if err := migratePinLockouts(db); err != nil {
+		return err
+	}
+	if err := migrateRatingLadderState(db); err != nil {
 		return err
 	}
 
@@ -3403,7 +3421,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	// LIST counted, so the detail's episode count matches the header. This also gains the
 	// ESCAPE clause it was missing — a folder containing a literal '_' or '%' previously
 	// over-matched and pulled in a sibling show's episodes.
-	folders := s.resolveShowFolders(showName, tvRoot)
+	folders := s.resolveShowFolders(v, showName, tvRoot)
 	matchWhere, matchArgs := showFolderWhere(folders, tvRoot)
 	// A qualified id narrows to ONE show inside a folder that holds several.
 	if gw, ga := showGroupWhere(showName); gw != "" {
@@ -4767,10 +4785,22 @@ func (s *Server) updateCodecInfoRepath(itemID, newPath string, probe *transcode.
 
 	// Different-path conversion → re-key + migrate FK rows in one transaction.
 	if newID != itemID {
+		// Moved or pruned progress rows change what /progress/all returns, and devices refetch
+		// it only when progress_seq moves. So allocate a progress_seq in this same transaction
+		// (as upsertProgress and the orphan purge do, via writeWithSeq) and publish it only
+		// after commit. Without the bump, devices kept progress under the vanished old id
+		// (TASK-941).
+		var progressSeq int64
 		_, err := s.writeWithItemSeq(context.Background(), func(tx *sql.Tx, seq int64) error {
-			return normalize.RekeyAndMigrateTx(tx, itemID, newID, cleanPath, probe, seq)
+			progressSeq = 0
+			moved, err := normalize.RekeyAndMigrateTx(tx, itemID, newID, cleanPath, probe, seq)
+			if err != nil || moved == 0 {
+				return err
+			}
+			return allocSeqTx(context.Background(), tx, "progress_seq", &progressSeq)
 		})
 		if err == nil {
+			s.publishProgressSeq(progressSeq) // after commit; a 0 (no progress moved) is ignored
 			return
 		}
 		// Fall through to the path-only repoint so the 404 fix still lands even if
@@ -5308,7 +5338,7 @@ type progressRequest struct {
 	//
 	// It looked like the mechanism behind "mark as finished", but that is derived from
 	// position vs duration (PlaybackProgress.isFinished on the client, the rail SQL on the
-	// server), and write ordering now comes from progress.write_seq — so there is no
+	// server), and write ordering comes from watchedAt and write_seq — so there is no
 	// behaviour for this field to drive. Do not add logic keyed on it without deciding what
 	// happens when an older client omits it entirely.
 	State string `json:"state,omitempty"`
@@ -5322,6 +5352,10 @@ type progressRequest struct {
 	// 106 rows sharing one timestamp, 25 sharing another — and since both home rails sort
 	// on updated_at, they were ordering by WHEN THE QUEUE DRAINED rather than when anything
 	// was watched. Recently Watched showed a stale, arbitrary slice of one flush.
+	//
+	// It is also what orders writes (FRD-001 FR-014, FR-019): the later watch wins, so an
+	// older replay cannot overwrite a newer position. Capped at the receive time; see
+	// newProgressClock in profiles.go.
 	//
 	// Optional on purpose: an older client omits it and the server falls back to receive
 	// time, which is exactly the previous behaviour.
@@ -5544,24 +5578,30 @@ func (s *Server) seqPublisher(key string) func(int64) {
 // returned to the counter by the rollback, and nothing is published. Returns the committed
 // value. write must do all its database work through tx: SQLite admits one writer, so a
 // write through s.db from inside write waits on this transaction until busy_timeout.
+//
+// The transaction is a sqltx.Tx, not a bare *sql.Tx: a COMMIT that SQLite refuses but keeps
+// open (busy, a deferred constraint) used to go back to the pool still holding the write
+// lock, because database/sql's deferred Rollback is a no-op once Commit has been attempted.
+// Every later write then failed until that connection was closed (TASK-941). sqltx rolls
+// back on the same connection and discards it; the deferred Close covers errors and panics.
 func (s *Server) writeWithSeq(ctx context.Context, key string, write func(tx *sql.Tx, seq int64) error) (int64, error) {
 	publish := s.seqPublisher(key)
 	if publish == nil {
 		return 0, fmt.Errorf("writeWithSeq: unknown sync counter %q", key)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqltx.Begin(ctx, s.db)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer tx.Close()
 	var seq int64
-	if err := allocSeqTx(ctx, tx, key, &seq); err != nil {
+	if err := allocSeqTx(ctx, tx.Tx, key, &seq); err != nil {
 		return 0, err
 	}
 	if seq <= 0 {
 		return 0, fmt.Errorf("%s allocated %d", key, seq)
 	}
-	if err := write(tx, seq); err != nil {
+	if err := write(tx.Tx, seq); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -5799,6 +5839,66 @@ func resolveFolderShowNames(counts map[string]map[string]int) map[string]sql.Nul
 	return resolved
 }
 
+// episodeRef is one episode row as the show grouping sees it. A zero episodeRef (no path)
+// groups nowhere: callers whose rows mix films and episodes pass one for every non-episode.
+type episodeRef struct {
+	Path     string
+	ShowName sql.NullString
+}
+
+// showGroup is where one episode row files: its folder, the show name its FOLDER resolved
+// to (not the row's own show_name) and the group key. Folder "" means the row could not be
+// placed in a show; Key is then "" too, and the caller decides what that row means (the
+// show listings drop it, the title rails list it as a title of its own).
+type showGroup struct {
+	Folder   string
+	ShowName sql.NullString
+	Key      string
+}
+
+// groupEpisodesByShow is THE assembly of the grouping rule, returning one showGroup per
+// ref, in order: showFolderFromPath per row, the non-empty show names counted per folder,
+// resolveFolderShowNames once, then showGroupKey on the folder's name.
+//
+// It was copy-pasted into five handlers (/tv/shows, the detail expansion, the DS Video plane,
+// /just-added and collections), and copies drift: the detail expansion grouped every row
+// while the list grouped visible ones, so a kids' list and its show detail disagreed on the
+// episode count (TASK-924). One home, so a change to the procedure lands everywhere at once.
+//
+// The majority is decided over exactly the refs passed in, so the caller's row set IS the
+// policy: the ceiling goes in the caller's WHERE before this runs (FR-250), and a rail that
+// over-fetches a window groups within that window. Order-independent: the same refs in any
+// order give the same answer per row.
+func groupEpisodesByShow(refs []episodeRef, tvRoot string) []showGroup {
+	out := make([]showGroup, len(refs))
+	nameCounts := map[string]map[string]int{}
+	for i, ref := range refs {
+		if ref.Path == "" {
+			continue
+		}
+		folder := showFolderFromPath(ref.Path, tvRoot)
+		if folder == "" {
+			continue
+		}
+		out[i].Folder = folder
+		if nameCounts[folder] == nil {
+			nameCounts[folder] = map[string]int{}
+		}
+		if ref.ShowName.Valid && ref.ShowName.String != "" {
+			nameCounts[folder][ref.ShowName.String]++
+		}
+	}
+	folderNames := resolveFolderShowNames(nameCounts)
+	for i := range out {
+		if out[i].Folder == "" {
+			continue
+		}
+		out[i].ShowName = folderNames[out[i].Folder]
+		out[i].Key = showGroupKey(out[i].Folder, out[i].ShowName)
+	}
+	return out
+}
+
 // showGroupFolders groups episode (path, show_name) pairs into shows and returns, for each
 // FOLDER name, every folder that belongs to the same show. A single-folder show maps to a
 // one-element slice containing only itself.
@@ -5817,29 +5917,21 @@ func showGroupFolders(paths []string, showNames []sql.NullString, tvRoot string)
 	// part-matched: whichever episode happened to be scanned first decided the folder's
 	// group here, while the list decided it by majority. Two answers to one question is how
 	// the header said "24 episodes" and the episode list showed 12.
-	nameCounts := map[string]map[string]int{}
+	refs := make([]episodeRef, len(paths))
 	for i, path := range paths {
-		folderName := showFolderFromPath(path, tvRoot)
-		if folderName == "" {
-			continue
-		}
-		if nameCounts[folderName] == nil {
-			nameCounts[folderName] = map[string]int{}
-		}
-		if i < len(showNames) && showNames[i].Valid && showNames[i].String != "" {
-			nameCounts[folderName][showNames[i].String]++
+		refs[i].Path = path
+		if i < len(showNames) {
+			refs[i].ShowName = showNames[i]
 		}
 	}
-	folderNames := resolveFolderShowNames(nameCounts)
 
 	groupFolders := map[string][]string{} // group key → folders, in first-seen order
 	folderGroup := map[string]string{}    // folder → group key
-	for _, path := range paths {
-		folderName := showFolderFromPath(path, tvRoot)
+	for _, g := range groupEpisodesByShow(refs, tvRoot) {
+		folderName, key := g.Folder, g.Key
 		if folderName == "" {
 			continue
 		}
-		key := showGroupKey(folderName, folderNames[folderName])
 		if _, seen := folderGroup[folderName]; !seen {
 			folderGroup[folderName] = key
 			groupFolders[key] = append(groupFolders[key], folderName)
@@ -5876,13 +5968,19 @@ func splitShowID(showID string) (folder, groupKey string) {
 // the list counted. Returns a one-element slice containing showID itself when the library
 // has no sibling folder — the overwhelmingly common case — which is what keeps the
 // single-folder behaviour byte-identical.
-func (s *Server) resolveShowFolders(showID, tvRoot string) []string {
+//
+// It groups only the rows v may see, because that is what the list grouped (FR-250: the
+// ceiling is applied before grouping). A folder's show name is a majority vote, and hiding
+// the majority changes the vote; grouping every row here made a kids' list say 3 episodes
+// while the show's episode list returned 1 (TASK-924). An unrestricted viewer adds no clause.
+func (s *Server) resolveShowFolders(v viewer, showID, tvRoot string) []string {
 	// A qualified id ("Daredevil::daredevil: born again") names a folder that holds more
 	// than one show. Only the folder half selects paths; the group half narrows WITHIN the
 	// folder and is applied separately — see showGroupWhere.
 	folder, _ := splitShowID(showID)
 
-	rows, err := s.db.Query(`SELECT path, show_name FROM items WHERE library_id = 'lib_tv'`)
+	visFrag, visArgs := v.andVisibleFrag("content_rating")
+	rows, err := s.db.Query(`SELECT path, show_name FROM items WHERE library_id = 'lib_tv'`+visFrag, visArgs...)
 	if err != nil {
 		return []string{folder}
 	}
@@ -6024,81 +6122,26 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	// Prefer the client's watch time over receive time — see progressRequest.WatchedAt.
+	// Ordered by when the viewer was at this position, not by arrival: an offline device's
+	// replayed outbox must not overwrite a position watched later elsewhere, nor undo a later
+	// Mark Watched / Unwatched (FRD-001 FR-014, FR-019). The rule and the clock cap live with
+	// the statement, in profiles.go (newProgressClock, writeProgress, upsertProgress).
 	//
-	// Validated, not trusted: the timestamp comes from a client clock, and a wrong one
-	// poisons the rails it is meant to fix. A value that will not parse, or that sits more
-	// than a day in the future (clock skew, a device set wrong), falls back to receive time.
-	// Past values are accepted without limit — replaying an old backlog is the entire point.
-	watchedAt := now
-	if req.WatchedAt != "" {
-		if t, perr := time.Parse(time.RFC3339, req.WatchedAt); perr != nil {
-			log.Printf("[progress] unparseable watchedAt %q — using receive time", req.WatchedAt)
-		} else if t.After(time.Now().UTC().Add(24 * time.Hour)) {
-			log.Printf("[progress] watchedAt %q is more than a day ahead — using receive time", req.WatchedAt)
-		} else {
-			watchedAt = t.UTC().Format(time.RFC3339)
-		}
-	}
-	s.progressMu.Lock()
-	// The upsert is conditional: a write is applied only if it is NEWER than what we hold,
-	// or if it meaningfully moves the position within the same title.
-	//
-	// It used to be unconditional (`DO UPDATE SET position_seconds=excluded...` with no
-	// WHERE), which made the server a pure last-write-wins sink and let any client regress
-	// another device's position. That is not hypothetical: a replayed backlog from a device
-	// that had been offline would overwrite a newer position watched elsewhere, and the
-	// client's own outbox comment asserted a "last-writer-wins comparison" here that had
-	// never actually existed. Verified against this server: POST 7500 then POST 6000 left
-	// the row at 6000, destroying 25 minutes of progress.
-	//
-	// The rule:
-	//   - excluded.updated_at > progress.updated_at  → a genuinely newer write, take it.
-	//   - ordering is by write_seq, a monotone per-write ordinal — NOT by updated_at.
-	//
-	// The previous rule broke ties on updated_at and, within the same second, kept the LARGER
-	// position. That silently discarded legitimate position-REDUCING writes: an explicit
-	// "mark unwatched" (position 0) or a rewind landing in the same second as a prior write
-	// disappeared, while the handler still returned {"ok":true}. Reproduced live: POST 4000
-	// then POST 0 in the same second left the row at 4000. RFC3339 is 1-second granular, so no
-	// timestamp comparison can order writes inside a second — hence a real sequence number.
-	// A deliberate restart-from-zero is now honoured, because it always carries a higher seq.
-	// duration is refreshed alongside so a re-probe that corrects runtime still lands.
-	// Must be incrementSeqErr: a flattened 0 here loses the upsert's
-	// `WHERE excluded.write_seq > progress.write_seq` race against every existing row,
-	// so a transient DB error would silently discard the write while still answering
-	// {"ok":true}. 500 instead, and let the client's outbox retry.
-	//
-	// The write_seq is a progress_seq value, allocated by writeWithSeq INSIDE the upsert's
-	// transaction and published to the heartbeat only after it commits (TASK-919). It was
-	// allocated in autocommit and published at allocation, before the upsert ran: a device
-	// whose heartbeat landed in between fetched the old position, stored the new number as
-	// its cursor, and kept the stale position until an unrelated progress write. The
-	// autocommit allocation also let another writer commit and publish a higher number
-	// first. Allocation or upsert failure answers 500 and the client's outbox retries.
-	var rowsAffected int64
-	_, err := s.writeWithSeq(context.Background(), "progress_seq", func(tx *sql.Tx, writeSeq int64) error {
-		// upsertProgress is the one home for this statement; its WHERE clause is the
-		// write_seq guard described above.
-		res, err := s.upsertProgress(tx, v, itemID, req.PositionSeconds, req.DurationSeconds, watchedAt, writeSeq)
-		if err != nil {
-			return err
-		}
-		rowsAffected, _ = res.RowsAffected()
-		return nil
-	})
-	s.progressMu.Unlock()
+	// History worth keeping: this upsert was once unconditional (POST 7500 then POST 6000 left
+	// 6000), then ordered by updated_at keeping the larger position within a second (which
+	// discarded a same-second "mark unwatched"), then by arrival write_seq alone (which let a
+	// late replay win, TASK-960). The write_seq stays as the same-second tiebreak.
+	applied, err := s.writeProgress(v, itemID, req.PositionSeconds, req.DurationSeconds,
+		newProgressClock(req.WatchedAt, time.Now()))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	// Report whether the row actually changed. A superseded write (a lower write_seq losing to
-	// a concurrent newer one) is not an error — but answering a flat {"ok":true} for a write
-	// the server DISCARDED is how "Mark Unwatched" appeared to work while changing nothing.
-	// Clients can now distinguish "stored" from "ignored as stale" instead of trusting 200.
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": rowsAffected > 0})
+	// Report whether the row actually changed. A superseded write (the stored row was watched
+	// later) is not an error, but answering a flat {"ok":true} for a write the server DISCARDED
+	// is how "Mark Unwatched" appeared to work while changing nothing. applied:false tells the
+	// client its copy is stale; it refetches progress to pick up the row that stands.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": applied})
 }
 
 // -------------------------
@@ -7888,10 +7931,13 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		// Highest change_seq allocated in this batch. Published to the in-memory cache
 		// only after the transaction commits — see the CAS block below.
 		var maxSeq int64
-		tx, err := s.db.BeginTx(ctx, nil)
+		// sqltx, not a bare BeginTx: a refused COMMIT must not leave this connection
+		// holding the write lock (TASK-941). Close covers early returns and panics.
+		tx, err := sqltx.Begin(ctx, s.db)
 		if err != nil {
 			return fmt.Errorf("scan: begin tx: %w", err)
 		}
+		defer tx.Close()
 		for _, row := range batch {
 			// Allocate a change_seq ONLY when this scan actually changes the row.
 			// Previously every scanned file burned a sequence number and rewrote
@@ -7929,8 +7975,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				metaPending = append(metaPending, metaPendingItem{id: row.id, parsed: row.parsed, typ: row.typ})
 			}
 		}
-		if err := tx.Commit(); err != nil {
-			_ = tx.Rollback()
+		if err := tx.Commit(); err != nil { // sqltx rolls back and drops the connection on failure
 			return fmt.Errorf("scan: commit: %w", err)
 		}
 		// Publish to the in-memory cache ONLY after the transaction is durable.
@@ -8232,13 +8277,14 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		}
 		if len(staleIDs) > 0 {
 			log.Printf("scan: removing %d stale items from library %s", len(staleIDs), libraryID)
-			staleTx, err := s.db.BeginTx(ctx, nil)
+			staleTx, err := sqltx.Begin(ctx, s.db) // TASK-941: a refused COMMIT releases the write lock
 			var maxPurgeSeq int64
 			if err == nil {
+				defer staleTx.Close()
 				for _, sid := range staleIDs {
 					// Assign a real change_seq so clients can detect the deletion via delta sync.
 					var seq int64
-					seqErr := allocItemSeqTx(ctx, staleTx, &seq)
+					seqErr := allocItemSeqTx(ctx, staleTx.Tx, &seq)
 					// A tombstone written with change_seq = 0 is INVISIBLE to delta sync:
 					// handleSyncDeleted filters `WHERE change_seq > ?` and every client's
 					// cursor is above 0 within moments of first use. The row would be gone
@@ -8404,14 +8450,14 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	// /sync before this UPDATE committed: a device syncing in that window moved its cursor
 	// past a sequence whose row still carried its old change_seq, and never fetched the new
 	// metadata (TASK-919 shift 1 finding).
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqltx.Begin(ctx, s.db)
 	if err != nil {
 		log.Printf("Failed to begin metadata tx for %s: %v", itemID, err)
 		return
 	}
-	defer tx.Rollback()
+	defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
 	var metaSeq int64
-	if seqErr := allocItemSeqTx(ctx, tx, &metaSeq); seqErr != nil || metaSeq <= 0 {
+	if seqErr := allocItemSeqTx(ctx, tx.Tx, &metaSeq); seqErr != nil || metaSeq <= 0 {
 		log.Printf("metadata: could not allocate change_seq for %s (%v) — skipping, next scan retries", itemID, seqErr)
 		return
 	}
@@ -8448,7 +8494,7 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 	if err == nil {
 		// Same transaction as the row: a row stamped tmdb_extras_checked_at must never be
 		// left without the tags that stamp says were fetched.
-		err = replaceItemTags(ctx, tx, itemID, metadata.Extras{
+		err = replaceItemTags(ctx, tx.Tx, itemID, metadata.Extras{
 			Companies: meta.Companies, Networks: meta.Networks, Keywords: meta.Keywords,
 		})
 	}
@@ -8674,13 +8720,13 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 		cast := strings.Join(castNames, ",")
 
-		tx, txErr := s.db.BeginTx(ctx, nil)
+		tx, txErr := sqltx.Begin(ctx, s.db)
 		if txErr != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
-		defer tx.Rollback()
-		seq, ok := allocItemFixSeq(ctx, w, tx, id)
+		defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
+		seq, ok := allocItemFixSeq(ctx, w, tx.Tx, id)
 		if !ok {
 			return
 		}
@@ -8709,7 +8755,7 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		if !itemFixApplied(w, res, err) {
 			return
 		}
-		if err := replaceItemTags(ctx, tx, id, details.Extras()); err != nil {
+		if err := replaceItemTags(ctx, tx.Tx, id, details.Extras()); err != nil {
 			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
@@ -8751,13 +8797,13 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 		cast := strings.Join(castNames, ",")
 
-		tx, txErr := s.db.BeginTx(ctx, nil)
+		tx, txErr := sqltx.Begin(ctx, s.db)
 		if txErr != nil {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
-		defer tx.Rollback()
-		seq, ok := allocItemFixSeq(ctx, w, tx, id)
+		defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
+		seq, ok := allocItemFixSeq(ctx, w, tx.Tx, id)
 		if !ok {
 			return
 		}
@@ -8790,7 +8836,7 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		if !itemFixApplied(w, res, err) {
 			return
 		}
-		if err := replaceItemTags(ctx, tx, id, details.Extras()); err != nil {
+		if err := replaceItemTags(ctx, tx.Tx, id, details.Extras()); err != nil {
 			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
@@ -8974,12 +9020,12 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 
 	// Update all episodes in a transaction, bumping change_seq on each row so
 	// the delta sync delivers the new metadata (and new image cache-buster) to clients.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := sqltx.Begin(ctx, s.db)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db_error")
 		return
 	}
-	defer tx.Rollback()
+	defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
 
 	// Collect affected item IDs first.
 	idRows, err := tx.QueryContext(ctx, `SELECT id FROM items WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`, folderPrefix+"%")
@@ -9005,7 +9051,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	var maxShowSeq int64
 	for _, id := range affectedIDs {
 		var seq int64
-		if seqErr := allocItemSeqTx(ctx, tx, &seq); seqErr != nil || seq <= 0 {
+		if seqErr := allocItemSeqTx(ctx, tx.Tx, &seq); seqErr != nil || seq <= 0 {
 			// change_seq = 0 is below every client's cursor, so the row would be invisible
 			// to delta sync forever. Fail the request instead of silently orphaning it.
 			log.Printf("tmdb-fix: could not allocate change_seq for %s (%v)", id, seqErr)
@@ -9038,7 +9084,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
 		}
-		if err := replaceItemTags(ctx, tx, id, showExtras); err != nil {
+		if err := replaceItemTags(ctx, tx.Tx, id, showExtras); err != nil {
 			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
 			writeErr(w, http.StatusInternalServerError, "db_error")
 			return
@@ -9395,10 +9441,9 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		addedAt    sql.NullString
 		changeSeq  sql.NullInt64
 		rating     sql.NullString
-		folderName string
 	}
 	var eps []epRow
-	nameCounts := map[string]map[string]int{}
+	var refs []episodeRef
 
 	for rows.Next() {
 		var e epRow
@@ -9406,39 +9451,28 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			&e.seasonNum, &e.addedAt, &e.changeSeq, &e.rating); err != nil {
 			continue
 		}
-		e.folderName = showFolderFromPath(e.path, tvRoot)
-		if e.folderName == "" {
-			continue
-		}
-		if e.showName.Valid && e.showName.String != "" {
-			if nameCounts[e.folderName] == nil {
-				nameCounts[e.folderName] = map[string]int{}
-			}
-			nameCounts[e.folderName][e.showName.String]++
-		} else if nameCounts[e.folderName] == nil {
-			// Register the folder even with no matches, so it resolves to the folder
-			// fallback rather than being absent from the map.
-			nameCounts[e.folderName] = map[string]int{}
-		}
 		eps = append(eps, e)
+		refs = append(refs, episodeRef{Path: e.path, ShowName: e.showName})
 	}
 	// Drain before the second pass: this cursor holds a pool connection, and anything
 	// querying inside it deadlocks under load (the defect fixed in 870636b, three times).
 	rows.Close()
 
-	folderNames := resolveFolderShowNames(nameCounts)
+	groups := groupEpisodesByShow(refs, tvRoot)
 
-	for _, e := range eps {
-		id, path := e.id, e.path
+	for i, e := range eps {
+		id := e.id
 		year, posterPath := e.year, e.posterPath
 		seasonNum, addedAt, changeSeq := e.seasonNum, e.addedAt, e.changeSeq
-		folderName := e.folderName
-		_ = path
+		folderName := groups[i].Folder
+		if folderName == "" {
+			continue // no show to file it under
+		}
 
 		// The FOLDER's resolved name, not this episode's. An unmatched episode in a
 		// matched folder groups with its siblings instead of forming a second show.
-		showName := folderNames[folderName]
-		mapKey := showGroupKey(folderName, showName)
+		showName := groups[i].ShowName
+		mapKey := groups[i].Key
 		folderToGroup[folderName] = mapKey
 
 		info, exists := showMap[mapKey]
@@ -9665,8 +9699,13 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 
 	// EVERY folder in the group, not just the one named by showID. A show split across
 	// differently-named folders is one show in the list; resolving a single folder here made
-	// the detail disagree with the header it came from.
-	folders := s.resolveShowFolders(showID, tvRoot)
+	// the detail disagree with the header it came from. Grouped over the rows the viewer
+	// can see, as the list was (FR-250), so a restricted header and detail agree.
+	v, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	folders := s.resolveShowFolders(v, showID, tvRoot)
 	folderWhere, folderArgs := showFolderWhere(folders, tvRoot)
 	if gw, ga := showGroupWhere(showID); gw != "" {
 		folderWhere += gw
@@ -9694,10 +9733,6 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 		return out, nil
 	}
 
-	v, ok := s.requestViewer(w, r)
-	if !ok {
-		return
-	}
 	// FR-250: a show above the ceiling is refused; otherwise only visible episodes count.
 	visFrag, visArgs, ok := s.gateShow(w, r, v, folderWhere+" AND library_id = 'lib_tv'", folderArgs)
 	if !ok {
@@ -9749,8 +9784,13 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 
 	// EVERY folder in the group — see resolveShowFolders. Matching the single folder named
-	// by showID made this list show 12 episodes under a header that said 24.
-	folders := s.resolveShowFolders(showID, tvRoot)
+	// by showID made this list show 12 episodes under a header that said 24. Grouped over the
+	// rows the viewer can see, as the list was (FR-250).
+	ceilV, ok := s.requestViewer(w, r)
+	if !ok {
+		return
+	}
+	folders := s.resolveShowFolders(ceilV, showID, tvRoot)
 	folderWhere, folderArgs := showFolderWhere(folders, tvRoot)
 	if gw, ga := showGroupWhere(showID); gw != "" {
 		folderWhere += gw
@@ -9770,10 +9810,6 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// FR-250: a show above the ceiling is refused; otherwise only visible episodes list.
-	ceilV, ok := s.requestViewer(w, r)
-	if !ok {
-		return
-	}
 	visFrag, visArgs, ok := s.gateShow(w, r, ceilV, baseWhere, baseArgs)
 	if !ok {
 		return

@@ -1192,11 +1192,13 @@ struct ItemDetailView: View {
         posterURL = appState.api.imageURL(id: posterId, width: 400)
       }
 
-      // FR-262: capture the title's server-sent level with the download, so the Downloads
-      // tab can gate it with no server in reach. From the local catalog: ItemDetail does not
-      // carry ageLevel. nil (not synced yet) is stored as unknown, which fails closed on
-      // restricted profiles until DownloadManager.refreshAgeLevels resolves it.
-      let ageLevel = await LocalStore.shared.ageLevel(forItemID: itemID)
+      // FR-262: capture the title's level with the download, so the Downloads tab can gate
+      // it with no server in reach. The server's level from this screen's detail response
+      // wins; the local catalog is the fallback; nil (neither knows) is stored as unknown,
+      // which fails closed on restricted profiles until DownloadManager.refreshAgeLevels
+      // resolves it. DownloadManager.resolveAgeLevel owns that choice.
+      let ageLevel = await downloadManager.resolveAgeLevel(
+        itemId: itemID, serverLevel: detail?.ageLevel)
       downloadManager.startDownload(
         itemId: itemID,
         title: shownTitle,

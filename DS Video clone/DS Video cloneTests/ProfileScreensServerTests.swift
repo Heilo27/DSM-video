@@ -109,51 +109,22 @@ struct ProfileScreensServerTests {
     Profile(id: id, name: name, avatar: "cat", maxAgeLevel: level, hasPin: hasPin, isOwner: owner)
   }
 
-  /// Runs `body` with a signed-in AppState pointed at the stub, then puts back every shared
-  /// store it touched (active profile, cached list, LocalStore scope, address, Remember Me).
+  /// Runs `body` with a signed-in AppState pointed at the stub, over its own profile store and
+  /// catalog (TASK-925): nothing in the app group or the app's database is touched.
   ///
-  /// Holds ProfileStateGate for the whole run: the stub's routes, ActiveProfileStore.shared and
-  /// LocalStore.shared's scope are process-wide, and ProfileScopeFixTests uses them too.
-  /// Internal (not private) so that suite can borrow it.
+  /// Holds ProfileStateGate for the whole run: the stub's route table and request log are
+  /// process-wide, and the other stub-backed suites use them too. Internal (not private) so
+  /// ProfileScopeFixTests can borrow it.
   func withAccount(
     cached: [Profile] = [], active: Profile? = nil,
     routes: [String: ProfileStubServer.Reply],
     _ body: (AppState) async -> Void
   ) async {
     await ProfileStateGate.shared.run {
-      await runAccount(cached: cached, active: active, routes: routes, body)
+      ProfileStubServer.reset(routes)
+      await withIsolatedAppState(cached: cached, active: active,
+                                 stubHost: ProfileStubServer.host, body)
     }
-  }
-
-  private func runAccount(
-    cached: [Profile], active: Profile?,
-    routes: [String: ProfileStubServer.Reply],
-    _ body: (AppState) async -> Void
-  ) async {
-    let store = ActiveProfileStore.shared
-    let savedActiveID = store.activeProfileID
-    let savedCache = store.cachedProfiles
-    let savedLevel = store.unrestrictedLevel
-    let savedScope = await LocalStore.shared.activeScope
-    let savedActiveProfile = savedCache.first { $0.id == savedActiveID }
-    let state = AppState()
-    let savedBase = state.baseURL, savedHTTPS = state.useHTTPS, savedRemember = state.rememberMe
-
-    ProfileStubServer.reset(routes)
-    store.setCachedProfiles(cached)
-    store.setActive(active)
-    state.rememberMe = false            // never write the stub token to the Keychain
-    state.useHTTPS = false
-    state.baseURL = ProfileStubServer.host
-    state.sessionToken = "stub-token"
-    await body(state)
-
-    store.setActive(savedActiveProfile)
-    store.setCachedProfiles(savedCache, unrestrictedLevel: savedLevel)
-    await LocalStore.shared.setActiveProfile(savedScope)
-    state.baseURL = savedBase
-    state.useHTTPS = savedHTTPS
-    state.rememberMe = savedRemember
   }
 
   private func failureMessage(_ result: Result<Void, Error>) -> String? {
@@ -411,11 +382,11 @@ struct ProfileScreensServerTests {
     ) { state in
       #expect(!state.needsProfilePicker, "precondition: Leo is remembered, picker closed")
       await state.refreshProfiles()
-      #expect(ActiveProfileStore.shared.activeProfileID == nil)
+      #expect(state.profileStore.activeProfileID == nil)
       #expect(state.needsProfilePicker)
       #expect(state.profiles.map(\.id) == ["pf_ryan", "pf_maya"])
       // The fresh list is Ryan (4) and Maya (2): the unchosen ceiling is the lowest, 2.
-      let scope = await LocalStore.shared.activeScope
+      let scope = await state.localStore.activeScope
       #expect(scope.isUnchosen, "no stale kid scope left behind, and not legacy")
       #expect(scope.isLegacy == false)
       #expect(scope.headerValue == nil)
@@ -433,7 +404,7 @@ struct ProfileScreensServerTests {
       routes: ["GET /api/v1/profiles": list([ryan, maya])]
     ) { state in
       await state.refreshProfiles()
-      #expect(ActiveProfileStore.shared.activeProfileID == "pf_maya")
+      #expect(state.profileStore.activeProfileID == "pf_maya")
       #expect(!state.needsProfilePicker)
     }
   }
@@ -442,7 +413,7 @@ struct ProfileScreensServerTests {
   @Test func multiProfileAccountWithNoActiveProfileShowsThePicker() async {
     await withAccount(routes: ["GET /api/v1/profiles": list([ryan, maya])]) { state in
       await state.refreshProfiles()
-      #expect(ActiveProfileStore.shared.activeProfileID == nil)
+      #expect(state.profileStore.activeProfileID == nil)
       #expect(state.needsProfilePicker)
     }
   }
@@ -454,8 +425,8 @@ struct ProfileScreensServerTests {
       "GET /api/v1/profiles": list([ryan], max: 4)
     ]) { state in
       await state.refreshProfiles()
-      #expect(ActiveProfileStore.shared.activeProfileID == "pf_ryan")
-      #expect(await LocalStore.shared.activeScope.id == "pf_ryan")
+      #expect(state.profileStore.activeProfileID == "pf_ryan")
+      #expect(await state.localStore.activeScope.id == "pf_ryan")
       #expect(!state.needsProfilePicker)
     }
   }
@@ -470,7 +441,7 @@ struct ProfileScreensServerTests {
       routes: ["GET /api/v1/profiles": list([ryan])]
     ) { state in
       await state.refreshProfiles()
-      #expect(ActiveProfileStore.shared.activeProfileID == "pf_ryan")
+      #expect(state.profileStore.activeProfileID == "pf_ryan")
       #expect(!state.needsProfilePicker)
     }
   }

@@ -1,11 +1,14 @@
 package normalize
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"testing"
 
+	"dsvideo/backend/internal/sqltx"
 	"dsvideo/backend/internal/transcode"
 
 	_ "modernc.org/sqlite"
@@ -209,5 +212,64 @@ func TestRekeyAndMigrate_RejectsSameID(t *testing.T) {
 	if err := RekeyAndMigrate(db, id, id, "/v/Movies/Same.mp4",
 		&transcode.ProbeResult{Container: "mp4"}, 1); err == nil {
 		t.Error("expected error when newID == oldID")
+	}
+}
+
+// rekeyTx runs RekeyAndMigrateTx in its own committed transaction and returns its
+// progressRows, the count the server uses to decide whether to bump progress_seq.
+func rekeyTx(t *testing.T, db *sql.DB, oldID, newID, path string) int64 {
+	t.Helper()
+	var rows int64
+	err := sqltx.Run(context.Background(), db, func(tx *sql.Tx) error {
+		var err error
+		rows, err = RekeyAndMigrateTx(tx, oldID, newID, path, &transcode.ProbeResult{Container: "mp4"}, 5)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("RekeyAndMigrateTx: %v", err)
+	}
+	return rows
+}
+
+// TASK-941: RekeyAndMigrateTx reports every progress row it changed, moved or pruned, and
+// only progress rows, so the caller bumps progress_seq exactly when /progress/all changed.
+func TestRekeyAndMigrateTx_ReportsProgressRowsChanged(t *testing.T) {
+	cases := []struct {
+		name string
+		seed []string // statements; %[1]s = oldID, %[2]s = newID
+		want int64
+	}{
+		{"two profiles' rows moved", []string{
+			`INSERT INTO progress (item_id, user_id, position_seconds) VALUES ('%[1]s', 'u1', 10), ('%[1]s', 'u2', 20)`,
+			`INSERT INTO watchlist (item_id, user_id) VALUES ('%[1]s', 'u1')`,
+		}, 2},
+		{"colliding row pruned, other moved", []string{
+			`INSERT INTO progress (item_id, user_id, position_seconds) VALUES ('%[1]s', 'u1', 10), ('%[2]s', 'u1', 20), ('%[1]s', 'u2', 30)`,
+		}, 2},
+		{"no progress, only other references", []string{
+			`INSERT INTO watchlist (item_id, user_id) VALUES ('%[1]s', 'u1')`,
+			`INSERT INTO playlist_items (playlist_id, item_id, position) VALUES ('p', '%[1]s', 0)`,
+		}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newRekeyTestDB(t)
+			mkv, mp4 := "/v/Movies/R.mkv", "/v/Movies/R.mp4"
+			oldID, newID := itemIDFromPath(mkv), itemIDFromPath(mp4)
+			if _, err := db.Exec(`INSERT INTO items (id, path, change_seq) VALUES (?, ?, 1)`, oldID, mkv); err != nil {
+				t.Fatalf("seed item: %v", err)
+			}
+			for _, stmt := range tc.seed {
+				if _, err := db.Exec(fmt.Sprintf(stmt, oldID, newID)); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+			}
+			if got := rekeyTx(t, db, oldID, newID, mp4); got != tc.want {
+				t.Errorf("progressRows = %d, want %d", got, tc.want)
+			}
+			if n := countRows(t, db, `SELECT COUNT(*) FROM progress WHERE item_id = ?`, oldID); n != 0 {
+				t.Errorf("%d progress rows left on the old id", n)
+			}
+		})
 	}
 }

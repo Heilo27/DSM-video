@@ -1453,19 +1453,24 @@ struct SettingsView: View {
     @Bindable var appState = appState
 
     let form = Form {
-      // FR-260: "Switch profile" is always available once the account has profiles to
-      // switch between. A single-profile account sees nothing new (FR-205).
-      if appState.profiles.count > 1 {
+      // FR-260: "Switch profile" is available once the account has profiles to switch
+      // between. "Manage Profiles" is always here, even for a single-profile account, which has
+      // no picker and so no other way to add a second profile (FR-205, FR-211). Home stays
+      // unchanged for that account: nothing new outside Settings.
+      if appState.profiles.count > 1 || appState.canManageProfiles {
         Section("Profile") {
-          if let profile = appState.activeProfile {
-            LabeledContent("Watching as", value: profile.name)
+          if appState.profiles.count > 1 {
+            if let profile = appState.activeProfile {
+              LabeledContent("Watching as", value: profile.name)
+            }
+            Button {
+              appState.notePickerTrigger(.switchRequested)
+            } label: {
+              Label("Switch Profile", systemImage: "person.2")
+            }
+            .accessibilityIdentifier("settings.switchProfile")
           }
-          Button {
-            appState.notePickerTrigger(.switchRequested)
-          } label: {
-            Label("Switch Profile", systemImage: "person.2")
-          }
-          .accessibilityIdentifier("settings.switchProfile")
+          ManageProfilesSettingsRow()
         }
       }
 

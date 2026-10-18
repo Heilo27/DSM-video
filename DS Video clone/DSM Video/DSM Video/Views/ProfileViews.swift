@@ -1096,6 +1096,35 @@ struct ActiveProfileBadge: View {
   }
 }
 
+// MARK: - Settings entry (FR-205, FR-211, FR-266)
+
+/// The Settings row that opens profile management. Present whenever the account's owner is
+/// known, including a single-profile account (`AppState.canManageProfiles`): that account has
+/// no picker, so this is its only way to "Add Profile". The owner's PIN is asked first (or set
+/// first, FR-212) by `ProfileManagementView` itself. Shared by iOS and tvOS Settings.
+struct ManageProfilesSettingsRow: View {
+  @Environment(AppState.self) private var appState
+  @State private var management: ManagementEntry?
+  @FocusState private var focused: Bool
+
+  var body: some View {
+    if appState.canManageProfiles {
+      Button {
+        management = .manage
+      } label: {
+        Label("Manage Profiles", systemImage: "person.crop.circle.badge.plus")
+      }
+      .focused($focused)
+      .accessibilityHint("Add, edit or remove profiles. Requires the owner's PIN")
+      .accessibilityIdentifier("settings.manageProfiles")
+      .fullScreenCover(item: $management) { entry in
+        ProfileManagementView(startWithAdd: entry == .add) { management = nil }
+          .environment(appState)
+      }
+    }
+  }
+}
+
 // MARK: - Restricted empty state (FR-265, AC-002-47)
 
 /// Shown instead of "no videos" when the active profile has an age limit. Names the level so

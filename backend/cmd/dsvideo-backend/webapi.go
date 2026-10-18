@@ -1764,17 +1764,16 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 	// duplicate ids that made SwiftUI blank rows); this plane had the identical shape and no
 	// report of its own, so it is fixed by the sweep rather than by a second bug report.
 	type epRow struct {
-		id, path     string
-		showName     sql.NullString
-		year         sql.NullInt64
-		ratingVal    sql.NullFloat64
-		posterPath   sql.NullString
-		overview     sql.NullString
-		genres       sql.NullString
-		folderName   string
+		id, path   string
+		showName   sql.NullString
+		year       sql.NullInt64
+		ratingVal  sql.NullFloat64
+		posterPath sql.NullString
+		overview   sql.NullString
+		genres     sql.NullString
 	}
 	var eps []epRow
-	nameCounts := map[string]map[string]int{}
+	var refs []episodeRef
 
 	for rows.Next() {
 		var e epRow
@@ -1782,36 +1781,29 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 		if err := rows.Scan(&e.id, &e.path, &e.showName, &e.year, &e.ratingVal, &e.posterPath, &backdropPath, &e.overview, &e.genres); err != nil {
 			continue
 		}
-		e.folderName = showFolderFromPath(e.path, tvRoot)
-		if e.folderName == "" {
-			continue
-		}
-		if nameCounts[e.folderName] == nil {
-			nameCounts[e.folderName] = map[string]int{}
-		}
-		if e.showName.Valid && e.showName.String != "" {
-			nameCounts[e.folderName][e.showName.String]++
-		}
 		eps = append(eps, e)
+		refs = append(refs, episodeRef{Path: e.path, ShowName: e.showName})
 	}
 	// Drain before resolving: a cursor holds a pool connection (870636b).
 	rows.Close()
 
-	folderNames := resolveFolderShowNames(nameCounts)
+	// The shared grouping (groupEpisodesByShow). This plane grouped on the folder alone, so
+	// the DS Video app showed a series split across differently-named folders twice while
+	// the native clients showed it once.
+	groups := groupEpisodesByShow(refs, tvRoot)
 
-	for _, e := range eps {
+	for i, e := range eps {
 		id := e.id
 		year, ratingVal := e.year, e.ratingVal
 		posterPath, overview, genres := e.posterPath, e.overview, e.genres
-		folderName := e.folderName
+		folderName := groups[i].Folder
+		if folderName == "" {
+			continue // no show to file it under
+		}
 
 		// The FOLDER's resolved name, not this episode's — see resolveFolderShowNames.
-		showName := folderNames[folderName]
-
-		// Shared grouping key — see showGroupKey. This plane grouped on the folder alone,
-		// so the DS Video app showed a series split across differently-named folders twice
-		// while the native clients showed it once.
-		mapKey := showGroupKey(folderName, showName)
+		showName := groups[i].ShowName
+		mapKey := groups[i].Key
 
 		info, exists := showMap[mapKey]
 		if !exists {
@@ -2619,37 +2611,27 @@ func (s *Server) handleWebAPIWatchStatus(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Allocate a write_seq and bump progress_seq, exactly as the REST path does.
+	// Written through writeProgress, exactly as the REST path is: same ordering rule, same
+	// write_seq and progress_seq handling.
 	//
-	// This write previously did NEITHER. Two consequences, both silent:
-	//   - With no write_seq, a row inserted here kept the column's 0 default, so the REST
-	//     upsert's `WHERE excluded.write_seq > progress.write_seq` guard compared against a
-	//     stale ordinal — reinstating the last-write-wins behaviour that guard exists to
-	//     prevent, and which previously destroyed real watch progress.
-	//   - With no progress_seq bump, delta sync never learned anything changed, so watching
-	//     in the DS Video app was invisible to every other device, permanently.
+	// This write once did neither. With no write_seq a row kept the column's 0 default and
+	// lost every later ordering comparison; with no progress_seq bump, delta sync never
+	// learned anything changed, so watching in the DS Video app was invisible to every other
+	// device, permanently. It was also a private copy keyed ON CONFLICT(item_id, user_id), a
+	// key the profiles migration replaced, so every DS Video app position failed to store on
+	// a migrated database.
+	//
 	// Resolved before progressMu is taken, as handleProgress does: the profiles lookup is a
 	// DB read and must not run under the lock.
 	v, ok := s.webAPIViewer(w, r, session)
 	if !ok {
 		return
 	}
-	// Update progress in database, keyed by the FR-221 profile (FRD-002 FR-230/FR-251) through
-	// upsertProgress, the one home of the write_seq-guarded statement. This was a private
-	// copy keyed ON CONFLICT(item_id, user_id), a key the profiles migration replaced, so
-	// every DS Video app position failed to store on a migrated database. Progress writes
-	// are accepted above the ceiling (FR-231): history is the viewer's own data.
-	//
-	// writeWithSeq allocates the write_seq inside the upsert's transaction and publishes
-	// progress_seq only after commit (TASK-919; see handleProgress for the stale-position
-	// window the old allocate-and-publish-first order opened).
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.progressMu.Lock()
-	_, err := s.writeWithSeq(context.Background(), "progress_seq", func(tx *sql.Tx, writeSeq int64) error {
-		_, err := s.upsertProgress(tx, v, internalID, position, totalDuration, now, writeSeq)
-		return err
-	})
-	s.progressMu.Unlock()
+	// Keyed by the FR-221 profile (FRD-002 FR-230/FR-251). Progress writes are accepted above
+	// the ceiling (FR-231): history is the viewer's own data. The DS Video app sends no watch
+	// time, so the receive time orders it (newProgressClock with no claim). A write refused as
+	// older than the stored row still answers success: the app has nothing to retry.
+	_, err := s.writeProgress(v, internalID, position, totalDuration, newProgressClock("", time.Now()))
 
 	if err != nil {
 		log.Printf("[WebAPI] WatchStatus update %s: %v", internalID, err)

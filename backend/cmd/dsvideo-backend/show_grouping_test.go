@@ -1,202 +1,240 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
-// A show is ONE show, even when its episodes are spread across differently-named folders.
+// TASK-924. The /tv/shows list grouped the VISIBLE rows (FR-250: the ceiling is in the WHERE,
+// before grouping) while the detail routes expanded a show id through resolveShowFolders,
+// which grouped EVERY row. A folder's resolved name is a majority vote over its episodes, so
+// when a ceiling hides the majority the vote changes, and the two halves stopped agreeing:
+// the kids' list said 3 episodes and the episode list showed fewer. The same header/list
+// split as main.go's showGroupFolders comment, reached through the ceiling instead.
 //
-// This rule existed three times with two different answers: /tv/shows merged on the TMDb
-// show name, while /shows and the DS Video plane grouped on the folder alone. The same
-// library therefore reported a different number of shows depending on which endpoint you
-// asked, and a series re-foldered part-way through (say "Daredevil" and "Daredevil (2015)")
-// appeared once in one place and twice in the other two.
-//
-// Both halves now come from showGroupKey / showFolderFromPath.
-
-func name(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
-
-func TestEpisodesInDifferentFoldersGroupAsOneShow(t *testing.T) {
-	// The case the owner described: same series, two folder names, one TMDb match.
-	a := showGroupKey("Daredevil", name("Daredevil"))
-	b := showGroupKey("Daredevil (2015)", name("Daredevil"))
-	if a != b {
-		t.Fatalf("episodes of one show in two folders must share a key: %q vs %q", a, b)
+// Fixture: Daredevil/ holds 3 TV-MA "Marvel's Daredevil" episodes and 2 TV-PG "Daredevil:
+// Born Again" ones; Born Again/ holds 1 more "Daredevil: Born Again". For a level-2 viewer
+// only the 3 Born Again episodes are visible, and both folders resolve to that show.
+func TestRestrictedShowDetailMatchesTheListedCount(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
 	}
-}
-
-// Folder-name casing must not split a show either.
-func TestGroupKeyIsCaseInsensitiveOnTheShowName(t *testing.T) {
-	if showGroupKey("f1", name("The Bear")) != showGroupKey("f2", name("THE BEAR")) {
-		t.Fatal("show name casing must not split a show")
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(showMergeSchema); err != nil {
+		t.Fatalf("schema: %v", err)
 	}
-}
-
-// Without a TMDb match there is no identity beyond the folder, so the folder IS the
-// identity — two unmatched folders stay two shows.
-func TestUnmatchedContentGroupsByFolder(t *testing.T) {
-	none := sql.NullString{}
-	if showGroupKey("Some Show", none) != "Some Show" {
-		t.Error("an unmatched episode should group under its folder")
+	ins := `INSERT INTO items(id, library_id, type, title, path, show_name, season_number,
+	        episode_number, added_at, change_seq, content_rating) VALUES(?,?,?,?,?,?,?,?,?,?,?)`
+	seed := []struct{ id, path, show, cert string }{
+		{"dd1", "/Daredevil/S01E01.mkv", "Marvel's Daredevil", "TV-MA"},
+		{"dd2", "/Daredevil/S01E02.mkv", "Marvel's Daredevil", "TV-MA"},
+		{"dd3", "/Daredevil/S01E03.mkv", "Marvel's Daredevil", "TV-MA"},
+		{"ba1", "/Daredevil/S01E04.mkv", "Daredevil: Born Again", "TV-PG"},
+		{"ba2", "/Daredevil/S01E05.mkv", "Daredevil: Born Again", "TV-PG"},
+		{"ba3", "/Born Again/S01E06.mkv", "Daredevil: Born Again", "TV-PG"},
 	}
-	if showGroupKey("A", none) == showGroupKey("B", none) {
-		t.Error("two different unmatched folders must stay separate shows")
-	}
-	// An empty-but-valid show name is not an identity either.
-	if showGroupKey("Folder", name("")) != "Folder" {
-		t.Error("an empty show name must fall back to the folder")
-	}
-}
-
-// Distinct shows must never collide just because they share a library.
-func TestDifferentShowsStaySeparate(t *testing.T) {
-	if showGroupKey("Show A", name("Show A")) == showGroupKey("Show B", name("Show B")) {
-		t.Fatal("different shows must not merge")
-	}
-}
-
-func TestShowFolderFromPath(t *testing.T) {
-	const root = "/volume1/video/Shows/"
-	cases := []struct{ name, path, want string }{
-		{"episode in a show folder", root + "Daredevil/S01E01.mkv", "Daredevil"},
-		{"nested season folder", root + "Daredevil/Season 1/S01E01.mkv", "Daredevil"},
-		// A root-level episode still belongs to something; returning "" would drop it
-		// from every listing, so the stem is the fallback.
-		{"root-level file falls back to the stem", root + "Loose Episode.mkv", "Loose Episode"},
-		{"root-level file with dots", root + "Show.S01E01.1080p.mkv", "Show.S01E01.1080p"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := showFolderFromPath(c.path, root); got != c.want {
-				t.Errorf("showFolderFromPath(%q) = %q, want %q", c.path, got, c.want)
-			}
-		})
-	}
-}
-
-// The scanner's show_folder_id rule is deliberately STRICTER than showFolderFromPath: it
-// stores a real directory or NULL, because the sibling-poster fallback matches it with
-// `path LIKE tvRoot || folder || '/%'` — a prefix that only exists for an actual directory.
-// A filename stem stored there would match nothing and cost every root-level episode its
-// show poster. This pins the difference so nobody "consolidates" the two into a bug.
-func TestScannerFolderRuleIsStricterThanTheDisplayRule(t *testing.T) {
-	const root = "/volume1/video/Shows/"
-	rootLevel := root + "Loose Episode.mkv"
-
-	if got := showFolderFromPath(rootLevel, root); got == "" {
-		t.Fatal("the display rule must still yield a name for a root-level episode")
-	}
-
-	// The scanner's rule, as written in scanLibraryWithClient.
-	scannerFolder := func(path string) (string, bool) {
-		rel := path
-		if len(path) > len(root) && path[:len(root)] == root {
-			rel = path[len(root):]
+	for i, r := range seed {
+		if _, err := db.Exec(ins, r.id, "lib_tv", "episode", "Episode", testTVRoot+r.path,
+			r.show, 1, i+1, "2024-01-01T00:00:00Z", i+1, r.cert); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
 		}
-		for i := 0; i < len(rel); i++ {
-			if rel[i] == '/' {
-				if i == 0 {
-					return "", false
+	}
+	s := &Server{cfg: Config{TVPath: testTVRoot}, db: db}
+	kid := viewer{UserID: "u1", ProfileID: "kid", MaxAgeLevel: 2}
+	req := func(target string) *http.Request {
+		r := httptest.NewRequest("GET", target, nil)
+		ctx := context.WithValue(r.Context(), userKey, authedUser{ID: "u1", Username: "u1"})
+		return r.WithContext(context.WithValue(ctx, viewerKey, kid))
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleTVShowsList(rec, req("/tv/shows"))
+	var list struct{ Shows []listedShow }
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v (%s)", err, rec.Body.String())
+	}
+	if len(list.Shows) != 1 || list.Shows[0].EpisodeCount != 3 {
+		t.Fatalf("kids' list = %+v, want one show with 3 episodes", list.Shows)
+	}
+	listed := list.Shows[0]
+
+	withShow := func(r *http.Request) *http.Request {
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("showId", listed.ID)
+		return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleTVShowEpisodes(rec, withShow(req("/tv/shows/"+url.PathEscape(listed.ID)+"/episodes")))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("episodes status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var eps struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &eps); err != nil {
+		t.Fatalf("decode episodes: %v", err)
+	}
+	if eps.Total != listed.EpisodeCount {
+		t.Errorf("episodes total %d, list episodeCount %d: the detail regrouped rows the viewer cannot see",
+			eps.Total, listed.EpisodeCount)
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleTVShowSeasons(rec, withShow(req("/tv/shows/"+url.PathEscape(listed.ID)+"/seasons")))
+	var seasons struct {
+		Seasons []struct {
+			EpisodeCount int `json:"episodeCount"`
+		} `json:"seasons"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &seasons); err != nil {
+		t.Fatalf("decode seasons: %v (%s)", err, rec.Body.String())
+	}
+	sum := 0
+	for _, se := range seasons.Seasons {
+		sum += se.EpisodeCount
+	}
+	if sum != listed.EpisodeCount {
+		t.Errorf("seasons sum to %d, list episodeCount %d", sum, listed.EpisodeCount)
+	}
+}
+
+// groupEpisodesByShow is the one assembly the five grouping sites share. Each case is a
+// place where the copies differed or could have: what an empty/zero row means, season
+// subfolders, unmatched episodes in a matched folder, which rows the majority is taken over
+// (the ceiling and the rail window are the CALLER's row set), ties, and input order.
+func TestGroupEpisodesByShow(t *testing.T) {
+	n := func(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
+	type want struct{ folder, name, key string }
+	cases := []struct {
+		name string
+		refs []episodeRef
+		want []want
+	}{
+		{
+			name: "part-matched folder: the unmatched episode files under the folder's name",
+			refs: []episodeRef{
+				{"/tv/Shameless/e1.mkv", n("Shameless")},
+				{"/tv/Shameless/e2.mkv", n("Shameless")},
+				{"/tv/Shameless/e3.mkv", n("")},
+			},
+			want: []want{
+				{"Shameless", "Shameless", "shameless"},
+				{"Shameless", "Shameless", "shameless"},
+				{"Shameless", "Shameless", "shameless"},
+			},
+		},
+		{
+			name: "split folders carrying one show name share one key",
+			refs: []episodeRef{
+				{"/tv/Daredevil/S01E01.mkv", n("Daredevil")},
+				{"/tv/Daredevil (2015)/S02E01.mkv", n("Daredevil")},
+			},
+			want: []want{
+				{"Daredevil", "Daredevil", "daredevil"},
+				{"Daredevil (2015)", "Daredevil", "daredevil"},
+			},
+		},
+		{
+			name: "unmatched folders key on the folder, case kept, and never merge",
+			refs: []episodeRef{
+				{"/tv/Unknown A/e1.mkv", n("")},
+				{"/tv/Unknown B/e1.mkv", n("")},
+			},
+			want: []want{{"Unknown A", "", "Unknown A"}, {"Unknown B", "", "Unknown B"}},
+		},
+		{
+			name: "season subfolder files under the show folder",
+			refs: []episodeRef{{"/tv/The Bear/Season 2/S02E01.mkv", n("The Bear")}},
+			want: []want{{"The Bear", "The Bear", "the bear"}},
+		},
+		{
+			name: "root-level episode falls back to its filename stem",
+			refs: []episodeRef{{"/tv/Pilot.mkv", n("")}},
+			want: []want{{"Pilot", "", "Pilot"}},
+		},
+		{
+			name: "zero ref (a film in a mixed rail) and an unplaceable path group nowhere",
+			refs: []episodeRef{{}, {"/tv/.mkv", n("Ghost")}, {"/tv/Lost/e1.mkv", n("Lost")}},
+			want: []want{{"", "", ""}, {"", "", ""}, {"Lost", "Lost", "lost"}},
+		},
+		{
+			name: "majority wins over a stray mismatch",
+			refs: []episodeRef{
+				{"/tv/NCIS/e1.mkv", n("NCIS")},
+				{"/tv/NCIS/e2.mkv", n("NCIS: Sydney")},
+				{"/tv/NCIS/e3.mkv", n("NCIS")},
+			},
+			want: []want{{"NCIS", "NCIS", "ncis"}, {"NCIS", "NCIS", "ncis"}, {"NCIS", "NCIS", "ncis"}},
+		},
+		{
+			name: "a tie resolves on the name, never on input order",
+			refs: []episodeRef{
+				{"/tv/Mix/e1.mkv", n("Zeta")},
+				{"/tv/Mix/e2.mkv", n("Alpha")},
+			},
+			want: []want{{"Mix", "Alpha", "alpha"}, {"Mix", "Alpha", "alpha"}},
+		},
+		{
+			// The ceiling case: the caller's WHERE removed the TV-MA majority, so the vote is
+			// taken over what remains and this folder joins the other Born Again folder.
+			name: "the majority is taken over the rows passed in (ceiling applied before)",
+			refs: []episodeRef{
+				{"/tv/Daredevil/S01E04.mkv", n("Daredevil: Born Again")},
+				{"/tv/Born Again/S01E01.mkv", n("Daredevil: Born Again")},
+			},
+			want: []want{
+				{"Daredevil", "Daredevil: Born Again", "daredevil: born again"},
+				{"Born Again", "Daredevil: Born Again", "daredevil: born again"},
+			},
+		},
+		{
+			name: "the same folder with its majority present votes the other way",
+			refs: []episodeRef{
+				{"/tv/Daredevil/S01E01.mkv", n("Marvel's Daredevil")},
+				{"/tv/Daredevil/S01E02.mkv", n("Marvel's Daredevil")},
+				{"/tv/Daredevil/S01E04.mkv", n("Daredevil: Born Again")},
+			},
+			want: []want{
+				{"Daredevil", "Marvel's Daredevil", "marvel's daredevil"},
+				{"Daredevil", "Marvel's Daredevil", "marvel's daredevil"},
+				{"Daredevil", "Marvel's Daredevil", "marvel's daredevil"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			check := func(refs []episodeRef, want []want) {
+				t.Helper()
+				got := groupEpisodesByShow(refs, "/tv/")
+				if len(got) != len(want) {
+					t.Fatalf("got %d groups for %d refs", len(got), len(want))
 				}
-				return rel[:i], true
+				for i, w := range want {
+					g := got[i]
+					if g.Folder != w.folder || g.ShowName.String != w.name ||
+						g.ShowName.Valid != (w.name != "") || g.Key != w.key {
+						t.Errorf("ref %d (%q) = {%q %q valid=%v %q}, want {%q %q %q}", i, refs[i].Path,
+							g.Folder, g.ShowName.String, g.ShowName.Valid, g.Key, w.folder, w.name, w.key)
+					}
+				}
 			}
-		}
-		return "", false
-	}
-
-	if _, ok := scannerFolder(rootLevel); ok {
-		t.Error("the scanner must store NULL for a root-level episode, not a stem")
-	}
-	if folder, ok := scannerFolder(root + "Daredevil/S01E01.mkv"); !ok || folder != "Daredevil" {
-		t.Errorf("scanner rule on a real folder: got (%q, %v), want (\"Daredevil\", true)", folder, ok)
-	}
-}
-
-// PARTIAL METADATA MUST NOT SPLIT ONE FOLDER INTO TWO SHOWS.
-//
-// Reported from a real Apple TV: the TV Shows grid had blank cards and Star Trek: The Next
-// Generation was missing entirely, while the server held it with 176 episodes and a working
-// poster. Four shows came back TWICE from /tv/shows — same title, same id, different episode
-// counts, a poster on only one of each pair.
-//
-// Cause: metadata lands per EPISODE, so a folder is routinely part-matched. Shameless had 134
-// episodes carrying showName="Shameless" and 6 carrying none, all in one folder. Grouping each
-// episode on its own showName filed the 134 under "shameless" and the 6 under the folder. Both
-// halves then emitted `id: folderName`, so the list contained duplicate ids — and SwiftUI's
-// ForEach, keyed on id, drops or blanks rows when ids collide. That is why TNG disappeared: it
-// was collateral from a collision elsewhere in the list, not a problem with TNG.
-//
-// The fix resolves ONE name per folder before any episode is filed. These tests pin that
-// resolution, since the grouping function itself stays a pure mapping.
-
-func TestPartialMetadataResolvesToOneNamePerFolder(t *testing.T) {
-	// The real Shameless shape: most episodes matched, a few did not.
-	resolved := resolveFolderShowNames(map[string]map[string]int{
-		"Shameless": {"Shameless": 134},
-	})
-
-	got := resolved["Shameless"]
-	if !got.Valid || got.String != "Shameless" {
-		t.Fatalf("a part-matched folder must resolve to its matched name, got %+v", got)
-	}
-
-	// Every episode of the folder — matched or not — must now produce the SAME key.
-	matched := showGroupKey("Shameless", got)
-	unmatched := showGroupKey("Shameless", got)
-	if matched != unmatched {
-		t.Fatalf("one folder produced two keys (%q vs %q) — the show will be listed twice",
-			matched, unmatched)
-	}
-}
-
-// A stray mismatch inside a folder must not win the folder's identity.
-func TestFolderNameResolutionPrefersTheMajority(t *testing.T) {
-	// NCIS's real shape: 159 episodes matched "NCIS", 8 mismatched to "NCIS: Sydney".
-	resolved := resolveFolderShowNames(map[string]map[string]int{
-		"NCIS": {"NCIS": 159, "NCIS: Sydney": 8},
-	})
-	if got := resolved["NCIS"]; !got.Valid || got.String != "NCIS" {
-		t.Fatalf("the majority name must win the folder, got %+v", got)
-	}
-}
-
-// Resolution must be deterministic: a map iteration order deciding a show's identity would
-// make the list reorder between requests for no reason.
-func TestFolderNameResolutionIsDeterministicOnTies(t *testing.T) {
-	counts := map[string]map[string]int{"F": {"Beta": 5, "Alpha": 5}}
-	first := resolveFolderShowNames(counts)["F"]
-	for i := 0; i < 50; i++ {
-		if got := resolveFolderShowNames(counts)["F"]; got != first {
-			t.Fatalf("tie broke differently across runs: %+v then %+v", first, got)
-		}
-	}
-	if first.String != "Alpha" {
-		t.Errorf("ties should break on the name for stability, got %q", first.String)
-	}
-}
-
-// A folder nothing matched has no identity beyond itself, and must still group by folder.
-func TestFolderWithNoMatchesFallsBackToTheFolder(t *testing.T) {
-	resolved := resolveFolderShowNames(map[string]map[string]int{"Unmatched Show": {}})
-	got := resolved["Unmatched Show"]
-	if got.Valid {
-		t.Fatalf("a folder with no matched episodes must resolve to no name, got %+v", got)
-	}
-	if showGroupKey("Unmatched Show", got) != "Unmatched Show" {
-		t.Error("an unmatched folder must still group under its own folder name")
-	}
-}
-
-// The cross-folder merge this function exists for must survive the fix.
-func TestResolutionStillFoldsTwoFoldersOfOneShow(t *testing.T) {
-	resolved := resolveFolderShowNames(map[string]map[string]int{
-		"Daredevil":        {"Daredevil": 13},
-		"Daredevil (2015)": {"Daredevil": 26},
-	})
-	a := showGroupKey("Daredevil", resolved["Daredevil"])
-	b := showGroupKey("Daredevil (2015)", resolved["Daredevil (2015)"])
-	if a != b {
-		t.Fatalf("two folders of one show must still merge: %q vs %q", a, b)
+			check(tc.refs, tc.want)
+			// Order-independent: the five sites read rows in five different orders.
+			rr, rw := make([]episodeRef, len(tc.refs)), make([]want, len(tc.want))
+			for i := range tc.refs {
+				rr[len(rr)-1-i], rw[len(rw)-1-i] = tc.refs[i], tc.want[i]
+			}
+			check(rr, rw)
+		})
 	}
 }

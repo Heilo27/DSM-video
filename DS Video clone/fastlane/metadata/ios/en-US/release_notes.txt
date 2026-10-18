@@ -1,28 +1,18 @@
-Ask Siri for a movie, and your Home screen finally stays up to date.
+Profiles: everyone in the house gets their own, and the kids only see what's right for them.
 
-SIRI
-• "Play Blade Runner in DSM Video" or "Find Blade Runner in DSM Video" opens it straight to the title — no typing on a remote.
+PROFILES
+• Up to four profiles per account, each with its own Continue Watching, watchlist and history.
+• Give each profile an age limit. Titles above it are hidden everywhere: Home, libraries, search, Just Added and downloads. Unrated titles are hidden on every limited profile.
+• Kids' profiles browse by collections like Disney, Pixar and Holiday instead of genres.
+• Optional PIN on any profile. Managing profiles always asks for the owner's PIN.
+• Your iPhone remembers which profile you picked.
 
-HOME SCREEN THAT'S ACTUALLY CURRENT
-• Just Added now comes from your server instead of being guessed at on the device, so films you added an hour ago show up. A show that gained a whole season counts as one new thing, not twelve, so it can't bury everything else.
-• New Suggested row, picked by genre from what you've been watching.
-• Rows no longer go stale after a pull-to-refresh.
-
-SHOWS THAT WERE HIDING
-• A series split across two folders, or with only some episodes matched, now appears once instead of twice — or not at all. Star Trek: The Next Generation and others are back.
-• Episode names are correct where they used to show the filename.
-
-HOME AND AWAY
-• The app now switches between your home network and remote access on its own. Come home and it notices, without a restart or a trip to Settings.
-• The library keeps syncing instead of quietly stopping and looking fine.
-
-PLAYBACK
-• HEVC videos that played as audio-only now play properly.
-• Scrubbing repeatedly no longer locks you out of your own video.
-• Faster startup and smoother seeking, with deeper buffering.
-• Downloads that failed silently now actually download.
+DOWNLOADS
+• Downloads follow the profile's age limit, even offline, and each profile resumes from its own spot.
+• A download that finishes while the app is closed is kept instead of discarded, and tapping Download twice no longer starts a second copy.
 
 FIXES
-• Only one volume indicator on screen.
-• Bigger, more reliable tap targets, and buttons that no longer look available when they aren't.
-• Error messages name the real problem instead of guessing.
+• Watching on two devices: an older position saved offline no longer overwrites a newer one, or un-watches a title you finished.
+• You can create a second profile when your account only has one.
+
+Profiles need DSVideo Server 0.3.9 or later on your NAS (free download).
