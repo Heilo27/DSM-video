@@ -10,7 +10,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -349,8 +348,7 @@ func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 	for _, d := range collectionsFor(v) {
 		members, err := s.collectionMembers(v, d)
 		if err != nil {
-			log.Printf("[collections] %v", err)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("collections: %w", err))
 			return
 		}
 		if len(members) == 0 {
@@ -392,8 +390,7 @@ func (s *Server) handleCollectionItems(w http.ResponseWriter, r *http.Request) {
 
 	members, err := s.collectionMembers(v, d)
 	if err != nil {
-		log.Printf("[collections] %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("collections: %w", err))
 		return
 	}
 	sortCollectionMembers(members, q.Get("sort"), q.Get("order"))

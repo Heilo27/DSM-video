@@ -84,7 +84,7 @@ func TestWebQuickConnectHasASentenceForEveryServerAnswer(t *testing.T) {
 	rest := text[start:]
 	end := strings.Index(rest, "\n}\n")
 	handler := rest[:end]
-	codes := regexp.MustCompile(`writeErr\(w, [^,]+, "([a-z_]+)"\)`).FindAllStringSubmatch(handler, -1)
+	codes := regexp.MustCompile(`write(?:Err|Failure)\(w, (?:r, )?[^,]+, "([a-z_]+)"`).FindAllStringSubmatch(handler, -1)
 	if len(codes) == 0 {
 		t.Fatal("found no error codes in handleQuickConnectResolve; the pattern is stale")
 	}

@@ -30,6 +30,7 @@ func breakEntropy(t *testing.T) {
 func captureServerErrorLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	resetFailureSites() // the 5xx throttle is process-wide; a test starts with every site quiet
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	return &buf

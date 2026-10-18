@@ -341,8 +341,7 @@ func (s *Server) profileResolver(strict bool) func(http.Handler) http.Handler {
 			}
 			rows, err := s.accountProfiles(r.Context(), u)
 			if err != nil {
-				log.Printf("profile resolve: %v", err)
-				writeErr(w, http.StatusInternalServerError, "db_error")
+				writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 				return
 			}
 			v, err := resolveFromRows(rows, strings.TrimSpace(r.Header.Get(profileHeader)), strict)
@@ -351,8 +350,7 @@ func (s *Server) profileResolver(strict bool) func(http.Handler) http.Handler {
 				return
 			}
 			if err != nil {
-				log.Printf("profile resolve: %v", err)
-				writeErr(w, http.StatusInternalServerError, "db_error")
+				writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 				return
 			}
 			w.Header().Set(profileHeader, v.ProfileID)
@@ -380,8 +378,7 @@ func (s *Server) viewerFor(r *http.Request) (viewer, error) {
 func (s *Server) requestViewer(w http.ResponseWriter, r *http.Request) (viewer, bool) {
 	v, err := s.viewerFor(r)
 	if err != nil {
-		log.Printf("viewer: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("viewer: %w", err))
 		return viewer{}, false
 	}
 	return v, true
@@ -467,8 +464,7 @@ var sqlIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0
 func (s *Server) refuseAboveCeiling(w http.ResponseWriter, r *http.Request, v viewer, itemID string) bool {
 	above, err := s.itemAboveCeiling(r.Context(), v, itemID)
 	if err != nil {
-		log.Printf("ceiling check %s: %v", itemID, err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("ceiling check %s: %w", itemID, err))
 		return false
 	}
 	if above {
@@ -494,8 +490,7 @@ func (s *Server) gateShow(w http.ResponseWriter, r *http.Request, v viewer, wher
 	if err := s.db.QueryRowContext(r.Context(),
 		"SELECT COUNT(*), COALESCE(SUM(CASE WHEN "+clause+" THEN 1 ELSE 0 END), 0) FROM items WHERE "+where,
 		qargs...).Scan(&total, &visible); err != nil {
-		log.Printf("show ceiling check: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("show ceiling check: %w", err))
 		return "", nil, false
 	}
 	if total > 0 && visible == 0 {
@@ -517,8 +512,7 @@ func (s *Server) requireUnrestricted(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		v, err := s.viewerFor(r)
 		if err != nil {
-			log.Printf("requireUnrestricted: %v", err)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 		if rating.Restricted(v.MaxAgeLevel) {
@@ -832,9 +826,9 @@ func pinColumnValue(f profileFields) (sql.NullString, error) {
 // `server_error` code is written, so a new site cannot skip the log. The line carries the
 // method, the path (never the query string), the step and the underlying error; those errors
 // come from the entropy source and the hasher and never contain the PIN, password or token.
+// The logging itself is writeFailureAt's (failurelog.go): one helper for every 5xx (TASK-1052).
 func writeServerError(w http.ResponseWriter, r *http.Request, step string, err error) {
-	log.Printf("server_error %s %s: %s: %v", r.Method, r.URL.Path, step, err)
-	writeErr(w, http.StatusInternalServerError, "server_error")
+	writeFailureAt(w, r, http.StatusInternalServerError, "server_error", step, callSiteOf(1), err)
 }
 
 // requestUser returns the authenticated account, or writes 401 (the session, not a profile,
@@ -857,12 +851,12 @@ func (s *Server) handleProfilesList(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := s.viewerFor(r)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	rows, err := s.loadProfiles(r.Context(), u.ID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	out := make([]profileJSON, 0, len(rows))
@@ -912,7 +906,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.accountProfiles(r.Context(), u)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	owner, _ := ownerOf(rows)
@@ -956,7 +950,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, "duplicate_profile_name") // NOCASE index backstop
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("create profile: insert: %w", err))
 		return
 	}
 	p := profileRow{ID: id, UserID: u.ID, Name: *f.name, Avatar: avatar, MaxAgeLevel: *f.maxAgeLevel,
@@ -981,7 +975,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.accountProfiles(r.Context(), u)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	target, ok := findProfile(rows, id)
@@ -1051,7 +1045,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusConflict, "duplicate_profile_name")
 				return
 			}
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 	}
@@ -1078,7 +1072,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.accountProfiles(r.Context(), u)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	target, ok := findProfile(rows, id)
@@ -1102,8 +1096,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 	err = s.deleteProfileData(r.Context(), u.ID, target.ID)
 	s.progressMu.Unlock()
 	if err != nil {
-		log.Printf("delete profile: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("delete profile: %w", err))
 		return
 	}
 	s.pinLimiter().reset(target.ID)
@@ -1142,7 +1135,7 @@ func (s *Server) handleProfilePinVerify(w http.ResponseWriter, r *http.Request) 
 	id := chi.URLParam(r, "id")
 	rows, err := s.accountProfiles(r.Context(), u)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	target, ok := findProfile(rows, id)
@@ -1222,7 +1215,7 @@ func (s *Server) handleOwnerPinReset(w http.ResponseWriter, r *http.Request) {
 			// blaming it would send the owner down the wrong path.
 			writeErr(w, http.StatusForbidden, "otp_required")
 		case isDSMUnavailable(err):
-			writeErr(w, http.StatusServiceUnavailable, "dsm_unavailable")
+			writeFailure(w, r, http.StatusServiceUnavailable, "dsm_unavailable", err)
 		default:
 			writeErr(w, http.StatusForbidden, "password_incorrect")
 		}
@@ -1237,8 +1230,7 @@ func (s *Server) handleOwnerPinReset(w http.ResponseWriter, r *http.Request) {
 	// sanitizeID, which gave "ryan-p" the key of "ryan_p" and so their owner PIN.
 	ownerKey, err := s.accountKey(r.Context(), dsmUser.Username)
 	if err != nil {
-		log.Printf("owner PIN reset: account key: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("owner PIN reset: account key: %w", err))
 		return
 	}
 	if ownerKey != u.ID {
@@ -1256,18 +1248,18 @@ func (s *Server) handleOwnerPinReset(w http.ResponseWriter, r *http.Request) {
 	defer s.profiles.mu.Unlock()
 	rows, err := s.accountProfiles(r.Context(), u)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	owner, ok := ownerOf(rows)
 	if !ok {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", errors.New("owner PIN reset: account has no owner profile"))
 		return
 	}
 	if _, err := s.db.ExecContext(r.Context(),
 		`UPDATE profiles SET pin_hash = ? WHERE id = ? AND user_id = ? AND is_owner = 1`,
 		hash, owner.ID, u.ID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	s.pinLimiter().reset(owner.ID)

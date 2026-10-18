@@ -784,6 +784,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(restoreTrueURL) // ...and immediately after, so handlers read real query params
 	r.Use(middleware.Recoverer)
+	r.Use(logUnloggedFailures) // TASK-1052: a 5xx that bypassed writeFailure still leaves one log line
 	r.Use(bodyLimitMiddleware) // TASK-810: cap request bodies to avoid NAS OOM DoS
 
 	// Serve web player
@@ -2042,13 +2043,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// so two DSM users whose names differ only by punctuation get two accounts.
 	userID, err := s.accountKey(r.Context(), dsmUser.Username)
 	if err != nil {
-		log.Printf("login: account key: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	token, err := s.issueToken(userID, dsmUser.Username)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "token_error")
+		writeFailure(w, r, http.StatusInternalServerError, "token_error", err)
 		return
 	}
 	// FR-204: every account has an owner profile from its first sign-in. A failure here is
@@ -2390,8 +2390,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// and receive its own key; tokens of the key's owner (and of unclaimed keys) pass.
 		owned, err := s.credentialOwnsAccount(r.Context(), sub, usr)
 		if err != nil {
-			log.Printf("auth: account owner check: %v", err)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 		if !owned {
@@ -2516,8 +2515,7 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 		codeBuf := make([]byte, 4)
 		if _, err := rand.Read(codeBuf); err != nil {
 			s.pairingMu.Unlock()
-			log.Printf("[pairing] crypto/rand failed: %v", err)
-			writeErr(w, http.StatusInternalServerError, "internal_error")
+			writeFailure(w, r, http.StatusInternalServerError, "internal_error", err)
 			return
 		}
 		// Map 4 random bytes to a number in [0, 1_000_000) then zero-pad to 6 digits.
@@ -2532,8 +2530,7 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pairingMu.Unlock()
 	if code == "" {
-		log.Printf("[pairing] no free code after 16 draws")
-		writeErr(w, http.StatusServiceUnavailable, "pairing_busy")
+		writeFailure(w, r, http.StatusServiceUnavailable, "pairing_busy", errors.New("no free pairing code after 16 draws"))
 		return
 	}
 
@@ -2594,8 +2591,7 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 
 	token, err := s.issueToken(entry.userID, entry.username)
 	if err != nil {
-		log.Printf("[pairing] issueToken failed: %v", err)
-		writeErr(w, http.StatusInternalServerError, "token_error")
+		writeFailure(w, r, http.StatusInternalServerError, "token_error", err)
 		return
 	}
 
@@ -2660,7 +2656,7 @@ func (s *Server) handleQuickConnectResolve(w http.ResponseWriter, r *http.Reques
 	}
 	candidates, err := resolve(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "quickconnect_resolve_failed")
+		writeFailure(w, r, http.StatusBadGateway, "quickconnect_resolve_failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"candidates": candidates})
@@ -2813,7 +2809,7 @@ func (s *Server) handleLibrariesSummary(w http.ResponseWriter, r *http.Request) 
 		 FROM items `+where+`
 		 GROUP BY library_id`, args...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -2960,7 +2956,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 	countSQL := "SELECT COUNT(*) FROM items i " + where
 	var total int
 	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -2979,7 +2975,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		joinArgs...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -2999,7 +2995,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 			&showName, &seasonNumber, &episodeNumber,
 			&progPos, &progDur, &progUpdatedAt,
 			&showFolderIDCol, &contentRating); err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 
@@ -3049,7 +3045,7 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
@@ -3082,7 +3078,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		`SELECT COUNT(*) FROM items i WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`+visFrag,
 		append([]any{pattern}, visArgs...)...,
 	).Scan(&total); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -3099,7 +3095,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		append(append([]any{v.ProfileID, pattern}, visArgs...), limit, offset)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -3116,7 +3112,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath,
 			&progPos, &progDur, &progUpdatedAt, &contentRating); err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 
@@ -3155,7 +3151,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
@@ -3173,7 +3169,7 @@ func (s *Server) handleItemsByFolder(w http.ResponseWriter, r *http.Request, lib
 	visFrag, visArgs := v.andVisibleFrag("content_rating")
 	rows, err := s.db.Query("SELECT path FROM items WHERE library_id = ?"+visFrag, append([]any{libraryID}, visArgs...)...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -3228,7 +3224,7 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		WHERE 1=1 ` + where
 	var total int
 	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -3240,7 +3236,7 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		append(args, limit, offset)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -3254,13 +3250,13 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 	}
 	var rawRows []jwRow
 	for rows.Next() {
-		var r jwRow
-		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.year, &r.duration, &r.addedAt, &r.rating, &r.posterPath, &r.backdropPath, &r.overview, &r.contentRating); err != nil {
+		var jr jwRow
+		if err := rows.Scan(&jr.id, &jr.typ, &jr.title, &jr.year, &jr.duration, &jr.addedAt, &jr.rating, &jr.posterPath, &jr.backdropPath, &jr.overview, &jr.contentRating); err != nil {
 			rows.Close()
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
-		rawRows = append(rawRows, r)
+		rawRows = append(rawRows, jr)
 	}
 	rows.Close()
 
@@ -3333,7 +3329,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found")
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	if v.above(contentRating) { // FR-250: refused, naming the real cause
@@ -3492,8 +3488,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		WHERE `+matchWhere+` AND library_id = 'lib_tv'
 		ORDER BY CASE WHEN poster_path IS NOT NULL AND poster_path != '' THEN 0 ELSE 1 END, path
 		LIMIT 1`, matchArgs...).Scan(&showRating); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Printf("show detail rating: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -3505,7 +3500,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		ORDER BY COALESCE(season_number, 0), COALESCE(episode_number, 0)`,
 		matchArgs...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -3746,7 +3741,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	if tmdbPath != "" {
 		// Fetch from TMDb and cache
 		if s.imageCache == nil {
-			writeErr(w, http.StatusServiceUnavailable, "image_cache_unavailable")
+			writeFailure(w, r, http.StatusServiceUnavailable, "image_cache_unavailable", errImageCacheUnavailable)
 			return
 		}
 
@@ -3860,7 +3855,7 @@ func (s *Server) handleTMDbImageProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.imageCache == nil {
-		writeErr(w, http.StatusServiceUnavailable, "image_cache_unavailable")
+		writeFailure(w, r, http.StatusServiceUnavailable, "image_cache_unavailable", errImageCacheUnavailable)
 		return
 	}
 
@@ -3868,8 +3863,7 @@ func (s *Server) handleTMDbImageProxy(w http.ResponseWriter, r *http.Request) {
 	size := metadata.ParseImageSize(width)
 	cachedPath, err := s.imageCache.GetOrCacheTMDbImage(r.Context(), tmdbPath, metadata.ImageTypePoster, size)
 	if err != nil {
-		log.Printf("[TMDbProxy] failed to proxy %s: %v", tmdbPath, err)
-		writeErr(w, http.StatusBadGateway, "image_fetch_failed")
+		writeFailure(w, r, http.StatusBadGateway, "image_fetch_failed", fmt.Errorf("proxy %s: %w", tmdbPath, err))
 		return
 	}
 
@@ -3909,7 +3903,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found")
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -4168,8 +4162,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		if s.hlsGenerator != nil {
 			hlsSession, err := s.hlsGenerator.StartSession(r.Context(), sessionID, path, playbackMode, maxHeight, subtitleTracks, startSeconds, ownerKey)
 			if err != nil {
-				log.Printf("Failed to start transcode session: %v", err)
-				writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
+				writeFailure(w, r, http.StatusServiceUnavailable, "transcode_busy", err)
 				return
 			}
 			ps.HLSDir = hlsSession.OutputDir
@@ -4189,8 +4182,8 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 				// TASK-752 budget and leaked on session teardown; it has been removed.
 				// If we ever do land here, fail cleanly rather than start an untracked
 				// transcode.
-				log.Printf("[Playback] No HLS generator available for non-web client — cannot transcode")
-				writeErr(w, http.StatusServiceUnavailable, "transcode_unavailable")
+				writeFailure(w, r, http.StatusServiceUnavailable, "transcode_unavailable",
+					errors.New("no HLS generator available for a non-web client; cannot transcode"))
 				return
 			}
 		}
@@ -4973,7 +4966,7 @@ func (s *Server) handlePlaybackStream(w http.ResponseWriter, r *http.Request) {
 
 	st, err := f.Stat()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "stat_failed")
+		writeFailure(w, r, http.StatusInternalServerError, "stat_failed", err)
 		return
 	}
 	http.ServeContent(w, r, filepath.Base(ps.Path), st.ModTime(), f)
@@ -5026,7 +5019,7 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 			defer f.Close()
 			st, err := f.Stat()
 			if err != nil {
-				writeErr(w, http.StatusInternalServerError, "stat_failed")
+				writeFailure(w, r, http.StatusInternalServerError, "stat_failed", err)
 				return
 			}
 			http.ServeContent(w, r, filepath.Base(ps.Path), st.ModTime(), f)
@@ -5042,7 +5035,7 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 	// still waiting) and the deferred Release frees the slot. Placed AFTER the ffmpeg-not-
 	// found fallback above so a direct-serve (no-ffmpeg) request never consumes a slot.
 	if err := s.ffmpegLimiter.Acquire(r.Context()); err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "transcode_busy")
+		writeFailure(w, r, http.StatusServiceUnavailable, "transcode_busy", err)
 		return
 	}
 	defer s.ffmpegLimiter.Release()
@@ -5074,13 +5067,12 @@ func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps Pl
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "pipe_failed")
+		writeFailure(w, r, http.StatusInternalServerError, "pipe_failed", err)
 		return
 	}
 
 	if err := cmd.Start(); err != nil {
-		log.Printf("[Remux] Failed to start ffmpeg: %v", err)
-		writeErr(w, http.StatusInternalServerError, "ffmpeg_failed")
+		writeFailure(w, r, http.StatusInternalServerError, "ffmpeg_failed", err)
 		return
 	}
 
@@ -5277,8 +5269,8 @@ func (s *Server) handleHLSFile(filename string) http.HandlerFunc {
 			waitCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
 			if err := s.hlsGenerator.WaitForPlaylist(waitCtx, sessionID, 30*time.Second); err != nil {
-				log.Printf("[HLS] Playlist not ready for session %s after 30s: %v", sessionID, err)
-				writeErr(w, http.StatusServiceUnavailable, "playlist_not_ready")
+				log.Printf("[HLS] Playlist not ready for session %s after 30s", sessionID)
+				writeFailure(w, r, http.StatusServiceUnavailable, "playlist_not_ready", err)
 				return
 			}
 		}
@@ -6255,7 +6247,7 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		if !known {
 			// The DB could not answer. A 404 here would make the client drop the write
 			// permanently; a 500 is retried by the outbox.
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", errItemLookupUnavailable)
 			return
 		}
 		writeErr(w, http.StatusNotFound, "not_found")
@@ -6279,7 +6271,7 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	applied, err := s.writeProgress(v, itemID, req.PositionSeconds, req.DurationSeconds,
 		newProgressClock(req.WatchedAt, time.Now()))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	// Report whether the row actually changed. A superseded write (the stored row was watched
@@ -6405,7 +6397,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		rows, err = s.db.Query(queryGT, v.ProfileID, since, limit+1)
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -6631,7 +6623,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// Generate new JTI
 	jtiBytes := make([]byte, 16)
 	if _, err := rand.Read(jtiBytes); err != nil {
-		writeErr(w, http.StatusInternalServerError, "token_generation_failed")
+		writeFailure(w, r, http.StatusInternalServerError, "token_generation_failed", err)
 		return
 	}
 	claims := jwt.MapClaims{
@@ -6648,7 +6640,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString([]byte(s.cfg.JWTSecret))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "token_signing_failed")
+		writeFailure(w, r, http.StatusInternalServerError, "token_signing_failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -6671,7 +6663,7 @@ func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
 		append([]any{v.ProfileID}, visArgs...)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -6733,7 +6725,7 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 		args...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -6838,7 +6830,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		u.ID,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -6922,7 +6914,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			key, userID, value, now,
 		)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 
@@ -6983,7 +6975,7 @@ func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
 		append(visArgs, u.ID)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -7033,7 +7025,7 @@ func (s *Server) handleCreatePlaylist(w http.ResponseWriter, r *http.Request) {
 		id, u.ID, req.Title, now, now,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -7063,7 +7055,7 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found")
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -7078,7 +7070,7 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 		append([]any{playlistID}, visArgs...)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -7128,7 +7120,7 @@ func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.db.Exec("DELETE FROM playlists WHERE id = ? AND user_id = ?", playlistID, u.ID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -7138,7 +7130,7 @@ func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	// Cascade should handle playlist_items, but be explicit
 	if _, err := s.db.Exec("DELETE FROM playlist_items WHERE playlist_id = ?", playlistID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -7185,7 +7177,7 @@ func (s *Server) handleAddPlaylistItem(w http.ResponseWriter, r *http.Request) {
 		playlistID, req.ItemID, maxPos+1, now,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -7209,13 +7201,13 @@ func (s *Server) handleRemovePlaylistItem(w http.ResponseWriter, r *http.Request
 	}
 
 	if _, err := s.db.Exec("DELETE FROM playlist_items WHERE playlist_id = ? AND item_id = ?", playlistID, itemID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.Exec("UPDATE playlists SET updated_at = ? WHERE id = ?", now, playlistID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -7244,7 +7236,7 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 		append([]any{u.ID}, visArgs...)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -7293,7 +7285,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		if !known {
 			// The DB could not answer. A 404 here would make the client drop the write
 			// permanently; a 500 is retried by the outbox.
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", errItemLookupUnavailable)
 			return
 		}
 		writeErr(w, http.StatusNotFound, "not_found")
@@ -7310,7 +7302,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		itemID, u.ID, now,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 
@@ -7322,7 +7314,7 @@ func (s *Server) handleRemoveDownload(w http.ResponseWriter, r *http.Request) {
 	itemID := chi.URLParam(r, "itemId")
 
 	if _, err := s.db.Exec("DELETE FROM downloads WHERE item_id = ? AND user_id = ?", itemID, u.ID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -7353,7 +7345,7 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		append([]any{v.ProfileID, v.ProfileID}, visArgs...)...,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -7370,7 +7362,7 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
 			&posterPath, &backdropPath, &libraryID,
 			&progPos, &progDur, &progUpdatedAt, &contentRating); err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 
@@ -7403,7 +7395,7 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -7418,8 +7410,7 @@ func (s *Server) handleWatchlistCheck(w http.ResponseWriter, r *http.Request) {
 
 	var count int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM watchlist WHERE item_id = ? AND profile_id = ?", itemID, v.ProfileID).Scan(&count); err != nil {
-		log.Printf("[handleWatchlistCheck] db error for item %q profile %q: %v", itemID, v.ProfileID, err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("watchlist check for item %q profile %q: %w", itemID, v.ProfileID, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"inWatchlist": count > 0})
@@ -7437,7 +7428,7 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 		if !known {
 			// The DB could not answer. A 404 here would make the client drop the write
 			// permanently; a 500 is retried by the outbox.
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", errItemLookupUnavailable)
 			return
 		}
 		writeErr(w, http.StatusNotFound, "not_found")
@@ -7453,7 +7444,7 @@ func (s *Server) handleWatchlistAdd(w http.ResponseWriter, r *http.Request) {
 		itemID, v.UserID, v.ProfileID,
 	)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -7468,7 +7459,7 @@ func (s *Server) handleWatchlistRemove(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.db.Exec("DELETE FROM watchlist WHERE item_id = ? AND profile_id = ?", itemID, v.ProfileID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	// DELETE is idempotent, matching its POST counterpart (INSERT OR IGNORE): removing
@@ -7642,8 +7633,7 @@ func (s *Server) handleAdminMetadataRefresh(w http.ResponseWriter, r *http.Reque
 
 	res, err := s.db.Exec(query)
 	if err != nil {
-		log.Printf("[admin] metadata refresh failed: %v", err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	cleared, _ := res.RowsAffected()
@@ -7685,7 +7675,7 @@ func (s *Server) handleGenres(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -8805,7 +8795,7 @@ func (s *Server) handleItemTMDbSearch(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "not_found")
 		} else {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		}
 		return
 	}
@@ -8851,7 +8841,7 @@ func (s *Server) handleItemTMDbSearch(w http.ResponseWriter, r *http.Request) {
 	if mediaType == "tv" {
 		tvResults, err := client.SearchTV(ctx, q, year)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "tmdb_error")
+			writeFailure(w, r, http.StatusInternalServerError, "tmdb_error", err)
 			return
 		}
 		for i, res := range tvResults {
@@ -8878,7 +8868,7 @@ func (s *Server) handleItemTMDbSearch(w http.ResponseWriter, r *http.Request) {
 	} else {
 		movieResults, err := client.SearchMovies(ctx, q, year)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "tmdb_error")
+			writeFailure(w, r, http.StatusInternalServerError, "tmdb_error", err)
 			return
 		}
 		for i, res := range movieResults {
@@ -8939,7 +8929,7 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeErr(w, http.StatusNotFound, "not_found")
 			} else {
-				writeErr(w, http.StatusInternalServerError, "db_error")
+				writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			}
 			return
 		}
@@ -8961,7 +8951,7 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 	if body.Type == "tv" {
 		details, err := client.GetTVDetails(ctx, body.TMDbID)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "tmdb_error")
+			writeFailure(w, r, http.StatusBadGateway, "tmdb_error", err)
 			return
 		}
 		var yr int
@@ -8986,11 +8976,11 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 
 		tx, txErr := sqltx.Begin(ctx, s.db)
 		if txErr != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", txErr)
 			return
 		}
 		defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
-		seq, ok := allocItemFixSeq(ctx, w, tx.Tx, id)
+		seq, ok := allocItemFixSeq(ctx, w, r, tx.Tx, id)
 		if !ok {
 			return
 		}
@@ -9016,22 +9006,21 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
 			genres, cast, nullableString(details.USContentRating()), now, now, seq, id,
 		)
-		if !itemFixApplied(w, res, err) {
+		if !itemFixApplied(w, r, res, err) {
 			return
 		}
 		if err := replaceItemTags(ctx, tx.Tx, id, details.Extras()); err != nil {
-			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store tags for %s: %w", id, err))
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 	} else {
 		details, err := client.GetMovieDetails(ctx, body.TMDbID)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "tmdb_error")
+			writeFailure(w, r, http.StatusBadGateway, "tmdb_error", err)
 			return
 		}
 		var yr int
@@ -9063,11 +9052,11 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 
 		tx, txErr := sqltx.Begin(ctx, s.db)
 		if txErr != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", txErr)
 			return
 		}
 		defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
-		seq, ok := allocItemFixSeq(ctx, w, tx.Tx, id)
+		seq, ok := allocItemFixSeq(ctx, w, r, tx.Tx, id)
 		if !ok {
 			return
 		}
@@ -9097,16 +9086,15 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			genres, director, cast, nullableInt(details.Runtime*60),
 			nullableString(details.USCertification()), now, now, seq, id,
 		)
-		if !itemFixApplied(w, res, err) {
+		if !itemFixApplied(w, r, res, err) {
 			return
 		}
 		if err := replaceItemTags(ctx, tx.Tx, id, details.Extras()); err != nil {
-			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store tags for %s: %w", id, err))
 			return
 		}
 		if err := tx.Commit(); err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 	}
@@ -9122,11 +9110,14 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 // allocItemFixSeq allocates the change_seq a single-item TMDb re-match stamps on its row.
 // On failure it has already written the 500 and reports false: a row rewritten without a
 // new change_seq is invisible to delta sync, so the fix must not half-apply.
-func allocItemFixSeq(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, id string) (int64, bool) {
+func allocItemFixSeq(ctx context.Context, w http.ResponseWriter, r *http.Request, tx *sql.Tx, id string) (int64, bool) {
 	var seq int64
-	if err := allocItemSeqTx(ctx, tx, &seq); err != nil || seq <= 0 {
-		log.Printf("tmdb-fix: could not allocate change_seq for %s (%v)", id, err)
-		writeErr(w, http.StatusInternalServerError, "db_error")
+	err := allocItemSeqTx(ctx, tx, &seq)
+	if err == nil && seq <= 0 {
+		err = fmt.Errorf("change_seq allocator returned %d", seq)
+	}
+	if err != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: could not allocate change_seq for %s: %w", id, err))
 		return 0, false
 	}
 	return seq, true
@@ -9134,9 +9125,9 @@ func allocItemFixSeq(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, id 
 
 // itemFixApplied checks the re-match UPDATE: an error is a 500, and zero rows means the id
 // names no item, a 404 (the caller's deferred Rollback returns the allocated sequence).
-func itemFixApplied(w http.ResponseWriter, res sql.Result, err error) bool {
+func itemFixApplied(w http.ResponseWriter, r *http.Request, res sql.Result, err error) bool {
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return false
 	}
 	if n, aErr := res.RowsAffected(); aErr == nil && n == 0 {
@@ -9181,7 +9172,7 @@ func (s *Server) handleTVShowTMDbSearch(w http.ResponseWriter, r *http.Request) 
 	tvResults, err := client.SearchTV(r.Context(), q, 0)
 
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "tmdb_error")
+		writeFailure(w, r, http.StatusInternalServerError, "tmdb_error", err)
 		return
 	}
 
@@ -9251,7 +9242,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	details, err := client.GetTVDetails(ctx, body.TMDbID)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "tmdb_error")
+		writeFailure(w, r, http.StatusBadGateway, "tmdb_error", err)
 		return
 	}
 
@@ -9286,7 +9277,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	// the delta sync delivers the new metadata (and new image cache-buster) to clients.
 	tx, err := sqltx.Begin(ctx, s.db)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer tx.Close() // TASK-941: rolls back on every early return and panic; Commit failure releases the write lock
@@ -9294,7 +9285,7 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 	// Collect affected item IDs first.
 	idRows, err := tx.QueryContext(ctx, `SELECT id FROM items WHERE path LIKE ? ESCAPE '\' AND library_id = 'lib_tv'`, folderPrefix+"%")
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	var affectedIDs []string
@@ -9318,8 +9309,11 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		if seqErr := allocItemSeqTx(ctx, tx.Tx, &seq); seqErr != nil || seq <= 0 {
 			// change_seq = 0 is below every client's cursor, so the row would be invisible
 			// to delta sync forever. Fail the request instead of silently orphaning it.
-			log.Printf("tmdb-fix: could not allocate change_seq for %s (%v)", id, seqErr)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			if seqErr == nil {
+				seqErr = fmt.Errorf("allocated change_seq %d is not positive", seq)
+			}
+			writeFailure(w, r, http.StatusInternalServerError, "db_error",
+				fmt.Errorf("tmdb-fix: could not allocate change_seq for %s: %w", id, seqErr))
 			return
 		}
 		if seq > maxShowSeq {
@@ -9345,18 +9339,17 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 			yr, details.PosterPath, details.BackdropPath, details.VoteAverage,
 			genres, cast, showRating, now, now, seq, id,
 		); err != nil {
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
 		if err := replaceItemTags(ctx, tx.Tx, id, showExtras); err != nil {
-			log.Printf("tmdb-fix: store tags for %s: %v", id, err)
-			writeErr(w, http.StatusInternalServerError, "db_error")
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store tags for %s: %w", id, err))
 			return
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	s.publishItemSeq(maxShowSeq)
@@ -9656,7 +9649,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		FROM items WHERE library_id = 'lib_tv'`+visFrag+`
 		ORDER BY season_number ASC, path ASC`, visArgs...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
@@ -9984,7 +9977,7 @@ func (s *Server) handleTVShowSeasons(w http.ResponseWriter, r *http.Request) {
 	}
 	seasons, err := querySeasons(folderWhere+visFrag, append(append([]any{}, folderArgs...), visArgs...)...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	// Fallback: if showID came from showName (TMDb title) rather than folder name,
@@ -10079,7 +10072,7 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 		ORDER BY COALESCE(season_number, 1), COALESCE(episode_number, 0)`,
 		args...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 

@@ -456,9 +456,15 @@ flagged to Ryan.)
 **FR-144 [DESIGN, 2026-10-17, TASK-929]** — *Secrets never reach the server log.* Request logging never
 records a body. A query string may be logged, but passwords, one-time codes, session ids, tokens and DSM's
 trusted-device token are redacted from it, and from any URL, wherever a request is logged.
-*Clarified 2026-10-18 (TASK-1048):* the other direction holds too: a response of `server_error` always
-leaves a log line naming the request method and path and the error underneath it, so a failure that
-reached a device can be traced on the NAS. That line carries no PIN, password, token or PIN hash.
+*Clarified 2026-10-18 (TASK-1048, widened by TASK-1052):* the other direction holds too: every 5xx the
+server answers (`server_error`, `db_error`, `tmdb_error`, `ffmpeg_failed`, `image_fetch_failed`, 503s and
+the rest) leaves a log line naming the request method and path (never the query string), the status, the
+code, the step that failed and the error underneath it, so a failure that reached a device can be traced on
+the NAS. That line carries no PIN, password, token, cookie value or PIN hash, including any a library
+error echoes back from a request URL. One helper writes every 5xx, so a new failure site cannot forget the
+line; a 5xx that still bypasses it (a DSM status passed straight through) leaves one fallback line saying
+no cause was recorded. A failure that repeats is not allowed to flood a NAS log: one site writes at most 3
+lines per 30 seconds, and the next failure after that window opens first reports how many were suppressed.
 **FR-145 [DESIGN, 2026-09-15, TASK-920]** — *Suggested is decided by the server.* The Suggested rail
 offers titles that share a genre with what the viewer watched most recently, from one server request, and
 leaves out anything the viewer has already started. It never draws on another profile's history, and with

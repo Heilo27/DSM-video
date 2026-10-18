@@ -128,7 +128,7 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 		ORDER BY RANDOM()
 		LIMIT ?`, args...)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "db_error")
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
 	defer rows.Close()
