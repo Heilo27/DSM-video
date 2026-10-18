@@ -353,6 +353,10 @@ remote access.
 required.
 **FR-113 [INFERRED]** — When nothing is discovered, manual entry remains available and the absence of
 discovered servers is not an error.
+*Clarified 2026-10-17 (TASK-950):* the search for servers ends. If nothing is found within about eight
+seconds, the "looking" indicator stops and the screen says no servers were found; on iPhone it points the
+user to the address field, and on Apple TV it says so above the manual sign-in option. It is worded as
+information, not as an error. A server that answers later still appears.
 **FR-114 [STATED]** — A correct password never displays a stale error from a previous attempt.
 **FR-115 [INFERRED]** — Failure causes are distinguished: wrong credentials; unreachable server;
 unresolvable QuickConnect ID; account not permitted to use this application; malformed address;
@@ -363,6 +367,11 @@ found. An ID that is registered but whose NAS publishes no address says so and p
 QuickConnect setting in DSM. A lookup that never reached QuickConnect says QuickConnect couldn't be
 reached. "Invalid server address" is reserved for input that is neither a parseable address nor
 shaped like a QuickConnect ID (letters, digits, hyphens).
+*Clarified 2026-10-17 (TASK-949):* Local Network access turned off for the app is its own cause, named
+as such wherever it stops something: the server search, sign-in, and a request mid-session (the banner).
+It is never reported as "No network connection" or as the device being offline, because the device's
+network works. On iPhone the message offers a way straight to the app's Settings. When the saved
+remote address still works, the app keeps using it as for any unreachable local server.
 *Note on account permission:* this one is derived from operational project memory rather than from
 product copy, and is flagged as such.
 **FR-116 [INFERRED]** — Concurrent sign-in attempts yield exactly one session and one definite outcome.

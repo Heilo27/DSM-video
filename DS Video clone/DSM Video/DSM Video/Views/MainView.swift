@@ -92,8 +92,10 @@ struct MainView: View {
       }
     }
     .overlay(alignment: .top) {
-      OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable)
+      OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable,
+                    localNetworkDenied: appState.localNetworkDenied)
         .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
+        .animation(.easeInOut(duration: 0.3), value: appState.localNetworkDenied)
     }
     // Deep links (dsvideo://item/{id}) — iOS side.
     //

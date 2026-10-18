@@ -419,7 +419,14 @@ private struct TVOtherWaysView: View {
             .frame(maxWidth: 900)
         }
 
-        if !discovery.servers.isEmpty {
+        if discovery.status == .denied {
+          // TASK-949: Local Network access is off; the scan can never find anything.
+          Text(LocalNetworkPermission.deniedMessage)
+            .font(.system(size: 18))
+            .foregroundStyle(Color.dsTextSecondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 900)
+        } else if !discovery.servers.isEmpty {
           VStack(spacing: 16) {
             Text("Found on your network")
               .font(.system(size: 20, weight: .semibold))
@@ -464,17 +471,20 @@ private struct TVOtherWaysView: View {
             }
             .focusSection()
           }
-        } else if discovery.isScanning {
+        } else if discovery.status == .noneFound {
+          // TASK-950: the scan window closed empty. Before it, this read "No servers found"
+          // on the first frame (ahead of onAppear's scan) and the spinner never stopped.
+          Text(BonjourDiscovery.noneFoundMessage)
+            .font(.system(size: 18))
+            .foregroundStyle(Color.dsTextMuted)
+        } else {
+          // .idle (first frame, before onAppear starts the scan) and .scanning.
           HStack(spacing: 12) {
             ProgressView().tint(Color.dsTextMuted)
             Text("Scanning network…")
               .font(.system(size: 18))
               .foregroundStyle(Color.dsTextMuted)
           }
-        } else {
-          Text("No servers found on your network.")
-            .font(.system(size: 18))
-            .foregroundStyle(Color.dsTextMuted)
         }
 
         // Always focusable, whatever discovery returns — a tvOS screen with no focusable

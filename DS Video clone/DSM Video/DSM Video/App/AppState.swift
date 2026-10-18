@@ -137,6 +137,11 @@ final class AppState {
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
+  /// A request to the server was refused because Local Network access is off (TASK-949).
+  /// Rides alongside `serverUnreachable` (the reconnect loop still runs, and can land on the
+  /// WAN address) and only changes what the banner says. Never sets `isOffline`: the device's
+  /// network works, and NWPathMonitor would never clear a flag it did not set.
+  var localNetworkDenied: Bool = false
 
   /// Whether this session's server supports profiles. In memory: `.unknown` at launch and
   /// after sign-out, moved only by `refreshProfiles()`. Read through `progressSyncAllowed`.
@@ -845,6 +850,9 @@ final class AppState {
       // these; without them "Login failed" is indistinguishable across a stale LAN address,
       // a blocked port, a cert mismatch and a genuine outage.
       var attemptFailures: [String] = []
+      // TASK-949: a LAN candidate refused for Local Network access. When nothing answered, that
+      // is the one cause the user can fix, so it leads the message.
+      var localNetworkRefused = false
       for (index, candidate) in candidates.enumerated() {
         do {
           var tempClient = makeClient(baseURL: candidate.url, token: nil)
@@ -895,6 +903,7 @@ final class AppState {
           }
           dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
           attemptFailures.append("\(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") — \(why)")
+          if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
           lastError = error
         }
       }
@@ -915,6 +924,8 @@ final class AppState {
       // and must not be buried under connection detail.
       if let apiErr = lastError as? APIError, apiErr.serverReached {
         loginError = apiErr.userMessage
+      } else if localNetworkRefused {
+        loginError = LocalNetworkPermission.deniedMessage
       } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
         let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
         // The saved LAN/WAN addresses failed AND the QuickConnect lookup failed: the lookup is
@@ -927,7 +938,7 @@ final class AppState {
           : "Couldn't reach the server. Tried:\n" + attemptFailures.joined(separator: "\n")
       } else {
         loginError = (lastError as? APIError)?.userMessage
-          ?? (lastError as? URLError).map { APIError.connection($0.code).userMessage }
+          ?? (lastError as? URLError).map { APIError.transport($0).userMessage }
           ?? "Login failed — no server address could be built. Check the address."
       }
     } catch {
@@ -935,7 +946,7 @@ final class AppState {
       // failure is now APIError.connection and carries the actual reason, and the fallback
       // must not imply the credentials were the problem.
       loginError = (error as? APIError)?.userMessage
-        ?? (error as? URLError).map { APIError.connection($0.code).userMessage }
+        ?? (error as? URLError).map { APIError.transport($0).userMessage }
         ?? "Login failed."
     }
   }
@@ -1046,6 +1057,8 @@ final class AppState {
         attemptSilentReauth()
       case .network:
         serverUnreachable = true
+      case .localNetworkDenied:
+        applyLocalNetworkDenied()
       // TASK-953: APIClient wraps EVERY transport failure as .connection(code), so this is
       // the shape a timeout or refused connection actually arrives in. It used to fall to
       // `default`, which made the URLError branch below unreachable from any APIClient call:
@@ -1057,8 +1070,18 @@ final class AppState {
         break  // transient, don't change state
       }
     } else if let urlErr = error as? URLError {
-      applyConnectionFailure(Self.connectionFailureKind(urlErr.code))
+      if case .localNetworkDenied = APIError.transport(urlErr) {
+        applyLocalNetworkDenied()
+      } else {
+        applyConnectionFailure(Self.connectionFailureKind(urlErr.code))
+      }
     }
+  }
+
+  /// TASK-949: the server is unreachable for a reason the user can fix in Settings.
+  private func applyLocalNetworkDenied() {
+    serverUnreachable = true
+    localNetworkDenied = true
   }
 
   enum ConnectionFailureKind: Equatable {
@@ -1177,6 +1200,7 @@ final class AppState {
     let wasDown = serverUnreachable || isOffline
     serverUnreachable = false
     isOffline = false
+    localNetworkDenied = false
     // Also clear the banner. homeError was only ever nil'd on entry to a FOREGROUND load,
     // so a successful background/heartbeat-driven sync left "Can't reach your server."
     // pinned above fully-populated, correct rails until the user pulled to refresh.
@@ -1395,6 +1419,7 @@ final class AppState {
           // so the cancel() it used to call doesn't abort this task mid-flight.
           reconnectRetryTask = nil
           serverUnreachable = false
+          localNetworkDenied = false
           startHeartbeatTimer()
           await homeLoad()
           return
@@ -2122,7 +2147,9 @@ final class AppState {
       // appropriate error — avoids a loud failure on every network call (TASK-291).
       guard !isOffline && !serverUnreachable else {
         homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
-        homeError = isOffline ? "No internet connection." : "Can't reach your server."
+        homeError = isOffline ? "No internet connection."
+          : localNetworkDenied ? LocalNetworkPermission.deniedMessage
+          : "Can't reach your server."
         return
       }
       // Resolve QC ID before the foreground sync too.

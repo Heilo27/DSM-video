@@ -73,6 +73,9 @@ struct SetupConnectScreen: View {
   @Environment(SetupFlowState.self) private var flow
 
   @State private var discovery = BonjourDiscovery()
+  #if os(iOS)
+  @Environment(\.openURL) private var openURL
+  #endif
 
   @State private var address: String = ""
   @State private var username: String = ""
@@ -240,7 +243,29 @@ struct SetupConnectScreen: View {
   /// correctly guess your way into. It scans on the landing screen now.
   @ViewBuilder
   private var discoverySection: some View {
-    if !discovery.servers.isEmpty {
+    if discovery.status == .denied {
+      // TASK-949: with Local Network access off the scan can never find anything. Say why,
+      // and on iPhone go straight to the switch.
+      VStack(alignment: .leading, spacing: 10) {
+        Label {
+          Text(LocalNetworkPermission.deniedMessage)
+            .font(.subheadline)
+            .foregroundStyle(Color.dsTextSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+          Image(systemName: "network.slash")
+            .foregroundStyle(Color.dsTextMuted)
+        }
+        #if os(iOS)
+        Button("Open Settings") {
+          if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Color.dsAccent)
+        .accessibilityIdentifier("setup.localNetwork.openSettings")
+        #endif
+      }
+    } else if !discovery.servers.isEmpty {
       VStack(alignment: .leading, spacing: 10) {
         HStack(spacing: 8) {
           Text("FOUND ON YOUR NETWORK")
@@ -300,6 +325,18 @@ struct SetupConnectScreen: View {
           .font(.subheadline)
           .foregroundStyle(Color.dsTextSecondary)
         Spacer(minLength: 0)
+      }
+    } else if discovery.status == .noneFound {
+      // TASK-950: the scan ended empty. Not an error (FR-113); the address field below is the
+      // way on, so point at it.
+      Label {
+        Text(BonjourDiscovery.noneFoundMessage + " Enter your server's address below.")
+          .font(.subheadline)
+          .foregroundStyle(Color.dsTextSecondary)
+          .fixedSize(horizontal: false, vertical: true)
+      } icon: {
+        Image(systemName: "arrow.down")
+          .foregroundStyle(Color.dsTextMuted)
       }
     }
   }

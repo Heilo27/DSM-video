@@ -748,7 +748,7 @@ struct APIClient {
       // credentials problem. Log the host so a stale saved address is obvious at a glance.
       dlog.error(.network,
                  "\(endpoint) — \(urlError.code.diagnosticName) (host: \(url.host ?? "?"):\(url.port.map(String.init) ?? "-"))")
-      throw APIError.connection(urlError.code)
+      throw APIError.transport(urlError)
     }
 
     let ms = Int(Date().timeIntervalSince(started) * 1000)
@@ -834,6 +834,10 @@ enum APIError: Error {
   /// mean the server DID answer and rejected us — the difference the user needs in order to
   /// know whether to fix their address or their password.
   case connection(URLError.Code)
+  /// The request never left the device: Local Network access is off and the server is on the
+  /// LAN (TASK-949). URLSession reports it as -1009 `.notConnectedToInternet`, which is not
+  /// true: the network works, the app may not use it.
+  case localNetworkDenied
   case http(Int)
   /// A structured error from the server. `status` is the HTTP status that carried it —
   /// needed because the backend returns a JSON body on EVERY error including 401, so
@@ -856,6 +860,7 @@ enum APIError: Error {
   var userMessage: String {
     switch self {
     case .network: return "Network error."
+    case .localNetworkDenied: return LocalNetworkPermission.deniedMessage
     case .connection(let code):
       switch code {
       case .cannotConnectToHost:
@@ -1103,7 +1108,7 @@ enum APIError: Error {
     // .decode means the request completed and the server sent a body we could not parse —
     // the most definitively "reached" failure there is.
     case .server, .http, .converting, .decode: return true
-    case .network, .invalidURL, .connection: return false
+    case .network, .invalidURL, .connection, .localNetworkDenied: return false
     }
   }
 }
@@ -1136,6 +1141,14 @@ nonisolated enum ProfileHeaderSource: Equatable, Sendable {
 }
 
 extension APIError {
+  /// The one conversion of a transport failure. TASK-949: -1009 also means "Local Network
+  /// access is off" when the address is on the LAN. It is classified here, while the error still
+  /// carries its NWPath; past this point only the code survives and the user would read
+  /// "No network connection." on a network that works.
+  nonisolated static func transport(_ urlError: URLError) -> APIError {
+    LocalNetworkPermission.isDenied(urlError) ? .localNetworkDenied : .connection(urlError.code)
+  }
+
   /// The server's structured extras, when the error carried any.
   var detail: APIErrorDetail? {
     if case .server(_, _, let detail) = self { return detail }
