@@ -18,7 +18,7 @@
 #     3. No case is declared and then never mentioned again (the .skipIntro failure)
 #   PART 2 (every Button, exactly)
 #     Every `Button` that compiles into the tvOS target and carries a CUSTOM look
-#     (dsPrimaryButton, .buttonStyle(.plain) or any non-system style, .background, .overlay)
+#     (dsPrimaryButton, dsSecondaryButton, .buttonStyle(.plain) or any non-system style, .background, .overlay)
 #     must be bound with .focused(...). A custom look replaces the system focus effect, so an
 #     unbound one renders and can never be reached by the Siri Remote. It fails the run; it is
 #     not a count heuristic.
@@ -293,7 +293,7 @@ def buttons(src):
         yield ln0 + 1, raw[ln0].strip(), chain, 'focus-exempt:' in around
 
 def custom_look(chain):
-    if 'dsPrimaryButton' in chain or '.background(' in chain or '.overlay(' in chain:
+    if 'dsPrimaryButton' in chain or 'dsSecondaryButton' in chain or '.background(' in chain or '.overlay(' in chain:
         return True
     for m in re.finditer(r'\.buttonStyle\(\s*([^)\n]*)', chain):
         if m.group(1).strip() not in SYSTEM_STYLES:
@@ -360,6 +360,15 @@ let s = "Button(x).buttonStyle(.plain)"
     ("dsPrimaryButton without a binding is flagged", 1, """
 Button { go() } label: { Text("x") }
   .dsPrimaryButton()
+"""),
+    ("dsSecondaryButton without a binding is flagged", 1, """
+Button { go() } label: { Text("x") }
+  .dsSecondaryButton()
+"""),
+    ("dsSecondaryButton with a binding passes", 0, """
+Button { go() } label: { Text("x") }
+  .dsSecondaryButton(minWidth: 200)
+  .focused($f, equals: .a)
 """),
 ]
 for name, want, src in FIXTURES:

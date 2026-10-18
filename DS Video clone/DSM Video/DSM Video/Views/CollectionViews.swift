@@ -197,9 +197,8 @@ struct CollectionsRail: View {
     .dsPrimaryButton(.card, minWidth: 240)
     .focused($focusedControl, equals: .retry)
     #else
-    // iOS keeps the quieter system .bordered look this inline rail retry already had; it is
-    // not one of the accent-prominent sites TASK-1038 routes through dsPrimaryButton.
-    .buttonStyle(.bordered)
+    // The inline rail retry is the quiet action on iOS (TASK-1050), not an accent call to action.
+    .dsSecondaryButton()
     #endif
     .padding(.horizontal, horizontalInset)
   }

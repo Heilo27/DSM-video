@@ -2,10 +2,10 @@ import SwiftUI
 
 #if os(tvOS)
 
-/// Focus targets for the `dsPrimaryButton`s on the pairing screen. The code field has its own
-/// Bool (`codeFieldFocused`), and the system-styled buttons take focus from the system.
+/// Focus targets for the `dsPrimaryButton`s and the `dsSecondaryButton` on the pairing screen. The
+/// code field has its own Bool (`codeFieldFocused`).
 enum PairingControl: Hashable {
-  case generate, tryAgain, connect
+  case generate, tryAgain, connect, generateNew
 }
 
 struct TVPairingView: View {
@@ -159,16 +159,11 @@ struct TVPairingView: View {
               Task { await generate() }
             } label: {
               Text("Generate New Code")
-                .font(.dsTVLabel)
-                .padding(.horizontal, .dsSpaceJumbo)
-                .padding(.vertical, 18)
             }
-            // Not a dsPrimaryButton on purpose: this is the SECONDARY action beside a live
-            // code, drawn quieter (raised-surface fill, not the accent) so the code stays the
-            // focal point. There is no shared secondary-button style yet; this one takes the
-            // system tvOS focus effect, so it needs no .focused() binding.
-            .buttonStyle(.borderedProminent)
-            .tint(Color.dsSurfaceRaised)
+            // The SECONDARY action beside a live code, drawn quieter (raised-surface fill, not
+            // the accent) so the code stays the focal point.
+            .dsSecondaryButton(minWidth: 360)
+            .focused($control, equals: .generateNew)
           }
         } else if let error {
           VStack(spacing: .dsSpaceXXL) {

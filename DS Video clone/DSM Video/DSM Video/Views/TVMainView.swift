@@ -204,9 +204,10 @@ struct TVLoginView: View {
 // MARK: - Home
 
 
-/// Focus targets for the `dsPrimaryButton`s on the home screen's error and empty states.
+/// Focus targets for the `dsPrimaryButton`s and `dsSecondaryButton`s on the home screen's error and
+/// empty states.
 private enum HomeControl: Hashable {
-  case retry, refresh
+  case retry, refresh, signOut
 }
 
 private struct TVHomeView: View {
@@ -246,16 +247,11 @@ private struct TVHomeView: View {
                   appState.logout()
                 } label: {
                   Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-                    .font(.dsTVHeadline)
-                    .padding(.horizontal, .dsSpaceHuge)
-                    .padding(.vertical, .dsSpaceXL)
                 }
-                // Not a dsPrimaryButton on purpose: Sign Out is the SECONDARY action beside
-                // Retry, drawn quieter (raised-surface fill, not the accent). There is no
-                // shared secondary-button style yet; it takes the system tvOS focus effect,
-                // so it needs no .focused() binding.
-                .buttonStyle(.borderedProminent)
-                .tint(Color.dsSurfaceRaised)
+                // Sign Out is the SECONDARY action beside Retry, drawn quieter (raised-surface
+                // fill, not the accent), at the same width as Retry.
+                .dsSecondaryButton(minWidth: 360)
+                .focused($homeControl, equals: .signOut)
               }
               .padding(.top, .dsSpaceTitleSafe)
             } else {

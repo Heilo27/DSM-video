@@ -784,17 +784,11 @@ struct ProfileManagementView: View {
                   spacing: 28) { tiles }
           .frame(maxWidth: 560)
         #endif
-        // Deliberately NOT dsPrimaryButton (TASK-1038): this is a white-on-black fill, not
-        // dsAccent, so it is not one of the accent-prominent sites that style replaces. It
-        // matches the neutral white the profile screens use for every selected state (the
-        // level chips, the avatar ring, the lifted tile). That is read from the code: no
-        // spec or commit records why it was made white (introduced with the screens in
-        // TASK-917). Changing it is a design call, not a consistency fix.
+        // The quiet action under the tiles: dsSecondaryButton (TASK-1050). It was a white-on-black
+        // system fill (introduced with the screens in TASK-917; no spec records why), now the
+        // shared secondary look so it is one component, not a one-off.
         Button("Done", action: close)
-          .font(ProfileMetrics.body.weight(.semibold))
-          .buttonStyle(.borderedProminent)
-          .tint(.white)
-          .foregroundStyle(.black)
+          .dsSecondaryButton(minWidth: 200)
           .focused($focusedControl, equals: .done)
           .accessibilityIdentifier("profileManage.done")
         Spacer(minLength: 0)
