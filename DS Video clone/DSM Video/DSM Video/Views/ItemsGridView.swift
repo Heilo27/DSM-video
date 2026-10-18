@@ -249,7 +249,7 @@ struct ItemsGridView: View {
             .foregroundStyle(.white.opacity(0.5))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 4)
-            .background(Color.black)
+            .background(Color.dsBackground)
         }
       }
     }

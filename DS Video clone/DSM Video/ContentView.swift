@@ -112,7 +112,7 @@ private struct LaunchAnimationView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color.dsBackground.ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     Spacer()

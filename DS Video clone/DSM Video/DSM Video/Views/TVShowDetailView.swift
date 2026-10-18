@@ -48,7 +48,7 @@ private struct TVShowDetailSplitView: View {
 
   var body: some View {
     ZStack(alignment: .topLeading) {
-      Color.black.ignoresSafeArea()
+      Color.dsBackground.ignoresSafeArea()
 
       GeometryReader { geo in
         HStack(spacing: 0) {
@@ -92,7 +92,7 @@ private struct TVShowDetailSplitView: View {
         .accessibilityHidden(true)
       } else {
         LinearGradient(
-          colors: [Color(white: 0.14), Color.black],
+          colors: [Color.dsSurfaceRaised, Color.dsBackground],
           startPoint: .topTrailing,
           endPoint: .bottomLeading
         )
@@ -109,7 +109,7 @@ private struct TVShowDetailSplitView: View {
       HStack(spacing: 0) {
         Spacer()
         LinearGradient(
-          colors: [.clear, .black],
+          colors: [.clear, Color.dsBackground],
           startPoint: .leading,
           endPoint: .trailing
         )
@@ -121,8 +121,8 @@ private struct TVShowDetailSplitView: View {
       LinearGradient(
         stops: [
           .init(color: .clear, location: 0.0),
-          .init(color: .black.opacity(0.5), location: 0.6),
-          .init(color: .black, location: 1.0)
+          .init(color: Color.dsBackground.opacity(0.5), location: 0.6),
+          .init(color: Color.dsBackground, location: 1.0)
         ],
         startPoint: .top,
         endPoint: .bottom
@@ -446,7 +446,7 @@ private struct TVSeasonSection: View {
         .frame(minHeight: 60)
         .background(
           RoundedRectangle(cornerRadius: 8)
-            .fill(isHeaderFocused ? Color(white: 0.22) : Color.clear)
+            .fill(isHeaderFocused ? Color.dsFocusFill : Color.clear)
         )
         .contentShape(Rectangle())
       }
@@ -600,7 +600,7 @@ private struct TVEpisodeNavRow<Destination: View>: View {
       TVEpisodeRow(ep: ep, isHighlighted: isHighlighted)
         .background(
           RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(isFocused ? Color(white: 0.22) : Color.clear)
+            .fill(isFocused ? Color.dsFocusFill : Color.clear)
         )
     }
     .buttonStyle(.plain)
@@ -628,7 +628,7 @@ private struct TVEpisodeRow: View {
       // Thumbnail (16:9 landscape)
       ZStack {
         RoundedRectangle(cornerRadius: 8, style: .continuous)
-          .fill(Color(white: 0.1))
+          .fill(Color.dsSurfaceHigh)
           .frame(width: 120, height: 68)
 
         if appState.isDemoMode, let assetName = DemoData.posterAssetNames[ep.id] {
@@ -695,7 +695,7 @@ private struct TVEpisodeRow: View {
       case .bar(let frac):
         ZStack {
           Circle()
-            .stroke(Color(white: 0.25), lineWidth: 3)
+            .stroke(Color.dsBorderStrong, lineWidth: 3)
           Circle()
             .trim(from: 0, to: frac)
             .stroke(Color.dsAccent, lineWidth: 3)
@@ -947,7 +947,7 @@ private struct StillWatchingOverlay: View {
             if isPrimary {
               Color.dsAccent.brightness(isFocused ? 0.12 : 0)
             } else {
-              isFocused ? Color(white: 0.35) : Color(white: 0.22)
+              isFocused ? Color.dsFocusFillStrong : Color.dsFocusFill
             }
           }
         )
@@ -1050,7 +1050,7 @@ private struct TVShowDetailScrollView: View {
         .frame(maxWidth: .infinity, alignment: .center)
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle(show.title)
     .task { await load() }
     .navigationDestination(item: $resumeNav) { target in
@@ -1067,7 +1067,7 @@ private struct TVShowDetailScrollView: View {
     #if !os(tvOS)
     .navigationBarTitleDisplayMode(.inline)
     .toolbarBackground(.visible, for: .navigationBar)
-    .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+    .toolbarBackground(Color.dsBackground.opacity(0.85), for: .navigationBar)
     .toolbarColorScheme(.dark, for: .navigationBar)
     .toolbar {
       ToolbarItem(placement: .topBarTrailing) {
@@ -1133,8 +1133,8 @@ private struct TVShowDetailScrollView: View {
       LinearGradient(
         stops: [
           .init(color: .clear, location: 0.0),
-          .init(color: .black.opacity(0.8), location: 0.55),
-          .init(color: .black, location: 1.0)
+          .init(color: Color.dsBackground.opacity(0.8), location: 0.55),
+          .init(color: Color.dsBackground, location: 1.0)
         ],
         startPoint: .top,
         endPoint: .bottom
@@ -1681,7 +1681,7 @@ private struct TVShowMetadataFixerSheet: View {
             .onSubmit { Task { await search() } }
             .foregroundStyle(.white)
         }
-        .listRowBackground(Color(white: 0.12))
+        .listRowBackground(Color.dsSurfaceHigh)
 
         if isSearching {
           HStack {
@@ -1689,7 +1689,7 @@ private struct TVShowMetadataFixerSheet: View {
             ProgressView("Searching").tint(.white)
             Spacer()
           }
-          .listRowBackground(Color(white: 0.08))
+          .listRowBackground(Color.dsSurface)
         } else {
           // Pre-compute which title+year keys appear more than once so the
           // ForEach body avoids an O(n²) filter on every render pass.
@@ -1744,7 +1744,7 @@ private struct TVShowMetadataFixerSheet: View {
             }())
             .buttonStyle(.plain)
             .disabled(isApplying)
-            .listRowBackground(Color(white: 0.1))
+            .listRowBackground(Color.dsSurfaceHigh)
           }
         }
 
@@ -1752,7 +1752,7 @@ private struct TVShowMetadataFixerSheet: View {
           Text(error)
             .foregroundStyle(Color.dsError)
             .font(.caption)
-            .listRowBackground(Color(white: 0.08))
+            .listRowBackground(Color.dsSurface)
         }
 
         #if os(tvOS)
@@ -1765,7 +1765,7 @@ private struct TVShowMetadataFixerSheet: View {
             .disabled(isSearching)
           Button("Cancel") { dismiss() }
         }
-        .listRowBackground(Color(white: 0.1))
+        .listRowBackground(Color.dsSurfaceHigh)
         #endif
       }
       .navigationTitle("Fix Show Metadata")
@@ -1785,7 +1785,7 @@ private struct TVShowMetadataFixerSheet: View {
       #if !os(tvOS)
       .scrollContentBackground(.hidden)
       #endif
-      .background(Color.black)
+      .background(Color.dsBackground)
       .onChange(of: error) { _, msg in
         if let msg { AccessibilityNotification.Announcement(msg).post() }
       }

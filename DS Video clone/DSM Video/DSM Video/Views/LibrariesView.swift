@@ -50,13 +50,13 @@ struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
             } label: {
               rowLabel(item)
             }
-            .listRowBackground(Color.black)
+            .listRowBackground(Color.dsBackground)
           }
           .listStyle(.plain)
           .scrollContentBackground(.hidden)
         }
       }
-      .background(Color.black.ignoresSafeArea())
+      .background(Color.dsBackground.ignoresSafeArea())
       .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: title)
       .searchFocused($fieldFocused)
       // Deferred one runloop turn: the field is installed by the navigation bar during
@@ -153,7 +153,7 @@ struct LibrariesView: View {
       }
     }
     .navigationTitle("Libraries")
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .task { await load() }
     .refreshable { await load(force: true) }
     .onChange(of: appState.homeLibraries) { _, libs in
@@ -372,7 +372,7 @@ private struct LibraryCard: View {
 
   private var placeholderFill: some View {
     Rectangle()
-      .fill(Color(white: 0.12))
+      .fill(Color.dsSurfaceHigh)
       .overlay(
         Image(systemName: loadFailed ? "arrow.clockwise" : icon)
           .font(.system(size: 56, weight: .regular))
@@ -600,7 +600,7 @@ struct LibraryHomeView: View {
     // The duplicate handler that lived here raced the same home-* flags on the same
     // .active event; it has been removed. networkDidReconnect (above) still drives a
     // homeLoad when the coordinator switches address.
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     // Global search entry point.
     //
     // iPhone dropped the Search TAB to stay at five and avoid the system "More" collapse,
@@ -693,7 +693,7 @@ private struct ContinueWatchingCard: View {
                  alignment: item.backdropImageId != nil ? .center : .top)
         } else {
           Rectangle()
-            .fill(Color(white: 0.1))
+            .fill(Color.dsSurfaceHigh)
             .overlay(
               Image(systemName: "play.rectangle.fill")
                 .font(.system(size: 28))

@@ -54,7 +54,7 @@ struct DiagnosticLogView: View {
         }
       }
     }
-    .background(Color.black)
+    .background(Color.dsBackground)
     .navigationTitle("Diagnostic Log")
     .onAppear { entries = DiagnosticLog.shared.entries }
     .toolbar {

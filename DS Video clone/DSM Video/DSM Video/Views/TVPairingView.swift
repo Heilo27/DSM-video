@@ -25,11 +25,11 @@ struct TVPairingView: View {
 
   var body: some View {
     ZStack {
-      Color.black.ignoresSafeArea()
+      Color.dsBackground.ignoresSafeArea()
 
       // Subtle radial depth
       RadialGradient(
-        colors: [Color(white: 0.07), Color.black],
+        colors: [Color.dsSurface, Color.dsBackground],
         center: .center,
         startRadius: 50,
         endRadius: 700
@@ -117,7 +117,7 @@ struct TVPairingView: View {
                 .tracking(8)
                 .padding(.horizontal, 72)
                 .padding(.vertical, 40)
-                .background(Color(white: 0.1))
+                .background(Color.dsSurfaceHigh)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(
                   RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -155,7 +155,7 @@ struct TVPairingView: View {
                 .padding(.vertical, 18)
             }
             .buttonStyle(.borderedProminent)
-            .tint(Color(white: 0.18))
+            .tint(Color.dsSurfaceRaised)
           }
         } else if let error {
           VStack(spacing: 24) {
@@ -396,9 +396,9 @@ private struct TVOtherWaysView: View {
 
   var body: some View {
     ZStack {
-      Color.black.ignoresSafeArea()
+      Color.dsBackground.ignoresSafeArea()
       RadialGradient(
-        colors: [Color(white: 0.07), Color.black],
+        colors: [Color.dsSurface, Color.dsBackground],
         center: .center,
         startRadius: 50,
         endRadius: 700
@@ -457,7 +457,7 @@ private struct TVOtherWaysView: View {
                   }
                   .padding(.horizontal, 32)
                   .padding(.vertical, 18)
-                  .background(Color(white: 0.1))
+                  .background(Color.dsSurfaceHigh)
                   .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                   .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)

@@ -212,8 +212,8 @@ private struct AddTileArt: View {
 private struct ProfileBackdrop: View {
   var body: some View {
     ZStack {
-      Color.black
-      RadialGradient(colors: [Color(white: 0.11), .black], center: .top,
+      Color.dsBackground
+      RadialGradient(colors: [Color.dsSurfaceHigh, Color.dsBackground], center: .top,
                      startRadius: 40, endRadius: 1100)
     }
     .ignoresSafeArea()

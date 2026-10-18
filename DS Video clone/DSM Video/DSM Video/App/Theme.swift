@@ -62,6 +62,13 @@ struct Theme: Equatable, Sendable {
     let borderSubtle: Color
     let borderStrong: Color
 
+    // Focus / selection fills: the highlighted-row and unselected-button fills on tvOS
+    // (and the matching iOS rows). Brighter than surfaceRaised so a focused control reads
+    // against a card. `focusFillStrong` is the focused state of a control that already
+    // sits on `focusFill`.
+    let focusFill: Color
+    let focusFillStrong: Color
+
     // Radii
     let radiusSm: CGFloat
     let radiusMd: CGFloat
@@ -138,6 +145,8 @@ extension Theme {
         success: Color, error: Color, warning: Color,
         textPrimary: Color, textSecondary: Color, textTertiary: Color, textMuted: Color, textInactive: Color,
         borderSubtle: Color, borderStrong: Color,
+        focusFill: Color = Color(white: 0.22),
+        focusFillStrong: Color = Color(white: 0.35),
         radiusSm: CGFloat, radiusMd: CGFloat, radiusLg: CGFloat, radiusPill: CGFloat,
         fontLargeTitle: Font, fontTitle2: Font, fontHeadline: Font, fontBody: Font,
         fontSubheadline: Font, fontSubheadlineSB: Font, fontFootnote: Font,
@@ -162,6 +171,7 @@ extension Theme {
         self.textPrimary = textPrimary; self.textSecondary = textSecondary
         self.textTertiary = textTertiary; self.textMuted = textMuted; self.textInactive = textInactive
         self.borderSubtle = borderSubtle; self.borderStrong = borderStrong
+        self.focusFill = focusFill; self.focusFillStrong = focusFillStrong
         self.radiusSm = radiusSm; self.radiusMd = radiusMd
         self.radiusLg = radiusLg; self.radiusPill = radiusPill
         self.fontLargeTitle = fontLargeTitle; self.fontTitle2 = fontTitle2
@@ -201,6 +211,8 @@ extension Theme {
         textInactive:   Color(hex: "#737373"),
         borderSubtle:   Color(hex: "#2A2A2E"),
         borderStrong:   Color(hex: "#3A3A40"),
+        focusFill:      Color(white: 0.22),
+        focusFillStrong: Color(white: 0.35),
         radiusSm:   8,
         radiusMd:   12,
         radiusLg:   16,
@@ -247,6 +259,8 @@ extension Theme {
         textInactive:   Color(hex: "#4D483E"),
         borderSubtle:   Color(hex: "#2A241B"),
         borderStrong:   Color(hex: "#3C3528"),
+        focusFill:      Color(hex: "#443A29"),
+        focusFillStrong: Color(hex: "#6B5D42"),
         radiusSm:   8,
         radiusMd:   12,
         radiusLg:   16,
@@ -287,6 +301,8 @@ extension Theme {
         textInactive:   Color(hex: "#4B4753"),
         borderSubtle:   Color(hex: "#221F28"),
         borderStrong:   Color(hex: "#332F3B"),
+        focusFill:      Color(hex: "#39353F"),
+        focusFillStrong: Color(hex: "#5B5666"),
         radiusSm:   10,
         radiusMd:   14,
         radiusLg:   18,

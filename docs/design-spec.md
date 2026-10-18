@@ -41,6 +41,14 @@ extension Color {
     // Borders / separators
     static let dsBorderSubtle    = Color(hex: "#2A2A2E")
     static let dsBorderStrong    = Color(hex: "#3A3A40")
+
+    // Focus / selection fills (tvOS focus highlight, selected rows). Per theme:
+    // Classic white 0.22 / 0.35, Nitrate #443A29 / #6B5D42, Cinematic #39353F / #5B5666.
+    // Views never use Color(white:) or a bare Color.black ground: grounds are dsBackground,
+    // fills are dsSurface / dsSurfaceHigh / dsSurfaceRaised / dsFocusFill, dividers dsBorderSubtle.
+    // Scrims, shadows, masks and the video letterbox stay black on purpose.
+    static let dsFocusFill       = Color(white: 0.22)
+    static let dsFocusFillStrong = Color(white: 0.35)
 }
 
 extension Color {

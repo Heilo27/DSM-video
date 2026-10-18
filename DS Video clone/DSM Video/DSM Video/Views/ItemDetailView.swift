@@ -157,7 +157,7 @@ struct ItemDetailView: View {
       .navigationTitle(shownTitle)
       .navigationBarTitleDisplayMode(.inline)
       .toolbarBackground(.visible, for: .navigationBar)
-      .toolbarBackground(Color.black.opacity(0.85), for: .navigationBar)
+      .toolbarBackground(Color.dsBackground.opacity(0.85), for: .navigationBar)
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
@@ -230,7 +230,8 @@ struct ItemDetailView: View {
   private var tvBody: some View {
     GeometryReader { geo in
       ZStack(alignment: .bottom) {
-        // Image fills the full geometry frame
+        // Image fills the full geometry frame. Black is deliberate: it sits behind the
+        // backdrop artwork like a letterbox, not as a themed ground.
         Color.black
         backdropImage
           .scaledToFill()
@@ -312,7 +313,7 @@ struct ItemDetailView: View {
     // — that is the cost of the fix. The explanatory comment was lost in a later refactor,
     // which is how this came back as a suspected bug; see 3c45fc3.
     .id(showPlayer)
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .privacySensitive()
   }
   #endif
@@ -783,11 +784,11 @@ struct ItemDetailView: View {
   @ViewBuilder
   private var header: some View {
     if isLoading && detail == nil {
-      Color.black
+      Color.dsBackground
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(ProgressView("Loading").tint(.white).accessibilityLabel("Loading, please wait"))
     } else if let error {
-      Color.black
+      Color.dsBackground
         .frame(maxWidth: .infinity, minHeight: backdropHeight)
         .overlay(
           VStack(spacing: 12) {
@@ -893,7 +894,7 @@ struct ItemDetailView: View {
     } else {
       // No backdrop — gradient placeholder with title overlay
       LinearGradient(
-        colors: [Color.dsSurfaceRaised, Color.black],
+        colors: [Color.dsSurfaceRaised, Color.dsBackground],
         startPoint: .top,
         endPoint: .bottom
       )
@@ -1289,7 +1290,7 @@ private struct MetadataFixerSheet: View {
             .onSubmit { Task { await search() } }
             .foregroundStyle(.white)
         }
-        .listRowBackground(Color(white: 0.12))
+        .listRowBackground(Color.dsSurfaceHigh)
 
         if isSearching {
           HStack {
@@ -1297,7 +1298,7 @@ private struct MetadataFixerSheet: View {
             ProgressView("Searching").tint(.white)
             Spacer()
           }
-          .listRowBackground(Color(white: 0.08))
+          .listRowBackground(Color.dsSurface)
         } else {
           ForEach(results) { candidate in
             Button {
@@ -1308,7 +1309,7 @@ private struct MetadataFixerSheet: View {
                   img.resizable().scaledToFill()
                     .frame(width: 50, height: 75, alignment: .top)
                 } placeholder: {
-                  Color(white: 0.15)
+                  Color.dsSurfaceRaised
                 }
                 .frame(width: 50, height: 75)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -1334,7 +1335,7 @@ private struct MetadataFixerSheet: View {
             }
             .buttonStyle(.plain)
             .disabled(isApplying)
-            .listRowBackground(Color(white: 0.1))
+            .listRowBackground(Color.dsSurfaceHigh)
           }
         }
 
@@ -1342,13 +1343,13 @@ private struct MetadataFixerSheet: View {
           Text(error)
             .foregroundStyle(Color.dsError)
             .font(.caption)
-            .listRowBackground(Color(white: 0.08))
+            .listRowBackground(Color.dsSurface)
         }
         if applied {
           Text("Metadata updated! Pull to refresh.")
             .foregroundStyle(Color.dsSuccess)
             .font(.caption)
-            .listRowBackground(Color(white: 0.08))
+            .listRowBackground(Color.dsSurface)
         }
       }
       .navigationTitle("Fix Metadata")
@@ -1364,7 +1365,7 @@ private struct MetadataFixerSheet: View {
       }
       .task { await search() }
       .scrollContentBackground(.hidden)
-      .background(Color.black)
+      .background(Color.dsBackground)
     }
   }
 
@@ -1510,6 +1511,7 @@ private struct PlayerSheet: View {
 
   var body: some View {
     ZStack {
+      // Video letterbox: black on every theme by design, not a theme ground.
       Color.black.ignoresSafeArea()
 
       if let url = playbackURL {

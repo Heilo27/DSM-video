@@ -64,9 +64,9 @@ struct TVLoginView: View {
   var body: some View {
     NavigationStack {
       ZStack {
-        Color.black.ignoresSafeArea()
+        Color.dsBackground.ignoresSafeArea()
         RadialGradient(
-          colors: [Color(white: 0.08), Color.black],
+          colors: [Color.dsSurface, Color.dsBackground],
           center: .center,
           startRadius: 100,
           endRadius: 900
@@ -206,7 +206,7 @@ private struct TVHomeView: View {
   var body: some View {
     NavigationStack(path: $navPath) {
       ZStack(alignment: .top) {
-        Color.black.ignoresSafeArea()
+        Color.dsBackground.ignoresSafeArea()
 
         ScrollView(.vertical, showsIndicators: false) {
           VStack(alignment: .leading, spacing: 56) {
@@ -239,7 +239,7 @@ private struct TVHomeView: View {
                     .padding(.vertical, 20)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(white: 0.2))
+                .tint(Color.dsSurfaceRaised)
               }
               .padding(.top, 60)
             } else {
@@ -385,7 +385,7 @@ private struct TVHomeView: View {
         }
         .padding(.horizontal, 60)   // title-safe
         .padding(.vertical, 24)
-        .background(Color.black.opacity(0.95))
+        .background(Color.dsBackground.opacity(0.95))
       }
     }
     .sheet(isPresented: $showSettings) {
@@ -784,7 +784,7 @@ private struct TVShowPortraitCard: View {
     VStack(alignment: .leading, spacing: 10) {
       ZStack(alignment: .bottom) {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(Color(white: 0.1))
+          .fill(Color.dsSurfaceHigh)
           .frame(width: cardWidth, height: cardHeight)
 
         if let posterID = show.posterImageId {
@@ -798,7 +798,7 @@ private struct TVShowPortraitCard: View {
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color(white: 0.08))
+            .fill(Color.dsSurface)
             .frame(width: cardWidth, height: cardHeight)
             .overlay(
               Image(systemName: "tv.fill")
@@ -855,7 +855,7 @@ private struct TVLandscapeCard: View {
       ZStack(alignment: .bottom) {
         // Backdrop/poster image
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(Color(white: 0.1))
+          .fill(Color.dsSurfaceHigh)
           .frame(width: cardWidth, height: cardHeight)
 
         if let imageID = item.backdropImageId ?? item.posterImageId {
@@ -893,7 +893,7 @@ private struct TVLandscapeCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color(white: 0.1))
+            .fill(Color.dsSurfaceHigh)
             .frame(width: cardWidth, height: cardHeight)
             .overlay(
               Image(systemName: "play.circle.fill")
@@ -922,7 +922,7 @@ private struct TVLandscapeCard: View {
             GeometryReader { geo in
               ZStack(alignment: .leading) {
                 Rectangle()
-                  .fill(Color(white: 0.3))
+                  .fill(Color.dsBorderStrong)
                   .frame(height: 4)
                 Rectangle()
                   .fill(Color.dsAccent)
@@ -978,7 +978,7 @@ private struct TVPortraitCard: View {
     VStack(alignment: .leading, spacing: 10) {
       ZStack(alignment: .bottom) {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(Color(white: 0.1))
+          .fill(Color.dsSurfaceHigh)
           .frame(width: cardWidth, height: cardHeight)
 
         if let posterID = item.posterImageId {
@@ -999,7 +999,7 @@ private struct TVPortraitCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         } else {
           RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color(white: 0.08))
+            .fill(Color.dsSurface)
             .frame(width: cardWidth, height: cardHeight)
             .overlay(
               Image(systemName: "film.fill")
@@ -1027,7 +1027,7 @@ private struct TVPortraitCard: View {
             Spacer()
             GeometryReader { geo in
               ZStack(alignment: .leading) {
-                Rectangle().fill(Color(white: 0.3)).frame(height: 4)
+                Rectangle().fill(Color.dsBorderStrong).frame(height: 4)
                 Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 4)
               }
             }
@@ -1242,7 +1242,7 @@ private struct TVSearchView: View {
   var body: some View {
     NavigationStack {
       ZStack {
-        Color.black.ignoresSafeArea()
+        Color.dsBackground.ignoresSafeArea()
 
         VStack(alignment: .leading, spacing: 40) {
           // Prominent search field — full-width, large text, auto-focuses keyboard
@@ -1251,7 +1251,7 @@ private struct TVSearchView: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 48)
             .padding(.vertical, 24)
-            .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color.dsSurfaceHigh, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .padding(.horizontal, 60)
             .focused($searchFieldFocused)
             .autocorrectionDisabled()
@@ -1343,7 +1343,7 @@ private struct TVSearchView: View {
                           .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         } else {
                           RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(white: 0.15))
+                            .fill(Color.dsSurfaceRaised)
                             .frame(width: 60, height: 90)
                         }
                         VStack(alignment: .leading, spacing: 4) {
@@ -1364,7 +1364,7 @@ private struct TVSearchView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
                     .accessibilityHint("Opens video details")
-                    Divider().background(Color(white: 0.2)).padding(.horizontal, 60)
+                    Divider().background(Color.dsBorderSubtle).padding(.horizontal, 60)
                   }
                 }
                 .focusSection()

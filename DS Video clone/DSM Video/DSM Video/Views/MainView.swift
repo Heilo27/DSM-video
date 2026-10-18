@@ -485,14 +485,14 @@ struct SearchView: View {
             .accessibilityHint("Opens video details")
 
             Divider()
-              .background(Color(white: 0.18))
+              .background(Color.dsBorderSubtle)
               .padding(.leading, 12 + 60 + 12)
           }
         }
         .padding(.vertical, 8)
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle("Search")
     // ALWAYS SHOWN, and focused on appear.
     //
@@ -792,7 +792,7 @@ private struct SearchResultCell: View {
       .scaledToFill()
     } else {
       Rectangle()
-        .fill(Color(white: 0.10))
+        .fill(Color.dsSurfaceHigh)
         .overlay(
           Image(systemName: "film.fill")
             .font(.system(size: 20))
@@ -860,7 +860,7 @@ struct WatchlistView: View {
           }
         }
       }
-      .background(Color.black.ignoresSafeArea())
+      .background(Color.dsBackground.ignoresSafeArea())
       .navigationTitle("Watchlist")
       .task { await appState.loadWatchlist() }
       // FIX-15: refresh watchlist when network reconnects after being offline
@@ -976,7 +976,7 @@ struct DownloadsView: View {
         }
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle("Downloads")
     .onAppear {
       loadDownloads()
@@ -1476,7 +1476,7 @@ private struct DownloadedItemCell: View {
           .clipped()
       } else {
         Rectangle()
-          .fill(Color(white: 0.06))
+          .fill(Color.dsSurface)
           .frame(width: width, height: height)
           .overlay(
             Image(systemName: "film.fill")

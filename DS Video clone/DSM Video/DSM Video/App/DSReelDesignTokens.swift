@@ -35,6 +35,10 @@ extension Color {
     static var dsBorderSubtle:  Color { ThemeHolder.shared.current.borderSubtle }
     static var dsBorderStrong:  Color { ThemeHolder.shared.current.borderStrong }
 
+    // Focus / selection fills (tvOS focus highlight, selected rows)
+    static var dsFocusFill:       Color { ThemeHolder.shared.current.focusFill }
+    static var dsFocusFillStrong: Color { ThemeHolder.shared.current.focusFillStrong }
+
     // Extended cinematic tokens (flat themes resolve these to no-op values)
     static var dsAccentGlow:    Color { ThemeHolder.shared.current.accentGlow }
 }

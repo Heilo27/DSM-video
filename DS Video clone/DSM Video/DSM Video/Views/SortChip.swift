@@ -78,7 +78,7 @@ struct SortChipScroller<Content: View>: View {
       .padding(.horizontal, tvAdjusted(16, tv: 60))
       .padding(.vertical, tvAdjusted(8, tv: 16))
     }
-    .background(Color.black.opacity(0.95))
+    .background(Color.dsBackground.opacity(0.95))
   }
 
   private func tvAdjusted(_ base: CGFloat, tv: CGFloat? = nil) -> CGFloat {

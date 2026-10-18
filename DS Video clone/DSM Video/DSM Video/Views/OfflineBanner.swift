@@ -39,7 +39,7 @@ struct OfflineBanner: View {
       .padding(.horizontal, 16)
       .padding(.vertical, 8)
       .frame(maxWidth: .infinity)
-      .background(Color(white: 0.15))
+      .background(Color.dsSurfaceRaised)
       .transition(.move(edge: .top).combined(with: .opacity))
       .accessibilityIdentifier(A11y.Shared.offlineBanner)
       .onAppear {
@@ -69,7 +69,7 @@ struct ConnectionIndicator: View {
           .foregroundStyle(.white)
           .padding(.horizontal, 24)
           .padding(.vertical, 12)
-          .background(Capsule().fill(Color(white: 0.2)))
+          .background(Capsule().fill(Color.dsSurfaceRaised))
           .transition(.opacity)
           .accessibilityElement(children: .combine)
           .accessibilityIdentifier(A11y.Shared.offlineBanner)
@@ -101,7 +101,7 @@ struct TransientNoticeBanner: View {
           .multilineTextAlignment(.center)
           .padding(.horizontal, 16)
           .padding(.vertical, 10)
-          .background(Capsule().fill(Color(white: 0.15)))
+          .background(Capsule().fill(Color.dsSurfaceRaised))
           .transition(.move(edge: .bottom).combined(with: .opacity))
           .accessibilityIdentifier(A11y.Shared.transientNotice)
       }

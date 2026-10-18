@@ -226,7 +226,7 @@ struct TVShowsView: View {
         #endif
       }
     }
-    .background(Color.black.ignoresSafeArea())
+    .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle(library.title)
     #if !os(tvOS)
     // Force white nav-bar content (the large title was rendering dim grey on black).
