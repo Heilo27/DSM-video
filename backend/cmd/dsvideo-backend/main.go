@@ -3991,18 +3991,9 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	startSeconds := clampStartSeconds(r.URL.Query().Get("start"), itemDuration)
 
 	// Quality cap: map ?quality= param to a max height for transcoding
+	// The accepted values live in qualityHeights (playback_quality.go); unknown means no cap.
 	qualityParam := r.URL.Query().Get("quality")
-	var maxHeight int
-	switch qualityParam {
-	case "480p":
-		maxHeight = 480
-	case "720p":
-		maxHeight = 720
-	case "1080p":
-		maxHeight = 1080
-	default:
-		maxHeight = 0
-	}
+	maxHeight := maxHeightForQuality(qualityParam)
 
 	// Web browser clients have stricter codec requirements than native Apple apps.
 	// Browsers only support MP4 + H.264 + AAC/MP3 for direct play.

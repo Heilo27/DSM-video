@@ -3156,9 +3156,9 @@
       const current = (state.playback && state.playback.quality) || 'auto';
       const QUALITIES = [
         { id: 'auto', label: 'Auto' },
-        { id: '1080', label: '1080p' },
-        { id: '720', label: '720p' },
-        { id: '480', label: '480p' }
+        { id: '1080p', label: '1080p' },
+        { id: '720p', label: '720p' },
+        { id: '480p', label: '480p' }
       ];
       const cur = QUALITIES.find(q => q.id === current);
       qualLabel.textContent = cur ? cur.label : 'Auto';

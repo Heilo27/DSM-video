@@ -195,6 +195,20 @@ Response: `image/*` bytes (with cache headers).
 ### GET `/items/{id}/playback`
 Creates/returns a playback source. The backend decides between direct file streaming and HLS.
 
+Query parameter `quality` (optional) caps the picture height of a transcode:
+
+| Value | Meaning |
+|-------|---------|
+| `1080p` | cap at 1080 lines |
+| `720p` | cap at 720 lines |
+| `480p` | cap at 480 lines |
+| `auto`, empty, or omitted | no cap (the default) |
+
+The `p` suffix is part of the value. Any other value, including a bare number such as `1080`, is not
+an error: it is treated as Auto, so a client that spells it wrong gets no cap and no warning. The web
+player, iOS and tvOS all send exactly these strings. The accepted set lives in one place in the
+backend (`qualityHeights`, `backend/cmd/dsvideo-backend/playback_quality.go`). [TASK-1031]
+
 Response:
 ```json
 {

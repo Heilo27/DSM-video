@@ -291,6 +291,10 @@ label, the default ticked, and switching keeps playing; a quality change keeps t
 A single-audio title is served exactly as before (direct or remux) and shows no Audio menu, since
 there is nothing to choose. The apps are unaffected: they still direct play such a file and
 offer its tracks themselves. [TASK-1028]
+The web player's Quality menu (Auto, 1080p, 720p, 480p) must actually change what is served: it
+sends the same quality values the apps send and the server accepts, the whole `p`-suffixed
+set, so choosing 720p caps the picture at 720 lines instead of silently staying on Auto. The menu
+and the server share one list of values, and a test fails if they drift apart. [TASK-1031]
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than
