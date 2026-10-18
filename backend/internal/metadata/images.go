@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +23,32 @@ import (
 // posters/backdrops are a few MB at most; 32 MiB is a generous ceiling that never
 // clips a legitimate image but stops a runaway body.
 const maxImageBytes = 32 << 20 // 32 MiB
+
+// DefaultImageCacheMaxBytes is the size the on-disk image cache is held under when the
+// operator sets nothing (FR-150). The cache used to grow forever; cast photos (a dozen per
+// title) would have made that a real disk-fill risk on a NAS. 1 GiB holds roughly the
+// poster, backdrop and cast sets of a several-thousand-title library at the sizes the clients
+// ask for, and is small next to the media it sits beside. DSVIDEO_IMAGE_CACHE_MAX_MB
+// overrides it; 0 turns eviction off.
+const DefaultImageCacheMaxBytes int64 = 1 << 30
+
+const (
+	// touchInterval is how stale a file's mtime may get before a cache hit refreshes it.
+	// mtime is the recency signal for eviction, and refreshing at most once an hour keeps a
+	// hit a single stat instead of a metadata write on every poster scroll.
+	touchInterval = time.Hour
+	// evictLowWater is the fraction of the cap a sweep evicts down to, so a cache sitting at
+	// the cap is not re-swept after every download.
+	evictLowWater = 0.9
+	// sweepEveryFraction: a background sweep is requested once this fraction of the cap has
+	// been written since the last one (1/20 = 5%). A download is therefore a counter add,
+	// not a directory scan.
+	sweepEveryFraction = 20
+	// defaultEvictGrace keeps a sweep off files written in the last minutes: a download
+	// writes its file in place, and removing it mid-write would hand the caller a path that
+	// no longer exists.
+	defaultEvictGrace = 2 * time.Minute
+)
 
 // download represents an in-flight image download so that waiters can observe its
 // actual outcome (path + error), not merely that it finished.
@@ -36,6 +65,13 @@ type ImageCache struct {
 
 	mu       sync.RWMutex
 	inFlight map[string]*download // Prevent duplicate downloads
+
+	// Size-capped eviction (FR-150). maxBytes <= 0 means unlimited.
+	maxBytes    atomic.Int64
+	evictGrace  time.Duration // files newer than this are never evicted
+	sweeping    atomic.Bool   // single-flight guard for background sweeps
+	sinceSweep  atomic.Int64  // bytes written since the last sweep was requested
+	sweepNeeded func()        // test hook: replaces the background goroutine launch when non-nil
 }
 
 // NewImageCache creates a new image cache.
@@ -50,8 +86,122 @@ func NewImageCache(cacheDir string) *ImageCache {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		inFlight: make(map[string]*download),
+		inFlight:   make(map[string]*download),
+		evictGrace: defaultEvictGrace,
 	}
+}
+
+// SetMaxBytes sets the size the cache is held under; n <= 0 disables eviction.
+func (c *ImageCache) SetMaxBytes(n int64) { c.maxBytes.Store(n) }
+
+// MaxBytes returns the configured cap (0 = unlimited).
+func (c *ImageCache) MaxBytes() int64 {
+	if n := c.maxBytes.Load(); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// isCacheFile reports whether name is a file this cache wrote; eviction touches nothing else
+// in the directory.
+func isCacheFile(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".jpg", ".png", ".webp":
+		return true
+	}
+	return false
+}
+
+// EvictToCap removes the least recently used files (oldest mtime first) until the cache is
+// at or under evictLowWater of its cap, and reports how many files and bytes went. A cache
+// already under the cap costs one directory read. Files younger than evictGrace are kept, so
+// an in-progress download is never deleted out from under its writer.
+func (c *ImageCache) EvictToCap() (removed int, freed int64, err error) {
+	limit := c.MaxBytes()
+	if limit <= 0 {
+		return 0, 0, nil
+	}
+	entries, err := os.ReadDir(c.cacheDir)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read image cache dir: %w", err)
+	}
+	type cached struct {
+		path  string
+		size  int64
+		mtime time.Time
+	}
+	files := make([]cached, 0, len(entries))
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() || !isCacheFile(e.Name()) {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue // vanished between ReadDir and Info: nothing to count
+		}
+		total += info.Size()
+		files = append(files, cached{filepath.Join(c.cacheDir, e.Name()), info.Size(), info.ModTime()})
+	}
+	if total <= limit {
+		return 0, 0, nil
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mtime.Before(files[j].mtime) })
+	target := int64(float64(limit) * evictLowWater)
+	youngest := time.Now().Add(-c.evictGrace)
+	var firstErr error
+	for _, f := range files {
+		if total <= target {
+			break
+		}
+		if f.mtime.After(youngest) {
+			break // sorted oldest first, so every later file is younger still
+		}
+		if rerr := os.Remove(f.path); rerr != nil {
+			if !os.IsNotExist(rerr) && firstErr == nil {
+				firstErr = fmt.Errorf("evict %s: %w", filepath.Base(f.path), rerr)
+			}
+			if !os.IsNotExist(rerr) {
+				continue
+			}
+		}
+		total -= f.size
+		freed += f.size
+		removed++
+	}
+	return removed, freed, firstErr
+}
+
+// noteWrite records that n bytes were just cached and, once enough has accumulated since
+// the last sweep, starts one in the background. At most one sweep runs at a time.
+func (c *ImageCache) noteWrite(n int64) {
+	limit := c.MaxBytes()
+	if limit <= 0 {
+		return
+	}
+	if c.sinceSweep.Add(n) < limit/sweepEveryFraction {
+		return
+	}
+	if !c.sweeping.CompareAndSwap(false, true) {
+		return
+	}
+	c.sinceSweep.Store(0)
+	run := func() {
+		defer c.sweeping.Store(false)
+		removed, freed, err := c.EvictToCap()
+		if err != nil {
+			log.Printf("image cache: eviction: %v", err)
+		}
+		if removed > 0 {
+			log.Printf("image cache: evicted %d files (%d bytes) to stay under %d bytes", removed, freed, limit)
+		}
+	}
+	if c.sweepNeeded != nil {
+		c.sweepNeeded()
+		run()
+		return
+	}
+	go run()
 }
 
 // ImageType represents the type of image.
@@ -87,11 +237,25 @@ func (c *ImageCache) GetCachedImage(imageID string) (string, bool) {
 	// Check for various extensions
 	for _, ext := range []string{".jpg", ".png", ".webp"} {
 		path := filepath.Join(c.cacheDir, imageID+ext)
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Stat(path); err == nil {
+			c.touch(path, info.ModTime())
 			return path, true
 		}
 	}
 	return "", false
+}
+
+// touch marks path as just used so eviction removes it last. It runs at most once per
+// touchInterval per file; a failure (read-only volume) only means the file keeps its older
+// rank, so it is logged and not returned.
+func (c *ImageCache) touch(path string, mtime time.Time) {
+	if c.MaxBytes() <= 0 || time.Since(mtime) < touchInterval {
+		return
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		log.Printf("image cache: touch %s: %v", filepath.Base(path), err)
+	}
 }
 
 // CacheImage downloads and caches an image from a URL.
@@ -186,6 +350,7 @@ func (c *ImageCache) downloadImage(ctx context.Context, imageID, sourceURL strin
 		return "", closeErr
 	}
 
+	c.noteWrite(n)
 	return cachePath, nil
 }
 

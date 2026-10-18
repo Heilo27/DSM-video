@@ -426,3 +426,41 @@ func replaceItemTags(ctx context.Context, tx *sql.Tx, itemID string, extras meta
 	}
 	return nil
 }
+
+// replaceItemCast makes item_cast for itemID exactly match members, inside the caller's
+// transaction (FR-150). Replace, not merge, for the same reason as replaceItemTags: after a
+// manual re-match the old title's cast must not linger. It is its own function, not part of
+// replaceItemTags, because the content-rating backfill fetches WITHOUT credits and must never
+// call it: an empty fetch is "no information", not "no cast", and writing it would erase the
+// rows a full metadata fetch stored. Members with no positive person id or no name are
+// dropped; rows are numbered by position in the list given (billing order).
+func replaceItemCast(ctx context.Context, tx *sql.Tx, itemID string, members []metadata.CastMember) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM item_cast WHERE item_id = ?`, itemID); err != nil {
+		return fmt.Errorf("clear cast: %w", err)
+	}
+	for ordinal, m := range storableCast(members) {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO item_cast(item_id, ordinal, tmdb_person_id, name, character, profile_path) VALUES (?,?,?,?,?,?)`,
+			itemID, ordinal, m.ID, m.Name, m.Character, m.ProfilePath); err != nil {
+			return fmt.Errorf("insert cast %d: %w", m.ID, err)
+		}
+	}
+	return nil
+}
+
+// storableCast is the members replaceItemCast would keep: positive person id and a name, text
+// trimmed, billing order preserved. The backfill uses it to tell "TMDb has no usable cast"
+// from "has cast".
+func storableCast(members []metadata.CastMember) []metadata.CastMember {
+	out := make([]metadata.CastMember, 0, len(members))
+	for _, m := range members {
+		m.Name = strings.TrimSpace(m.Name)
+		if m.ID <= 0 || m.Name == "" {
+			continue
+		}
+		m.Character = strings.TrimSpace(m.Character)
+		m.ProfilePath = strings.TrimSpace(m.ProfilePath)
+		out = append(out, m)
+	}
+	return out
+}
