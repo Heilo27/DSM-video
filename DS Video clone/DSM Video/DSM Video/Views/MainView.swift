@@ -1125,6 +1125,7 @@ struct DownloadsView: View {
         ForEach(inProgressIDs, id: \.self) { itemID in
           let isActive = downloadManager.isDownloading(itemId: itemID)
           let isPaused = downloadManager.isPaused(itemId: itemID)
+          let rowState = downloadManager.rowState(for: itemID)
           // Resolve title: active downloads have an ActiveDownload entry; paused ones
           // keep their info in pendingDownloadInfo (private) — we surface the title via
           // the activeDownloads entry while active, or fall back to a generic label.
@@ -1139,6 +1140,7 @@ struct DownloadsView: View {
           ActiveDownloadCell(
             title: displayTitle,
             progress: progress,
+            state: rowState,
             isActive: isActive,
             isPaused: isPaused,
             onPause: { Task { await downloadManager.pauseDownload(itemId: itemID) } },
@@ -1223,6 +1225,8 @@ struct DownloadsView: View {
 private struct ActiveDownloadCell: View {
   let title: String
   let progress: Double
+  /// FR-030: queued, downloading (percent + size) or paused; one mapping, one status line.
+  let state: DownloadRowState
   let isActive: Bool
   let isPaused: Bool
   let onPause: () -> Void
@@ -1237,8 +1241,8 @@ private struct ActiveDownloadCell: View {
             .font(.subheadline)
             .foregroundStyle(Color.dsTextPrimary)
             .lineLimit(1)
-          if isPaused {
-            Text("Paused")
+          if state.isQueued || isPaused {
+            Text(isPaused ? "Paused" : "Queued")
               .font(.caption2)
               .foregroundStyle(Color.dsTextSecondary)
               .padding(.horizontal, 6)
@@ -1248,8 +1252,8 @@ private struct ActiveDownloadCell: View {
           }
         }
         ProgressView(value: progress)
-          .tint(isPaused ? Color.dsTextSecondary : Color.dsAccent)
-        Text("\(Int(progress * 100))%")
+          .tint(isPaused || state.isQueued ? Color.dsTextSecondary : Color.dsAccent)
+        Text(state.detail)
           .font(.caption)
           .foregroundStyle(Color.dsTextSecondary)
           .monospacedDigit()
@@ -1290,7 +1294,9 @@ private struct ActiveDownloadCell: View {
     }
     .accessibilityLabel(isPaused
       ? "\(title), paused at \(Int(progress * 100)) percent"
-      : "\(title), downloading, \(Int(progress * 100)) percent complete"
+      : state.isQueued
+        ? "\(title), queued"
+        : "\(title), downloading, \(state.detail)"
     )
     .accessibilityAction(named: "Cancel download") { onCancel() }
   }

@@ -121,6 +121,47 @@ struct ActiveDownload: Identifiable {
   let task: URLSessionDownloadTask
 }
 
+/// Bytes received so far and the total the server announced (<= 0 when unknown).
+struct TransferBytes: Equatable, Sendable {
+  var written: Int64
+  var expected: Int64
+}
+
+/// FR-030: an in-flight row is Queued (accepted, nothing transferring yet), Downloading
+/// (percent and size) or Paused. A pure mapping so the three can never render alike.
+enum DownloadRowState: Equatable, Sendable {
+  case queued
+  case downloading(percent: Int, bytes: TransferBytes)
+  case paused(percent: Int)
+
+  static func make(isActive: Bool, isPaused: Bool, progress: Double, bytes: TransferBytes?) -> DownloadRowState {
+    let percent = Int((min(1, max(0, progress)) * 100).rounded(.down))
+    if isPaused && !isActive { return .paused(percent: percent) }
+    guard let bytes, bytes.written > 0 else { return .queued }
+    return .downloading(percent: percent, bytes: bytes)
+  }
+
+  /// The row's status line: percent plus bytes (or total size), "Queued", or the paused percent.
+  var detail: String {
+    switch self {
+    case .queued:
+      return "Queued"
+    case .paused(let percent):
+      return "\(percent)%"
+    case .downloading(let percent, let bytes):
+      let size = ByteCountFormatter()
+      size.countStyle = .file
+      if bytes.expected > 0 {
+        return "\(percent)% \u{00B7} \(size.string(fromByteCount: bytes.written)) of \(size.string(fromByteCount: bytes.expected))"
+      }
+      return size.string(fromByteCount: bytes.written)
+    }
+  }
+
+  var isQueued: Bool { self == .queued }
+  var isPaused: Bool { if case .paused = self { return true } else { return false } }
+}
+
 /// The three states the downloads manifest can be in, kept distinct on purpose.
 ///
 /// `absent` and `unreadable` used to collapse into the same `[]`, which is how a corrupt file
@@ -178,6 +219,9 @@ final class DownloadManager: NSObject {
 
   private(set) var activeDownloads: [String: ActiveDownload] = [:]
   private(set) var downloadProgress: [String: Double] = [:]
+  /// itemId → bytes received / expected, for the Downloads row's size text (FR-030). Set and
+  /// cleared together with `downloadProgress`; zero received means queued, not transferring.
+  private(set) var downloadBytes: [String: TransferBytes] = [:]
   /// In-memory map of itemId → resume data blob for paused downloads.
   private(set) var pausedDownloads: [String: Data] = [:]
   /// TASK-782: itemId → failure record for genuinely-failed downloads. Populated in the
@@ -474,7 +518,7 @@ final class DownloadManager: NSObject {
       retire(download.task)
       downloadTasks.removeValue(forKey: download.task)
       activeDownloads.removeValue(forKey: itemId)
-      downloadProgress.removeValue(forKey: itemId)
+      forgetProgress(itemId)
     }
     // Cancel is a terminal path, so it releases the session like the others. It used to be
     // the one that did not: the map entry was gone before the delegate's cancel callback ran,
@@ -540,6 +584,7 @@ final class DownloadManager: NSObject {
     }
     activeDownloads.removeAll()
     downloadProgress.removeAll()
+    downloadBytes.removeAll()
     pausedDownloads.removeAll()
     failedDownloads.removeAll()
     deferredWork = DeferredWork()
@@ -582,6 +627,20 @@ final class DownloadManager: NSObject {
 
   func isDownloaded(itemId: String) -> Bool {
     getDownloadedItems().contains { $0.id == itemId }
+  }
+
+  /// The one place a transfer's progress is dropped, so the percent and the bytes cannot disagree.
+  private func forgetProgress(_ itemId: String) {
+    downloadProgress.removeValue(forKey: itemId)
+    downloadBytes.removeValue(forKey: itemId)
+  }
+
+  /// What the Downloads surface shows for an in-flight row (FR-030).
+  func rowState(for itemId: String) -> DownloadRowState {
+    DownloadRowState.make(isActive: isDownloading(itemId: itemId),
+                          isPaused: isPaused(itemId: itemId),
+                          progress: downloadProgress[itemId] ?? 0,
+                          bytes: downloadBytes[itemId])
   }
 
   func isDownloading(itemId: String) -> Bool {
@@ -1043,6 +1102,7 @@ final class DownloadManager: NSObject {
       let progress = expected > 0 ? Double(task.countOfBytesReceived) / Double(expected) : 0
       activeDownloads[itemId] = ActiveDownload(id: itemId, title: info.title, progress: progress, task: task)
       downloadProgress[itemId] = progress
+      downloadBytes[itemId] = TransferBytes(written: task.countOfBytesReceived, expected: expected)
       // The live transfer is the item's state now; an older paused or failed record is stale.
       pausedDownloads.removeValue(forKey: itemId)
       removeResumeBlob(for: itemId)
@@ -1127,7 +1187,7 @@ final class DownloadManager: NSObject {
   /// Retryable: freeing space fixes it, and a retry re-resolves a fresh session.
   private func recordSaveFailure(itemId: String, info: DownloadInfo, error: Error?) {
     activeDownloads.removeValue(forKey: itemId)
-    downloadProgress.removeValue(forKey: itemId)
+    forgetProgress(itemId)
     lastProgressUpdate.removeValue(forKey: itemId)
     pendingDownloadInfo.removeValue(forKey: itemId)
     resumedFromData.remove(itemId)
@@ -1156,7 +1216,7 @@ final class DownloadManager: NSObject {
                           resumeData: Data?, cancelReason: Int?) {
     downloadTasks.removeValue(forKey: task)
     activeDownloads.removeValue(forKey: itemId)
-    downloadProgress.removeValue(forKey: itemId)
+    forgetProgress(itemId)
     lastProgressUpdate.removeValue(forKey: itemId)
     resumedFromData.remove(itemId)
     if let resumeData {
@@ -1530,7 +1590,7 @@ final class DownloadManager: NSObject {
     cachedDownloadedItems = nil
 
     activeDownloads.removeValue(forKey: itemId)
-    downloadProgress.removeValue(forKey: itemId)
+    forgetProgress(itemId)
     pendingDownloadInfo.removeValue(forKey: itemId)
     // Done for good: no failed, paused or persisted in-flight trace of it may remain.
     clearFailure(itemId)
@@ -1773,7 +1833,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
   /// happens when the playback session backing it was already released.
   func recordHTTPFailure(itemId: String, status: Int) {
     activeDownloads.removeValue(forKey: itemId)
-    downloadProgress.removeValue(forKey: itemId)
+    forgetProgress(itemId)
     lastProgressUpdate.removeValue(forKey: itemId)
 
     // Resumed from data and the stream is gone (TASK-947): the resume data replayed a session
@@ -1817,6 +1877,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
       lastProgressUpdate[itemId] = now
       let progress = expectedSnapshot > 0 ? Double(writtenSnapshot) / Double(expectedSnapshot) : 0
       downloadProgress[itemId] = progress
+      downloadBytes[itemId] = TransferBytes(written: writtenSnapshot, expected: expectedSnapshot)
     }
   }
 

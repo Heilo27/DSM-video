@@ -148,6 +148,9 @@ touches no progress causes no progress refetch.
 
 **FR-030 [STATED]** — A title can be downloaded for offline viewing; the Downloads surface lists each
 download with its state: completed, downloading (with progress and size), queued, or paused.
+An in-flight row reads "Queued" until the first bytes arrive, then percent plus bytes received of the
+total ("42% · 310 MB of 1.2 GB", bytes alone when the total is unknown); a paused row reads "Paused".
+Queued never renders like downloading. *(TASK-979)*
 *Derivation:* design-spec B7 §2.
 **FR-031 [STATED]** — **"Downloaded" means playable offline.** A title reported as completed must play
 from local storage with the server unreachable. A transfer that did not fully complete must never be
