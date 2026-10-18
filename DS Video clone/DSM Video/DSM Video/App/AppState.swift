@@ -587,51 +587,87 @@ final class AppState {
     return Date(timeIntervalSince1970: exp)
   }
 
-  /// Called on app launch when a stored token exists. If the token is already expired,
-  /// clears state and forces re-login. If expiry is within 24 hours, attempts a proactive refresh.
-  @MainActor
-  private func checkTokenExpiryOnLaunch() async {
-    guard let token = sessionToken, !isDemoMode else { return }
-    guard let expiry = Self.jwtExpiry(token: token) else { return }
-    let now = Date()
-    if expiry <= now {
-      // Already expired — force re-login immediately.
-      Self.deleteFromKeychain(account: Keys.keychainAccountToken)
-      sessionToken = nil
-      loginError = "Your session expired. Please sign in again."
-      return
-    }
+  /// Called on launch when a stored token exists (SEC-02). A token whose `exp` says it has
+  /// expired, or will within 24 hours, is renewed through the server once the home screen has
+  /// settled.
+  ///
+  /// TASK-1013: an expired-looking token used to be deleted on the spot, with "Your session
+  /// expired" and no request made. That is the device ending a session on its own reading of
+  /// `exp`: its clock can be wrong, and with the NAS off at launch nothing could be checked, so
+  /// the user lost their sign-in to an outage. Only the server rejecting the token ends a
+  /// session (FR-120, FR-121), and renewSession() is where that answer is acted on.
+  func checkTokenExpiryOnLaunch(now: Date = Date(), settleDelay: Duration = .seconds(2)) async {
+    guard let token = sessionToken, !isDemoMode,
+          let expiry = Self.jwtExpiry(token: token) else { return }
     let twentyFourHours: TimeInterval = 24 * 60 * 60
-    if expiry.timeIntervalSince(now) < twentyFourHours {
-      // Expiring soon — schedule a silent refresh after the home screen has loaded
-      // to avoid racing with homeLoad()'s own QC resolution and api mutation.
-      Task { @MainActor [weak self] in
-        // Brief yield so init's Task and homeLoad() settle first.
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        await self?.refreshSession()
-      }
-    }
+    guard expiry.timeIntervalSince(now) < twentyFourHours else { return }
+    // Brief yield so init's Task and homeLoad() settle first: homeLoad resolves QuickConnect
+    // and rebuilds api, and a renewal racing it would ask the address it is about to leave.
+    try? await Task.sleep(for: settleDelay)
+    await startSessionRenewal().value
   }
 
-  /// TASK-781: proactive near-expiry token refresh. Exchanges the current token for a fresh
-  /// one via `/api/v1/auth/refresh` (no password re-transmission), then rebuilds `api` and
-  /// persists the new token. Falls back to a full `login()` if the refresh endpoint is
-  /// unavailable/unsupported or fails — so this never regresses the previous behaviour, and
-  /// still works when only a token (no saved password) is stored. Wired in place of the old
-  /// login()-only path, which re-sent the plaintext password on every near-expiry launch.
-  func refreshSession() async {
-    guard sessionToken != nil, !isDemoMode else { return }
+  /// What asking the server to renew the session established (TASK-1013).
+  enum SessionRenewal: Equatable {
+    /// A fresh token is in place.
+    case renewed
+    /// The server refused this session. The only outcome that may end it (FR-121).
+    case rejected
+    /// The server was not reached, or did not decide. The session stays (FR-120).
+    case unresolved
+  }
+
+  /// TASK-781: exchanges the current token for a fresh one via `/api/v1/auth/refresh` (no
+  /// password re-transmission), then rebuilds `api` and persists the new token. If that fails
+  /// and a password is saved, a full `login()` is tried: it covers a server without the
+  /// refresh endpoint and, through its candidate cascade, an address the current client
+  /// cannot reach.
+  ///
+  /// TASK-1013: returns what was established instead of leaving callers to infer it from
+  /// `sessionToken`. A failed fallback login leaves the old token in place, so the caller read
+  /// a server rejection as a recovery and kept a dead session. And when the server was not
+  /// reached, the fallback's failure message was left in loginError, a sign-in message for a
+  /// session nobody had rejected.
+  @discardableResult
+  func refreshSession() async -> SessionRenewal {
+    guard let before = sessionToken, !isDemoMode else { return .unresolved }
+    let refreshError: Error
     do {
       let resp = try await api.refreshToken()
       sessionToken = resp.token
       api = makeClient(baseURL: api.baseURL, token: resp.token, usesTunnelCookie: api.usesTunnelCookie)
       homeLog.info("refreshSession: token refreshed without password")
+      return .renewed
     } catch {
-      // Refresh unavailable or rejected — fall back to a full login only if we can.
-      homeLog.warning("refreshSession: refresh failed (\(error.localizedDescription)) — falling back to login")
-      if !savedPassword.isEmpty {
-        await login()
-      }
+      refreshError = error
+    }
+    // isAuthFailure is the server's own 401: an unreachable server can never produce it.
+    let serverRejected = (refreshError as? APIError)?.isAuthFailure ?? false
+    homeLog.warning("refreshSession: refresh failed (\(refreshError.localizedDescription)), server rejected: \(serverRejected)")
+    // A sign-in already in flight decides this session; a second login() would no-op on its
+    // re-entrancy guard and look like a failure.
+    if isLoggingIn { return .unresolved }
+    if !savedPassword.isEmpty {
+      let priorError = loginError
+      await login()
+      if let after = sessionToken, after != before { return .renewed }
+      if !serverRejected { loginError = priorError }
+    }
+    return serverRejected ? .rejected : .unresolved
+  }
+
+  /// Renews the session through the server and acts on the answer: the one place a renewal
+  /// outcome keeps or ends the session (TASK-1013). Callers go through startSessionRenewal()
+  /// so concurrent triggers share one attempt.
+  private func renewSession() async {
+    switch await refreshSession() {
+    case .renewed:
+      dlog.info(.auth, "session renewed through the server")
+      loginError = nil
+    case .rejected:
+      failSession()
+    case .unresolved:
+      homeLog.info("renewSession: the server did not decide — keeping the session")
     }
   }
 
@@ -1199,18 +1235,20 @@ final class AppState {
       failSession()
       return
     }
-    silentReauthTask = Task { @MainActor in
+    startSessionRenewal()
+  }
+
+  /// Starts the one in-flight renewal, or returns the one already running. Shared by a 401
+  /// mid-use and the launch expiry check, so they never race two refreshes (TASK-1013).
+  @discardableResult
+  private func startSessionRenewal() -> Task<Void, Never> {
+    if let running = silentReauthTask { return running }
+    let task = Task { @MainActor in
       defer { silentReauthTask = nil }
-      await refreshSession()
-      // refreshSession() falls back to login() when a password is saved. If either
-      // worked we now hold a live token and the user never saw an interruption.
-      if sessionToken == nil {
-        failSession()
-      } else {
-        dlog.info(.auth, "silent re-auth recovered the session after a 401")
-        loginError = nil
-      }
+      await renewSession()
     }
+    silentReauthTask = task
+    return task
   }
 
   /// Clears credentials and routes the user to the connect screen with a stated reason.

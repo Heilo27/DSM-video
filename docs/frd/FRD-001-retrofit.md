@@ -520,6 +520,11 @@ reaching the server never ends the session; only the server rejecting the sessio
 **FR-121 [INFERRED]** — An expired or revoked session is reported as a session problem with a path to
 re-authenticate — not as the server being offline or the media being unplayable. After re-authenticating,
 progress and watchlist are intact.
+*Clarified 2026-10-18 (TASK-1013):* the device never decides on its own that a session has expired. A
+session that looks expired or close to expiring when the app opens is renewed with the server; if the
+server cannot be reached, the user stays signed in with no sign-in message (FR-120). When the server
+refuses the session and signing in again with the saved password does not work either, the session ends
+with the session-expired message, rather than carrying on with a session the server will not accept.
 **FR-122 [INFERRED, DESTRUCTIVE]** — Sign-out returns the app to the sign-in screen, makes library
 content unreachable, persists across relaunch, and leaves **no usable session credential anywhere on the
 device** — including data shared with companion extensions or widgets. Surfaces such as a TV top-shelf
