@@ -903,27 +903,24 @@ private struct TVLandscapeCard: View {
         .frame(width: cardWidth, height: cardHeight)
 
         // Progress bar at bottom edge
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac < 1.0 {
-            VStack(spacing: 0) {
-              Spacer()
-              GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                  Rectangle()
-                    .fill(Color(white: 0.3))
-                    .frame(height: 4)
-                  Rectangle()
-                    .fill(Color.dsAccent)
-                    .frame(width: geo.size.width * frac, height: 4)
-                }
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+          VStack(spacing: 0) {
+            Spacer()
+            GeometryReader { geo in
+              ZStack(alignment: .leading) {
+                Rectangle()
+                  .fill(Color(white: 0.3))
+                  .frame(height: 4)
+                Rectangle()
+                  .fill(Color.dsAccent)
+                  .frame(width: geo.size.width * frac, height: 4)
               }
-              .frame(height: 4)
             }
-            .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .accessibilityHidden(true)
+            .frame(height: 4)
           }
+          .frame(width: cardWidth, height: cardHeight)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .accessibilityHidden(true)
         }
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -1007,47 +1004,41 @@ private struct TVPortraitCard: View {
         .frame(width: cardWidth, height: cardHeight)
 
         // Progress bar
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac < 1.0 {
-            VStack(spacing: 0) {
-              Spacer()
-              GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                  Rectangle().fill(Color(white: 0.3)).frame(height: 4)
-                  Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 4)
-                }
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+          VStack(spacing: 0) {
+            Spacer()
+            GeometryReader { geo in
+              ZStack(alignment: .leading) {
+                Rectangle().fill(Color(white: 0.3)).frame(height: 4)
+                Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 4)
               }
-              .frame(height: 4)
             }
-            .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .accessibilityHidden(true)
+            .frame(height: 4)
           }
+          .frame(width: cardWidth, height: cardHeight)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .accessibilityHidden(true)
         }
 
         // Watched badge
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= PlaybackProgress.watchedThreshold {
-            VStack {
-              HStack {
-                Spacer()
-                Circle()
-                  .fill(Color.dsSuccess)
-                  .frame(width: 28, height: 28)
-                  .overlay(
-                    Image(systemName: "checkmark")
-                      .font(.system(size: 13, weight: .bold))
-                      .foregroundStyle(.black)
-                  )
-                  .padding(8)
-              }
+        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
+          VStack {
+            HStack {
               Spacer()
+              Circle()
+                .fill(Color.dsSuccess)
+                .frame(width: 28, height: 28)
+                .overlay(
+                  Image(systemName: "checkmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.black)
+                )
+                .padding(8)
             }
-            .frame(width: cardWidth, height: cardHeight)
-            .accessibilityHidden(true)
+            Spacer()
           }
+          .frame(width: cardWidth, height: cardHeight)
+          .accessibilityHidden(true)
         }
       }
       .frame(width: cardWidth, height: cardHeight)

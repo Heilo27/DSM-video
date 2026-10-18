@@ -25,8 +25,7 @@ nonisolated enum PlaybackProgress {
     /// 5% is the canonical value — it filters out the accidental tap / trailer-length sample
     /// that 2% lets through. Every threshold check should reference this, not a literal.
     ///
-    /// NOTE: ItemsGridView's separate 0.02 is a deliberate *rendering* cutoff for the progress
-    /// bar sliver (documented at its site) and is intentionally not this constant.
+    /// The poster-card bar no longer has a cutoff of its own (TASK-978): see `cardIndicator`.
     static let startedThreshold: Double = 0.05
 
     /// Seconds remaining at/below which an item is treated as finished regardless of
@@ -135,6 +134,39 @@ nonisolated enum PlaybackProgress {
         if let inProgress { return ShowResumePick(index: inProgress, isResume: true) }
         if let firstUnwatched { return ShowResumePick(index: firstUnwatched, isResume: false) }
         return nil
+    }
+
+    /// What a poster card draws for an item's progress (FRD-001 FR-020, TASK-978).
+    enum CardIndicator: Equatable {
+        /// Nothing: no progress, or a position of zero.
+        case none
+        /// A progress bar whose width is `fraction` of the card, strictly between 0 and 1.
+        case bar(fraction: Double)
+        /// The watched badge, and no bar.
+        case watchedBadge
+    }
+
+    /// The one decision behind every poster card's bar and badge (iOS grid and rails, tvOS portrait
+    /// and landscape cards).
+    ///
+    /// TASK-978: each card made its own call. tvOS drew the bar for any `frac < 1.0`, so a record at
+    /// position 0 drew an empty track, and a title at 96% (finished) drew a bar beside the badge,
+    /// because the bar test stopped at 1.0 and the badge test started at 0.95. iOS had a third pair of
+    /// literals (0.02 and 0.98). Now there is one answer, and it is `isFinished`, the same rule the
+    /// rails and playback use: a finished title shows the badge and no bar; an unfinished one with a
+    /// position above zero shows a bar of exactly its fraction; zero shows nothing.
+    static func cardIndicator(positionSeconds: Int, durationSeconds: Int) -> CardIndicator {
+        guard durationSeconds > 0, positionSeconds > 0 else { return .none }
+        if isFinished(positionSeconds: positionSeconds, durationSeconds: durationSeconds) {
+            return .watchedBadge
+        }
+        return .bar(fraction: Double(positionSeconds) / Double(durationSeconds))
+    }
+
+    /// Convenience over an item's optional progress record.
+    static func cardIndicator(for progress: ItemProgress?) -> CardIndicator {
+        guard let progress else { return .none }
+        return cardIndicator(positionSeconds: progress.positionSeconds, durationSeconds: progress.durationSeconds)
     }
 
     /// The position playback should actually start from: the saved position, or 0 once the

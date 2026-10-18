@@ -324,9 +324,11 @@ struct ItemsGridView: View {
     if let year = item.year {
       label += ", \(year)"
     }
-    if let progress = item.progress, progress.durationSeconds > 0 {
-      let percent = Int((Double(progress.positionSeconds) / Double(progress.durationSeconds)) * 100)
-      label += ", \(percent) percent watched"
+    // Same decision as the card's bar and badge (TASK-978): nothing is said at zero progress.
+    switch PlaybackProgress.cardIndicator(for: item.progress) {
+    case .none: break
+    case .watchedBadge: label += ", watched"
+    case .bar(let fraction): label += ", \(Int(fraction * 100)) percent watched"
     }
     return label
   }
@@ -499,46 +501,38 @@ struct ItemPosterCell: View {
             .allowsHitTesting(false)
           }
 
-        // Progress bar — pinned to bottom edge, INSIDE clip boundary.
-        // Only render meaningful progress: below ~2% it's a glitchy sliver, and at
-        // ≥98% the watched badge already conveys "done" (avoids a near-full bar that
-        // reads as a rendering bug).
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= 0.02 && frac < 0.98 {
-            GeometryReader { barGeo in
-              ZStack(alignment: .leading) {
-                Rectangle()
-                  .fill(Color.dsBorderStrong)
-                  .frame(height: 3)
-                Rectangle()
-                  .fill(Color.dsAccent)
-                  .frame(width: barGeo.size.width * frac, height: 3)
-              }
+        // Progress bar — pinned to bottom edge, INSIDE clip boundary. Whether and how wide is
+        // PlaybackProgress.cardIndicator's call (TASK-978), shared with the tvOS cards.
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+          GeometryReader { barGeo in
+            ZStack(alignment: .leading) {
+              Rectangle()
+                .fill(Color.dsBorderStrong)
+                .frame(height: 3)
+              Rectangle()
+                .fill(Color.dsAccent)
+                .frame(width: barGeo.size.width * frac, height: 3)
             }
-            .frame(height: 3)
-            .accessibilityHidden(true)
           }
+          .frame(height: 3)
+          .accessibilityHidden(true)
         }
       }
       .frame(width: width, height: height)
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
       // Watched badge — overlaid on top-right corner, outside clip so badge isn't clipped
       .overlay(alignment: .topTrailing) {
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= PlaybackProgress.watchedThreshold {
-            Circle()
-              .fill(Color.dsSuccess)
-              .frame(width: 22, height: 22)
-              .overlay(
-                Image(systemName: "checkmark")
-                  .font(.system(size: 11, weight: .bold))
-                  .foregroundStyle(.black)
-              )
-              .padding(6)
-              .accessibilityHidden(true)
-          }
+        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
+          Circle()
+            .fill(Color.dsSuccess)
+            .frame(width: 22, height: 22)
+            .overlay(
+              Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.black)
+            )
+            .padding(6)
+            .accessibilityHidden(true)
         }
       }
       // Ambient elevation on the Cinematic theme; no-op on flat themes.

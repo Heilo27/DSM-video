@@ -135,6 +135,11 @@ destroyed.) This includes an older save replayed from an offline device after th
 title was marked watched: it never brings back the resume point or un-watches the title (TASK-960).
 **FR-020 [STATED]** — Poster cards show a progress indicator only when progress is above zero and below
 complete, and a watched badge when complete. *Derivation:* design-spec B3 §3–4.
+**Card indicator [DESIGN, 2026-10-17, TASK-978]** — One function decides what a poster card draws
+(`PlaybackProgress.cardIndicator`), and the iOS grid and rails and both tvOS cards use it. At position zero
+the card draws nothing: no bar, no empty track, no percentage in its VoiceOver label. Complete (see FR-016)
+draws the watched badge and no bar. Anything between draws a bar whose width is exactly the fraction watched;
+there is no minimum width and no upper cutoff (iOS used to hide the bar below 2% and above 98%).
 **FR-021 [INFERRED]** — A TV show contributes at most one Continue Watching entry, identifying the
 specific partially-watched episode.
 **FR-022 [INFERRED]** — Progress reached while the screen is locked (background audio) is recorded.
