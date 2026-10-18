@@ -1,7 +1,8 @@
 package main
 
-// Kids' collections (FRD-002 §9, TASK-918): studio, theme and kid-genre groupings that child
-// profiles browse in place of the genre list.
+// Collections (FRD-002 §9, TASK-918, TASK-1054): studio, theme and kid-genre groupings. Kids'
+// profiles browse them in place of the genre list, Teens get the studio and theme ones as an
+// extra row, and Adult profiles are offered none (FR-274).
 //
 // collectionDefs below is the ONE home for every collection id, title and membership rule
 // (FR-271, AC-002-66). The endpoints, the visibility tiers and the tests all read it; adding
@@ -28,7 +29,8 @@ const (
 )
 
 // Collection audiences (FR-274). "kids" collections are offered only to profiles at or below
-// kidsMaxAgeLevel; "all" collections are offered to every profile.
+// kidsMaxAgeLevel; "all" collections are offered to every profile that is offered collections
+// at all (offersCollections).
 const (
 	collectionAudienceAll  = "all"
 	collectionAudienceKids = "kids"
@@ -41,6 +43,13 @@ const kidsMaxAgeLevel = 2
 // decides which collections a profile is offered (FR-274) and is sent to clients as the
 // Profile "kids" field, so no client holds its own copy of the threshold (TASK-921).
 func isKidsLevel(maxAgeLevel int) bool { return maxAgeLevel <= kidsMaxAgeLevel }
+
+// offersCollections is THE rule for "is a profile with this ceiling offered collections at
+// all" (FR-274, Ryan 2026-10-18): every profile with a rating ceiling is; the unrestricted
+// Adult ceiling is not. It is defined off the rating ladder (agerating.Restricted), so there
+// is no level literal here. It gates both endpoints and is sent to clients as the Profile
+// "offersCollections" field, so no client holds its own copy of the cutoff.
+func offersCollections(maxAgeLevel int) bool { return agerating.Restricted(maxAgeLevel) }
 
 // TMDb separates production companies from TV networks, and numbers them independently:
 // company 2 is Walt Disney Pictures, network 2 is ABC. An id without its kind is ambiguous,
@@ -95,10 +104,14 @@ var collectionDefs = []collectionDef{
 }
 
 // collectionsFor returns the definitions offered to v, in definition order (FR-274): every
-// collection for a kids' profile, only the audience-all ones for Teens and Adult.
+// collection for a kids' profile, only the audience-all ones for Teens, none for Adult. The
+// empty list is the Adult answer, so neither endpoint needs a tier branch of its own.
 func collectionsFor(v viewer) []collectionDef {
-	kids := isKidsLevel(v.MaxAgeLevel)
 	out := make([]collectionDef, 0, len(collectionDefs))
+	if !offersCollections(v.MaxAgeLevel) {
+		return out
+	}
+	kids := isKidsLevel(v.MaxAgeLevel)
 	for _, d := range collectionDefs {
 		if kids || d.Audience == collectionAudienceAll {
 			out = append(out, d)

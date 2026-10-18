@@ -1,6 +1,7 @@
 import SwiftUI
 
-// Kids' collections (FRD-002 §9, TASK-918).
+// Collections (FRD-002 §9, TASK-918, TASK-1054): the kids' browse in place of the genre
+// filter, an extra row for Teens, nothing for Adult.
 //
 // Everything rendered here is what GET /collections returned for the active profile. The
 // server decides which collections a profile gets, their titles and their order (FR-271,
@@ -84,8 +85,9 @@ struct CollectionTile: View {
 // MARK: - Home rail
 
 /// The "Collections" row on the home screen. Kids get it as their browse (with an explicit
-/// "none yet" or "couldn't load" state, FR-276); Teens and Adult get it as an extra row that
-/// simply is not there when there is nothing to show.
+/// "none yet" or "couldn't load" state, FR-276); Teens get it as an extra row that simply is
+/// not there when there is nothing to show; Adult profiles are offered none, so it is never
+/// there (FR-274).
 struct CollectionsRail: View {
   @Environment(AppState.self) private var appState
   #if os(tvOS)

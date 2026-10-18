@@ -399,6 +399,8 @@ manage and Settings shows no entry.
 **FR-270 [RYAN]** Kids' profiles (maximum age level ≤ 2) browse by **collections** (studio and theme
 groupings plus kid-friendly genres) **instead of** the adult genre list. The server marks each profile
 `kids` from its one threshold; apps read the flag and hold no threshold of their own. [2026-10-17, TASK-921]
+Teens keep genres and get an extra collections row; Adult profiles get no collections (FR-274). The server
+marks that with `offersCollections` beside `kids`.
 
 **FR-271 [RYAN/DESIGN]** Collections are defined **once, server-side, as data**: id, title, kind
 (`studio` | `theme` | `genre`), membership rule, audience. A title is a member if it has **any** of the
@@ -430,23 +432,27 @@ collection would miss nearly every classic. Adding a collection is a data change
 **FR-273 [RYAN]** The rating filter applies inside every collection. A collection with **no visible titles
 for the active profile is hidden**: not listed, not shown empty.
 
-**FR-274 [DESIGN] Who sees which collections.**
+**FR-274 [RYAN] Who sees which collections.** [2026-10-18, TASK-1054]
 - **Kids' profiles (≤ Older Kids):** every collection, `kids` and `all` audiences, in definition order, as
-  their browse categories in place of genres.
-- **Teens and Adult profiles:** the genre list stays their primary browse, and the `all`-audience studio
-  and theme collections are offered as an extra browse row. The `kids` genre-kind collections are left out
-  because they would duplicate the Animation and Family genres these profiles already have.
-- *Justification:* studio and theme collections serve adults too: a parent choosing a family movie from the
-  owner profile, or the Christmas shelf in December. That is M2's "filter in ways that reflect what the user
-  is actually looking for" (P1). One definition serving every profile costs nothing extra. Teens keep genres
-  because a 13–16-year-old browsing "Pixar / Family" instead of Action / Comedy / Drama would find the app
-  built for someone younger. Ryan's instruction was "kids' profiles", and Teens are not kids.
+  their browse categories **in place of the genre filter**. A kids' profile sees no genre filter on any
+  surface (Home, library grids, search, iOS or tvOS).
+- **Teens profiles:** the genre list stays their primary browse, and the `all`-audience studio and theme
+  collections are offered as an extra browse row. The `kids` genre-kind collections are left out because
+  they would duplicate the Animation and Family genres Teens already have.
+- **Adult profiles (the unrestricted ceiling):** genres only. No collections row, `GET /collections`
+  returns an empty list, and every collection id is `unknown_collection`. The cutoff is one server rule
+  (the profile's ceiling is below the ladder's top), sent to apps as the profile's `offersCollections`
+  flag; apps hold no level of their own, and an app hides collections for a profile whose flag is false
+  whatever an older server sends.
+- *Reason (Ryan, in product terms):* kids' films share too few genres to tell apart, so the studios do the
+  filtering: Disney, Pixar, DreamWorks sort a child's library better than "Animation" and "Family" can.
+  Teens keep collections as an extra row, but Adult profiles do not need them.
 
 **FR-275 [DESIGN]** The server returns a profile's visible collections, with visible counts, from one
 endpoint, and each collection's titles from a second, paged in the same shape as the item listing
 (ProfilesAPI.md). A collection the profile is offered but that has no visible titles at the moment of the
-second call answers an empty page, not an error; only an undefined id, or one not offered to the profile's
-tier, is `unknown_collection`. Collection titles are data from the server definition. Studio names are proper nouns;
+second call answers an empty page, not an error; only an undefined id, or one not offered to the profile
+(every id, for an Adult profile; the `kids` ones, for Teens), is `unknown_collection`. Collection titles are data from the server definition. Studio names are proper nouns;
 the two theme names are the only copy, and they have one home in the definition.
 
 **FR-276 [DESIGN]** If no collection has a visible title (for example, no TMDb key is configured, so no
@@ -474,7 +480,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | `profile_limit_reached` | 409 | The account already has 4 profiles. |
 | `owner_pin_not_set` | 409 | Creating a second profile before the owner has a PIN. |
 | `owner_profile_immutable` | 409 | Deleting the owner profile, lowering its age level, or clearing its PIN while other profiles exist. |
-| `unknown_collection` | 404 | Collection id not defined, or not offered to this profile's tier. An offered collection with no visible titles is an empty page, not this error (FR-275). |
+| `unknown_collection` | 404 | Collection id not defined, or not offered to this profile (every id, for an Adult profile). An offered collection with no visible titles is an empty page, not this error (FR-275). |
 | `invalid_avatar` | 400 | Avatar key outside 1–32 letters, digits, `-` and `_` (FR-203). |
 | `dsm_unavailable` | 503 | Owner PIN reset when DSM cannot be reached or gives no usable answer (FR-216). |
 | `server_error` | 500 | The server failed to generate a profile ID or secure a PIN, before anything was written. The apps say nothing was saved and to try again (FRD-001 FR-002). The server logs the request method and path, the failing step and the underlying error for every `server_error` (and, since TASK-1052, for every other 5xx too, under FRD-001 FR-144), and never a PIN, password, token or PIN hash (TASK-1048). Repeats of one failure site are throttled to 3 lines per 30 seconds, then one count of the suppressed ones. |
@@ -515,8 +521,9 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | FR-250–252 enforcement | S5 | S2 (`content_restricted` names the cause) | none | KEEP |
 | FR-260–266, FR-268 apps | S5 | S2 | none | KEEP |
 | FR-267 both platforms | FRD-000 standard 3 | S1 | none | KEEP (if the feature ships) |
-| FR-270, 273 (kids' scope), 276 kids' collections | S5 | S2 | none | KEEP |
-| FR-271, 272, 274 (adult row), 275 collections for Teens/Adult | P1 (findable: browse that reflects what the user is looking for, M2) | S1 | A1/A3: none (reads TMDb metadata only) | KEEP |
+| FR-270, 273 (kids' scope), 276 kids' collections in place of genres | S5 | S2 | none | KEEP |
+| FR-271, 272, 274 (Teens row), 275 collections for Teens | P1 (findable: browse that reflects what the user is looking for, M2) | S1 | A1/A3: none (reads TMDb metadata only) | KEEP |
+| FR-274 (Adult: no collections, `offersCollections` flag) | P1 (Adult browses by genre, which already separates adult titles; a studio row adds nothing) | S1 (one server rule, apps hold no level) | A1/A3: none | KEEP. Ryan 2026-10-18 removed the earlier Adult row: "Teen accounts it's fine. But not older and adult accounts. It's not needed." |
 
 No CUTs. Nothing proposed during this work serves nothing or violates an anti-truth.
 
@@ -577,12 +584,14 @@ tvOS (TASK-917)
 - **AC-002-49** Given an owner who has forgotten the owner PIN, on iOS/iPadOS and tvOS, the owner PIN pad offers "Forgot PIN?". It takes the DSM password, an optional verification code and a new PIN, and on success opens management under the new PIN. A wrong password, a missing code, an unreachable DSM or an unreachable NAS is each named on that screen; nothing changes and the user stays signed in. (FR-216, FR-217)
 
 Collections (TASK-918)
-- **AC-002-60** Given a kids' profile, `GET /collections` returns only collections with at least one visible title, in definition order, genre-kind ones included. Given a Teens or Adult profile, it returns only `audience: all` collections. (FR-273, FR-274)
+- **AC-002-60** Given a kids' profile, `GET /collections` returns only collections with at least one visible title, in definition order, genre-kind ones included. Given a Teens profile, it returns only `audience: all` collections. Given an Adult profile, it returns an empty list, even when titles exist that every collection could show. (FR-273, FR-274)
 - **AC-002-61** Given titles tagged company 3, network 2, keyword 207317, keyword 3335 and genre "Kids", then they fall in `pixar`, no collection (network 2 is not Disney), `holiday`, `halloween` and `family` respectively. (FR-271, FR-272)
 - **AC-002-62** Given an R-rated Walt Disney Pictures title, it is neither returned nor counted in `disney` for a kids' profile. (FR-273)
 - **AC-002-63** Given a show in a collection, it is listed once, and none of its episodes is listed individually. (FR-271)
-- **AC-002-64** Given an undefined collection id, or one not offered to the profile's tier, `/collections/{id}/items` returns `404 unknown_collection`; given an offered collection with no visible titles, it returns `200` with an empty page. (FR-275)
+- **AC-002-64** Given an undefined collection id, or one not offered to the profile (any id, for an Adult profile; `animation` and `family`, for Teens), `/collections/{id}/items` returns `404 unknown_collection`; given an offered collection with no visible titles, it returns `200` with an empty page. (FR-275)
 - **AC-002-65** Given a kids' profile on tvOS, browse shows collections in place of genres. With none visible, it says there are no collections yet, distinct from a load failure. (FR-270, FR-276)
 - **AC-002-66** Given the server source, collection ids, rules and titles are defined in exactly one place. (FR-271)
 - **AC-002-67** Given a new download of a title the server rates 4 and the device's catalog has no row for, then the download is stored at level 4 and is neither listed nor playable on a level-1 profile offline. Given the server sends no level, then the catalog's level is used, else unknown (hidden on restricted profiles). Given a refresh of stored levels, then a known level is never replaced by "unknown" and a newer catalog level replaces it. (FR-262, FR-242)
+- **AC-002-68** Given every profile object the server returns (list, create, update), it carries a boolean `offersCollections`: true for kids and Teens, false for Adult, and true exactly when `/collections` can list anything for that profile. Given the app and a profile whose `offersCollections` is false, no collections row is shown on Home or elsewhere, even if the server sent collections (an older server). Given a server that omits the flag, kids' profiles still show collections and no other profile does. (FR-274)
+- **AC-002-69** Given a kids' profile, then collections replace the genre filter and no genre filter appears on Home, in any library grid, or in search, on iOS or tvOS. Given a Teens profile, then it has the genre filter and a collections row. Given an Adult profile, then it has the genre filter and no collections row. (FR-270, FR-274)
 

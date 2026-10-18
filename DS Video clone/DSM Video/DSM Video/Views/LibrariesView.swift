@@ -526,8 +526,9 @@ struct LibraryHomeView: View {
                 seeAllLibrary: nil
               )
             }
-            // Collections (FRD-002 §9): a kids' profile's browse, an extra row for Teens and
-            // Adult. Renders what GET /collections returned; hidden offline.
+            // Collections (FRD-002 §9): a kids' profile's browse (in place of the genre
+            // filter), an extra row for Teens, never shown for Adult (FR-274). Renders what
+            // GET /collections returned; hidden offline.
             CollectionsRail()
           }
           .padding(.top, ThemeHolder.shared.current.usesCinematicChrome ? 0 : 16)

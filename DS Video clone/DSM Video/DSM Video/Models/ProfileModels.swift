@@ -36,9 +36,16 @@ nonisolated struct Profile: Codable, Identifiable, Hashable, Sendable {
   /// The server's answer to "is this a kids' profile" (FR-270): kids browse by collections in
   /// place of genres. Computed on the server from its one threshold; the client holds none.
   let kids: Bool
+  /// The server's answer to "is this profile offered collections at all" (FR-274): kids and
+  /// Teens are, Adult is not. Computed on the server beside `kids`; the client compares no level.
+  let offersCollections: Bool
 
+  /// `offersCollections` left nil follows `kids`: a server (or a list cached by an older build)
+  /// that predates the field still gives kids their collections, and nothing else gets a row
+  /// the server may no longer offer. The one place that fallback lives.
   init(id: String, name: String, avatar: String, maxAgeLevel: Int,
-       hasPin: Bool, isOwner: Bool, createdAt: String? = nil, kids: Bool = false) {
+       hasPin: Bool, isOwner: Bool, createdAt: String? = nil, kids: Bool = false,
+       offersCollections: Bool? = nil) {
     self.id = id
     self.name = name
     self.avatar = avatar
@@ -47,6 +54,7 @@ nonisolated struct Profile: Codable, Identifiable, Hashable, Sendable {
     self.isOwner = isOwner
     self.createdAt = createdAt
     self.kids = kids
+    self.offersCollections = offersCollections ?? kids
   }
 
   /// Restricted = below the ladder's top (FRD-002 §1). The top comes from the server, stored
@@ -93,7 +101,9 @@ nonisolated extension Profile {
       // Missing `kids` (a server that predates the field, or a list cached by an older build)
       // -> false: browse falls back to genres. A UI mode only; the server still enforces the
       // ceiling, so nothing becomes visible that should not.
-      kids: try c.decodeIfPresent(Bool.self, forKey: .kids) ?? false)
+      kids: try c.decodeIfPresent(Bool.self, forKey: .kids) ?? false,
+      // Missing `offersCollections` -> nil -> follows `kids` (see init).
+      offersCollections: try c.decodeIfPresent(Bool.self, forKey: .offersCollections))
   }
 }
 

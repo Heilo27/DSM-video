@@ -286,7 +286,9 @@ func TestAC00260_KidsGetEveryNonEmptyCollectionInDefinitionOrder(t *testing.T) {
 	}
 }
 
-func TestAC00260_TeensAndAdultsGetOnlyTheAllAudienceCollections(t *testing.T) {
+// REWRITTEN (TASK-1054, Ryan 2026-10-18): this test used to expect the owner (an Adult
+// profile) to get [pixar holiday]. Adult is now offered no collections; Teens are unchanged.
+func TestAC00260_TeensGetOnlyTheAllAudienceCollectionsAndAdultsGetNone(t *testing.T) {
 	e := newColEnv(t)
 	e.movie("m_fam", "Family,Animation", sp("G"), 1) // would fill animation and family
 	e.movie("m_pixar", "Animation", sp("PG"), 2)
@@ -294,15 +296,49 @@ func TestAC00260_TeensAndAdultsGetOnlyTheAllAudienceCollections(t *testing.T) {
 	e.movie("m_xmas", "Comedy", sp("PG-13"), 3)
 	e.tagKeyword("m_xmas", 207317)
 
-	for name, profile := range map[string]string{"teen": e.teen, "owner": e.owner} {
-		got := collectionIDs(e.collections(profile))
-		if want := "[pixar holiday]"; fmt.Sprint(got) != want {
-			t.Errorf("%s collections = %v, want %s: no kids-audience genre collections (FR-274)", name, got, want)
-		}
+	if got := collectionIDs(e.collections(e.teen)); fmt.Sprint(got) != "[pixar holiday]" {
+		t.Errorf("teen collections = %v, want [pixar holiday]: no kids-audience genre collections (FR-274)", got)
+	}
+	// Adult gets the empty list, not an error and not a missing key, even though the library
+	// holds titles every collection could show.
+	r := e.do(qaAlice, "GET", "/collections", "", e.owner)
+	wantOK(t, r, 200)
+	raw, present := r.js["collections"].([]any)
+	if !present || len(raw) != 0 {
+		t.Errorf("owner (Adult) collections = %v (present %v), want an empty array (FR-274)", r.js["collections"], present)
 	}
 	// And the kid still has the genre ones.
 	if got := collectionIDs(e.collections(e.kid)); fmt.Sprint(got) != "[pixar animation family]" {
 		t.Errorf("kid collections = %v", got)
+	}
+}
+
+// The wire flag a client reads and the lists the endpoints return come from one rule: a
+// profile has offersCollections=true exactly when /collections is non-empty for it.
+func TestAC00268_OffersCollectionsFlagAgreesWithTheEndpointForEveryTier(t *testing.T) {
+	e := newColEnv(t)
+	e.movie("m_pixar", "Animation", sp("G"), 1) // visible to every ceiling
+	e.tagCompany("m_pixar", "company", 3)
+
+	byID := map[string]map[string]any{}
+	for _, p := range e.profiles(qaAlice) {
+		byID[p["id"].(string)] = p
+	}
+	for name, tc := range map[string]struct {
+		id   string
+		want bool
+	}{"kid": {e.kid, true}, "teen": {e.teen, true}, "owner (Adult)": {e.owner, false}} {
+		p := byID[tc.id]
+		flag, present := p["offersCollections"].(bool)
+		if !present {
+			t.Fatalf("%s: profile object has no boolean offersCollections: %v", name, p)
+		}
+		if flag != tc.want {
+			t.Errorf("%s: offersCollections = %v, want %v", name, flag, tc.want)
+		}
+		if listed := len(e.collections(tc.id)) > 0; listed != flag {
+			t.Errorf("%s: offersCollections = %v but /collections non-empty = %v", name, flag, listed)
+		}
 	}
 }
 
@@ -323,8 +359,18 @@ func TestAC00260_ACollectionOnlyTheCeilingEmptiesIsHidden(t *testing.T) {
 	if got := collectionIDs(e.collections(e.kid)); len(got) != 0 {
 		t.Errorf("kid collections = %v, want none: halloween holds only an R title (FR-273)", got)
 	}
-	if got := collectionIDs(e.collections(e.owner)); fmt.Sprint(got) != "[halloween]" {
-		t.Errorf("owner collections = %v, want [halloween]", got)
+	// REWRITTEN (TASK-1054): the owner (Adult) used to see [halloween] here; Adult now sees no
+	// collections at all, so the ceiling is exercised with a PG-13 title that a teen can see.
+	e.movie("m_pg13", "Comedy", sp("PG-13"), 2)
+	e.tagKeyword("m_pg13", 3335)
+	if got := collectionIDs(e.collections(e.kid)); len(got) != 0 {
+		t.Errorf("kid collections = %v, want none: halloween holds only R and PG-13 titles", got)
+	}
+	if got := collectionIDs(e.collections(e.teen)); fmt.Sprint(got) != "[halloween]" {
+		t.Errorf("teen collections = %v, want [halloween]", got)
+	}
+	if got := collectionIDs(e.collections(e.owner)); len(got) != 0 {
+		t.Errorf("owner (Adult) collections = %v, want none (FR-274)", got)
 	}
 }
 
@@ -346,11 +392,11 @@ func TestAC00262_ARatedDisneyTitleIsNeitherReturnedNorCountedForAKid(t *testing.
 	if n := e.count_(e.kid, "disney"); n != 1 {
 		t.Errorf("kid disney itemCount = %d, want 1", n)
 	}
-	if ids, total := e.itemIDs("/collections/disney/items", e.owner); len(ids) != 3 || total != 3 {
-		t.Errorf("owner disney = %v (total %d), want all three", ids, total)
-	}
-	if n := e.count_(e.owner, "disney"); n != 3 {
-		t.Errorf("owner disney itemCount = %d, want 3", n)
+	// REWRITTEN (TASK-1054): the owner (Adult) used to see all three Disney titles here. Adult
+	// is offered no collections, so the collection is unknown to it, not merely empty.
+	r := e.do(qaAlice, "GET", "/collections/disney/items", "", e.owner)
+	if r.code != 404 || r.str("error") != "unknown_collection" {
+		t.Errorf("owner (Adult) disney items: %d %s, want 404 unknown_collection (FR-274)", r.code, r.raw)
 	}
 	// The teen sits between: PG-13 is theirs, R is not.
 	e.movie("m_pg13", "Drama", sp("PG-13"), 4)
@@ -454,6 +500,10 @@ func TestAC00264_UndefinedOrNotOfferedCollectionIs404UnknownCollection(t *testin
 		{"undefined id, owner", "marvel", e.owner},
 		{"kids-audience collection, teen", "animation", e.teen},
 		{"kids-audience collection, owner", "family", e.owner},
+		// TASK-1054: Adult is offered no collection at all, the all-audience ones included.
+		{"studio, Adult", "pixar", e.owner},
+		{"theme, Adult", "holiday", e.owner},
+		{"every def id, Adult: disney", "disney", e.owner},
 		{"case differs", "Pixar", e.kid},
 	} {
 		r := e.do(qaAlice, "GET", "/collections/"+tc.id+"/items", "", tc.profile)

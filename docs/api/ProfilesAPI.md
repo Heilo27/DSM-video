@@ -68,6 +68,11 @@ accepted on input: `true` when the profile counts as a kids' profile (FR-270, to
 It decides browse mode: kids' profiles get collections in place of the genre list (FR-274). Clients
 read this field and hold no threshold of their own, so moving the threshold needs no client release.
 
+`offersCollections` is computed the same way (never stored or accepted on input): `true` for kids' and Teens
+profiles, `false` for Adult (the unrestricted ceiling), and `true` exactly when `GET /collections` can list
+anything for the profile (FR-274). Apps show no collections row for a profile whose flag is `false`. An app
+talking to a server that omits it treats kids as `true` and everyone else as `false`.
+
 `avatar` is an opaque key from the apps' built-in set: 1–32 characters, letters, digits, `-` and `_` only
 (anything else is `400 invalid_avatar`); `null` clears it. The server stores it as given. The
 PIN is never returned, only `hasPin`.
@@ -205,7 +210,8 @@ Response:
 ### GET `/collections`
 The active profile's browse collections (FR-270–FR-276). Only collections with at least one title visible
 to this profile are returned, in definition order. Kids' profiles (Profile `kids: true`, `maxAgeLevel ≤ 2`) get every
-collection. Teens and Adult profiles get only `audience: all` (studio and theme) collections.
+collection. Teens profiles get only `audience: all` (studio and theme) collections, as an extra row beside
+their genres. Adult profiles (`offersCollections: false`) get an empty `collections` array.
 
 Response:
 ```json
@@ -242,8 +248,8 @@ and artwork are one of the show's episodes (the first with a poster), `title` an
 `year` the earliest and `addedAt` the newest across its episodes. Open it by `showName`. Its episodes are never
 listed individually (AC-002-63).
 
-Errors: `404 unknown_collection` (not defined, or not offered to this profile: a Teens or Adult profile asking
-for `animation` or `family`). A collection the profile *is* offered but that currently has no visible titles
+Errors: `404 unknown_collection` (not defined, or not offered to this profile: a Teens profile asking
+for `animation` or `family`, or an Adult profile asking for any id). A collection the profile *is* offered but that currently has no visible titles
 answers `200` with `total: 0` and `items: []`; clients get the list of what to show from `GET /collections`.
 
 Membership is defined once, in `backend/cmd/dsvideo-backend/collections.go` (`collectionDefs`). A title is a

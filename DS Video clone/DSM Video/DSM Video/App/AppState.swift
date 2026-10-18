@@ -2023,6 +2023,7 @@ final class AppState {
       collections: homeCollections,
       load: homeCollectionsLoad,
       isKids: activeProfile?.kids ?? false,
+      offersCollections: activeProfile?.offersCollections ?? false,
       isOffline: isDemoMode || isServerUnavailable)
   }
 

@@ -609,7 +609,8 @@ func TestProfileObjectShapeAndListEnvelope(t *testing.T) {
 	if len(ps) != 2 {
 		t.Fatalf("want 2 profiles, got %s", r.raw)
 	}
-	wantKeys := []string{"avatar", "createdAt", "hasPin", "id", "isOwner", "kids", "maxAgeLevel", "name"}
+	// TASK-1054 (Ryan 2026-10-18): `offersCollections` joins the object beside `kids` (FR-274).
+	wantKeys := []string{"avatar", "createdAt", "hasPin", "id", "isOwner", "kids", "maxAgeLevel", "name", "offersCollections"}
 	for _, p := range ps {
 		m := p.(map[string]any)
 		var keys []string

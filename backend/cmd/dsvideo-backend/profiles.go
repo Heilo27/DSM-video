@@ -105,17 +105,21 @@ type profileJSON struct {
 	MaxAgeLevel int    `json:"maxAgeLevel"`
 	// Kids is computed, never stored: isKidsLevel (collections.go) is its one home, so the
 	// client switches browse mode on the server's answer instead of its own threshold.
-	Kids      bool   `json:"kids"`
-	HasPin    bool   `json:"hasPin"`
-	IsOwner   bool   `json:"isOwner"`
-	CreatedAt string `json:"createdAt"`
+	Kids bool `json:"kids"`
+	// OffersCollections is computed the same way: offersCollections (collections.go) is its one
+	// home (FR-274), so no client compares a level to decide whether to show a collections row.
+	OffersCollections bool   `json:"offersCollections"`
+	HasPin            bool   `json:"hasPin"`
+	IsOwner           bool   `json:"isOwner"`
+	CreatedAt         string `json:"createdAt"`
 }
 
 // json is the only way a Profile object is built for the wire (list, create, update), so
 // every response carries the same computed fields.
 func (p profileRow) json() profileJSON {
 	return profileJSON{ID: p.ID, Name: p.Name, Avatar: p.Avatar, MaxAgeLevel: p.MaxAgeLevel,
-		Kids: isKidsLevel(p.MaxAgeLevel), HasPin: p.hasPin(), IsOwner: p.IsOwner, CreatedAt: p.CreatedAt}
+		Kids: isKidsLevel(p.MaxAgeLevel), OffersCollections: offersCollections(p.MaxAgeLevel),
+		HasPin: p.hasPin(), IsOwner: p.IsOwner, CreatedAt: p.CreatedAt}
 }
 
 // loadProfiles returns the account's profiles (at most 4), oldest first.
