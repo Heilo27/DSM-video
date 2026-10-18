@@ -49,7 +49,8 @@ cp -r "$SPK_DIR"/* "$TARGET_DIR/"
 # Build Go backend for target architecture
 echo "🔨 Cross-compiling Go backend for ${GOOS}/${GOARCH}..."
 cd "$REPO_ROOT/backend"
-GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -ldflags="-s -w" -o "$TARGET_DIR/target/backend/dsvideo-backend" ./cmd/dsvideo-backend
+PACKAGE_VERSION=$(grep '^version=' "$SPK_DIR/INFO" | cut -d'"' -f2)
+GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -ldflags="-s -w -X main.BuildVersion=${PACKAGE_VERSION}" -o "$TARGET_DIR/target/backend/dsvideo-backend" ./cmd/dsvideo-backend
 
 # Make binary executable
 chmod +x "$TARGET_DIR/target/backend/dsvideo-backend"

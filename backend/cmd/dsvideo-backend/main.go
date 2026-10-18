@@ -7510,7 +7510,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"ok":               true,
-		"version":          "0.2.0-dev",
+		"version":          BuildVersion,
 		"libraries":        configuredLibrariesRedacted(s.cfg, admin),
 		"lastScanAt":       last.UTC().Format(time.RFC3339),
 		"playbackSessions": activeSessions,

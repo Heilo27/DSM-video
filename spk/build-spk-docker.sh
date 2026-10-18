@@ -85,7 +85,8 @@ export CGO_ENABLED=0
 export GOOS=$GOOS
 export GOARCH=$GOARCH
 
-go build -ldflags="-s -w" -o "$TEMP_SOURCE/DSVideoServer/target/backend/dsvideo-backend" ./cmd/dsvideo-backend
+PACKAGE_VERSION=$(grep '^version=' "$SPK_DIR/INFO" | cut -d'"' -f2)
+go build -ldflags="-s -w -X main.BuildVersion=${PACKAGE_VERSION}" -o "$TEMP_SOURCE/DSVideoServer/target/backend/dsvideo-backend" ./cmd/dsvideo-backend
 
 # Verify it's Linux format
 if file "$TEMP_SOURCE/DSVideoServer/target/backend/dsvideo-backend" | grep -q "Mach-O"; then
