@@ -3507,13 +3507,13 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 	progressByID := s.getProfileProgressBatch(v.ProfileID, episodeIDs)
 
 	for _, pe := range pending {
-		p := progressByID[pe.id]
-
+		rec, hasProgress := progressByID[pe.id]
+		// "progress" is null when the episode has none (the key is always present here).
+		var p any
 		watched := false
-		if p != nil {
-			pos, _ := p["positionSeconds"].(int)
-			dur, _ := p["durationSeconds"].(int)
-			if dur > 0 && float64(pos)/float64(dur) >= 0.85 {
+		if hasProgress {
+			p = rec.JSON()
+			if rec.DurationSeconds > 0 && float64(rec.PositionSeconds)/float64(rec.DurationSeconds) >= 0.85 {
 				watched = true
 			}
 		}
@@ -4153,9 +4153,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	resume, _ := s.getProfileProgress(v.ProfileID, itemID)
 	var resumePos any = 0
 	if resume != nil {
-		if v, ok := resume["positionSeconds"].(int); ok {
-			resumePos = v
-		}
+		resumePos = resume.PositionSeconds
 	}
 
 	baseURL := requestBaseURL(r, s.cfg.BaseURL)
@@ -6373,7 +6371,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		SeasonNumber    *int            `json:"seasonNumber,omitempty"`
 		EpisodeNumber   *int            `json:"episodeNumber,omitempty"`
 		ChangeSeq       int64           `json:"changeSeq"`
-		Progress        *map[string]any `json:"progress,omitempty"`
+		Progress        map[string]any  `json:"progress,omitempty"`
 		// FRD-002 FR-240/241, ADR-001 §4: sync is account-scoped and unfiltered; every item
 		// carries its level so the device filters each local read. Unrated → null / 4.
 		ContentRating *string `json:"contentRating"`
@@ -6439,13 +6437,8 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 			folderID := showFolderIDCol.String
 			item.ShowFolderID = &folderID
 		}
-		if posSeconds.Valid && durSeconds.Valid {
-			p := map[string]any{
-				"positionSeconds": posSeconds.Int64,
-				"durationSeconds": durSeconds.Int64,
-				"updatedAt":       progUpdatedAt.String,
-			}
-			item.Progress = &p
+		if rec, ok := progressFromNull(posSeconds, durSeconds, progUpdatedAt); ok {
+			item.Progress = rec.JSON()
 		}
 		if item.ChangeSeq > maxSeq {
 			maxSeq = item.ChangeSeq
@@ -6614,7 +6607,7 @@ func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
 	// FR-207/FR-250: rows above the ceiling are hidden on read, never deleted.
 	visFrag, visArgs := v.visibleItemFrag("progress.item_id")
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ?"+visFrag,
+		"SELECT "+progressSelect+" FROM progress WHERE profile_id = ?"+visFrag,
 		append([]any{v.ProfileID}, visArgs...)...,
 	)
 	if err != nil {
@@ -6622,20 +6615,7 @@ func (s *Server) handleProgressAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	result := make(map[string]any)
-	for rows.Next() {
-		var itemID, updatedAt string
-		var pos, dur int
-		if err := rows.Scan(&itemID, &pos, &dur, &updatedAt); err != nil {
-			continue
-		}
-		result[itemID] = map[string]any{
-			"positionSeconds": pos,
-			"durationSeconds": dur,
-			"updatedAt":       updatedAt,
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"progress": result})
+	writeJSON(w, http.StatusOK, map[string]any{"progress": progressMapJSON(scanProgressRows(rows, "handleProgressAll"))})
 }
 
 // handleProgressBatch — GET /api/v1/progress?ids=id1,id2,...
@@ -6676,7 +6656,7 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 	visFrag, visArgs := v.visibleItemFrag("progress.item_id")
 	args = append(args, visArgs...)
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")"+visFrag,
+		"SELECT "+progressSelect+" FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")"+visFrag,
 		args...,
 	)
 	if err != nil {
@@ -6684,20 +6664,7 @@ func (s *Server) handleProgressBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	result := make(map[string]any, len(ids))
-	for rows.Next() {
-		var itemID, updatedAt string
-		var pos, dur int
-		if err := rows.Scan(&itemID, &pos, &dur, &updatedAt); err != nil {
-			continue
-		}
-		result[itemID] = map[string]any{
-			"positionSeconds": pos,
-			"durationSeconds": dur,
-			"updatedAt":       updatedAt,
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"progress": result})
+	writeJSON(w, http.StatusOK, map[string]any{"progress": progressMapJSON(scanProgressRows(rows, "handleProgressBatch"))})
 }
 
 func firstNonEmpty(values ...string) string {
@@ -6710,41 +6677,39 @@ func firstNonEmpty(values ...string) string {
 }
 
 // getProfileProgress returns one profile's progress for itemID, or (nil, nil) if it has none.
-func (s *Server) getProfileProgress(profileID, itemID string) (map[string]any, error) {
+func (s *Server) getProfileProgress(profileID, itemID string) (*progressRecord, error) {
 	row := s.db.QueryRow("SELECT position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id = ?", profileID, itemID)
-	var pos, dur int
-	var updatedAt string
-	if err := row.Scan(&pos, &dur, &updatedAt); err != nil {
+	var rec progressRecord
+	if err := row.Scan(&rec.PositionSeconds, &rec.DurationSeconds, &rec.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return map[string]any{"positionSeconds": pos, "durationSeconds": dur, "updatedAt": updatedAt}, nil
+	return &rec, nil
 }
 
 // getProgressBatch is the no-header path (the WebAPI layer, which cannot send
 // X-DSVideo-Profile): progress for the account's FR-221 default profile (FR-251). Handlers
 // that have a viewer call getProfileProgressBatch directly. A profiles lookup failure yields
 // an empty map, the same degraded answer as a failed progress query.
-func (s *Server) getProgressBatch(userID string, itemIDs []string) map[string]map[string]any {
+func (s *Server) getProgressBatch(userID string, itemIDs []string) map[string]progressRecord {
 	if len(itemIDs) == 0 {
-		return map[string]map[string]any{}
+		return map[string]progressRecord{}
 	}
 	v, err := s.defaultViewer(context.Background(), userID)
 	if err != nil {
 		log.Printf("getProgressBatch: default profile for %s: %v", userID, err)
-		return map[string]map[string]any{}
+		return map[string]progressRecord{}
 	}
 	return s.getProfileProgressBatch(v.ProfileID, itemIDs)
 }
 
 // getProfileProgressBatch returns one profile's progress for a slice of itemIDs in a single
-// query. Returns a map of itemID → progress map; missing items are absent from the map.
-func (s *Server) getProfileProgressBatch(profileID string, itemIDs []string) map[string]map[string]any {
-	result := make(map[string]map[string]any, len(itemIDs))
+// query. Returns a map of itemID → progress record; missing items are absent from the map.
+func (s *Server) getProfileProgressBatch(profileID string, itemIDs []string) map[string]progressRecord {
 	if len(itemIDs) == 0 {
-		return result
+		return map[string]progressRecord{}
 	}
 	placeholders := strings.Repeat("?,", len(itemIDs))
 	placeholders = placeholders[:len(placeholders)-1]
@@ -6754,22 +6719,16 @@ func (s *Server) getProfileProgressBatch(profileID string, itemIDs []string) map
 		args = append(args, id)
 	}
 	rows, err := s.db.Query(
-		"SELECT item_id, position_seconds, duration_seconds, updated_at FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")",
+		"SELECT "+progressSelect+" FROM progress WHERE profile_id = ? AND item_id IN ("+placeholders+")",
 		args...,
 	)
 	if err != nil {
-		return result
+		// Degraded answer (no progress) rather than a failed page; logged so it is not silent.
+		log.Printf("getProfileProgressBatch: query: %v", err)
+		return map[string]progressRecord{}
 	}
 	defer rows.Close()
-	for rows.Next() {
-		var itemID, updatedAt string
-		var pos, dur int
-		if err := rows.Scan(&itemID, &pos, &dur, &updatedAt); err != nil {
-			continue
-		}
-		result[itemID] = map[string]any{"positionSeconds": pos, "durationSeconds": dur, "updatedAt": updatedAt}
-	}
-	return result
+	return scanProgressRows(rows, "getProfileProgressBatch")
 }
 
 // -------------------------
@@ -10089,7 +10048,7 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 				hi = len(ids)
 			}
 			for id, pm := range s.getProfileProgressBatch(epViewer.ProfileID, ids[off:hi]) {
-				progressMap[id] = pm
+				progressMap[id] = pm.JSON()
 			}
 		}
 	}

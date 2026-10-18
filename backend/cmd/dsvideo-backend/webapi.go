@@ -1587,9 +1587,9 @@ func (s *Server) webAPIMovieList(w http.ResponseWriter, r *http.Request, session
 		if !ok {
 			continue
 		}
-		pos, _ := p["positionSeconds"].(int)
-		dur, _ := p["durationSeconds"].(int)
-		m["watch_status"] = map[string]any{"time": pos, "total_time": dur}
+		// watch_status is the Video Station wire shape, a different contract from the progress
+		// object; it only reads the record's counts.
+		m["watch_status"] = map[string]any{"time": p.PositionSeconds, "total_time": p.DurationSeconds}
 	}
 
 	// Store ID mapping for this session (mapper_id -> internal_id)
@@ -2135,15 +2135,13 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 		if !ok {
 			continue
 		}
-		p := progressByID[id]
-		if p == nil {
+		p, hasProgress := progressByID[id]
+		if !hasProgress {
 			continue
 		}
-		pos, _ := p["positionSeconds"].(int)
-		dur, _ := p["durationSeconds"].(int)
 		ep["watch_status"] = map[string]any{
-			"time":       pos,
-			"total_time": dur,
+			"time":       p.PositionSeconds,
+			"total_time": p.DurationSeconds,
 		}
 	}
 
