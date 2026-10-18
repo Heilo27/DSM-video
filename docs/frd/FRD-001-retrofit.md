@@ -147,7 +147,7 @@ complete, and a watched badge when complete. *Derivation:* design-spec B3 §3–
 **Card indicator [DESIGN, 2026-10-17, TASK-978]** — One function decides what a poster card draws
 (`PlaybackProgress.cardIndicator`), and the iOS grid and rails and both tvOS cards use it. At position zero
 the card draws nothing: no bar, no empty track, no percentage in its VoiceOver label. Complete (see FR-016)
-draws the watched badge and no bar. Anything between draws a bar whose width is exactly the fraction watched;
+draws the watched badge and no bar, on every card shape (the tvOS landscape card drew no badge until TASK-1018). Anything between draws a bar whose width is exactly the fraction watched;
 there is no minimum width and no upper cutoff (iOS used to hide the bar below 2% and above 98%).
 **FR-021 [INFERRED]** — A TV show contributes at most one Continue Watching entry, identifying the
 specific partially-watched episode.
