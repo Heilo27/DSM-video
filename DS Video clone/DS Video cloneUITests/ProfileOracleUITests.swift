@@ -222,6 +222,38 @@ final class ProfileOracleUITests: XCTestCase {
                    "Exactly one verify call should have reached the NAS.")
   }
 
+  // MARK: - Siri / deep link opens the detail page and never plays (FR-264, FRD-001 FR-147)
+
+  /// OC-2184 / FR-264. Given a signed-in profile and a title "Stub Movie", when the app is opened
+  /// on `dsvideo://item/m1` (the route Siri's PlayItemIntent and Top Shelf both use), then the
+  /// detail page for that title shows with its Play button, the app fetched that item, and NO
+  /// playback was requested; playing is left to the viewer's own tap on Play.
+  /// Red if: the deep-link sheet starts presenting the detail with autoPlay (or anything else
+  /// starts playback on open).
+  func testSiriOpenShowsTheDetailPageAndNeverStartsPlayback() throws {
+    server = try StubServer.withProfiles([StubProfile(id: "p-only", name: "Dana", isOwner: true)])
+    server.setRoute("/api/v1/items/m1", .init(
+      #"{"id":"m1","type":"movie","title":"Stub Movie","year":2020,"durationSeconds":7200,"#
+        + #""summary":"A stub.","ageLevel":1,"changeSeq":1}"#))
+    let app = UITest.launchAgainst(server)
+    XCTAssertEqual(profileHeaderOnLibraryRequest(timeout: UITest.launchTimeout), "p-only",
+                   "The app never entered the only profile, so the home screen never loaded.")
+
+    app.open(URL(string: "dsvideo://item/m1")!)
+
+    let play = element(app, UIID.Detail.playButton)
+    requireExists(play, "the detail page's Play button after the deep link", timeout: UITest.launchTimeout)
+    XCTAssertEqual(play.label, "Play Stub Movie",
+                   "The detail page did not load the opened title (m1).")
+    XCTAssertFalse(server.requests(path: "/api/v1/items/m1").isEmpty,
+                   "The app never fetched the opened item's detail.")
+    // Negative observation: give a (wrongly) auto-started player time to ask for its stream.
+    RunLoop.current.run(until: Date().addingTimeInterval(4))
+    XCTAssertEqual(server.requests(path: "/api/v1/items/m1/playback").count, 0,
+                   "Opening a title from Siri / a deep link requested playback; it must only open the detail page.")
+    XCTAssertTrue(play.exists, "The detail page's Play button is gone: something replaced the page (a player?).")
+  }
+
   // NOT AUTOMATED: ProfileText.saveNeedsNAS via the owner's first-PIN pad (OC-2111).
   // NewPinView sets `first = nil` inside its submit closure before returning `.reject`, which
   // flips `.id(first == nil ? "first" : "confirm")` and rebuilds PinPadView, discarding the

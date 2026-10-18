@@ -579,6 +579,7 @@ struct ItemDetailView: View {
             }
             .dsPrimaryButton(fillsWidth: true)
             .disabled(playUnavailableOffline)
+            .accessibilityIdentifier(A11y.Detail.playButton)
             .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
             .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
 
