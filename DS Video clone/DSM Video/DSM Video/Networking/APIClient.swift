@@ -930,7 +930,7 @@ enum APIError: Error {
       case "invalid_pin_format":
         return "A PIN must be exactly 4 digits."
       case "invalid_profile_name":
-        return "A profile name needs 1 to 20 characters."
+        return "A profile name needs 1 to \(ProfileNameRules.maxLength) characters."
       case "duplicate_profile_name":
         return "Another profile already has that name."
       case "invalid_age_level":

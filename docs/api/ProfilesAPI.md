@@ -107,7 +107,7 @@ Request:
 Response `201`: the new profile object.
 
 Errors: `owner_pin_required`, `pin_incorrect`, `pin_locked`, `owner_pin_not_set`, `profile_limit_reached`,
-`invalid_profile_name`, `duplicate_profile_name`, `invalid_avatar`, `invalid_age_level`, `invalid_pin_format`.
+`invalid_profile_name` (the trimmed name is empty or over 20 Unicode code points, not graphemes: a family emoji is 7), `duplicate_profile_name`, `invalid_avatar`, `invalid_age_level`, `invalid_pin_format`.
 
 ### PATCH `/profiles/{id}`
 Edit any profile, the owner's included. **Requires the owner PIN.** Only the fields present change.

@@ -784,8 +784,8 @@ struct ProfileEditorView: View {
     return nil
   }
   private var isOwner: Bool { existing?.isOwner ?? false }
-  private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-  private var nameValid: Bool { (1...20).contains(trimmedName.count) }
+  private var trimmedName: String { ProfileNameRules.trimmed(name) }
+  private var nameValid: Bool { ProfileNameRules.isValid(name) }
 
   /// Whether the profile will have a PIN after saving.
   private var willHavePin: Bool {
@@ -820,6 +820,7 @@ struct ProfileEditorView: View {
                 #endif
                 .frame(maxWidth: 700)
                 .accessibilityIdentifier("profileEditor.name")
+              nameFeedback
             }
           }
 
@@ -912,6 +913,27 @@ struct ProfileEditorView: View {
     #if os(tvOS)
     .onExitCommand { close() }
     #endif
+  }
+
+  /// The count against the limit, and the reason Save is off while the name is empty or too long
+  /// (TASK-952). Without it the button just greyed out.
+  private var nameFeedback: some View {
+    let reason = ProfileNameRules.reason(for: name)
+    let over = !nameValid && !trimmedName.isEmpty
+    return HStack(alignment: .firstTextBaseline, spacing: 16) {
+      if let reason {
+        Text(reason)
+          .foregroundStyle(over ? Color.dsError : Color.dsTextSecondary)
+          .accessibilityIdentifier("profileEditor.nameReason")
+      }
+      Spacer(minLength: 0)
+      Text(ProfileNameRules.counter(for: name))
+        .monospacedDigit()
+        .foregroundStyle(over ? Color.dsError : Color.dsTextTertiary)
+        .accessibilityIdentifier("profileEditor.nameCounter")
+    }
+    .font(ProfileMetrics.body)
+    .frame(maxWidth: 700)
   }
 
   private func sectionLabel(_ text: String) -> some View {
