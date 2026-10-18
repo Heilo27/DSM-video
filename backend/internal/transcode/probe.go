@@ -335,11 +335,14 @@ func normalizeContainer(format string) string {
 // ISO-BMFF family) and normalizeContainer keeps the first word, "mov". That is a
 // DirectPlay container, so a .3gp carrying H.264+AAC would be streamed as-is under a
 // .3gp name. The player is not promised to open that, so 3GPP files are named for what
-// they are and take the repackaging path (TASK-990).
+// they are and take the repackaging path (TASK-990). Adobe's .f4v is the same family
+// (ISO-BMFF under a different name) and gets the same treatment (TASK-1002).
 func containerForFile(formatName, path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".3gp", ".3g2":
 		return "3gp"
+	case ".f4v":
+		return "f4v"
 	}
 	return normalizeContainer(formatName)
 }

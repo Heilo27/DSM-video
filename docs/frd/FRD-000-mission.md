@@ -27,13 +27,14 @@ Discover movies and shows already on the NAS, on the user's own terms. The user 
 their files for this app; the app reads what is there.
 - A title the user can see in Synology's own file browser must be findable in this app.
   The scanner indexes .mp4 .m4v .mov .mkv .avi .ts .webm and the older camera, disc and web
-  formats .wmv .mpg .mpeg .m2ts .mts .flv .vob .3gp. Those older containers are never direct
-  played: they always go through the transcoder. So is a .ts: whether a file plays direct or
+  formats .wmv .mpg .mpeg .m2ts .mts .flv .vob .3gp, plus .rm .rmvb .divx .asf .ogv .ogm .f4v
+  (the bundled ffmpeg has the demuxers and decoders for them). Those older containers are
+  never direct played: they always go through the transcoder. So is a .ts: whether a file plays direct or
   is repackaged is decided by ONE rule (its container and probed codecs), the same whether or
   not ffprobe could read it; a quick extension guess never overrules that rule. [TASK-997]
   A video format the server recognises but does
-  not index (.rm .rmvb .divx .asf .ogv .ogm .f4v .iso) is logged by path, once, so the gap is
-  visible. Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
+  not index (.iso, a disc image rather than a stream) is logged by path, once, so the gap is
+  visible. [TASK-1002] Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
   A DVD rip is not indexed: a folder named VIDEO_TS or AUDIO_TS (any case) is skipped whole and
   logged by path, once. Its .VOB files are fragments of one title (VTS_01_1.VOB, VTS_01_2.VOB ...)
   that only play as a sequence; indexing each made unplayable rows, and joining them means a

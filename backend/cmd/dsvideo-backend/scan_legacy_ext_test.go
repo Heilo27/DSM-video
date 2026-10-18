@@ -13,7 +13,8 @@ import (
 func TestScanIndexesLegacyVideoContainers(t *testing.T) {
 	s := scanTestServer(t)
 	root := t.TempDir()
-	wanted := []string{".wmv", ".mpg", ".mpeg", ".m2ts", ".mts", ".flv", ".vob", ".3gp"}
+	wanted := []string{".wmv", ".mpg", ".mpeg", ".m2ts", ".mts", ".flv", ".vob", ".3gp",
+		".rm", ".rmvb", ".divx", ".asf", ".ogv", ".ogm", ".f4v"} // last seven: TASK-1002
 	var videos, ignored []string
 	for _, ext := range wanted {
 		videos = append(videos, filepath.Join(root, "Movies", "clip"+ext))
@@ -43,7 +44,7 @@ func TestScanIndexesLegacyVideoContainers(t *testing.T) {
 func TestScanLogsUnsupportedVideoExtensionOnce(t *testing.T) {
 	s := scanTestServer(t)
 	root := t.TempDir()
-	skipped := filepath.Join(root, "Movies", "old.rmvb")
+	skipped := filepath.Join(root, "Movies", "disc.iso")
 	writeVideo(t, skipped)
 	logs := captureLog(t)
 

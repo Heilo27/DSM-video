@@ -7814,8 +7814,12 @@ var scanVideoExt = map[string]bool{
 	".webm": true,
 	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
 	".vob": true, ".3gp": true,
-	".rm": false, ".rmvb": false, ".divx": false, ".asf": false, ".ogv": false,
-	".ogm": false, ".f4v": false, ".iso": false,
+	// TASK-1002: the bundled ffmpeg (6.1.1) has the demuxers and decoders for these, so
+	// they are indexed and always transcoded. .iso is a disc image, not a stream: it stays
+	// recognised-but-skipped and logged.
+	".rm": true, ".rmvb": true, ".divx": true, ".asf": true, ".ogv": true,
+	".ogm": true, ".f4v": true,
+	".iso": false,
 }
 
 // isDVDDiscFolder reports whether a directory name is a DVD disc's VIDEO_TS or AUDIO_TS
