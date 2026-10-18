@@ -1,0 +1,294 @@
+{
+  "about": "Profile-name vector (FRD-002 FR-203, TASK-1023). raw is what the user typed; trimmed is what Go strings.TrimSpace returns and what ProfileNameRules.trimmed must return; valid is 1 <= code points of trimmed <= 20. Asserted by backend/cmd/dsvideo-backend/profiles_name_vector_test.go and DS Video cloneTests/ProfileNameVectorTests.swift. Add a case here, never on one side only.",
+  "maxLength": 20,
+  "cases": [
+    {
+      "label": "trims U+0009",
+      "raw": "\ta\t",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+000A",
+      "raw": "\na\n",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+000B",
+      "raw": "\u000ba\u000b",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+000C",
+      "raw": "\fa\f",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+000D",
+      "raw": "\ra\r",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+0020",
+      "raw": " a ",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+0085",
+      "raw": "\u0085a\u0085",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+00A0",
+      "raw": "\u00a0a\u00a0",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+1680",
+      "raw": "\u1680a\u1680",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2000",
+      "raw": "\u2000a\u2000",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2001",
+      "raw": "\u2001a\u2001",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2002",
+      "raw": "\u2002a\u2002",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2003",
+      "raw": "\u2003a\u2003",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2004",
+      "raw": "\u2004a\u2004",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2005",
+      "raw": "\u2005a\u2005",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2006",
+      "raw": "\u2006a\u2006",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2007",
+      "raw": "\u2007a\u2007",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2008",
+      "raw": "\u2008a\u2008",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2009",
+      "raw": "\u2009a\u2009",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+200A",
+      "raw": "\u200aa\u200a",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2028",
+      "raw": "\u2028a\u2028",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+2029",
+      "raw": "\u2029a\u2029",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+202F",
+      "raw": "\u202fa\u202f",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+205F",
+      "raw": "\u205fa\u205f",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "trims U+3000",
+      "raw": "\u3000a\u3000",
+      "trimmed": "a",
+      "valid": true
+    },
+    {
+      "label": "keeps U+001C",
+      "raw": "\u001ca\u001c",
+      "trimmed": "\u001ca\u001c",
+      "valid": true
+    },
+    {
+      "label": "keeps U+001F",
+      "raw": "\u001fa\u001f",
+      "trimmed": "\u001fa\u001f",
+      "valid": true
+    },
+    {
+      "label": "keeps U+180E",
+      "raw": "\u180ea\u180e",
+      "trimmed": "\u180ea\u180e",
+      "valid": true
+    },
+    {
+      "label": "keeps U+200B",
+      "raw": "\u200ba\u200b",
+      "trimmed": "\u200ba\u200b",
+      "valid": true
+    },
+    {
+      "label": "keeps U+200C",
+      "raw": "\u200ca\u200c",
+      "trimmed": "\u200ca\u200c",
+      "valid": true
+    },
+    {
+      "label": "keeps U+200D",
+      "raw": "\u200da\u200d",
+      "trimmed": "\u200da\u200d",
+      "valid": true
+    },
+    {
+      "label": "keeps U+2060",
+      "raw": "\u2060a\u2060",
+      "trimmed": "\u2060a\u2060",
+      "valid": true
+    },
+    {
+      "label": "keeps U+FEFF",
+      "raw": "\ufeffa\ufeff",
+      "trimmed": "\ufeffa\ufeff",
+      "valid": true
+    },
+    {
+      "label": "20 ASCII",
+      "raw": "aaaaaaaaaaaaaaaaaaaa",
+      "trimmed": "aaaaaaaaaaaaaaaaaaaa",
+      "valid": true
+    },
+    {
+      "label": "21 ASCII",
+      "raw": "aaaaaaaaaaaaaaaaaaaaa",
+      "trimmed": "aaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "label": "empty",
+      "raw": "",
+      "trimmed": "",
+      "valid": false
+    },
+    {
+      "label": "blank",
+      "raw": "  \t\n ",
+      "trimmed": "",
+      "valid": false
+    },
+    {
+      "label": "only unicode spaces",
+      "raw": "\u00a0\u3000\u2003\u0085",
+      "trimmed": "",
+      "valid": false
+    },
+    {
+      "label": "padding is trimmed, not counted",
+      "raw": "  aaaaaaaaaaaaaaaaaaaa  ",
+      "trimmed": "aaaaaaaaaaaaaaaaaaaa",
+      "valid": true
+    },
+    {
+      "label": "a zero-width space is a character: 20 + 2 is too long",
+      "raw": "\u200baaaaaaaaaaaaaaaaaaaa\u200b",
+      "trimmed": "\u200baaaaaaaaaaaaaaaaaaaa\u200b",
+      "valid": false
+    },
+    {
+      "label": "a zero-width space is a character: 18 + 2 fits",
+      "raw": "\u200baaaaaaaaaaaaaaaaaa\u200b",
+      "trimmed": "\u200baaaaaaaaaaaaaaaaaa\u200b",
+      "valid": true
+    },
+    {
+      "label": "interior whitespace is kept",
+      "raw": " a\u00a0b\u3000c ",
+      "trimmed": "a\u00a0b\u3000c",
+      "valid": true
+    },
+    {
+      "label": "mixed leading and trailing",
+      "raw": "\u00a0 \u3000 Ann \u2003\n",
+      "trimmed": "Ann",
+      "valid": true
+    },
+    {
+      "label": "family emoji costs seven: 21 points",
+      "raw": "Grandma \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 Smith",
+      "trimmed": "Grandma \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 Smith",
+      "valid": false
+    },
+    {
+      "label": "family emoji costs seven: 20 points",
+      "raw": "Grandma \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 Smit",
+      "trimmed": "Grandma \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 Smit",
+      "valid": true
+    },
+    {
+      "label": "decomposed e-acute is two points: 20",
+      "raw": "e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301",
+      "trimmed": "e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301",
+      "valid": true
+    },
+    {
+      "label": "decomposed e-acute is two points: 22",
+      "raw": "e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301",
+      "trimmed": "e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301e\u0301",
+      "valid": false
+    },
+    {
+      "label": "precomposed e-acute is one point",
+      "raw": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+      "trimmed": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+      "valid": true
+    }
+  ]
+}
