@@ -7888,10 +7888,19 @@ var scanVideoExt = map[string]bool{
 	".iso": false,
 }
 
-// isDVDDiscFolder reports whether a directory name is a DVD disc's VIDEO_TS or AUDIO_TS
-// folder (any case: rips from Windows and macOS tools differ).
-func isDVDDiscFolder(name string) bool {
-	return strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS")
+// isDiscRipFolder reports whether dir is the structure folder of a disc rip, whose video
+// files are fragments of the disc's titles rather than standalone videos: a DVD's
+// VIDEO_TS or AUDIO_TS (VTS_01_1.VOB ...), or a Blu-ray's BDMV (BDMV/STREAM/00001.m2ts
+// ...). Any case: rips from Windows and macOS tools differ. A BDMV directly inside an
+// AVCHD folder is NOT a disc rip: that is a camcorder card (PRIVATE/AVCHD/BDMV/STREAM),
+// and each of its .MTS clips is a complete recording that plays on its own (TASK-990).
+// This is the ONE disc-folder rule; the scanner's walker is its only caller.
+func isDiscRipFolder(dir string) bool {
+	name := filepath.Base(dir)
+	if strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS") {
+		return true
+	}
+	return strings.EqualFold(name, "BDMV") && !strings.EqualFold(filepath.Base(filepath.Dir(dir)), "AVCHD")
 }
 
 // scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
@@ -8130,13 +8139,14 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			if d.Name() == "_dsvideo_originals" {
 				return filepath.SkipDir
 			}
-			// TASK-998 (FRD-000 M1): a DVD rip's VIDEO_TS/AUDIO_TS holds title FRAGMENTS
-			// (VTS_01_1.VOB ...) that only play as a sequence. Indexing each as a movie
-			// filled the library with unplayable rows, and joining them needs a concat pass
-			// too costly for NAS hardware. Skip the folder whole and say so, once.
-			if isDVDDiscFolder(d.Name()) {
+			// TASK-998, TASK-1026 (FRD-000 M1): a disc rip's VIDEO_TS/AUDIO_TS (DVD) or BDMV
+			// (Blu-ray) holds title FRAGMENTS (VTS_01_1.VOB ..., STREAM/00001.m2ts ...) that
+			// only play as a sequence or through the disc's playlists. Indexing each as a
+			// movie filled the library with unplayable rows, and joining them needs a concat
+			// pass too costly for NAS hardware. Skip the folder whole and say so, once.
+			if isDiscRipFolder(path) {
 				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
-					log.Printf("scan: library %s: skipping DVD folder %q — its .VOB files are title fragments that do not play on their own; this server does not index disc rips", libraryID, path)
+					log.Printf("scan: library %s: skipping disc-rip folder %q — its video files are fragments of the disc's titles that do not play on their own; this server does not index disc rips", libraryID, path)
 				}
 				return filepath.SkipDir
 			}
