@@ -85,6 +85,9 @@ struct RootView: View {
                 frozenLayout = nil
             }
         }
+        #if DEBUG
+        .dsShotScreen()  // -DSShotScreen <name>: design-evidence screenshots (DSShotScreen.swift)
+        #endif
         .preferredColorScheme(.dark)
     }
 }
