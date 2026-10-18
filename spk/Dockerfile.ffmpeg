@@ -99,7 +99,7 @@ RUN mkdir -p /artifacts && \
     ( ldd /artifacts/ffmpeg 2>&1 | grep -q "not a dynamic executable" || \
       (echo "ERROR: ffmpeg is NOT statically linked" && ldd /artifacts/ffmpeg && exit 1) ) && \
     echo "=== decoder check ===" && \
-    for dec in aac ac3 eac3 dca truehd h264 hevc mp3; do \
+    for dec in aac ac3 eac3 dca truehd h264 hevc mp3 mpeg2video wmv3 vc1 rv40 cook theora vorbis; do \
       /artifacts/ffmpeg -hide_banner -decoders 2>/dev/null | grep -qwE "$dec" || \
         (echo "ERROR: decoder '$dec' missing from built ffmpeg" && exit 1); \
     done && \

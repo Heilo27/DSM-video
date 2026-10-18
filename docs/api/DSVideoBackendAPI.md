@@ -191,11 +191,27 @@ Response:
     { "id": "sub_1", "label": "English", "format": "vtt", "url": "https://<host>/api/v1/playback/sess_123/sub_1.vtt" }
   ],
   "audioTracks": [
-    { "id": "a1", "label": "Stereo", "language": "en" }
+    { "id": "a1", "label": "Main", "language": "eng", "title": "Main", "codec": "ac3", "channels": 6, "default": true },
+    { "id": "a2", "label": "fre", "language": "fre", "title": "", "codec": "aac", "channels": 2, "default": false }
   ],
   "resumePositionSeconds": 20
 }
 ```
+
+`audioTracks` lists every audio stream of the source, in source order, for every `kind` (direct,
+remux and HLS alike); a title with no audio answers `[]`, never `null`. It comes from the same
+probe the HLS audio renditions are built from, so it matches the master playlist track for track
+(TASK-1004). Per entry: `id` is `a` plus the 1-based position; `label` is the track title, else
+its language, else `Track N` (made unique), the same `NAME` the master playlist carries;
+`language` is the source tag lowercased (`""` when untagged or `und`); `title` is the source
+title tag (`""` when absent); `codec` and `channels` are the source stream's; exactly one entry
+has `default: true` (the source's default, else the first). A client may ignore the field: the
+apps read the tracks from the HLS manifest.
+
+With `?client=web`, a title that would otherwise be served by the realtime remux (`kind: "direct"`,
+`transcoding: true`, one fragmented MP4 with ONE audio stream) and carries two or more audio tracks
+is answered `kind: "hls"` instead, so the web player gets every track as an audio rendition
+(TASK-1003). A single-audio title keeps the remux.
 
 ### GET `/playback/{sessionId}/stream`
 Direct progressive streaming endpoint (supports `Range`).

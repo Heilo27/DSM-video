@@ -3966,6 +3966,41 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// livePlaybackProbe is the ONE full probe this request may run for what the response
+	// reports about the source's streams (its audio tracks, its chapters, and whether a
+	// web remux would drop audio). probeResult is nil on the cached-codec path, so this
+	// probes live then, at most once; a probe that already ran with audio streams is
+	// reused. nil when there is no prober or the probe failed.
+	var liveProbe *transcode.ProbeResult
+	liveProbeTried := false
+	livePlaybackProbe := func() *transcode.ProbeResult {
+		if probeResult != nil && len(probeResult.AudioStreams) > 0 {
+			return probeResult
+		}
+		if !liveProbeTried && s.prober != nil {
+			liveProbeTried = true
+			pctx, pcancel := context.WithTimeout(r.Context(), 8*time.Second)
+			defer pcancel()
+			if pr, perr := s.prober.Probe(pctx, path); perr == nil {
+				liveProbe = pr
+			}
+		}
+		return liveProbe
+	}
+
+	// TASK-1003: the realtime remux (handleRemuxStream) writes ONE fragmented MP4 with
+	// one audio stream, so a web title with a second language or a commentary track
+	// would lose it. Such a title goes to the HLS audio renditions (FR-061) instead,
+	// where every track is its own selectable rendition. A probe that cannot be read
+	// leaves the remux in place: playable, as before.
+	webRemuxWouldDropAudio := false
+	if isWebClient && playbackMode == transcode.RemuxOnly {
+		if pr := livePlaybackProbe(); pr != nil && len(pr.AudioStreams) >= 2 {
+			webRemuxWouldDropAudio = true
+			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of the single-audio remux", itemID, len(pr.AudioStreams))
+		}
+	}
+
 	sessionID := randID("sess_")
 
 	// Identifies this viewer + this title, so StartSession can supersede the SAME viewer's
@@ -4019,6 +4054,10 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	}
 	classifySubtitleTracks(subtitleTracks, runtimeSecs, audioLang)
 
+	// The audio tracks the response lists (TASK-1004): the HLS session's own list when it
+	// transcodes (the very tracks its renditions carry), else the probe's.
+	var audioStreams []transcode.AudioStream
+
 	ps := PlaySession{
 		ItemID:       itemID,
 		Path:         path,
@@ -4032,7 +4071,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Determine playback kind based on mode
 	if playbackMode == transcode.DirectPlay {
 		ps.Kind = "direct"
-	} else if isWebClient && playbackMode == transcode.RemuxOnly {
+	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webRemuxWouldDropAudio {
 		// For web clients needing remux (MKV+H264 or MP4+H264+AC3),
 		// stream a remuxed fragmented MP4 in real-time through ffmpeg.
 		// This is much faster than full HLS generation (just copies video stream).
@@ -4051,6 +4090,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			ps.HLSDir = hlsSession.OutputDir
+			audioStreams = hlsSession.AudioTracks
 		} else {
 			// No HLS generator - fall back to direct serving for web clients
 			// (browser may or may not handle the format, but it's better than nothing)
@@ -4105,17 +4145,18 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// For direct play, try a quick probe for chapters if we don't already have them
-	if chapterList == nil && (ps.Kind == "direct" || ps.Kind == "remux") && s.prober != nil {
-		ctx2, cancel2 := context.WithTimeout(r.Context(), 8*time.Second)
-		defer cancel2()
-		if pr, err := s.prober.Probe(ctx2, path); err == nil && len(pr.Chapters) > 0 {
-			for _, c := range pr.Chapters {
-				chapterList = append(chapterList, map[string]any{
-					"id":        c.ID,
-					"title":     c.Title,
-					"startSecs": c.StartSecs,
-					"endSecs":   c.EndSecs,
-				})
+	if ps.Kind == "direct" || ps.Kind == "remux" {
+		if pr := livePlaybackProbe(); pr != nil {
+			audioStreams = pr.AudioStreams
+			if chapterList == nil {
+				for _, c := range pr.Chapters {
+					chapterList = append(chapterList, map[string]any{
+						"id":        c.ID,
+						"title":     c.Title,
+						"startSecs": c.StartSecs,
+						"endSecs":   c.EndSecs,
+					})
+				}
 			}
 		}
 	}
@@ -4161,7 +4202,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			"sessionId":             sessionID,
 			"streamUrl":             baseURL + "/api/v1/playback/" + sessionID + "/stream",
 			"subtitles":             subtitleInfo,
-			"audioTracks":           []any{},
+			"audioTracks":           playbackAudioTracks(audioStreams),
 			"resumePositionSeconds": resumePos,
 			"durationSeconds":       nullIntToAny(itemDuration),
 			"transcoding":           ps.Kind == "remux",
@@ -4181,7 +4222,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"startSeconds":          startSeconds,
 		"hlsMasterUrl":          baseURL + "/api/v1/playback/" + sessionID + "/master.m3u8",
 		"subtitles":             subtitleInfo,
-		"audioTracks":           []any{},
+		"audioTracks":           playbackAudioTracks(audioStreams),
 		"resumePositionSeconds": resumePos,
 		"durationSeconds":       nullIntToAny(itemDuration),
 		"transcoding":           true,
@@ -4189,6 +4230,28 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"chapters":              chapterList,
 		"quality":               qualityOut,
 	})
+}
+
+// playbackAudioTracks renders the audioTracks array of the playback JSON (TASK-1004):
+// one entry per audio stream, in source order. label and default come from the same two
+// functions that build the HLS master playlist, so a client sees the names and the
+// preselected track the renditions carry. Never nil: a title without audio answers [].
+func playbackAudioTracks(tracks []transcode.AudioStream) []map[string]any {
+	out := make([]map[string]any, 0, len(tracks))
+	labels := transcode.AudioTrackLabels(tracks)
+	def := transcode.DefaultAudioTrack(tracks)
+	for i, t := range tracks {
+		out = append(out, map[string]any{
+			"id":       "a" + strconv.Itoa(i+1),
+			"label":    labels[i],
+			"language": t.Language,
+			"title":    t.Title,
+			"codec":    t.Codec,
+			"channels": t.Channels,
+			"default":  i == def,
+		})
+	}
+	return out
 }
 
 // findSubtitleFiles looks for subtitle files alongside videoPath and returns
@@ -4861,6 +4924,9 @@ func (t *tailBuffer) String() string { return strings.TrimSpace(t.buf.String()) 
 // This is used for web clients when the video codec is compatible (H.264)
 // but the container (MKV) or audio codec (AC3/DTS) isn't browser-compatible.
 // Much faster than full HLS transcode since video is stream-copied.
+// It carries ONE audio stream (no -map: ffmpeg picks the default one), so handlePlayback
+// only routes a title here when it has fewer than two audio tracks; a multi-audio title
+// goes to the HLS audio renditions instead (TASK-1003, FR-061).
 func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps PlaySession) {
 	ffmpegPath := s.cfg.FFmpegPath
 	if ffmpegPath == "" {
@@ -7814,8 +7880,18 @@ var scanVideoExt = map[string]bool{
 	".webm": true,
 	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
 	".vob": true, ".3gp": true,
-	".rm": false, ".rmvb": false, ".divx": false, ".asf": false, ".ogv": false,
-	".ogm": false, ".f4v": false, ".iso": false,
+	// TASK-1002: the bundled ffmpeg (6.1.1) has the demuxers and decoders for these, so
+	// they are indexed and always transcoded. .iso is a disc image, not a stream: it stays
+	// recognised-but-skipped and logged.
+	".rm": true, ".rmvb": true, ".divx": true, ".asf": true, ".ogv": true,
+	".ogm": true, ".f4v": true,
+	".iso": false,
+}
+
+// isDVDDiscFolder reports whether a directory name is a DVD disc's VIDEO_TS or AUDIO_TS
+// folder (any case: rips from Windows and macOS tools differ).
+func isDVDDiscFolder(name string) bool {
+	return strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS")
 }
 
 // scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
@@ -8052,6 +8128,16 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				return filepath.SkipDir
 			}
 			if d.Name() == "_dsvideo_originals" {
+				return filepath.SkipDir
+			}
+			// TASK-998 (FRD-000 M1): a DVD rip's VIDEO_TS/AUDIO_TS holds title FRAGMENTS
+			// (VTS_01_1.VOB ...) that only play as a sequence. Indexing each as a movie
+			// filled the library with unplayable rows, and joining them needs a concat pass
+			// too costly for NAS hardware. Skip the folder whole and say so, once.
+			if isDVDDiscFolder(d.Name()) {
+				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
+					log.Printf("scan: library %s: skipping DVD folder %q — its .VOB files are title fragments that do not play on their own; this server does not index disc rips", libraryID, path)
+				}
 				return filepath.SkipDir
 			}
 			return nil
