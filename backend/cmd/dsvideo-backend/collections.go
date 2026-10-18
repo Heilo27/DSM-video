@@ -206,7 +206,7 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 	rows, err := s.db.Query(`
 		SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number,
-		       i.library_id, i.path, i.content_rating
+		       i.library_id, i.path, i.show_folder_id, i.content_rating
 		FROM items i
 		WHERE `+where+visFrag+`
 		ORDER BY i.season_number ASC, i.path ASC`, args...)
@@ -215,12 +215,12 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 	}
 	defer rows.Close()
 
+	// Collection members carry no progress (the progress columns of the summary row are never
+	// scanned): a show is represented by one of its episodes, whose progress would misdescribe
+	// the show.
 	type row struct {
-		id, typ, title, addedAt, libID, folder string
-		year, duration, season, episode        sql.NullInt64
-		rating                                 sql.NullFloat64
-		posterPath, backdropPath, showName     sql.NullString
-		contentRating                          *string
+		itemSummaryRow
+		libID, folder string
 	}
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
 	var all []row
@@ -228,14 +228,14 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 	for rows.Next() {
 		var r row
 		var path string
-		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.year, &r.duration, &r.addedAt, &r.rating,
-			&r.posterPath, &r.backdropPath, &r.showName, &r.season, &r.episode,
-			&r.libID, &path, &r.contentRating); err != nil {
+		if err := rows.Scan(&r.ID, &r.Type, &r.Title, &r.Year, &r.Duration, &r.AddedAt, &r.Rating,
+			&r.PosterPath, &r.BackdropPath, &r.ShowName, &r.SeasonNumber, &r.EpisodeNumber,
+			&r.libID, &path, &r.ShowFolderID, &r.ContentRating); err != nil {
 			return nil, fmt.Errorf("collection %s scan: %w", d.ID, err)
 		}
 		var ref episodeRef
-		if r.typ == "episode" {
-			ref = episodeRef{Path: path, ShowName: r.showName}
+		if r.Type == "episode" {
+			ref = episodeRef{Path: path, ShowName: r.ShowName}
 		}
 		all = append(all, r)
 		refs = append(refs, ref)
@@ -251,26 +251,26 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 	var members []collectionMember
 	showIdx := map[string]int{} // show group key → index in members
 	for i, r := range all {
-		hasPoster := r.posterPath.Valid && r.posterPath.String != ""
+		hasPoster := r.PosterPath.Valid && r.PosterPath.String != ""
 		r.folder = groups[i].Folder
-		if r.typ == "episode" && r.folder != "" {
+		if r.Type == "episode" && r.folder != "" {
 			showName := groups[i].ShowName
 			key := groups[i].Key
 			if i, seen := showIdx[key]; seen {
 				m := &members[i]
-				if r.addedAt > m.addedAt {
-					m.addedAt = r.addedAt
-					m.item["addedAt"] = r.addedAt
+				if r.AddedAt > m.addedAt {
+					m.addedAt = r.AddedAt
+					m.item["addedAt"] = r.AddedAt
 				}
-				if r.year.Valid && (!m.year.Valid || r.year.Int64 < m.year.Int64) {
-					m.year = r.year
-					m.item["year"] = r.year.Int64
+				if r.Year.Valid && (!m.year.Valid || r.Year.Int64 < m.year.Int64) {
+					m.year = r.Year
+					m.item["year"] = r.Year.Int64
 				}
 				// The first episode WITH artwork represents the show, as in /tv/shows.
 				if hasPoster && !m.hasPoster {
-					s.collectionFillRepresentative(m, r.id, r.typ, r.libID, r.duration, r.rating, r.season, r.episode, r.posterPath, r.backdropPath, r.contentRating)
+					collectionFillRepresentative(m, r.itemSummaryRow, r.libID)
 					m.hasPoster = true
-					m.posterID = r.id
+					m.posterID = r.ID
 				}
 				continue
 			}
@@ -278,76 +278,42 @@ func (s *Server) collectionMembers(v viewer, d collectionDef) ([]collectionMembe
 			if showName.Valid && showName.String != "" {
 				display = showName.String
 			}
-			m := collectionMember{title: display, year: r.year, addedAt: r.addedAt, rating: r.rating, hasPoster: hasPoster}
-			m.item = map[string]any{
-				"id": r.id, "type": r.typ, "title": display,
-				"year": nullIntToAny(r.year), "durationSeconds": nullIntToAny(r.duration),
-				"addedAt": r.addedAt, "rating": nullFloatToAny(r.rating), "libraryId": r.libID,
-				"posterImageId": nil, "backdropImageId": nil,
-				"contentRating": r.contentRating, "ageLevel": agerating.LevelPtr(r.contentRating),
-				"showName": display,
-			}
-			s.collectionFillRepresentative(&m, r.id, r.typ, r.libID, r.duration, r.rating, r.season, r.episode, r.posterPath, r.backdropPath, r.contentRating)
+			m := collectionMember{title: display, year: r.Year, addedAt: r.AddedAt, rating: r.Rating, hasPoster: hasPoster}
+			collectionFillRepresentative(&m, r.itemSummaryRow, r.libID)
 			if hasPoster {
-				m.posterID = r.id
+				m.posterID = r.ID
 			}
 			showIdx[key] = len(members)
 			members = append(members, m)
 			continue
 		}
 
-		m := collectionMember{title: r.title, year: r.year, addedAt: r.addedAt, rating: r.rating, hasPoster: hasPoster}
-		m.item = map[string]any{
-			"id": r.id, "type": r.typ, "title": r.title,
-			"year": nullIntToAny(r.year), "durationSeconds": nullIntToAny(r.duration),
-			"addedAt": r.addedAt, "rating": nullFloatToAny(r.rating), "libraryId": r.libID,
-			"posterImageId": nil, "backdropImageId": nil,
-			"contentRating": r.contentRating, "ageLevel": agerating.LevelPtr(r.contentRating),
-		}
+		m := collectionMember{title: r.Title, year: r.Year, addedAt: r.AddedAt, rating: r.Rating, hasPoster: hasPoster}
+		m.item = itemSummary(r.itemSummaryRow)
+		// Extra on top of the standard summary: collections span libraries.
+		m.item["libraryId"] = r.libID
 		if hasPoster {
-			m.item["posterImageId"] = r.id
-			m.posterID = r.id
-		}
-		if r.backdropPath.Valid && r.backdropPath.String != "" {
-			m.item["backdropImageId"] = r.id
-		}
-		if r.showName.Valid && r.showName.String != "" {
-			m.item["showName"] = r.showName.String
+			m.posterID = r.ID
 		}
 		members = append(members, m)
 	}
 	return members, nil
 }
 
-// collectionFillRepresentative points a show's payload at one episode: its id, artwork,
-// rating and episode fields. The show-level title/year/addedAt stay as aggregated.
-func (s *Server) collectionFillRepresentative(m *collectionMember, id, typ, libID string,
-	duration sql.NullInt64, rating sql.NullFloat64, season, episode sql.NullInt64,
-	posterPath, backdropPath sql.NullString, contentRating *string) {
-	m.item["id"] = id
-	m.item["libraryId"] = libID
-	m.item["durationSeconds"] = nullIntToAny(duration)
-	m.item["rating"] = nullFloatToAny(rating)
-	m.rating = rating
-	m.item["contentRating"] = contentRating
-	m.item["ageLevel"] = agerating.LevelPtr(contentRating)
-	// Reset first: re-pointing at a better episode must not leave the previous one's artwork
-	// or episode numbers on the payload.
-	m.item["posterImageId"], m.item["backdropImageId"] = nil, nil
-	delete(m.item, "seasonNumber")
-	delete(m.item, "episodeNumber")
-	if posterPath.Valid && posterPath.String != "" {
-		m.item["posterImageId"] = id
-	}
-	if backdropPath.Valid && backdropPath.String != "" {
-		m.item["backdropImageId"] = id
-	}
-	if season.Valid {
-		m.item["seasonNumber"] = season.Int64
-	}
-	if episode.Valid {
-		m.item["episodeNumber"] = episode.Int64
-	}
+// collectionFillRepresentative points a show's payload at one episode (rep): the standard
+// summary of that episode, so its id, artwork, rating and episode fields follow it. The
+// show-level title, showName, year and addedAt stay as aggregated on m (m.title, m.year and
+// m.addedAt are the aggregate; a show's year is its earliest, its addedAt its newest).
+func collectionFillRepresentative(m *collectionMember, rep itemSummaryRow, libID string) {
+	item := itemSummary(rep)
+	// Extras/overrides on top of the standard summary: libraryId, and the show-level label.
+	item["libraryId"] = libID
+	item["title"] = m.title
+	item["showName"] = m.title
+	item["addedAt"] = m.addedAt
+	item["year"] = nullIntToAny(m.year)
+	m.item = item
+	m.rating = rep.Rating
 }
 
 // handleCollections serves GET /collections: the active profile's non-empty collections, in

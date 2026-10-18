@@ -1,11 +1,8 @@
 package main
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
-
-	agerating "dsvideo/backend/internal/rating"
 )
 
 // broadGenres are too common to make a useful recommendation.
@@ -122,7 +119,7 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		       i.poster_path, i.backdrop_path, i.show_name, i.season_number, i.episode_number,
-		       i.content_rating
+		       i.show_folder_id, i.content_rating
 		FROM items i
 		WHERE `+where+`
 		ORDER BY RANDOM()
@@ -135,47 +132,19 @@ func (s *Server) handleSuggested(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var id, typ, title, addedAt string
-		var year, duration, seasonNumber, episodeNumber sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, showName sql.NullString
-		var contentRating *string
-
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath, &showName, &seasonNumber, &episodeNumber, &contentRating); err != nil {
-			continue
+		// No progress column: the query excludes every title the profile has progress on.
+		var row itemSummaryRow
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath, &row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+			return
 		}
-
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           title,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-			// ProfilesAPI.md "Item fields": unrated is null / level 4 (FR-242).
-			"contentRating": contentRating,
-			"ageLevel":      agerating.LevelPtr(contentRating),
-		}
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-		if showName.Valid && showName.String != "" {
-			item["showName"] = showName.String
-		}
-		if seasonNumber.Valid {
-			item["seasonNumber"] = seasonNumber.Int64
-		}
-		if episodeNumber.Valid {
-			item["episodeNumber"] = episodeNumber.Int64
-		}
-		items = append(items, item)
+		items = append(items, itemSummary(row))
+	}
+	if err := rows.Err(); err != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"genre": genre, "items": items})

@@ -149,6 +149,48 @@ Response:
 }
 ```
 
+#### Item summary (the shape of every title list)
+Every endpoint that lists titles builds each element with one builder (`itemSummary`,
+`backend/cmd/dsvideo-backend/item_summary.go`), so they all answer the `/items` element:
+`id`, `type`, `title`, `year`, `durationSeconds`, `addedAt`, `rating`, `posterImageId`,
+`backdropImageId`, `contentRating`, `ageLevel`, plus, when present, `showName`, `seasonNumber`,
+`episodeNumber`, `showFolderId` and `progress` (the viewing profile's, FRD-002 FR-230). A test
+(`item_summary_parity_test.go`) asserts each endpoint's element has the same key set as the
+`/items` element for the same item, apart from the differences in this table:
+
+| Endpoint | Differences from the `/items` element |
+|---|---|
+| `/items?filter=justWatched` | none (`progress` always present) |
+| `/search` | none |
+| `/playlists/{id}` | none |
+| `/downloads` | none |
+| `/watchlist` | adds `libraryId` |
+| `/tv/shows/{showId}/episodes` | none |
+| `/items/{id}/similar` | none |
+| `/just-added` | adds `libraryId`; no `progress` (the rail is shared by every profile) |
+| `/suggested` | none (it excludes every title the profile has progress on, so none has `progress`) |
+| `/collections/{id}/items` | adds `libraryId`; no `progress` (a show is represented by one of its episodes) |
+
+Keys added by this change (all additive; clients ignore unknown keys):
+- `/search`, `/items?filter=justWatched`, `/watchlist`, `/tv/shows/{showId}/episodes` gain `showName`,
+  `seasonNumber`, `episodeNumber`, `showFolderId` (an episode in search and the watchlist no longer
+  loses its season/episode identity).
+- `/playlists/{id}` and `/downloads` gain the same four keys and also `addedAt`, `rating` and
+  `progress` (the viewing profile's).
+- `/just-added` and `/suggested` gain `showFolderId`.
+- `/collections/{id}/items`: ungrouped members (movies and episodes that file under no show folder)
+  gain `showFolderId`, `seasonNumber` and `episodeNumber`.
+
+Not item lists, so not built by `itemSummary`: `/tv/shows` (a show aggregate) and the sync feed
+(`/sync/*`, a typed, account-scoped record).
+
+Behaviour change: a row that fails to read from the database now fails the request with
+`500 {"error":"db_error"}` on `/playlists/{id}`, `/downloads`, `/tv/shows/{showId}/episodes` and
+`/suggested`. Before, those handlers silently dropped the row and answered `200` with a short list.
+`/just-added` is served from a precomputed rail, so it has no request to fail: a row that fails to
+read now fails that rail's computation (logged), the rail is not cached as complete, and the next
+request recomputes it. Before, the row was dropped and the short rail was cached for up to 12 hours.
+
 ### GET `/items/{id}`
 Item details (enriched metadata).
 
@@ -267,7 +309,8 @@ Query:
 - `libraryId` (optional)
 - `offset` / `limit`
 
-Response is the same shape as `/items`.
+Response is the same shape as `/items` (the item summary above, including `showName`, `seasonNumber`,
+`episodeNumber` and `showFolderId` for episodes).
 
 ## Artwork
 
@@ -426,7 +469,9 @@ Both rails are served for the request's profile: the one named by `X-DSVideo-Pro
 the FR-221 default when the header is absent (the account's most restricted profile, else
 the owner). The response header `X-DSVideo-Profile` names the profile used. Each item
 carries `contentRating` (raw US certification, `null` when unrated) and `ageLevel` (1-4;
-unrated is 4), as in `ProfilesAPI.md` "Item fields".
+unrated is 4), as in `ProfilesAPI.md` "Item fields". Elements are the item summary (see
+`GET /items`); `/just-added` and `/suggested` carry `showFolderId` for episodes, and neither carries
+`progress`. `/suggested` answers a database read failure with `500 {"error":"db_error"}`, not a short rail.
 
 ### GET `/just-added?libraryId=&limit=`
 Newest titles, one entry per show, `limit` 1-24 (default 16). Titles above the profile's

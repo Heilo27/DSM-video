@@ -23,8 +23,13 @@ type itemSummaryRow struct {
 // itemSummary is THE builder of the standard item summary shape (the /items list element):
 // id, type, title, year, durationSeconds, addedAt, rating, posterImageId, backdropImageId,
 // contentRating, ageLevel, plus showName / seasonNumber / episodeNumber / showFolderId /
-// progress when present. GET /items and GET /items/{id}/similar both call it; the other
-// list endpoints still carry their own copies (listed in the TASK-747 report).
+// progress when present. Every title-list endpoint builds its elements through it: /items,
+// /items/{id}/similar, /search, the just-watched rail, playlists, downloads, the watchlist,
+// the TV episode list, /just-added, /suggested and collection members. Endpoint extras
+// (libraryId, a rail's own label) are set on top of the returned map, each with a comment.
+// Documented exceptions, which are not item lists: /tv/shows (a show aggregate) and the sync
+// feed (a typed, account-scoped record).
+// Rule 9: a new list endpoint calls this; never hand-build the shape again.
 func itemSummary(r itemSummaryRow) map[string]any {
 	item := map[string]any{
 		"id":              r.ID,

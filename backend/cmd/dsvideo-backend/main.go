@@ -3088,7 +3088,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		        i.poster_path, i.backdrop_path,
-		        p.position_seconds, p.duration_seconds, p.updated_at, i.content_rating
+		        i.show_name, i.season_number, i.episode_number,
+		        p.position_seconds, p.duration_seconds, p.updated_at,
+		        i.show_folder_id, i.content_rating
 		 FROM items i
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE LOWER(i.title) LIKE LOWER(?) ESCAPE '\'`+visFrag+`
@@ -3104,53 +3106,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, typ, title, addedAt string
-		var year, duration sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, contentRating sql.NullString
-		var progPos, progDur sql.NullInt64
-		var progUpdatedAt sql.NullString
-
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath,
-			&progPos, &progDur, &progUpdatedAt, &contentRating); err != nil {
+		var row itemSummaryRow
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath,
+			&row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ProgPos, &row.ProgDur, &row.ProgUpdatedAt,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
-
-		var p map[string]any
-		if progPos.Valid {
-			p = map[string]any{
-				"positionSeconds": progPos.Int64,
-				"durationSeconds": progDur.Int64,
-				"updatedAt":       progUpdatedAt.String,
-			}
-		}
-
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           title,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-		}
-		putRating(item, contentRating)
-
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-
-		if p != nil {
-			item["progress"] = p
-		}
-		items = append(items, item)
+		items = append(items, itemSummary(row))
 	}
 	if err := rows.Err(); err != nil {
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
@@ -3230,8 +3195,14 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// The INNER JOINed progress row IS the item's progress, so it is selected here rather than
+	// fetched in a second batch query.
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.overview, i.content_rating
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
+		        i.poster_path, i.backdrop_path,
+		        i.show_name, i.season_number, i.episode_number,
+		        p.position_seconds, p.duration_seconds, p.updated_at,
+		        i.show_folder_id, i.content_rating
 		 FROM items i
 		 INNER JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE 1=1 `+where+` ORDER BY p.updated_at DESC LIMIT ? OFFSET ?`,
@@ -3241,60 +3212,24 @@ func (s *Server) handleItemsJustWatched(w http.ResponseWriter, r *http.Request, 
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
+	defer rows.Close()
 
-	// Drain rows to a slice first so the cursor is closed before the batch progress query.
-	type jwRow struct {
-		id, typ, title, addedAt            string
-		year, duration                     sql.NullInt64
-		rating                             sql.NullFloat64
-		posterPath, backdropPath, overview sql.NullString
-		contentRating                      sql.NullString
-	}
-	var rawRows []jwRow
+	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var jr jwRow
-		if err := rows.Scan(&jr.id, &jr.typ, &jr.title, &jr.year, &jr.duration, &jr.addedAt, &jr.rating, &jr.posterPath, &jr.backdropPath, &jr.overview, &jr.contentRating); err != nil {
-			rows.Close()
+		var row itemSummaryRow
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath,
+			&row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ProgPos, &row.ProgDur, &row.ProgUpdatedAt,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
-		rawRows = append(rawRows, jr)
+		items = append(items, itemSummary(row))
 	}
-	rows.Close()
-
-	// Batch-fetch progress for all returned items in a single query.
-	ids := make([]string, len(rawRows))
-	for i, r := range rawRows {
-		ids[i] = r.id
-	}
-	progressMap := s.getProfileProgressBatch(v.ProfileID, ids)
-
-	items := make([]map[string]any, 0, len(rawRows))
-	for _, r := range rawRows {
-		item := map[string]any{
-			"id":              r.id,
-			"type":            r.typ,
-			"title":           r.title,
-			"year":            nullIntToAny(r.year),
-			"durationSeconds": nullIntToAny(r.duration),
-			"addedAt":         r.addedAt,
-			"rating":          nullFloatToAny(r.rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-		}
-		putRating(item, r.contentRating)
-
-		if r.posterPath.Valid && r.posterPath.String != "" {
-			item["posterImageId"] = r.id
-		}
-		if r.backdropPath.Valid && r.backdropPath.String != "" {
-			item["backdropImageId"] = r.id
-		}
-
-		if p, ok := progressMap[r.id]; ok {
-			item["progress"] = p
-		}
-		items = append(items, item)
+	if err := rows.Err(); err != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
 }
@@ -6419,6 +6354,9 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// itemSummary EXCEPTION: the sync feed is a typed, omitempty, account-scoped record (it
+	// carries changeSeq and libraryId, is unfiltered by the age ceiling, and is a different
+	// wire contract from the list endpoints), not the list element.
 	type syncItem struct {
 		ID              string          `json:"id"`
 		LibraryID       string          `json:"libraryId"`
@@ -7079,12 +7017,17 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	// Get items in playlist; titles above the ceiling are left out (FR-250).
 	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.content_rating
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
+		        i.poster_path, i.backdrop_path,
+		        i.show_name, i.season_number, i.episode_number,
+		        p.position_seconds, p.duration_seconds, p.updated_at,
+		        i.show_folder_id, i.content_rating
 		 FROM playlist_items pi
 		 INNER JOIN items i ON i.id = pi.item_id
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE pi.playlist_id = ?`+visFrag+`
 		 ORDER BY pi.position ASC, pi.added_at ASC`,
-		append([]any{playlistID}, visArgs...)...,
+		append([]any{v.ProfileID, playlistID}, visArgs...)...,
 	)
 	if err != nil {
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
@@ -7094,32 +7037,20 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, typ, itemTitle, addedAt string
-		var year, duration sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, contentRating sql.NullString
-
-		if err := rows.Scan(&id, &typ, &itemTitle, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath, &contentRating); err != nil {
-			continue
+		var row itemSummaryRow
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath,
+			&row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ProgPos, &row.ProgDur, &row.ProgUpdatedAt,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+			return
 		}
-
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           itemTitle,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-		}
-		putRating(item, contentRating)
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-		items = append(items, item)
+		items = append(items, itemSummary(row))
+	}
+	if err := rows.Err(); err != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -7245,12 +7176,17 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 	visFrag, visArgs := v.andVisibleFrag("i.content_rating")
 
 	rows, err := s.db.Query(
-		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating, i.poster_path, i.backdrop_path, i.content_rating
+		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
+		        i.poster_path, i.backdrop_path,
+		        i.show_name, i.season_number, i.episode_number,
+		        p.position_seconds, p.duration_seconds, p.updated_at,
+		        i.show_folder_id, i.content_rating
 		 FROM downloads d
 		 INNER JOIN items i ON i.id = d.item_id
+		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
 		 WHERE d.user_id = ?`+visFrag+`
 		 ORDER BY d.marked_at DESC`,
-		append([]any{u.ID}, visArgs...)...,
+		append([]any{v.ProfileID, u.ID}, visArgs...)...,
 	)
 	if err != nil {
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
@@ -7260,34 +7196,20 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, typ, title, addedAt string
-		var year, duration sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, contentRating sql.NullString
-
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating, &posterPath, &backdropPath, &contentRating); err != nil {
-			continue
+		var row itemSummaryRow
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath,
+			&row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ProgPos, &row.ProgDur, &row.ProgUpdatedAt,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+			return
 		}
-
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           title,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-		}
-		putRating(item, contentRating)
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-		items = append(items, item)
+		items = append(items, itemSummary(row))
+	}
+	if err := rows.Err(); err != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -7353,7 +7275,9 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT i.id, i.type, i.title, i.year, i.duration_seconds, i.added_at, i.rating,
 		        i.poster_path, i.backdrop_path, i.library_id,
-		        p.position_seconds, p.duration_seconds, p.updated_at, i.content_rating
+		        i.show_name, i.season_number, i.episode_number,
+		        p.position_seconds, p.duration_seconds, p.updated_at,
+		        i.show_folder_id, i.content_rating
 		 FROM watchlist w
 		 JOIN items i ON i.id = w.item_id
 		 LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
@@ -7369,46 +7293,20 @@ func (s *Server) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, typ, title, addedAt, libraryID string
-		var year, duration sql.NullInt64
-		var rating sql.NullFloat64
-		var posterPath, backdropPath, contentRating sql.NullString
-		var progPos, progDur sql.NullInt64
-		var progUpdatedAt sql.NullString
-
-		if err := rows.Scan(&id, &typ, &title, &year, &duration, &addedAt, &rating,
-			&posterPath, &backdropPath, &libraryID,
-			&progPos, &progDur, &progUpdatedAt, &contentRating); err != nil {
+		var row itemSummaryRow
+		var libraryID string
+		if err := rows.Scan(&row.ID, &row.Type, &row.Title, &row.Year, &row.Duration, &row.AddedAt, &row.Rating,
+			&row.PosterPath, &row.BackdropPath, &libraryID,
+			&row.ShowName, &row.SeasonNumber, &row.EpisodeNumber,
+			&row.ProgPos, &row.ProgDur, &row.ProgUpdatedAt,
+			&row.ShowFolderID, &row.ContentRating); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
 		}
-
-		item := map[string]any{
-			"id":              id,
-			"type":            typ,
-			"title":           title,
-			"year":            nullIntToAny(year),
-			"durationSeconds": nullIntToAny(duration),
-			"addedAt":         addedAt,
-			"rating":          nullFloatToAny(rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-			"libraryId":       libraryID,
-		}
-		putRating(item, contentRating)
-		if posterPath.Valid && posterPath.String != "" {
-			item["posterImageId"] = id
-		}
-		if backdropPath.Valid && backdropPath.String != "" {
-			item["backdropImageId"] = id
-		}
-		if progPos.Valid {
-			item["progress"] = map[string]any{
-				"positionSeconds": progPos.Int64,
-				"durationSeconds": progDur.Int64,
-				"updatedAt":       progUpdatedAt.String,
-			}
-		}
+		item := itemSummary(row)
+		// Extra on top of the standard summary: the watchlist spans libraries, so each entry
+		// names the one it lives in.
+		item["libraryId"] = libraryID
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -9894,6 +9792,9 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		// correct fix is on the READ side instead: resolveShowFolders expands this folder id
 		// back to the whole group, so the detail request returns the same episodes the count
 		// above reports. Single-folder shows — the overwhelming majority — see no id churn.
+		// itemSummary EXCEPTION: this is a SHOW aggregate, not an item (id is a folder name,
+		// with seasonCount / episodeCount / lastWatchedAt / metadataVersion and no type,
+		// duration or progress), so it cannot be built from an itemSummaryRow.
 		show := map[string]any{
 			"id":              showID,
 			"title":           info.displayName,
@@ -10122,7 +10023,8 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.Query(`
 		SELECT id, type, title, episode_title, year, duration_seconds, added_at, rating,
-		       poster_path, backdrop_path, season_number, episode_number, content_rating
+		       poster_path, backdrop_path, season_number, episode_number, content_rating,
+		       show_name, show_folder_id
 		FROM items WHERE `+where+`
 		ORDER BY COALESCE(season_number, 1), COALESCE(episode_number, 0)`,
 		args...)
@@ -10136,22 +10038,27 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	// issuing nested QueryRow calls exhausts the connection pool under concurrent
 	// season requests, causing all requests to deadlock.
 	type episodeRow struct {
-		id, typ, title, addedAt                string
-		year, duration, seasonNum, episodeNum  sql.NullInt64
-		rating                                 sql.NullFloat64
-		posterPath, backdropPath, episodeTitle sql.NullString
-		contentRating                          sql.NullString
+		itemSummaryRow
+		episodeTitle sql.NullString
 	}
 	var rawRows []episodeRow
 	for rows.Next() {
-		var r episodeRow
-		if err := rows.Scan(&r.id, &r.typ, &r.title, &r.episodeTitle, &r.year, &r.duration, &r.addedAt, &r.rating,
-			&r.posterPath, &r.backdropPath, &r.seasonNum, &r.episodeNum, &r.contentRating); err != nil {
-			continue
+		var er episodeRow
+		if err := rows.Scan(&er.ID, &er.Type, &er.Title, &er.episodeTitle, &er.Year, &er.Duration, &er.AddedAt, &er.Rating,
+			&er.PosterPath, &er.BackdropPath, &er.SeasonNumber, &er.EpisodeNumber, &er.ContentRating,
+			&er.ShowName, &er.ShowFolderID); err != nil {
+			rows.Close()
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
+			return
 		}
-		rawRows = append(rawRows, r)
+		rawRows = append(rawRows, er)
 	}
+	scanErr := rows.Err()
 	rows.Close() // release connection before any further DB calls
+	if scanErr != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", scanErr)
+		return
+	}
 
 	// Batch-fetch progress for all episodes in one query. Progress is the viewing profile's
 	// (FR-230); a profiles lookup failure leaves episodes without progress, the same
@@ -10166,8 +10073,8 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	}
 	if epViewer.ProfileID != "" {
 		ids := make([]string, len(rawRows))
-		for i, r := range rawRows {
-			ids[i] = r.id
+		for i, er := range rawRows {
+			ids[i] = er.ID
 		}
 		// CHUNKED. This built one IN(...) list sized to the whole result, and the episode
 		// query has no LIMIT — so a show with more episodes than SQLITE_MAX_VARIABLE_NUMBER
@@ -10191,42 +10098,26 @@ func (s *Server) handleTVShowEpisodes(w http.ResponseWriter, r *http.Request) {
 	// (e.g. different formats) produce duplicate rows; keep the first seen.
 	seenEpisode := map[[2]int64]bool{}
 	items := make([]map[string]any, 0, len(rawRows))
-	for _, r := range rawRows {
-		if r.seasonNum.Valid && r.episodeNum.Valid {
-			key := [2]int64{r.seasonNum.Int64, r.episodeNum.Int64}
+	for _, er := range rawRows {
+		if er.SeasonNumber.Valid && er.EpisodeNumber.Valid {
+			key := [2]int64{er.SeasonNumber.Int64, er.EpisodeNumber.Int64}
 			if seenEpisode[key] {
 				continue
 			}
 			seenEpisode[key] = true
 		}
 
-		// Use episode_title (from TMDb) when available; fall back to filename-parsed title
-		displayTitle := r.title
-		if r.episodeTitle.Valid && r.episodeTitle.String != "" {
-			displayTitle = r.episodeTitle.String
+		item := itemSummary(er.itemSummaryRow)
+		// Extras on top of the standard summary: the episode list always carries seasonNumber and
+		// episodeNumber (null when unparsed) so a season grid can place every row, and shows the
+		// TMDb episode_title when there is one, falling back to the filename-parsed title.
+		item["seasonNumber"] = nullIntToAny(er.SeasonNumber)
+		item["episodeNumber"] = nullIntToAny(er.EpisodeNumber)
+		if er.episodeTitle.Valid && er.episodeTitle.String != "" {
+			item["title"] = er.episodeTitle.String
 		}
-
-		item := map[string]any{
-			"id":              r.id,
-			"type":            r.typ,
-			"title":           displayTitle,
-			"year":            nullIntToAny(r.year),
-			"durationSeconds": nullIntToAny(r.duration),
-			"addedAt":         r.addedAt,
-			"rating":          nullFloatToAny(r.rating),
-			"posterImageId":   nil,
-			"backdropImageId": nil,
-			"seasonNumber":    nullIntToAny(r.seasonNum),
-			"episodeNumber":   nullIntToAny(r.episodeNum),
-		}
-		putRating(item, r.contentRating)
-		if r.posterPath.Valid && r.posterPath.String != "" {
-			item["posterImageId"] = r.id
-		}
-		if r.backdropPath.Valid && r.backdropPath.String != "" {
-			item["backdropImageId"] = r.id
-		}
-		if p, ok := progressMap[r.id]; ok {
+		// Progress is the viewing profile's, batch-fetched above (FR-230).
+		if p, ok := progressMap[er.ID]; ok {
 			item["progress"] = p
 		}
 		items = append(items, item)
