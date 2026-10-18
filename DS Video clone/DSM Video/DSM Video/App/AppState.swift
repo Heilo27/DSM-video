@@ -584,19 +584,30 @@ final class AppState {
   /// unavailable/unsupported or fails — so this never regresses the previous behaviour, and
   /// still works when only a token (no saved password) is stored. Wired in place of the old
   /// login()-only path, which re-sent the plaintext password on every near-expiry launch.
-  func refreshSession() async {
-    guard sessionToken != nil, !isDemoMode else { return }
+  ///
+  /// Returns false ONLY when the server itself refused every way back in (the refresh was
+  /// rejected as an auth failure and there is no password, or the password login was rejected
+  /// too): the session is dead and the caller must end it (TASK-1051, OC-1123). Any other
+  /// failure (NAS off, timeout, refresh endpoint missing) returns true: an unreachable server
+  /// never costs the user their session (M5).
+  @discardableResult
+  func refreshSession() async -> Bool {
+    guard sessionToken != nil, !isDemoMode else { return true }
     do {
       let resp = try await api.refreshToken()
       sessionToken = resp.token
       api = makeClient(baseURL: api.baseURL, token: resp.token, usesTunnelCookie: api.usesTunnelCookie)
       homeLog.info("refreshSession: token refreshed without password")
+      return true
     } catch {
       // Refresh unavailable or rejected — fall back to a full login only if we can.
       homeLog.warning("refreshSession: refresh failed (\(error.localizedDescription)) — falling back to login")
+      let refused = (error as? APIError)?.isAuthFailure == true
       if !savedPassword.isEmpty {
         await login()
+        return !(refused && loginError != nil)
       }
+      return !refused
     }
   }
 
@@ -1159,10 +1170,12 @@ final class AppState {
     }
     silentReauthTask = Task { @MainActor in
       defer { silentReauthTask = nil }
-      await refreshSession()
+      let alive = await refreshSession()
       // refreshSession() falls back to login() when a password is saved. If either
-      // worked we now hold a live token and the user never saw an interruption.
-      if sessionToken == nil {
+      // worked we now hold a live token and the user never saw an interruption. A refresh the
+      // server REFUSED leaves the old token in place, so the verdict is the return value, not
+      // the token's absence (TASK-1051).
+      if sessionToken == nil || !alive {
         failSession()
       } else {
         dlog.info(.auth, "silent re-auth recovered the session after a 401")
