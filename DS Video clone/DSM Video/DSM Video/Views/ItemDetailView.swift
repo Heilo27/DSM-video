@@ -139,6 +139,7 @@ struct ItemDetailView: View {
           itemID: itemID,
           title: shownTitle,
           itemYear: detail?.year,
+          artworkURL: appState.api.nowPlayingArtworkURL(images: detail?.images, version: detail?.changeSeq),
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
@@ -169,6 +170,7 @@ struct ItemDetailView: View {
           itemID: itemID,
           title: shownTitle,
           itemYear: detail?.year,
+          artworkURL: appState.api.nowPlayingArtworkURL(images: detail?.images, version: detail?.changeSeq),
           forceFromBeginning: playFromBeginning,
           nextEpisode: nextEpisode,
           onPlayNextEpisode: onNextEpisode != nil ? { advanceToNextAfterDismiss = true } : nil,
@@ -870,7 +872,7 @@ struct ItemDetailView: View {
 
   @ViewBuilder
   private var backdropImage: some View {
-    if let backdropId = detail?.images?.backdrop?.id ?? detail?.images?.backdrop?.mapperId {
+    if let backdropId = detail?.images?.backdropImageID {
       AuthenticatedImage(
         url: appState.api.imageURL(id: backdropId, width: 1200, version: detail?.changeSeq,
                                     kind: .backdrop),
@@ -1426,6 +1428,8 @@ private struct PlayerSheet: View {
   let itemID: String
   let title: String
   var itemYear: Int? = nil
+  /// Lock-screen / Control Center artwork (FR-058): the title's poster, else its backdrop.
+  var artworkURL: URL? = nil
   var forceFromBeginning: Bool = false
   var nextEpisode: ItemSummary? = nil
   var onPlayNextEpisode: (() -> Void)? = nil
@@ -1503,6 +1507,7 @@ private struct PlayerSheet: View {
           itemID: itemID,
           itemTitle: title,
           itemYear: itemYear,
+          artworkURL: artworkURL,
           trickplayBaseURL: isOffline ? nil : appState.api.trickplayBaseURL(itemID: itemID),
           authToken: appState.sessionToken,
           usesTunnelCookie: appState.api.usesTunnelCookie,

@@ -223,6 +223,9 @@ locks; the setting can be turned off in Settings.
 duration and advancing elapsed time, and its controls actually affect playback. *(Stated as a pattern in
 competitive research P05; inferred as a requirement from the stated background-audio promise — audio
 that keeps playing with no lock-screen control is a half-feature.)*
+*Clarified 2026-10-17 (TASK-965):* the artwork is the title's poster, or its backdrop when it has no
+poster. A title with neither shows no picture, never the previous title's, and its name, duration and
+time still show. When autoplay moves to the next episode, the artwork changes with it.
 **FR-059 [STATED]** — Playback Speed lives in Settings, is easy to find, and is easy to set back to
 normal. A user must never be stuck playing fast with no way to change it.
 **FR-060 [INFERRED]** — The persisted default playback rate is 1x; after a cold start with no explicit

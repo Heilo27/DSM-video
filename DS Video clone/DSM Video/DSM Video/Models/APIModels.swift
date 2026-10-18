@@ -195,6 +195,10 @@ struct ItemDetail: Decodable, Identifiable {
     // unreachable against it; any other DSM-compatible server is where it bites.
     let poster: Ref?
     let backdrop: Ref?
+
+    /// The id the backdrop endpoint takes: the image id, else the mapper id that older
+    /// backdrop responses carry instead. The detail header and Now Playing both use it.
+    var backdropImageID: String? { backdrop?.id ?? backdrop?.mapperId }
   }
 
   let id: String
