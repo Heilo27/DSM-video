@@ -7818,6 +7818,12 @@ var scanVideoExt = map[string]bool{
 	".ogm": false, ".f4v": false, ".iso": false,
 }
 
+// isDVDDiscFolder reports whether a directory name is a DVD disc's VIDEO_TS or AUDIO_TS
+// folder (any case: rips from Windows and macOS tools differ).
+func isDVDDiscFolder(name string) bool {
+	return strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS")
+}
+
 // scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
 // the 5-minute scan does not repeat the same line forever.
 var scanSkippedVideoLogged sync.Map
@@ -8052,6 +8058,16 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				return filepath.SkipDir
 			}
 			if d.Name() == "_dsvideo_originals" {
+				return filepath.SkipDir
+			}
+			// TASK-998 (FRD-000 M1): a DVD rip's VIDEO_TS/AUDIO_TS holds title FRAGMENTS
+			// (VTS_01_1.VOB ...) that only play as a sequence. Indexing each as a movie
+			// filled the library with unplayable rows, and joining them needs a concat pass
+			// too costly for NAS hardware. Skip the folder whole and say so, once.
+			if isDVDDiscFolder(d.Name()) {
+				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
+					log.Printf("scan: library %s: skipping DVD folder %q — its .VOB files are title fragments that do not play on their own; this server does not index disc rips", libraryID, path)
+				}
 				return filepath.SkipDir
 			}
 			return nil

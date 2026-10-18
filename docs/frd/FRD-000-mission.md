@@ -34,6 +34,12 @@ their files for this app; the app reads what is there.
   A video format the server recognises but does
   not index (.rm .rmvb .divx .asf .ogv .ogm .f4v .iso) is logged by path, once, so the gap is
   visible. Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
+  A DVD rip is not indexed: a folder named VIDEO_TS or AUDIO_TS (any case) is skipped whole and
+  logged by path, once. Its .VOB files are fragments of one title (VTS_01_1.VOB, VTS_01_2.VOB ...)
+  that only play as a sequence; indexing each made unplayable rows, and joining them means a
+  concat pass this NAS hardware should not carry. A loose .vob outside those folders is still
+  indexed. Rows that an earlier scan made from files inside such a folder are removed by the
+  normal stale-row purge (and tombstoned, so the apps drop them too). [TASK-998]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.
