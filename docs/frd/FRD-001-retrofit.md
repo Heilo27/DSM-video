@@ -632,6 +632,12 @@ photos cannot fill the NAS disk: 1 GB by default, set with `DSVIDEO_IMAGE_CACHE_
 limit). When the cache is over its limit the least recently viewed images are removed first, down to 90% of
 the limit, and an image fetched in the last two minutes is never removed. A removed image is simply fetched
 again when next viewed.
+*In the app (iOS and tvOS):* each cast entry shows the actor's photo when the server gives it a photo id, and
+the actor's initials (first letters of the first and last names) on a plain circle when it does not. When
+there is no photo id the app makes no photo request at all. In demo mode, or while the server is
+unavailable, it asks for no photos and shows initials. A server that only sends names (an older server, or a
+title not yet filled in) shows the same initials list; the app prefers the server's ordered cast list and
+falls back to the names-only list when that list is missing or empty.
 *Derivation:* P1 (the cast list shows who is actually in the film, not just names). Ryan, 2026-10-18: show
 cast photos on the detail page. [TASK-747]
 **FR-149 [DESIGN, 2026-10-18, TASK-1055]** — *The app suggests updating a server that is older than the app
@@ -687,9 +693,16 @@ An id the library does not have is "not found".
 *Cost:* one lookup for the title, one for its collections, and one pass over the library to gather at most
 2,000 candidates, scored in memory; fast enough for a NAS library of tens of thousands of titles, and the
 server logs when a library is large enough to hit the 2,000 limit.
+*In the app (iOS and tvOS):* a title's detail page shows a "More Like This" shelf of up to 12 posters below
+the cast (on tvOS, below the full-screen hero, reached by moving down). Selecting a poster opens that
+title, or the show for an episode. The shelf is shown only when the server returns at least one title. It
+is hidden, with no placeholder and no error shown, when the list is empty, when the request fails for any
+reason (including "not found" and "content restricted"), and in demo mode or while the server is
+unavailable, where no request is made. Failures other than those two expected refusals are written to
+the diagnostic log. The request is made once per visit to the page, with no retry, so an unreachable
+server never delays the rest of the page. Every poster on tvOS can take focus.
 *Derivation:* P1 and A2 (a pick of what to watch next, built from what the user already owns, with no data
-leaving the NAS); S4. This is the server half of More Like This; the app screens that show it are a
-separate piece of work. [TASK-747]
+leaving the NAS); S4. [TASK-747]
 
 **FR-152 [DESIGN, 2026-10-18, TASK-748]** — *A person with no server is shown how to install one, and the
 first connection to a server says what it found.* Three parts.
