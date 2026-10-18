@@ -160,9 +160,8 @@ platform :ios do
   lane :set_build do |options|
     b = options[:build]
     UI.user_error!("Usage: fastlane set_build build:N") if b.to_s.empty?
-    path = "#{XCODEPROJ}/project.pbxproj"
-    body = File.read(path)
-    File.write(path, body.gsub(/CURRENT_PROJECT_VERSION = [0-9]+;/, "CURRENT_PROJECT_VERSION = #{b};"))
+    UI.user_error!("build must be a positive integer, got '#{b}'") unless b.to_s =~ /\A[1-9][0-9]*\z/
+    write_project_build_number(b)
     UI.success("Set CURRENT_PROJECT_VERSION = #{b} in all targets.")
   end
 
@@ -302,6 +301,7 @@ platform :ios do
   lane :build_and_upload do
     check_xcode
     check_version_match
+    ensure_fresh_build_number("IOS")
 
     # Provisioning must be fetched BEFORE export — see fetch_profiles_ios for why the
     # archive can succeed while the export fails.
@@ -330,6 +330,13 @@ platform :ios do
 
   # Submit existing iOS build for review
   lane :submit do
+    # What's New + promo text are written through the ASC API and read back; the lane
+    # aborts here, BEFORE anything is submitted, if either is empty or differs from
+    # metadata/ios/en-US. deliver is then told to skip metadata so it cannot blank them
+    # between the verify and the submit (it did, non-deterministically, on 1.3.6/1.3.8).
+    # The rest of the metadata is pushed by upload_metadata, which `release` runs first.
+    push_store_text("IOS")
+    verify_store_text("IOS")
     deliver(
       api_key:             api_key,
       app_identifier:      IOS_BUNDLE_ID,
@@ -337,12 +344,12 @@ platform :ios do
       metadata_path:       "metadata/ios",
       skip_binary_upload:  true,
       skip_screenshots:    true,
-      # NOTE: metadata is NOT skipped — release_notes.txt (What's New) and
-      # promotional_text.txt MUST upload on every submission. A prior version of
-      # this lane had skip_metadata:true, which silently shipped stale/blank
-      # What's New. Do not re-add it. Build number is intentionally omitted so
-      # deliver attaches the latest processed build, not a hardcoded one.
-      skip_metadata:       false,
+      # skip_metadata is true ONLY because push_store_text + verify_store_text just
+      # wrote and read back What's New + promo text above. The old skip_metadata:true
+      # silently shipped blank/stale What's New with NO such check; do not remove the
+      # check above. Build number omitted: deliver keeps the build already attached
+      # (use attach_build build:N to choose it).
+      skip_metadata:       true,
       submit_for_review:   true,
       automatic_release:   true,
       force:               true,
@@ -414,6 +421,7 @@ platform :ios do
   lane :build_and_upload_tvos do
     check_xcode
     check_version_match
+    ensure_fresh_build_number("TV_OS")
 
     # Provisioning must be fetched BEFORE export. The tvOS targets use manual
     # signing, and `archive` will happily succeed without valid profiles — it is
@@ -494,6 +502,9 @@ platform :ios do
   end
 
   lane :submit_tvos do
+    # See the iOS :submit lane: set, read back, fail before submit.
+    push_store_text("TV_OS")
+    verify_store_text("TV_OS")
     deliver(
       api_key:             api_key,
       app_identifier:      TVOS_BUNDLE_ID,
@@ -502,10 +513,8 @@ platform :ios do
       platform:            "appletvos",
       skip_binary_upload:  true,
       skip_screenshots:    true,
-      # metadata NOT skipped — see the iOS :submit lane note. What's New +
-      # promo text must upload every submission. Build number omitted so the
-      # latest processed tvOS build is attached.
-      skip_metadata:       false,
+      # skip_metadata only because the text was set + verified above; see iOS :submit.
+      skip_metadata:       true,
       submit_for_review:   true,
       automatic_release:   true,
       force:               true,
@@ -579,6 +588,147 @@ def wait_for_processing(platform_name:, timeout_min: 45)
   end
 end
 
+# ──────────────────────────────────────────────────────
+# Store text (What's New + promo text) — set explicitly, read back, fail if wrong.
+#
+# `deliver` reports success while leaving whatsNew / promotionalText EMPTY, and does so
+# non-deterministically (1.3.6, and both platforms of 1.3.8: blank after the first submit,
+# fine after the second). So the release lanes no longer trust deliver for these two
+# fields: they write them through the ASC API, re-read them from ASC, and abort BEFORE
+# the submit if either differs from the files in metadata/<platform>/<locale>/.
+# ──────────────────────────────────────────────────────
+STORE_TEXT_FILES = { "whatsNew" => "release_notes.txt", "promotionalText" => "promotional_text.txt" }.freeze
+
+def metadata_dir_for(plat)
+  plat == "TV_OS" ? "tvos" : "ios"
+end
+
+# The ASC version record for VERSION on plat, or a hard failure.
+def asc_version_for(plat)
+  asc_token
+  app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+  v = app.get_app_store_versions(filter: { versionString: VERSION, platform: plat }).first
+  UI.user_error!("No #{plat} #{VERSION} version record in ASC (run create_version_and_metadata first)") if v.nil?
+  v
+end
+
+# { "en-US" => { "whatsNew" => "...", "promotionalText" => "..." } } for every locale
+# folder that exists on disk. A missing or empty source file is an error here, so the
+# files are the single place the text lives.
+def store_text_from_disk(plat)
+  base = File.join(__dir__, "metadata", metadata_dir_for(plat))
+  out = {}
+  Dir.children(base).sort.each do |locale|
+    next unless File.directory?(File.join(base, locale))
+    entry = {}
+    STORE_TEXT_FILES.each do |attr, file|
+      path = File.join(base, locale, file)
+      text = File.exist?(path) ? File.read(path).strip : ""
+      UI.user_error!("#{path} is missing or empty - cannot set #{attr}") if text.empty?
+      entry[attr] = text
+    end
+    out[locale] = entry
+  end
+  UI.user_error!("No locale folders under #{base}") if out.empty?
+  out
+end
+
+# Write What's New + promo text onto every localization that has source files.
+def push_store_text(plat)
+  wanted = store_text_from_disk(plat)
+  v = asc_version_for(plat)
+  v.get_app_store_version_localizations.each do |loc|
+    text = wanted[loc.locale]
+    if text.nil?
+      UI.important("#{plat} #{loc.locale}: no metadata folder, leaving untouched")
+      next
+    end
+    loc.update(attributes: text)
+    UI.success("#{plat} #{loc.locale}: set whatsNew (#{text['whatsNew'].length} chars) + promotionalText (#{text['promotionalText'].length} chars)")
+  end
+end
+
+# Re-read from ASC (fresh fetch, not the objects we just wrote) and FAIL unless both
+# fields are non-empty and equal to the files. Call immediately before submitting.
+def verify_store_text(plat)
+  wanted = store_text_from_disk(plat)
+  v = asc_version_for(plat)
+  locs = v.get_app_store_version_localizations
+  problems = []
+  wanted.each do |locale, text|
+    loc = locs.find { |l| l.locale == locale }
+    if loc.nil?
+      problems << "#{locale}: no localization in ASC"
+      next
+    end
+    { "whatsNew" => loc.whats_new, "promotionalText" => loc.promotional_text }.each do |attr, actual|
+      if actual.to_s.strip.empty?
+        problems << "#{locale}: #{attr} is EMPTY in ASC"
+      elsif actual.to_s.strip != text[attr]
+        problems << "#{locale}: #{attr} in ASC differs from metadata file"
+      end
+    end
+  end
+  UI.user_error!("#{plat} store text not ready, NOT submitting:\n  " + problems.join("\n  ")) unless problems.empty?
+  UI.success("#{plat} #{VERSION}: What's New + promo text read back from ASC and verified (#{wanted.keys.join(', ')}).")
+end
+
+# ──────────────────────────────────────────────────────
+# Build numbers
+# ──────────────────────────────────────────────────────
+
+# Every build of VERSION on plat, any processing state, as [number, Build] sorted ascending.
+def asc_builds_for(plat)
+  asc_token
+  app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
+  Spaceship::ConnectAPI::Build.all(
+    app_id: app.id, version: VERSION, platform: plat,
+    processing_states: "PROCESSING,FAILED,INVALID,VALID", includes: "preReleaseVersion", limit: 200
+  ).select { |b| b.pre_release_version&.platform == plat }
+   .map { |b| [b.version.to_i, b] }.sort_by(&:first)
+end
+
+def project_build_number
+  nums = File.read("#{XCODEPROJ}/project.pbxproj").scan(/CURRENT_PROJECT_VERSION = ([0-9]+);/).flatten.uniq
+  UI.user_error!("CURRENT_PROJECT_VERSION is not uniform across targets: #{nums.join(', ')}") unless nums.size == 1
+  nums.first.to_i
+end
+
+def write_project_build_number(n)
+  path = "#{XCODEPROJ}/project.pbxproj"
+  File.write(path, File.read(path).gsub(/CURRENT_PROJECT_VERSION = [0-9]+;/, "CURRENT_PROJECT_VERSION = #{n};"))
+end
+
+# Called by the upload lanes before archiving: never upload a build number ASC already
+# has for VERSION on this platform. If the project number collides or is behind, bump it
+# (every target) to highest+1 so the archive carries the new number.
+# Commit the resulting pbxproj change after the upload.
+def ensure_fresh_build_number(plat)
+  highest = asc_builds_for(plat).map(&:first).max || 0
+  mine = project_build_number
+  if mine > highest
+    UI.success("Build number #{mine} is free for #{plat} #{VERSION} (ASC highest: #{highest}).")
+  else
+    write_project_build_number(highest + 1)
+    UI.important("Build #{mine} already exists in ASC for #{plat} #{VERSION} (highest #{highest}). CURRENT_PROJECT_VERSION bumped to #{highest + 1} in all targets - commit it.")
+  end
+end
+
+# Choose the build to attach: the requested number, else the highest VALID one. Prints it.
+def pick_build_to_attach(plat, requested)
+  valid = asc_builds_for(plat).select { |_, b| b.processing_state == "VALID" }
+  UI.user_error!("No VALID #{plat} #{VERSION} build found to attach") if valid.empty?
+  UI.message("VALID #{plat} #{VERSION} builds: #{valid.map(&:first).join(', ')}")
+  if requested.to_s.empty?
+    num, build = valid.last
+  else
+    num, build = valid.find { |n, _| n == requested.to_i }
+    UI.user_error!("Build #{requested} is not a VALID #{plat} #{VERSION} build (valid: #{valid.map(&:first).join(', ')})") if build.nil?
+  end
+  UI.message("Selected #{plat} build #{num} (#{requested.to_s.empty? ? 'highest processed' : 'requested'}).")
+  build
+end
+
 platform :ios do
   # Report which capabilities each App ID actually has on the developer portal.
   # App Groups must be enabled on BOTH the tvOS app and the Top Shelf App ID, or
@@ -614,6 +764,13 @@ end
 
 platform :ios do
   lane :upload_existing_ipa do
+    # Refuse a build number ASC already has (read from the ipa itself, not the project).
+    ipa = File.join(ROOT, "build", "DSM Video.ipa")
+    ipa_build = `unzip -p "#{ipa}" "Payload/*.app/Info.plist" | plutil -extract CFBundleVersion raw -o - -`.strip
+    UI.user_error!("Could not read CFBundleVersion from #{ipa}") unless ipa_build =~ /\A[0-9]+\z/
+    if asc_builds_for("IOS").map(&:first).include?(ipa_build.to_i)
+      UI.user_error!("ASC already has iOS #{VERSION} build #{ipa_build}; rebuild with a higher number (build_and_upload auto-increments).")
+    end
     upload_to_testflight(
       api_key: api_key,
       app_identifier: IOS_BUNDLE_ID,
@@ -680,12 +837,11 @@ platform :ios do
   # Attach the VALID build to the App Store version. Uploading a build and
   # creating a version don't auto-link them — the version shows "no build" and
   # submission is blocked until the build is selected.
-  lane :attach_build do
-    asc_token
-    app = Spaceship::ConnectAPI::App.find(IOS_BUNDLE_ID)
-    version = app.get_app_store_versions(filter: {versionString: VERSION}).first
-    build = app.get_builds(includes: "preReleaseVersion").find { |b| b.pre_release_version&.version == VERSION && b.processing_state == "VALID" }
-    UI.user_error!("No VALID #{VERSION} build found to attach") if build.nil?
+  #   fastlane attach_build            # highest VALID build of VERSION
+  #   fastlane attach_build build:2    # a specific build number
+  lane :attach_build do |options|
+    version = asc_version_for("IOS")
+    build = pick_build_to_attach("IOS", options[:build])
     version.select_build(build_id: build.id)
     UI.success("ATTACHED build #{build.version} to version #{VERSION}")
   end
@@ -698,19 +854,10 @@ platform :ios do
   # "no build" and submission is blocked. iOS has attach_build for exactly this;
   # tvOS needs its own because the build must be filtered by PLATFORM, or the
   # iOS build of the same version is selected and the tvOS submission is rejected.
-  lane :attach_build_tvos do
-    asc_token
-    app = Spaceship::ConnectAPI::App.find(TVOS_BUNDLE_ID)
-    version = app.get_app_store_versions(
-      filter: { versionString: VERSION, platform: "TV_OS" }
-    ).first
-    UI.user_error!("No tvOS #{VERSION} version record found") if version.nil?
-    build = app.get_builds(includes: "preReleaseVersion").find do |b|
-      b.pre_release_version&.version == VERSION &&
-        b.processing_state == "VALID" &&
-        b.pre_release_version&.platform == "TV_OS"
-    end
-    UI.user_error!("No VALID tvOS #{VERSION} build found to attach") if build.nil?
+  #   fastlane attach_build_tvos [build:N]   (default: highest VALID build)
+  lane :attach_build_tvos do |options|
+    version = asc_version_for("TV_OS")
+    build = pick_build_to_attach("TV_OS", options[:build])
     version.select_build(build_id: build.id)
     UI.success("ATTACHED tvOS build #{build.version} to version #{VERSION}")
   end
@@ -734,7 +881,7 @@ platform :ios do
     begin
       loc = v.get_app_store_version_localizations
       loc.each do |l|
-        UI.message("LOC #{l.locale}: desc=#{!l.description.to_s.empty?} whatsNew=#{!l.whats_new.to_s.empty?} keywords=#{!l.keywords.to_s.empty?} support=#{l.support_url.inspect}")
+        UI.message("LOC #{l.locale}: desc=#{!l.description.to_s.empty?} whatsNew=#{!l.whats_new.to_s.empty?} promoText=#{!l.promotional_text.to_s.empty?} keywords=#{!l.keywords.to_s.empty?} support=#{l.support_url.inspect}")
       end
     rescue => e
       UI.error("localizations: #{e.message}")
