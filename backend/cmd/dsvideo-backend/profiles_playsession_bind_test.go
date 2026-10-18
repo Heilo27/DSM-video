@@ -99,13 +99,20 @@ func TestFR250_HLSSegmentsHoldToTheMintingProfile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "segment_00001.m4s"), []byte("SEG"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A multi-audio session's rendition files (FR-061) hold to the same profile.
+	for _, f := range []string{"init_audio_1.mp4", "video.m3u8", "audio_1.m3u8"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("REND"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	sid := "ps_hls_adult"
 	w.s.mu.Lock()
 	w.s.playSessions[sid] = PlaySession{ItemID: enfMovR, Kind: "hls", HLSDir: dir,
 		CreatedAt: time.Now(), LastAccess: time.Now(), UserID: qaAlice.id, ProfileID: w.ownerID}
 	w.s.mu.Unlock()
 
-	for _, name := range []string{"init.mp4", "segment_00001.m4s", "segments/segment_00001.m4s"} {
+	for _, name := range []string{"init.mp4", "segment_00001.m4s", "segments/segment_00001.m4s",
+		"init_audio_1.mp4", "video.m3u8", "audio_1.m3u8"} {
 		p := "/playback/" + sid + "/" + name
 		assertRestricted(t, "kid fetching "+name, w.playbackAs(p, w.kidID))
 		if rec := w.playbackAs(p, w.ownerID); rec.Code != http.StatusOK {

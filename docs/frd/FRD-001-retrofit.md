@@ -229,12 +229,20 @@ normal. A user must never be stuck playing fast with no way to change it.
 change, playback is at normal speed.
 **FR-061 [STATED]** — Subtitle and audio track selection is available in the player; where a language has
 both full and forced subtitle variants they are presented as distinguishable, labelled choices.
+Every audio track the source carries is offered, with no carve-out: a title with a second language
+or a commentary track lists each one in the audio picker, labelled by its title, else its language,
+else "Track N", with the source's default track preselected. A single-audio title plays exactly as
+before and its picker shows one track. This holds in the iOS and tvOS apps whether they play the
+file directly or the server converts it to HLS.
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than
 showing an unexplained empty list.
 **FR-063 [INFERRED]** — Switching audio track continues from approximately the same position rather
 than restarting.
+Library normalization never costs a title an audio track: a converted file keeps every audio track
+of the original, each with its language and title, and a conversion that would drop one is
+rejected and the original kept.
 **FR-064 [STATED]** — Every player control — skip to start, back 15, play/pause, forward 15, skip to end —
 is reachable and activatable with the tvOS remote.
 **FR-065 [INFERRED]** — Back 15 / Forward 15 move the position by approximately 15 seconds and clamp

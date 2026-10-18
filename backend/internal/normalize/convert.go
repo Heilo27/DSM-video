@@ -155,13 +155,15 @@ func TargetOutputPath(src string) string {
 func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag string) []string {
 	if action == ActionRemux {
 		// Copy video, transcode audio to AAC, repackage to MP4. +igndts on top of
-		// +genpts repairs the broken DTS some MKVs carry. -map 0:a:0? makes audio
-		// optional (a video-only file remuxes fine).
+		// +genpts repairs the broken DTS some MKVs carry. -map 0:a? keeps EVERY audio
+		// track (FR-063: a second language or commentary must survive), each encoded to
+		// AAC with its language and title tags carried over; the trailing ? keeps a
+		// video-only file remuxing fine.
 		out := []string{
 			"-nostdin", "-y",
 			"-fflags", "+genpts+igndts",
 			"-i", src,
-			"-map", "0:v:0", "-map", "0:a:0?",
+			"-map", "0:v:0", "-map", "0:a?",
 			"-c:v", "copy",
 		}
 		// Relabel hev1 -> hvc1 on the copied stream.
@@ -185,13 +187,14 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 
 	// ActionEncode: full re-encode to H.264, capped at maxHeight, never upscaling
 	// (scale=-2:min(ih\,H) keeps even width and only downscales). veryfast/crf21 is
-	// the proven NAS tradeoff from the script.
+	// the proven NAS tradeoff from the script. Audio maps as in the remux branch: every
+	// track, each to AAC.
 	scale := fmt.Sprintf("scale=-2:min(ih\\,%d)", maxHeight)
 	return []string{
 		"-nostdin", "-y",
 		"-fflags", "+genpts",
 		"-i", src,
-		"-map", "0:v:0", "-map", "0:a:0?",
+		"-map", "0:v:0", "-map", "0:a?",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
 		"-vf", scale,
 		"-pix_fmt", "yuv420p",
@@ -203,8 +206,10 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 }
 
 // verifyOutput re-probes the produced file and confirms it is a sane, playable MP4:
-// non-empty, a valid H.264/HEVC video stream, and a duration within durationTolerance
-// of the source. Returns nil only when all checks pass. (Port of verify_out.)
+// non-empty, a valid H.264/HEVC video stream, a duration within durationTolerance of
+// the source, and as many audio tracks as the source (the swap deletes the original,
+// so a dropped track would be gone for good; FR-063). Returns nil only when all checks
+// pass. (Port of verify_out.)
 func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
 	if info, statErr := os.Stat(out); statErr != nil || info.Size() == 0 {
 		return fmt.Errorf("output missing or empty")
@@ -229,6 +234,10 @@ func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
 	// fall back to the "duration > 0" check we already passed rather than rejecting a
 	// good output for a transient probe miss on the original.
 	srcProbe, srcErr := prober.Probe(ctx, src)
+	if srcErr == nil && len(outProbe.AudioStreams) != len(srcProbe.AudioStreams) {
+		return fmt.Errorf("output has %d audio track(s), source has %d",
+			len(outProbe.AudioStreams), len(srcProbe.AudioStreams))
+	}
 	if srcErr == nil && srcProbe.DurationSecs > 0 {
 		diff := math.Abs(outProbe.DurationSecs-srcProbe.DurationSecs) / srcProbe.DurationSecs
 		if diff > durationTolerance {
