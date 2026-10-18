@@ -255,6 +255,9 @@ buffering never raises the connection-lost error.
 *Derivation:* competitive research explicitly frames this distinction as the requirement.
 **FR-054 [INFERRED]** — The connection-lost message names the network/server and never the video
 format, the file, or the credentials (instance of FR-002).
+*Clarified 2026-10-17 (TASK-1007):* the reverse holds too: a failure that is not a connection
+failure never blames the server. A video this device cannot decode says so, and a restart of the
+system's media services says so and invites a retry, never "cancelled" or "cannot connect".
 **FR-055 [STATED]** — An audio interruption (phone call, Siri, another app) leaves playback in a usable
 state afterwards; audio resumes properly. The player is never left where the play control does nothing.
 **FR-056 [STATED]** — Unplugging headphones or removing AirPods pauses cleanly and leaves playback

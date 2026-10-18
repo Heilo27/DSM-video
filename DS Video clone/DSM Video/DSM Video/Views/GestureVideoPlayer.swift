@@ -2435,8 +2435,10 @@ extension GestureVideoPlayer {
             case -11828: return "Format not supported."
             case -11849: return "Could not load media."
             case -11850: return "Playback failed. The media is not accessible."
-            case -11819: return "The operation was cancelled."
-            case -11821: return "Cannot connect to the server."
+            // TASK-1007: per AVError.h, -11819 is mediaServicesWereReset and -11821 is
+            // decodeFailed. Neither is a cancellation or a connection failure.
+            case -11819: return "The system's media services restarted. Try again."
+            case -11821: return "This device couldn't decode the video."
             case -11829: return "This video's format isn't supported."
             default: break
             }
