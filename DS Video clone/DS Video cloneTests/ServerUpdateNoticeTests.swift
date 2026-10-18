@@ -191,6 +191,7 @@ struct ServerUpdateAppStateTests {
     await ProfileStateGate.shared.run {
       ProfileStubServer.reset(["GET /api/v1/version": .json(200, versionJSON("0.3.9-0001"))])
       await withIsolatedAppState(stubHost: ProfileStubServer.host) { state in
+        await letNetworkMonitorSettle()  // the init monitor's first update would otherwise reset the flag
         state.isOffline = true
         await state.checkServerVersion()
         state.isOffline = false

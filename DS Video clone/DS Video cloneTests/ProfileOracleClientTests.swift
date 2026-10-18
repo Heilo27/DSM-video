@@ -313,6 +313,7 @@ struct OfflineProfileTests {
   /// network to make a profile active.
   @Test func cachedListShowsAndAPinlessProfileIsEnteredOffline() async {
     await ocAccount(cached: [owner, kid, pinned], active: nil) { state in
+      await letNetworkMonitorSettle()  // the init monitor's first update would otherwise reset the flag
       state.isOffline = true
       ProfileStubServer.reset(["GET /api/v1/profiles": .unreachable])
       #expect(state.profiles.map(\.name) == ["Ryan", "Maya", "Zed"])
@@ -335,6 +336,7 @@ struct OfflineProfileTests {
     await ocAccount(cached: [owner, kid], active: kid, routes: [
       "GET /api/v1/profiles": .unreachable
     ]) { state in
+      await letNetworkMonitorSettle()  // the init monitor's first update would otherwise reset the flag
       state.isOffline = true
       state.serverUnreachable = true
 
