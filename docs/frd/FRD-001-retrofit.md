@@ -253,6 +253,8 @@ cannot play it either, the message names that failure, not the one that led to i
 *Clarified 2026-10-17 (TASK-1008):* a video that stopped mid-playback because the network dropped
 also retries itself when the network returns at the same address, picking up near where it stopped.
 A video that stopped for any other reason waits for the user's Retry.
+*Clarified 2026-10-17 (TASK-1009):* a video or download requested just as the app moves between
+addresses plays or downloads from the address the app is now using, never from the one it just left.
 **FR-053 [STATED]** — Transient buffering and permanent disconnection are distinguishable; recoverable
 buffering never raises the connection-lost error.
 *Derivation:* competitive research explicitly frames this distinction as the requirement.

@@ -1205,7 +1205,7 @@ struct ItemDetailView: View {
 
     do {
       // Get playback info to get the video URL
-      let info = try await appState.api.playback(id: itemID)
+      let info = try await appState.playbackThroughCurrentAddress(id: itemID).info
       // The download URL is session-scoped (`/playback/{id}/stream`), so the session must
       // outlive the transfer. This used to stop it right here, on the premise that "the
       // download itself doesn't use it" — which was false, and made every download 404.
@@ -1927,10 +1927,9 @@ private struct PlayerSheet: View {
     // path in play(_:resolvedThrough:).
     let requestedStart = forceFromBeginning ? 0 : Double(resumeOverrideSeconds)
     do {
-      let base = appState.api.baseURL
-      let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap,
-                                                 subtitleOffset: subtitleOffset,
-                                                 startSeconds: requestedStart)
+      let (info, base) = try await appState.playbackThroughCurrentAddress(
+        id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset,
+        startSeconds: requestedStart)
       await play(info, resolvedThrough: base)
     } catch APIError.converting {
       // Server is auto-normalizing this title (TASK-755). Show the informational
@@ -1955,12 +1954,11 @@ private struct PlayerSheet: View {
       // try re-resolving candidates (network context may have changed since login).
       if appState.serverUnreachable, await appState.reconnect() {
         do {
-          let base = appState.api.baseURL
           // Same start position as the first attempt: this retry used to drop it, so a
           // mid-file transcode restarted from zero on the new address (TASK-991).
-          let info = try await appState.api.playback(id: itemID, quality: appState.qualityCap,
-                                                     subtitleOffset: subtitleOffset,
-                                                     startSeconds: requestedStart)
+          let (info, base) = try await appState.playbackThroughCurrentAddress(
+            id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset,
+            startSeconds: requestedStart)
           await play(info, resolvedThrough: base)
           appState.clearNetworkError()
           return
@@ -2055,6 +2053,52 @@ enum StreamReresolution {
     if playbackFailedOnConnection { return true }
     guard let resolvedThrough else { return false }
     return resolvedThrough.absoluteString != currentBase.absoluteString
+  }
+
+  /// Fetches through the current address and returns the reply with the address it came
+  /// through (TASK-1009). The server builds stream URLs from the address a request arrived on,
+  /// so a reply that was in flight while the app switched address names the old host. The
+  /// reconnect for that switch has already been handled, with nothing yet on screen to rebuild,
+  /// so the stale reply is released (`discard`) and the request repeated through the new
+  /// address. An address that changes on every request stops after `maxAttempts`; the last
+  /// reply is used with the address it came through, so a later reconnect still sees it stale.
+  static func fetchThroughCurrentBase<Info>(
+    currentBase: () -> URL,
+    fetch: () async throws -> Info,
+    discard: (Info) async -> Void,
+    maxAttempts: Int = 3
+  ) async throws -> (info: Info, base: URL) {
+    var attempt = 1
+    while true {
+      let base = currentBase()
+      let info = try await fetch()
+      if currentBase().absoluteString == base.absoluteString || attempt >= maxAttempts {
+        return (info, base)
+      }
+      await discard(info)
+      attempt += 1
+    }
+  }
+}
+
+extension AppState {
+  /// The one way to ask for playback info (TASK-1009): the player, its reconnect retry, a
+  /// download and a download restart all need a stream URL on an address this device can
+  /// still reach. A reply that came through an address no longer current is released and
+  /// asked for again.
+  func playbackThroughCurrentAddress(id: String, quality: String = "auto",
+                                     subtitleOffset: Double = 0,
+                                     startSeconds: Double = 0) async throws
+    -> (info: PlaybackInfo, base: URL) {
+    try await StreamReresolution.fetchThroughCurrentBase(
+      currentBase: { api.baseURL },
+      fetch: {
+        try await api.playback(id: id, quality: quality, subtitleOffset: subtitleOffset,
+                               startSeconds: startSeconds)
+      },
+      discard: { stale in
+        if let sid = stale.resolvedSessionID { await api.stopPlayback(sessionID: sid) }
+      })
   }
 }
 

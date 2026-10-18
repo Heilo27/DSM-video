@@ -127,7 +127,9 @@ struct DS_Video_cloneApp: App {
                         Task { await state.api.stopPlayback(sessionID: sessionID) }
                     }
                     DownloadManager.shared.urlResolver = { itemID in
-                        guard let info = try? await state.api.playback(id: itemID),
+                        // Through the current address, so a restart never resumes on a host
+                        // the device just left (TASK-1009).
+                        guard let info = try? await state.playbackThroughCurrentAddress(id: itemID).info,
                               let url = info.streamUrl else { return nil }
                         return (url: url, sessionID: info.resolvedSessionID)
                     }
