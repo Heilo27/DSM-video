@@ -22,6 +22,95 @@ struct TVShowDetailView: View {
   }
 }
 
+// MARK: - Show resume point (shared by the tvOS and iOS show pages)
+
+/// A resolved resume point: the owning season's full episode list plus the index to open at.
+struct ShowResumeTarget: Identifiable, Hashable {
+  let seasonNumber: Int
+  let seasonIndex: Int
+  let episodes: [ItemSummary]
+  let index: Int
+  /// true = an in-progress episode (Resume); false = the next unwatched one (Play).
+  let isResume: Bool
+  var id: String { episodes.indices.contains(index) ? episodes[index].id : "\(seasonNumber)-\(index)" }
+
+  /// "Resume S2·E3" / "Play S1·E1".
+  var label: String {
+    let verb = isResume ? "Resume" : "Play"
+    let number = episodes.indices.contains(index) ? (episodes[index].episodeNumber ?? (index + 1)) : (index + 1)
+    return "\(verb) S\(seasonNumber)·E\(number)"
+  }
+
+  static func == (lhs: ShowResumeTarget, rhs: ShowResumeTarget) -> Bool { lhs.id == rhs.id }
+  func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+/// ONE home for "which episode does the show page's Resume/Play button open". Before TASK-1060
+/// the scan loop existed twice (tvOS `resolveResumePoint`, iOS `resolveResume`) and the tvOS
+/// copy had already drifted once (it lacked the S1·E1 fallback).
+///
+/// Walks seasons in order, fetching sequentially and stopping at the first season that holds an
+/// in-progress episode (TASK-654: worst case a handful of calls, never 20 in parallel), capped
+/// at `scanLimit` seasons. The pick itself is `PlaybackProgress.showResumePick` (thresholds:
+/// FRD-001 FR-016): the latest in-progress episode resumes itself; otherwise the first unwatched
+/// episode after the last finished one; otherwise (everything watched, or no progress data) the
+/// first episode of the first non-empty season as Play. A season whose fetch fails is skipped.
+/// Returns nil when cancelled (TASK-656: no state written on a dismissed view) or when no
+/// scanned season has an episode.
+@MainActor
+enum ShowResumeResolver {
+  static let scanLimit = 5
+
+  static func resolve(show: TVShow, library: Library, seasons: [TVSeason],
+                      appState: AppState) async -> ShowResumeTarget? {
+    guard !seasons.isEmpty else { return nil }
+
+    var results: [(season: TVSeason, episodes: [ItemSummary])] = []
+    for s in seasons.prefix(scanLimit) {
+      guard !Task.isCancelled else { return nil }
+      if appState.isDemoMode {
+        results.append((s, DemoData.episodes(for: show.id, season: s.seasonNumber)))
+        continue
+      }
+      do {
+        let resp = try await appState.api.tvShowEpisodes(
+          showId: show.id, season: s.seasonNumber, libraryId: library.id)
+        results.append((s, resp.items))
+        let hasInProgress = resp.items.contains { ep in
+          guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
+          return PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
+                                             durationSeconds: prog.durationSeconds) == .inProgress
+        }
+        if hasInProgress { break }
+      } catch is CancellationError {
+        return nil
+      } catch {
+        // Non-fatal: skip this season for resume detection.
+        results.append((s, []))
+      }
+    }
+    guard !Task.isCancelled else { return nil }
+
+    func target(_ season: TVSeason, _ episodes: [ItemSummary], _ index: Int, _ isResume: Bool) -> ShowResumeTarget {
+      let sIdx = seasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
+      return ShowResumeTarget(seasonNumber: season.seasonNumber, seasonIndex: sIdx,
+                              episodes: episodes, index: index, isResume: isResume)
+    }
+
+    let flat = results.flatMap { entry in
+      entry.episodes.enumerated().map { (season: entry.season, episodes: entry.episodes, idx: $0.offset) }
+    }
+    if let pick = PlaybackProgress.showResumePick(progress: flat.map { $0.episodes[$0.idx].progress }) {
+      let at = flat[pick.index]
+      return target(at.season, at.episodes, at.idx, pick.isResume)
+    }
+    if let first = results.first(where: { !$0.episodes.isEmpty }) {
+      return target(first.season, first.episodes, 0, false)
+    }
+    return nil
+  }
+}
+
 // MARK: - tvOS: Cinematic Split-Screen
 
 #if os(tvOS)
@@ -42,6 +131,13 @@ private struct TVShowDetailSplitView: View {
   // Computed resume point — derived from episode progress after seasons load
   @State private var resolvedHighlightEpisodeID: String? = nil
   @State private var resolvedHighlightSeason: Int? = nil
+
+  // The Resume/Play action in the backdrop panel (nil until the scan resolves, or when the
+  // show has no episodes). It owns default focus on this page.
+  @State private var resume: ShowResumeTarget?
+  @State private var resumeNav: ShowResumeTarget?
+  @FocusState private var resumeFocused: Bool
+  @Namespace private var pageNamespace
 
   private var effectiveHighlightEpisodeID: String? { highlightEpisodeID ?? resolvedHighlightEpisodeID }
   private var effectiveHighlightSeason: Int? { highlightSeason ?? resolvedHighlightSeason }
@@ -64,7 +160,19 @@ private struct TVShowDetailSplitView: View {
         }
       }
     }
+    .focusScope(pageNamespace)
     .task { await load() }
+    .navigationDestination(item: $resumeNav) { target in
+      TVEpisodeDetailView(
+        episodes: target.episodes,
+        initialIndex: target.index,
+        show: show,
+        library: library,
+        allSeasons: seasons,
+        currentSeasonIndex: target.seasonIndex,
+        autoPlay: true
+      )
+    }
   }
 
   // MARK: Backdrop Panel
@@ -107,38 +215,66 @@ private struct TVShowDetailSplitView: View {
       )
       .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-      // Show title & meta overlaid bottom-left
-      VStack(alignment: .leading, spacing: .dsSpaceSM) {
-        Text(show.title)
-          .font(.dsTVLargeTitle)
-          .foregroundStyle(.white)
-          .lineLimit(2)
-          .shadow(color: .black.opacity(0.6), radius: 4, x: 0, y: 2)
+      // Show title & meta overlaid bottom-left, with the Resume/Play action under them
+      VStack(alignment: .leading, spacing: .dsSpaceXL) {
+        VStack(alignment: .leading, spacing: .dsSpaceSM) {
+          Text(show.title)
+            .font(.dsTVLargeTitle)
+            .foregroundStyle(.white)
+            .lineLimit(2)
+            .shadow(color: .black.opacity(0.6), radius: 4, x: 0, y: 2)
 
-        HStack(spacing: .dsSpaceMD) {
-          if let year = show.year {
-            Text(String(year))
-              .font(.dsTVBody)
-              .foregroundStyle(Color.dsTextSecondary)
-          }
-          if show.year != nil {
-            Circle()
-              .fill(Color.dsTextMuted)
-              .frame(width: 4, height: 4)
-              .accessibilityHidden(true)
-          }
-          if let sc = show.seasonCount {
-            Text("\(sc) season\(sc == 1 ? "" : "s")")
-              .font(.dsTVBody)
-              .foregroundStyle(Color.dsTextSecondary)
+          HStack(spacing: .dsSpaceMD) {
+            if let year = show.year {
+              Text(String(year))
+                .font(.dsTVBody)
+                .foregroundStyle(Color.dsTextSecondary)
+            }
+            if show.year != nil {
+              Circle()
+                .fill(Color.dsTextMuted)
+                .frame(width: 4, height: 4)
+                .accessibilityHidden(true)
+            }
+            if let sc = show.seasonCount {
+              Text("\(sc) season\(sc == 1 ? "" : "s")")
+                .font(.dsTVBody)
+                .foregroundStyle(Color.dsTextSecondary)
+            }
           }
         }
+        .accessibilityElement(children: .combine)
+
+        resumeButton
       }
-      .accessibilityElement(children: .combine)
       .padding(.leading, .dsSpaceTitleSafe)
       .padding(.bottom, .dsSpaceTitleSafe)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  /// Resume the in-progress episode, else Play the next unwatched one, else Play S1·E1.
+  /// The pick is `ShowResumeResolver`; this is only the presentation.
+  @ViewBuilder
+  private var resumeButton: some View {
+    if let resume {
+      Button {
+        resumeNav = resume
+      } label: {
+        HStack(spacing: .dsSpaceSM) {
+          Image(systemName: resume.isResume ? "play.fill" : "play.circle.fill")
+          Text(resume.label)
+        }
+        .minimumScaleFactor(0.7)
+        .lineLimit(1)
+      }
+      .dsPrimaryButton(minWidth: 260)
+      .focusEffectDisabled()
+      .focused($resumeFocused)
+      .prefersDefaultFocus(in: pageNamespace)
+      .accessibilityLabel(resume.label)
+      .accessibilityHint(resume.isResume ? "Resumes the episode where you left off" : "Plays the next episode")
+    }
   }
 
   @ViewBuilder
@@ -270,6 +406,7 @@ private struct TVShowDetailSplitView: View {
     guard !isLoading else { return }
     if appState.isDemoMode {
       seasons = DemoData.seasons(for: show.id)
+      await resolveResumePoint()
       return
     }
     isLoading = true
@@ -278,10 +415,7 @@ private struct TVShowDetailSplitView: View {
       let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
       seasons = resp.seasons
       error = nil
-      // Only resolve a resume point if none was passed in from outside
-      if highlightEpisodeID == nil, highlightSeason == nil {
-        await resolveResumePoint(for: resp.seasons)
-      }
+      await resolveResumePoint()
     } catch {
       // Classify the failure so session/offline state stays accurate (see ItemDetailView.load).
       appState.handleConnectionFailure(error)
@@ -290,85 +424,20 @@ private struct TVShowDetailSplitView: View {
     }
   }
 
-  // Find the resume point across seasons. Fetches seasons sequentially (up to a cap)
-  // and stops early once an in-progress episode is found — avoids 20+ parallel requests.
-  //
-  // Algorithm (PlaybackProgress.showResumePick; thresholds in PlaybackProgress, FRD-001 FR-016):
-  //   Walk all episodes in season order.
-  //   - Track the latest episode that is in progress (started: 5% or more, and not
-  //     finished) as the resume pick.
-  //   - A finished episode (past 95%, or within the last 90 seconds) moves the
-  //     first-unwatched cursor past it.
-  //   - An episode with no progress, or under 5% (never genuinely started), is
-  //     unwatched: it becomes first-unwatched if the cursor is empty.
-  //   After scanning:
-  //   - If an in-progress episode was found: the resume point IS that episode (resumes
-  //     from its saved position). Advancing to the next episode only happens for
-  //     finished episodes, via the first-unwatched cursor.
-  //   - Else: the resume point is the first unwatched episode after the last finished one.
-  //
-  // TASK-654: capped to scanLimit seasons; sequential fetch exits early on first
-  //           in-progress find — worst case 3–4 calls, not 20 parallel.
-  // TASK-656: CancellationError propagates; guard after withTaskGroup prevents
-  //           state writes on a dismissed view.
-  private func resolveResumePoint(for seasons: [TVSeason]) async {
-    guard !seasons.isEmpty else { return }
-
-    // TASK-654: Only scan enough seasons to find a resume point.
-    // Most users are within the first 5 seasons; cap avoids hammering the API on
-    // a 20-season show when the user is on S1.
-    let scanLimit = min(5, seasons.count)
-    let seasonsToScan = Array(seasons.prefix(scanLimit))
-
-    // TASK-654: Sequential fetch — stop once we find an in-progress season.
-    // This is 1–3 calls in the common case instead of N parallel calls.
-    var results: [(season: Int, episodes: [ItemSummary])] = []
-    for s in seasonsToScan {
-      // TASK-656: Check cancellation before each fetch
-      guard !Task.isCancelled else { return }
-      do {
-        let resp = try await appState.api.tvShowEpisodes(
-          showId: show.id, season: s.seasonNumber, libraryId: library.id)
-        results.append((season: s.seasonNumber, episodes: resp.items))
-        // Early exit: if this season has an in-progress episode, no need to scan further
-        let hasInProgress = resp.items.contains { ep in
-          guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
-          return PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
-                                             durationSeconds: prog.durationSeconds) == .inProgress
-        }
-        if hasInProgress { break }
-      } catch is CancellationError {
-        return
-      } catch {
-        // Non-fatal: skip this season for resume detection
-        results.append((season: s.seasonNumber, episodes: []))
-      }
+  // Resume point for the Resume/Play button and the episode-list highlight. The scan and the
+  // pick are `ShowResumeResolver` (shared with the iOS show page; FRD-001 FR-016 thresholds
+  // live in PlaybackProgress). The scan runs even when a highlight was passed in, because the
+  // button needs the target's episode list; the passed-in highlight still wins for the list.
+  private func resolveResumePoint() async {
+    guard let target = await ShowResumeResolver.resolve(
+        show: show, library: library, seasons: seasons, appState: appState) else { return }
+    resume = target
+    if highlightEpisodeID == nil, highlightSeason == nil {
+      resolvedHighlightEpisodeID = target.episodes[target.index].id
+      resolvedHighlightSeason = target.seasonNumber
     }
-
-    // TASK-656: Don't write state if the parent task was cancelled while fetching
-    guard !Task.isCancelled else { return }
-
-    // Walk seasons in order. The pick (latest in-progress episode, else the first unwatched
-    // one after the last finished episode) is PlaybackProgress.showResumePick, shared with
-    // the iOS show page, so both classify "finished" through PlaybackProgress.isFinished.
-    let flat = results.flatMap { entry in entry.episodes.map { (season: entry.season, ep: $0) } }
-    if let pick = PlaybackProgress.showResumePick(progress: flat.map { $0.ep.progress }) {
-      resolvedHighlightEpisodeID = flat[pick.index].ep.id
-      resolvedHighlightSeason = flat[pick.index].season
-      return
-    }
-
-    // Fallback: everything watched (or no progress data) — offer S1·E1.
-    //
-    // DRIFT FIX. The iOS twin has always had this; tvOS did not, so on Apple TV a
-    // fully-watched show resolved no target at all and the page offered nothing to play.
-    // Same algorithm, same comments, one branch missing — the exact failure mode that
-    // comes from writing a routine twice instead of once.
-    if let first = results.first(where: { !$0.episodes.isEmpty }),
-       let ep = first.episodes.first {
-      resolvedHighlightEpisodeID = ep.id
-      resolvedHighlightSeason = first.season
-    }
+    // The button appears after the episode list has already claimed focus; hand it back.
+    resumeFocused = true
   }
 }
 
@@ -385,7 +454,7 @@ private struct TVSeasonSection: View {
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
-  /// Drives the season header's focus highlight — `.buttonStyle(.plain)` provides none.
+  /// Drives the season header's focus highlight — `dsPlainButton()` provides none.
   @FocusState private var isHeaderFocused: Bool
   /// Set once the user has focused an episode inside this section. Latches deliberately:
   /// a late async resolve must never collapse a section the user has entered, and focus
@@ -457,11 +526,11 @@ private struct TVSeasonSection: View {
         )
         .contentShape(Rectangle())
       }
-      // TVRowButtonStyle draws no system focus chrome, so the dsFocusFill above is the
+      // dsPlainButton() draws no system focus chrome, so the dsFocusFill above is the
       // only highlight (without one the header focused INVISIBLY — the user couldn't tell
       // whether Select would collapse the season or open the first episode). Matches
       // TVEpisodeNavRow, which sits directly beneath it.
-      .buttonStyle(TVRowButtonStyle())
+      .dsPlainButton()
       .focused($isHeaderFocused)
       .accessibilityLabel("Season \(season.seasonNumber), \(season.episodeCount) episode\(season.episodeCount == 1 ? "" : "s"), \(isExpanded ? "expanded" : "collapsed")")
 
@@ -589,21 +658,6 @@ private struct TVSeasonSection: View {
   }
 }
 
-// MARK: - tvOS row button style
-
-/// Button style for the season header and episode rows (TASK-1059).
-///
-/// `.buttonStyle(.plain)` on tvOS still draws the system focus platter, a white slab taller
-/// than the row's own `dsFocusFill` that showed as a band above and below the focused Season
-/// header (`.focusEffectDisabled()` does not remove it). A custom style draws no platter, so
-/// the row's explicit `dsFocusFill` background is the one focus treatment. Same reason as
-/// `ProfileTileButtonStyle`. The call site keeps `.focused()` and the fill.
-private struct TVRowButtonStyle: ButtonStyle {
-  func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-  }
-}
-
 // MARK: - tvOS Episode Nav Row (plain button style to prevent focus-scale clipping)
 
 private struct TVEpisodeNavRow<Destination: View>: View {
@@ -625,7 +679,7 @@ private struct TVEpisodeNavRow<Destination: View>: View {
             .fill(isFocused ? Color.dsFocusFill : Color.clear)
         )
     }
-    .buttonStyle(TVRowButtonStyle())
+    .dsPlainButton()
     .focused($isFocused)
     .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
   }
@@ -977,7 +1031,7 @@ private struct StillWatchingOverlay: View {
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
-    .buttonStyle(.plain)
+    .dsPlainButton()
     .focusEffectDisabled()
     .focused($focused, equals: button)
   }
@@ -1005,30 +1059,13 @@ private struct TVShowDetailScrollView: View {
 
   // A7: resume resolution mirroring the tvOS path. Resolves a "Resume S2·E3" /
   // "Play S1·E1" target so iOS gets a top-level Play/Resume button under the header.
-  @State private var resume: ResumeTarget?
-  @State private var resumeNav: ResumeTarget?
+  @State private var resume: ShowResumeTarget?
+  @State private var resumeNav: ShowResumeTarget?
   @State private var isResolvingResume = false
   /// The arrival scroll to the highlighted season happens once per visit, not on every reload.
   @State private var didInitialScroll = false
 
-  /// A resolved resume point: the season's full episode list plus the index to open at.
-  private struct ResumeTarget: Identifiable, Hashable {
-    let seasonNumber: Int
-    let seasonIndex: Int
-    let episodes: [ItemSummary]
-    let index: Int
-    let isResume: Bool   // true = in-progress (Resume), false = unwatched (Play)
-    var id: String { episodes.indices.contains(index) ? episodes[index].id : "\(seasonNumber)-\(index)" }
-
-    static func == (lhs: ResumeTarget, rhs: ResumeTarget) -> Bool { lhs.id == rhs.id }
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
-  }
-
-  private var resumeLabel: String {
-    guard let resume else { return "" }
-    let verb = resume.isResume ? "Resume" : "Play"
-    return "\(verb) S\(resume.seasonNumber)·E\(resume.episodes[resume.index].episodeNumber ?? (resume.index + 1))"
-  }
+  private var resumeLabel: String { resume?.label ?? "" }
 
   private var headerHeight: CGFloat {
     horizontalSizeClass == .regular ? 320 : 220
@@ -1272,64 +1309,15 @@ private struct TVShowDetailScrollView: View {
     }
   }
 
-  /// Resolve the resume point for the top-level button. Mirrors the tvOS
-  /// `resolveResumePoint` algorithm: latest in-progress episode resumes itself
-  /// (Resume); otherwise first unwatched episode (Play). Stores the owning
-  /// season's full episode list + index so the button can navigate.
+  /// Resolve the resume point for the top-level button. The scan and the pick live in
+  /// `ShowResumeResolver`, shared with the tvOS page (one home for the rule).
   private func resolveResume() async {
     guard !seasons.isEmpty, !isResolvingResume else { return }
     isResolvingResume = true
     defer { isResolvingResume = false }
-
-    let scanLimit = min(5, seasons.count)
-    let seasonsToScan = Array(seasons.prefix(scanLimit))
-
-    var results: [(season: TVSeason, episodes: [ItemSummary])] = []
-    for s in seasonsToScan {
-      guard !Task.isCancelled else { return }
-      if appState.isDemoMode {
-        results.append((s, DemoData.episodes(for: show.id, season: s.seasonNumber)))
-      } else {
-        do {
-          let resp = try await appState.api.tvShowEpisodes(
-            showId: show.id, season: s.seasonNumber, libraryId: library.id)
-          results.append((s, resp.items))
-          let hasInProgress = resp.items.contains { ep in
-            guard let prog = ep.progress, prog.durationSeconds > 0 else { return false }
-            return PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
-                                             durationSeconds: prog.durationSeconds) == .inProgress
-          }
-          if hasInProgress { break }
-        } catch is CancellationError {
-          return
-        } catch {
-          results.append((s, []))
-        }
-      }
-    }
-    guard !Task.isCancelled else { return }
-
-    func target(season: TVSeason, episodes: [ItemSummary], index: Int, isResume: Bool) -> ResumeTarget {
-      let sIdx = seasons.firstIndex(where: { $0.seasonNumber == season.seasonNumber }) ?? 0
-      return ResumeTarget(seasonNumber: season.seasonNumber, seasonIndex: sIdx,
-                          episodes: episodes, index: index, isResume: isResume)
-    }
-
-    // Same shared pick as the tvOS scan above — see PlaybackProgress.showResumePick.
-    // A partially-watched episode resumes ITSELF (from its saved position), not the next
-    // one; a finished episode advances to the next unwatched one.
-    let flat = results.flatMap { entry in
-      entry.episodes.enumerated().map { (season: entry.season, episodes: entry.episodes, idx: $0.offset) }
-    }
-    if let pick = PlaybackProgress.showResumePick(
-        progress: flat.map { $0.episodes[$0.idx].progress }) {
-      let at = flat[pick.index]
-      resume = target(season: at.season, episodes: at.episodes, index: at.idx, isResume: pick.isResume)
-      return
-    }
-    // Fallback: everything watched (or no progress data) — offer S1·E1 as Play.
-    if let first = results.first(where: { !$0.episodes.isEmpty }) {
-      resume = target(season: first.season, episodes: first.episodes, index: 0, isResume: false)
+    if let target = await ShowResumeResolver.resolve(
+        show: show, library: library, seasons: seasons, appState: appState) {
+      resume = target
     }
   }
 }
@@ -1805,7 +1793,7 @@ private struct TVShowMetadataFixerSheet: View {
               let base = "\(candidate.title)\(candidate.year.map { ", \($0)" } ?? "")"
               return isDuplicate ? "\(base), TMDb ID \(candidate.tmdbId)" : base
             }())
-            .buttonStyle(.plain)
+            .dsPlainButton(focusFill: true)
             .disabled(isApplying)
             .listRowBackground(Color.dsSurfaceHigh)
           }
