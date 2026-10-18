@@ -387,6 +387,7 @@ struct HomeFallbackCeilingTests {
   @Test func offlineHomeShowsOnlyTitlesAtOrBelowTheCeiling() async {
     await ocAccount(cached: [owner, kid], active: kid) { state in
       await seed(state)
+      await letNetworkMonitorSettle()  // the init monitor's first update would otherwise reset the flag
       state.isOffline = true
 
       await state.homeLoad()
