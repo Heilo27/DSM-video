@@ -518,8 +518,10 @@ final class DownloadManager: NSObject {
       retire(download.task)
       downloadTasks.removeValue(forKey: download.task)
       activeDownloads.removeValue(forKey: itemId)
-      forgetProgress(itemId)
     }
+    // Outside the `if`: a PAUSED row has no active download but now keeps its progress (TASK-1021),
+    // so cancelling it must clear that too.
+    forgetProgress(itemId)
     // Cancel is a terminal path, so it releases the session like the others. It used to be
     // the one that did not: the map entry was gone before the delegate's cancel callback ran,
     // so a cancelled transfer's session sat on the server until the idle reaper took it.
@@ -558,6 +560,7 @@ final class DownloadManager: NSObject {
     cachedDownloadedItems = nil
     // Clear any resume data that might be lingering
     pausedDownloads.removeValue(forKey: itemId)
+    forgetProgress(itemId)
     forgetDownload(for: itemId)
   }
 
@@ -778,6 +781,7 @@ final class DownloadManager: NSObject {
       // re-resolve the URL first: the stored one is session-scoped and its session is long
       // gone, so reusing it would 404 and write an error body as the movie.
       pendingDownloadInfo.removeValue(forKey: itemId)
+      forgetProgress(itemId)   // a fresh start begins at zero, not at the old transfer's percent
       forgetDownload(for: itemId)
       restartWithFreshURL(itemId: itemId, info: info)
     } else {
@@ -786,6 +790,7 @@ final class DownloadManager: NSObject {
       // explanation of why.
       pendingDownloadInfo.removeValue(forKey: itemId)
       pausedDownloads.removeValue(forKey: itemId)
+      forgetProgress(itemId)
       forgetDownload(for: itemId)
       raiseFailure(FailedDownload(
         id: itemId, title: info.title, videoURL: info.videoURL,
@@ -1216,9 +1221,11 @@ final class DownloadManager: NSObject {
                           resumeData: Data?, cancelReason: Int?) {
     downloadTasks.removeValue(forKey: task)
     activeDownloads.removeValue(forKey: itemId)
-    forgetProgress(itemId)
     lastProgressUpdate.removeValue(forKey: itemId)
     resumedFromData.remove(itemId)
+    // TASK-1021: a stop that leaves resume data is a PAUSED row, and a paused row shows the
+    // percent it reached (FR-030). Progress used to be dropped here, before this branch, so every
+    // paused row read 0%. It is forgotten only when nothing is left to continue (below).
     if let resumeData {
       if pendingDownloadInfo[itemId] == nil { pendingDownloadInfo[itemId] = minimalInfo(for: itemId) }
       pausedDownloads[itemId] = resumeData
@@ -1227,6 +1234,7 @@ final class DownloadManager: NSObject {
       persistDownloadMeta(for: itemId)
       return
     }
+    forgetProgress(itemId)
     releasePlaybackSession(for: itemId)
     let info = pendingDownloadInfo.removeValue(forKey: itemId) ?? minimalInfo(for: itemId)
     pausedDownloads.removeValue(forKey: itemId)
@@ -1392,6 +1400,9 @@ final class DownloadManager: NSObject {
       if let sessionID = meta["sessionID"] { downloadSessionIDs[itemId] = sessionID }
       // Started from resume data by the process that wrote this (see `resumedFromData`).
       if meta["resumed"] == "1" { resumedFromData.insert(itemId) }
+      if let saved = meta["progress"].flatMap(Double.init), saved.isFinite, saved > 0 {
+        downloadProgress[itemId] = min(saved, 1)
+      }
     }
   }
 
@@ -1422,6 +1433,8 @@ final class DownloadManager: NSObject {
     if let ageLevel = info.ageLevel { meta["ageLevel"] = "\(ageLevel)" }
     if let sessionID = downloadSessionIDs[itemId] { meta["sessionID"] = sessionID }
     if resumedFromData.contains(itemId) { meta["resumed"] = "1" }
+    // A paused row shows the percent it reached, also after a relaunch (TASK-1021, FR-030).
+    if let progress = downloadProgress[itemId], progress > 0 { meta["progress"] = "\(progress)" }
     store[itemId] = meta
     savePausedMetaToDisk(store)
   }
