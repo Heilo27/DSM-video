@@ -1562,33 +1562,68 @@
       return /^[a-zA-Z0-9_-]+$/.test(input) && !input.includes('.');
     }
 
+    // TASK-1049. A QuickConnect lookup that fails says why and what to do; it never falls back to a
+    // guessed "<id>.quickconnect.to". That host is DSM's portal, not DSVideo, and a browser cannot
+    // call it from this page anyway (the server sends no CORS headers), so the guess could only
+    // produce a later, unrelated "Failed to fetch". Each sentence below is one cause; the keys
+    // for server answers are the error codes handleQuickConnectResolve returns.
+    const QC_PROBLEMS = {
+      // The lookup never reached the DSVideo server this page came from.
+      page_server_unreachable: (id) => `Couldn't reach the DSVideo server this page came from to look up "${id}". Check that it is running and your network is up, then try again.`,
+      // The page was not served by a DSVideo server (opened from a file), so there is nothing to ask.
+      no_page_server: (id) => `This page wasn't opened from a DSVideo server, so it can't look up "${id}". Open DSVideo from your NAS, or enter your NAS's address instead.`,
+      // The server answered 502: it could not reach Synology's QuickConnect service.
+      quickconnect_resolve_failed: (id) => `Your DSVideo server couldn't reach QuickConnect to look up "${id}". Check the NAS's internet connection and try again, or enter your NAS's address instead.`,
+      missing_quickconnect_id: () => 'Enter your QuickConnect ID.',
+      invalid_json: (id) => `The server couldn't read the lookup for "${id}". Reload the page and try again.`,
+      // QuickConnect answered with no address (an unregistered ID, or a NAS not sharing one).
+      no_address: (id) => `QuickConnect has no address for "${id}". Check the spelling and that QuickConnect is turned on in DSM, or enter your NAS's address instead.`,
+      // Any answer this page has no sentence for: say what the server said, not a generic failure.
+      unexpected: (id, detail) => `The lookup for "${id}" failed unexpectedly (${detail}). Try again, or enter your NAS's address instead.`
+    };
+
+    function qcProblem(kind, id, detail) {
+      const say = Object.hasOwn(QC_PROBLEMS, kind) ? QC_PROBLEMS[kind] : QC_PROBLEMS.unexpected;
+      return new Error(say(id, detail));
+    }
+
+    // Returns the first address QuickConnect lists for the ID, or throws an Error whose message is
+    // the cause. The server is the one this page came from (window.location.origin), which is
+    // where /web is served; embedded mode never calls this because it has no address field.
     async function resolveQuickConnect(quickConnectId) {
       const infoDiv = document.getElementById('login-info');
-      infoDiv.textContent = 'Resolving QuickConnect...';
+      infoDiv.textContent = 'Looking up your QuickConnect ID...';
       infoDiv.classList.add('visible');
       try {
-        // Use state.baseURL, not window.location.origin — baseURL carries the
-        // /dsvideo prefix when served through DSM's nginx.
-        const apiBase = state.isEmbedded ? state.baseURL : '';
-        if (apiBase) {
-          const response = await fetch(`${apiBase}/api/v1/auth/quickconnect/resolve`, {
+        const origin = window.location.origin;
+        if (!origin || origin === 'null') throw qcProblem('no_page_server', quickConnectId);
+        let response;
+        try {
+          response = await fetch(`${origin}/api/v1/auth/quickconnect/resolve`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ quickConnectId })
           });
-          if (response.ok) {
-            const data = await response.json();
-            if (data.candidates && data.candidates.length > 0) {
-              infoDiv.classList.remove('visible');
-              return data.candidates[0].baseUrl;
-            }
-          }
+        } catch (networkError) {
+          console.error('QuickConnect lookup request failed:', networkError);
+          throw qcProblem('page_server_unreachable', quickConnectId);
         }
+        let data = null;
+        try {
+          data = await response.json();
+        } catch (parseError) {
+          console.error('QuickConnect lookup answer was not JSON, HTTP', response.status, parseError);
+        }
+        if (!response.ok) {
+          const code = data && data.error ? data.error : `HTTP ${response.status}`;
+          console.error('QuickConnect lookup failed:', response.status, code);
+          throw qcProblem(code, quickConnectId, code);
+        }
+        const first = data && Array.isArray(data.candidates) ? data.candidates[0] : null;
+        if (!first || !first.baseUrl) throw qcProblem('no_address', quickConnectId);
+        return first.baseUrl;
+      } finally {
         infoDiv.classList.remove('visible');
-        return `https://${quickConnectId}.quickconnect.to`;
-      } catch (error) {
-        infoDiv.classList.remove('visible');
-        throw new Error('Failed to resolve QuickConnect ID');
       }
     }
 
@@ -1636,8 +1671,10 @@
       const otp = document.getElementById('otp').value.trim();
 
       try {
+        let viaQuickConnect = false;
         if (!state.isEmbedded && server && isQuickConnectID(server)) {
           server = await resolveQuickConnect(server);
+          viaQuickConnect = true;
         }
         if (server && !server.startsWith('http://') && !server.startsWith('https://')) {
           server = 'http://' + server;
@@ -1646,11 +1683,22 @@
         const loginData = { username, password };
         if (otp) loginData.otp = otp;
 
-        const response = await fetch(`${server}/api/v1/auth/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(loginData)
-        });
+        let response;
+        try {
+          response = await fetch(`${server}/api/v1/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(loginData)
+          });
+        } catch (networkError) {
+          console.error('Sign-in request failed:', server, networkError);
+          if (viaQuickConnect) {
+            // QuickConnect did answer; the address it gave is not one this page can sign in to
+            // (a browser may only call the server it was loaded from).
+            throw new Error(`QuickConnect found ${server}, but this page can't sign in there. Open DSVideo from that address instead (${server}/dsvideo/), or from your NAS.`);
+          }
+          throw new Error(`Couldn't reach ${server}. Check the address and that the server is running.`);
+        }
         const data = await response.json();
 
         if (!response.ok) {

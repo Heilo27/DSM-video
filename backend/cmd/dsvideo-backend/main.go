@@ -1116,10 +1116,12 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 		// /shows/{showName} emits the same id + title shape — but the routes are live.
 		//
 		// Genuinely uncalled by every client today: /libraries/summary, /admin/*,
-		// /tmdb/image, /auth/quickconnect/resolve
-		// (the app resolves via Synology's service directly), and /playback/{sessionId}/stop
+		// /tmdb/image, and /playback/{sessionId}/stop
 		// — that last one is worth noting, because transcode sessions are consequently only
 		// reaped by timeout rather than closed when the client stops watching.
+		//
+		// /auth/quickconnect/resolve is called by the /web sign-in page only (TASK-1049); the
+		// iOS and tvOS apps resolve via Synology's service directly.
 		r.Get("/genres", s.handleGenres)
 		r.Get("/suggested", s.handleSuggested)
 		r.Get("/collections", s.handleCollections)

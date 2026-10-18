@@ -526,6 +526,13 @@ found. An ID that is registered but whose NAS publishes no address says so and p
 QuickConnect setting in DSM. A lookup that never reached QuickConnect says QuickConnect couldn't be
 reached. "Invalid server address" is reserved for input that is neither a parseable address nor
 shaped like a QuickConnect ID (letters, digits, hyphens).
+*Clarified 2026-10-18 (TASK-1049):* the /web sign-in page follows the same rule. When a QuickConnect ID
+cannot be looked up, the page says which of these it is: the DSVideo server it came from could not be
+reached, that server could not reach QuickConnect, QuickConnect has no address for the ID, or the answer
+was something the page does not recognise (the server's own error code is shown). Each message says what
+to do next, and the page never quietly signs in against a guessed "<id>.quickconnect.to" address: that
+host is DSM's portal, not DSVideo, and a browser cannot call it from the page. If QuickConnect does return
+an address the page cannot sign in to, it says so and points at that address's /dsvideo/ page.
 *Clarified 2026-10-17 (TASK-949):* Local Network access turned off for the app is its own cause, named
 as such wherever it stops something: the server search, sign-in, and a request mid-session (the banner).
 It is never reported as "No network connection" or as the device being offline, because the device's
