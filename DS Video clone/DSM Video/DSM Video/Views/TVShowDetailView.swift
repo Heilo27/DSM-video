@@ -340,61 +340,13 @@ private struct TVShowDetailSplitView: View {
     // TASK-656: Don't write state if the parent task was cancelled while fetching
     guard !Task.isCancelled else { return }
 
-    // Walk seasons in order; find the latest in-progress episode and first unwatched.
-    // Priority: in-progress (2%–95%) > first unwatched (0% progress) > nothing
-    var inProgressEp: ItemSummary? = nil
-    var inProgressSeason: Int? = nil
-    var firstUnwatchedEp: ItemSummary? = nil
-    var firstUnwatchedSeason: Int? = nil
-
-    for entry in results {
-      for ep in entry.episodes {
-        // Classification lives in PlaybackProgress.watchState so this scan and the iOS one
-        // cannot disagree about what "started" or "watched" means. They previously wrote
-        // the same fraction math out by hand — which is how the startedThreshold drifted
-        // (0.05 here, 0.02 there) and the show page offered to resume an episode the home
-        // rail said had never been started.
-        if let prog = ep.progress, prog.durationSeconds > 0 {
-          let state = PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
-                                                  durationSeconds: prog.durationSeconds)
-          if state == .inProgress {
-            // Track the *latest* in-progress episode (overwrite as we walk forward)
-            inProgressEp = ep
-            inProgressSeason = entry.season
-            // Once we've seen in-progress content, the firstUnwatched cursor resets —
-            // the next unwatched episode after the in-progress block is what matters
-            firstUnwatchedEp = nil
-            firstUnwatchedSeason = nil
-          } else if state == .watched {
-            // TASK-657: Fully watched — advance the firstUnwatched cursor past this ep.
-            // Without this, a show where S1 is 100% done kept pointing firstUnwatched
-            // at S1E1 (or nowhere) rather than S2E1.
-            firstUnwatchedEp = nil
-            firstUnwatchedSeason = nil
-          }
-        } else {
-          // No progress record — genuinely unwatched.
-          // Only record it if we haven't already got a candidate.
-          if firstUnwatchedEp == nil {
-            firstUnwatchedEp = ep
-            firstUnwatchedSeason = entry.season
-          }
-        }
-      }
-    }
-
-    // A partially-watched episode resumes ITSELF (from its saved position), not the
-    // next one. Advancing to the next episode is handled separately for fully-watched
-    // episodes via the firstUnwatched cursor below.
-    if let ipEp = inProgressEp, let ipSeason = inProgressSeason {
-      resolvedHighlightEpisodeID = ipEp.id
-      resolvedHighlightSeason = ipSeason
-      return
-    }
-
-    if let ep = firstUnwatchedEp, let s = firstUnwatchedSeason {
-      resolvedHighlightEpisodeID = ep.id
-      resolvedHighlightSeason = s
+    // Walk seasons in order. The pick (latest in-progress episode, else the first unwatched
+    // one after the last finished episode) is PlaybackProgress.showResumePick, shared with
+    // the iOS show page, so both classify "finished" through PlaybackProgress.isFinished.
+    let flat = results.flatMap { entry in entry.episodes.map { (season: entry.season, ep: $0) } }
+    if let pick = PlaybackProgress.showResumePick(progress: flat.map { $0.ep.progress }) {
+      resolvedHighlightEpisodeID = flat[pick.index].ep.id
+      resolvedHighlightSeason = flat[pick.index].season
       return
     }
 
@@ -1308,37 +1260,16 @@ private struct TVShowDetailScrollView: View {
                           episodes: episodes, index: index, isResume: isResume)
     }
 
-    // Locate latest in-progress episode and the episode after it.
-    var inProgress: (season: TVSeason, episodes: [ItemSummary], idx: Int)?
-    var firstUnwatched: (season: TVSeason, episodes: [ItemSummary], idx: Int)?
-
-    for entry in results {
-      for (i, ep) in entry.episodes.enumerated() {
-        // Same shared classifier as the tvOS scan above — see PlaybackProgress.watchState.
-        if let prog = ep.progress, prog.durationSeconds > 0 {
-          let state = PlaybackProgress.watchState(positionSeconds: prog.positionSeconds,
-                                                  durationSeconds: prog.durationSeconds)
-          if state == .inProgress {
-            inProgress = (entry.season, entry.episodes, i)
-            firstUnwatched = nil
-          } else if state == .watched {
-            firstUnwatched = nil
-          }
-        } else if firstUnwatched == nil {
-          firstUnwatched = (entry.season, entry.episodes, i)
-        }
-      }
+    // Same shared pick as the tvOS scan above — see PlaybackProgress.showResumePick.
+    // A partially-watched episode resumes ITSELF (from its saved position), not the next
+    // one; a finished episode advances to the next unwatched one.
+    let flat = results.flatMap { entry in
+      entry.episodes.enumerated().map { (season: entry.season, episodes: entry.episodes, idx: $0.offset) }
     }
-
-    if let ip = inProgress {
-      // A partially-watched episode resumes ITSELF (from its saved position), not the
-      // next one. Advancing to the next episode is handled separately for fully-watched
-      // episodes via the firstUnwatched cursor below.
-      resume = target(season: ip.season, episodes: ip.episodes, index: ip.idx, isResume: true)
-      return
-    }
-    if let fu = firstUnwatched {
-      resume = target(season: fu.season, episodes: fu.episodes, index: fu.idx, isResume: false)
+    if let pick = PlaybackProgress.showResumePick(
+        progress: flat.map { $0.episodes[$0.idx].progress }) {
+      let at = flat[pick.index]
+      resume = target(season: at.season, episodes: at.episodes, index: at.idx, isResume: pick.isResume)
       return
     }
     // Fallback: everything watched (or no progress data) — offer S1·E1 as Play.

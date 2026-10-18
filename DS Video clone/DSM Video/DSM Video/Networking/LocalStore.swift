@@ -958,9 +958,14 @@ actor LocalStore {
   private static let sqlRemaining = "(p.duration_seconds - p.position_seconds)"
 
   /// Mirrors PlaybackProgress.isFinished: past the watched ratio OR inside the final 90s.
+  ///
+  /// `position_seconds > 0` mirrors the guard in `isFinished`: a row at position 0 (Mark as
+  /// Unwatched writes one) is never finished, even on a clip shorter than 90s, where
+  /// `remaining < 90` alone would put it in Recently Watched (TASK-962).
   private static let sqlIsFinished = """
-    (\(sqlRatio) > \(PlaybackProgress.watchedThreshold) \
-    OR \(sqlRemaining) < \(PlaybackProgress.finishedRemainingSeconds))
+    (p.position_seconds > 0 \
+    AND (\(sqlRatio) > \(PlaybackProgress.watchedThreshold) \
+    OR \(sqlRemaining) < \(PlaybackProgress.finishedRemainingSeconds)))
     """
 
   /// Started (>= 5%) but not finished — the exact complement of sqlIsFinished within

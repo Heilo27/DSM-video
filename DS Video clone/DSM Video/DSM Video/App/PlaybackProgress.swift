@@ -72,10 +72,19 @@ nonisolated enum PlaybackProgress {
     /// how the 0.05-vs-0.02 mismatch documented on startedThreshold above happened: one copy
     /// was updated and the other was not, so the show page offered to resume an episode the
     /// home rail said had never been started. Single definition, so it cannot drift again.
+    ///
+    /// TASK-962: "watched" is `isFinished` and nothing else. This used to test the fraction
+    /// alone (`>= 0.95`), so a 22-minute episode stopped at 1240s (93.9%, 80s left) was
+    /// `.inProgress` here while `isFinished`, the rail SQL and playback all called it finished:
+    /// the show page offered Resume on an episode that restarted from 0 and that the rail had
+    /// already dropped, instead of advancing to the next one. It also disagreed at exactly
+    /// 95.000%, which `isFinished` (strictly greater) does not treat as finished.
     static func watchState(positionSeconds: Int, durationSeconds: Int) -> WatchState {
         guard durationSeconds > 0 else { return .unwatched }
+        if isFinished(positionSeconds: positionSeconds, durationSeconds: durationSeconds) {
+            return .watched
+        }
         let frac = Double(positionSeconds) / Double(durationSeconds)
-        if frac >= watchedThreshold { return .watched }
         // INCLUSIVE at startedThreshold, matching the rail SQL in LocalStore
         // (`ratio >= startedThreshold`). The show-page scans used a strict `>` while the
         // rail used `>=`, so an item sitting at exactly 5.000% appeared in one place and
@@ -84,6 +93,48 @@ nonisolated enum PlaybackProgress {
         // authority for "is this in Continue Watching", so its boundary wins.
         if frac >= startedThreshold { return .inProgress }
         return .unwatched
+    }
+
+    /// Where the Play / Resume button on a show page should land, over every scanned episode
+    /// in watch order (seasons concatenated). Pure, so the iOS and tvOS show pages share one
+    /// walk instead of keeping two copies, and so it can be tested without a view.
+    ///
+    /// - The latest `.inProgress` episode wins and resumes itself (`isResume == true`).
+    /// - Otherwise the first episode with no progress record AFTER the last watched or
+    ///   in-progress one (`isResume == false`): a finished episode advances the show to the
+    ///   next one.
+    /// - `nil` when neither exists (everything watched, or nothing to scan); the caller
+    ///   falls back to the first episode.
+    ///
+    /// An episode with progress below `startedThreshold` is neither a resume point nor
+    /// "unwatched" here, exactly as both scans behaved before this was extracted.
+    struct ShowResumePick: Equatable {
+        let index: Int
+        let isResume: Bool
+    }
+
+    static func showResumePick(progress: [ItemProgress?]) -> ShowResumePick? {
+        var inProgress: Int?
+        var firstUnwatched: Int?
+        for (i, prog) in progress.enumerated() {
+            if let prog, prog.durationSeconds > 0 {
+                switch watchState(positionSeconds: prog.positionSeconds,
+                                  durationSeconds: prog.durationSeconds) {
+                case .inProgress:
+                    inProgress = i
+                    firstUnwatched = nil
+                case .watched:
+                    firstUnwatched = nil
+                case .unwatched:
+                    break
+                }
+            } else if firstUnwatched == nil {
+                firstUnwatched = i
+            }
+        }
+        if let inProgress { return ShowResumePick(index: inProgress, isResume: true) }
+        if let firstUnwatched { return ShowResumePick(index: firstUnwatched, isResume: false) }
+        return nil
     }
 
     /// The position playback should actually start from: the saved position, or 0 once the

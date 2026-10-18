@@ -119,6 +119,12 @@ stands, so it never keeps showing its own stale one.
 reconciled to the server when connectivity returns; it is never discarded.
 **FR-016 [STATED]** — Continue Watching contains exactly the titles with progress strictly between zero
 and complete, ordered most-recently-watched first. *Derivation:* design-spec B2 data requirements.
+**Complete [DESIGN, 2026-10-17, TASK-962]** — "Complete" means one thing everywhere: the position is above
+zero and either past 95% of the runtime or within the last 90 seconds of it. A title is "started" from 5%.
+The Continue Watching and Recently Watched rails, the poster-card indicator and badge (FR-020), the show
+page's Resume-or-next-episode choice (FR-011) and the restart-from-zero on reopening all read that one
+rule (`PlaybackProgress.isFinished`; the rail SQL mirrors it). A 22-minute episode stopped 80 seconds from the
+end is therefore complete: its show offers the next episode, not a resume.
 **FR-017 [INFERRED]** — With zero in-progress titles the rail is absent rather than rendered empty, and
 its absence is not an error.
 **FR-018 [STATED]** — Mark as Watched sets a title to fully watched, removes it from Continue Watching,
