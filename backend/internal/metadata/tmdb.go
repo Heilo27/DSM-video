@@ -80,38 +80,38 @@ type MovieResult struct {
 
 // TVResult represents a TV show from TMDb search results.
 type TVResult struct {
-	ID              int     `json:"id"`
-	Name            string  `json:"name"`
-	OriginalName    string  `json:"original_name"`
-	Overview        string  `json:"overview"`
-	FirstAirDate    string  `json:"first_air_date"`
-	PosterPath      string  `json:"poster_path"`
-	BackdropPath    string  `json:"backdrop_path"`
-	VoteAverage     float64 `json:"vote_average"`
-	VoteCount       int     `json:"vote_count"`
-	Popularity      float64 `json:"popularity"`
-	GenreIDs        []int   `json:"genre_ids"`
-	OriginCountry   []string `json:"origin_country"`
+	ID            int      `json:"id"`
+	Name          string   `json:"name"`
+	OriginalName  string   `json:"original_name"`
+	Overview      string   `json:"overview"`
+	FirstAirDate  string   `json:"first_air_date"`
+	PosterPath    string   `json:"poster_path"`
+	BackdropPath  string   `json:"backdrop_path"`
+	VoteAverage   float64  `json:"vote_average"`
+	VoteCount     int      `json:"vote_count"`
+	Popularity    float64  `json:"popularity"`
+	GenreIDs      []int    `json:"genre_ids"`
+	OriginCountry []string `json:"origin_country"`
 }
 
 // MovieDetails contains detailed information about a movie.
 type MovieDetails struct {
-	ID            int     `json:"id"`
-	Title         string  `json:"title"`
-	OriginalTitle string  `json:"original_title"`
-	Overview      string  `json:"overview"`
-	ReleaseDate   string  `json:"release_date"`
-	PosterPath    string  `json:"poster_path"`
-	BackdropPath  string  `json:"backdrop_path"`
-	VoteAverage   float64 `json:"vote_average"`
-	VoteCount     int     `json:"vote_count"`
-	Runtime       int     `json:"runtime"`
-	Tagline       string  `json:"tagline"`
-	Status        string  `json:"status"`
-	Revenue       int64   `json:"revenue"`
-	Budget        int64   `json:"budget"`
-	IMDbID        string  `json:"imdb_id"`
-	Genres        []Genre `json:"genres"`
+	ID            int      `json:"id"`
+	Title         string   `json:"title"`
+	OriginalTitle string   `json:"original_title"`
+	Overview      string   `json:"overview"`
+	ReleaseDate   string   `json:"release_date"`
+	PosterPath    string   `json:"poster_path"`
+	BackdropPath  string   `json:"backdrop_path"`
+	VoteAverage   float64  `json:"vote_average"`
+	VoteCount     int      `json:"vote_count"`
+	Runtime       int      `json:"runtime"`
+	Tagline       string   `json:"tagline"`
+	Status        string   `json:"status"`
+	Revenue       int64    `json:"revenue"`
+	Budget        int64    `json:"budget"`
+	IMDbID        string   `json:"imdb_id"`
+	Genres        []Genre  `json:"genres"`
 	Credits       *Credits `json:"credits,omitempty"`
 	// ProductionCompanies, ReleaseDates and Keywords ride along on the detail call via
 	// append_to_response (no extra request).
@@ -122,24 +122,24 @@ type MovieDetails struct {
 
 // TVDetails contains detailed information about a TV show.
 type TVDetails struct {
-	ID              int       `json:"id"`
-	Name            string    `json:"name"`
-	OriginalName    string    `json:"original_name"`
-	Overview        string    `json:"overview"`
-	FirstAirDate    string    `json:"first_air_date"`
-	LastAirDate     string    `json:"last_air_date"`
-	PosterPath      string    `json:"poster_path"`
-	BackdropPath    string    `json:"backdrop_path"`
-	VoteAverage     float64   `json:"vote_average"`
-	VoteCount       int       `json:"vote_count"`
-	NumberOfSeasons int       `json:"number_of_seasons"`
-	NumberOfEpisodes int      `json:"number_of_episodes"`
-	Status          string    `json:"status"`
-	Tagline         string    `json:"tagline"`
-	EpisodeRunTime  []int     `json:"episode_run_time"`
-	Genres          []Genre   `json:"genres"`
-	Networks        []Network `json:"networks"`
-	Credits         *Credits  `json:"credits,omitempty"`
+	ID               int       `json:"id"`
+	Name             string    `json:"name"`
+	OriginalName     string    `json:"original_name"`
+	Overview         string    `json:"overview"`
+	FirstAirDate     string    `json:"first_air_date"`
+	LastAirDate      string    `json:"last_air_date"`
+	PosterPath       string    `json:"poster_path"`
+	BackdropPath     string    `json:"backdrop_path"`
+	VoteAverage      float64   `json:"vote_average"`
+	VoteCount        int       `json:"vote_count"`
+	NumberOfSeasons  int       `json:"number_of_seasons"`
+	NumberOfEpisodes int       `json:"number_of_episodes"`
+	Status           string    `json:"status"`
+	Tagline          string    `json:"tagline"`
+	EpisodeRunTime   []int     `json:"episode_run_time"`
+	Genres           []Genre   `json:"genres"`
+	Networks         []Network `json:"networks"`
+	Credits          *Credits  `json:"credits,omitempty"`
 	// ProductionCompanies, ContentRatings and Keywords ride along on the detail call via
 	// append_to_response (no extra request). Networks is a base field of the response.
 	ProductionCompanies []Company       `json:"production_companies"`
@@ -149,16 +149,16 @@ type TVDetails struct {
 
 // TVEpisode contains information about a TV episode.
 type TVEpisode struct {
-	ID             int     `json:"id"`
-	Name           string  `json:"name"`
-	Overview       string  `json:"overview"`
-	AirDate        string  `json:"air_date"`
-	SeasonNumber   int     `json:"season_number"`
-	EpisodeNumber  int     `json:"episode_number"`
-	StillPath      string  `json:"still_path"`
-	VoteAverage    float64 `json:"vote_average"`
-	VoteCount      int     `json:"vote_count"`
-	Runtime        int     `json:"runtime"`
+	ID            int     `json:"id"`
+	Name          string  `json:"name"`
+	Overview      string  `json:"overview"`
+	AirDate       string  `json:"air_date"`
+	SeasonNumber  int     `json:"season_number"`
+	EpisodeNumber int     `json:"episode_number"`
+	StillPath     string  `json:"still_path"`
+	VoteAverage   float64 `json:"vote_average"`
+	VoteCount     int     `json:"vote_count"`
+	Runtime       int     `json:"runtime"`
 }
 
 // ReleaseDates is TMDb's per-country movie release list. It is the shape of both the
@@ -267,8 +267,8 @@ type Genre struct {
 
 // Network represents a TV network.
 type Network struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
 	LogoPath string `json:"logo_path"`
 }
 
@@ -285,6 +285,56 @@ type CastMember struct {
 	Character   string `json:"character"`
 	ProfilePath string `json:"profile_path"`
 	Order       int    `json:"order"`
+}
+
+// Cast sizes. StoredCastSize is how many billed cast members are kept per title for the detail
+// screens' photo row (FR-150); LegacyCastNames is how many names the comma-joined cast_names
+// column still carries, for the DS Video web plane and for clients that predate cast photos.
+const (
+	StoredCastSize  = 12
+	LegacyCastNames = 5
+)
+
+// TopCast returns up to n of the credits' billed cast, in billing order: members with no name
+// are dropped, and a person TMDb lists twice (two roles) appears once, under the first billing.
+// It is the one place the cast is chosen, shared by the scanner and every manual TMDb fix, so
+// the two can never keep different people. Safe on a nil receiver (a detail call made without
+// credits).
+func (c *Credits) TopCast(n int) []CastMember {
+	if c == nil || n <= 0 {
+		return nil
+	}
+	out := make([]CastMember, 0, n)
+	seen := make(map[int]bool, n)
+	for _, m := range c.Cast {
+		if len(out) >= n {
+			break
+		}
+		m.Name = strings.TrimSpace(m.Name)
+		if m.Name == "" {
+			continue
+		}
+		if m.ID > 0 {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// CastNames is the first n names of members: the value of the legacy cast_names column.
+func CastNames(members []CastMember, n int) []string {
+	names := make([]string, 0, n)
+	for _, m := range members {
+		if len(names) >= n {
+			break
+		}
+		names = append(names, m.Name)
+	}
+	return names
 }
 
 // CrewMember represents a crew member.
@@ -579,21 +629,24 @@ func (c *TMDbClient) doRequest(ctx context.Context, reqURL string, result interf
 
 // VideoMetadata represents enriched metadata for a video file.
 type VideoMetadata struct {
-	TMDbID       int
-	IMDbID       string
-	Title        string
+	TMDbID        int
+	IMDbID        string
+	Title         string
 	OriginalTitle string
-	Overview     string
-	Year         int
-	ReleaseDate  string
-	PosterPath   string
-	BackdropPath string
-	Rating       float64
-	RatingCount  int
-	Runtime      int // minutes
-	Genres       []string
-	Cast         []string // Top cast names
-	Director     string
+	Overview      string
+	Year          int
+	ReleaseDate   string
+	PosterPath    string
+	BackdropPath  string
+	Rating        float64
+	RatingCount   int
+	Runtime       int // minutes
+	Genres        []string
+	Cast          []string // Top cast names (the legacy cast_names column)
+	// CastMembers is the billed cast with TMDb person ids and profile photos (FR-150); Cast is
+	// its first LegacyCastNames names.
+	CastMembers []CastMember
+	Director    string
 	// ContentRating is the raw US certification ("PG-13", "TV-MA"). Empty means TMDb has
 	// no US certification for the title: stored as NULL, meaning unrated.
 	ContentRating string
@@ -824,14 +877,10 @@ func (c *TMDbClient) FetchMovieMetadata(ctx context.Context, title string, year 
 		meta.Genres = append(meta.Genres, g.Name)
 	}
 
-	// Extract cast (top 5)
+	// Extract cast
+	meta.CastMembers = details.Credits.TopCast(StoredCastSize)
+	meta.Cast = CastNames(meta.CastMembers, LegacyCastNames)
 	if details.Credits != nil {
-		for i, c := range details.Credits.Cast {
-			if i >= 5 {
-				break
-			}
-			meta.Cast = append(meta.Cast, c.Name)
-		}
 		// Find director
 		for _, c := range details.Credits.Crew {
 			if c.Job == "Director" {
@@ -930,15 +979,9 @@ func (c *TMDbClient) FetchTVMetadataWithFallback(ctx context.Context, showName, 
 		meta.Genres = append(meta.Genres, g.Name)
 	}
 
-	// Extract cast (top 5)
-	if showDetails.Credits != nil {
-		for i, c := range showDetails.Credits.Cast {
-			if i >= 5 {
-				break
-			}
-			meta.Cast = append(meta.Cast, c.Name)
-		}
-	}
+	// Extract cast
+	meta.CastMembers = showDetails.Credits.TopCast(StoredCastSize)
+	meta.Cast = CastNames(meta.CastMembers, LegacyCastNames)
 
 	// Get episode details if season/episode provided
 	if season > 0 && episode > 0 {
