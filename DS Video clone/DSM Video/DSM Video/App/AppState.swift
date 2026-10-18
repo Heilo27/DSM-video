@@ -922,140 +922,131 @@ final class AppState {
       return
     }
 
-    do {
-      let (candidates, quickConnectFailure) = await resolveCandidateSet()
-      guard !candidates.isEmpty else {
-        loginError = quickConnectFailure?.userMessage ?? Self.invalidServerAddressMessage
-        return
-      }
+    let (candidates, quickConnectFailure) = await resolveCandidateSet()
+    guard !candidates.isEmpty else {
+      loginError = quickConnectFailure?.userMessage ?? Self.invalidServerAddressMessage
+      return
+    }
 
-      let lanCount = { () -> Int in
-        let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        return lan.isEmpty ? 0 : 1
-      }()
+    let lanCount = { () -> Int in
+      let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+      return lan.isEmpty ? 0 : 1
+    }()
 
-      // Diagnostic: the candidate list IS the explanation for most login failures. A stale
-      // saved address shows up here as an address Ryan does not recognise, and the per-
-      // candidate results below say exactly how each one failed.
-      dlog.info(.auth, "login: user '\(username)', \(candidates.count) candidate(s), \(lanCount) LAN")
-      for (i, c) in candidates.enumerated() {
-        dlog.info(.auth, "  candidate \(i + 1): \(c.url.host ?? "?"):\(c.url.port.map(String.init) ?? "-") \(c.url.scheme ?? "?")\(c.requiresTunnelCookie ? " (relay)" : "")")
-      }
+    // Diagnostic: the candidate list IS the explanation for most login failures. A stale
+    // saved address shows up here as an address Ryan does not recognise, and the per-
+    // candidate results below say exactly how each one failed.
+    dlog.info(.auth, "login: user '\(username)', \(candidates.count) candidate(s), \(lanCount) LAN")
+    for (i, c) in candidates.enumerated() {
+      dlog.info(.auth, "  candidate \(i + 1): \(c.url.host ?? "?"):\(c.url.port.map(String.init) ?? "-") \(c.url.scheme ?? "?")\(c.requiresTunnelCookie ? " (relay)" : "")")
+    }
 
-      // Remember the LAN address QuickConnect just told us about.
-      //
-      // The user only ever signs in with a QuickConnect ID (FRD-000 M5: "the user does not
-      // choose a mode, does not re-enter an address"). QuickConnect's response already
-      // contains the NAS's private interface addresses, so persisting the first one here
-      // means the LAN path is available on the NEXT launch without waiting for a
-      // resolution round-trip — and it stops Settings → Home being something the user has
-      // to discover and fill in by hand.
-      //
-      // Only when the user has not set one themselves: a hand-entered address is a
-      // deliberate choice and must not be overwritten by discovery.
-      if lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-         let discoveredLAN = candidates.first(where: {
-           !$0.requiresTunnelCookie && Self.isPrivateLANAddress($0.url.absoluteString)
-         })?.url.absoluteString {
-        lanAddress = discoveredLAN
-        dlog.info(.auth, "learned LAN address from QuickConnect: \(discoveredLAN)")
-      }
+    // Remember the LAN address QuickConnect just told us about.
+    //
+    // The user only ever signs in with a QuickConnect ID (FRD-000 M5: "the user does not
+    // choose a mode, does not re-enter an address"). QuickConnect's response already
+    // contains the NAS's private interface addresses, so persisting the first one here
+    // means the LAN path is available on the NEXT launch without waiting for a
+    // resolution round-trip — and it stops Settings → Home being something the user has
+    // to discover and fill in by hand.
+    //
+    // Only when the user has not set one themselves: a hand-entered address is a
+    // deliberate choice and must not be overwritten by discovery.
+    if lanAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+       let discoveredLAN = candidates.first(where: {
+         !$0.requiresTunnelCookie && Self.isPrivateLANAddress($0.url.absoluteString)
+       })?.url.absoluteString {
+      lanAddress = discoveredLAN
+      dlog.info(.auth, "learned LAN address from QuickConnect: \(discoveredLAN)")
+    }
 
-      var lastError: Error?
-      // Every candidate's failure, as "host:port — reason". The user-facing error names
-      // these; without them "Login failed" is indistinguishable across a stale LAN address,
-      // a blocked port, a cert mismatch and a genuine outage.
-      var attemptFailures: [String] = []
-      // TASK-949: a LAN candidate refused for Local Network access. When nothing answered, that
-      // is the one cause the user can fix, so it leads the message.
-      var localNetworkRefused = false
-      for (index, candidate) in candidates.enumerated() {
-        do {
-          var tempClient = makeClient(baseURL: candidate.url, token: nil)
-          tempClient.usesTunnelCookie = candidate.requiresTunnelCookie
-          // LAN candidates (first lanCount entries) get 2s — fail-fast so WAN isn't delayed
-          // when the user is away from home. Relay gets 15s. WAN direct gets 8s.
-          let timeout: TimeInterval
-          if candidate.requiresTunnelCookie {
-            timeout = 15
-          } else if index < lanCount {
-            timeout = 2
-          } else {
-            timeout = 8
-          }
-          homeLog.info("login: trying \(candidate.url) tunnel=\(candidate.requiresTunnelCookie) timeout=\(timeout)s")
-          let resp = try await tempClient.login(username: username, password: savedPassword, timeoutInterval: timeout)
-          sessionToken = resp.token
-          clearNetworkError()
-          api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
-          // Keep the ID before adoptWinningAddress overwrites baseURL with the winner (TASK-1030).
-          quickConnectID = configuredQuickConnectID ?? ""
-          adoptWinningAddress(candidate)
-          if !savedPassword.isEmpty {
-            Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
-          }
-          startHeartbeatTimer()
-          dlog.info(.auth, "login OK via \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") token=\(DiagnosticLog.redact(resp.token))")
-          return
-        } catch {
-          homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
-          // Per-candidate failure reason. This is what distinguishes "wrong password"
-          // (server answered 401) from "wrong address" (nothing answered at all) — the
-          // exact ambiguity that cost an evening when the app reported both identically.
-          let why: String
-          if let apiErr = error as? APIError {
-            why = apiErr.serverReached ? "server rejected: \(apiErr.userMessage)" : apiErr.userMessage
-          } else if let urlErr = error as? URLError {
-            why = urlErr.code.diagnosticName
-          } else {
-            why = error.localizedDescription
-          }
-          dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
-          attemptFailures.append("\(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") — \(why)")
-          if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
-          lastError = error
+    var lastError: Error?
+    // Every candidate's failure, as "host:port — reason". The user-facing error names
+    // these; without them "Login failed" is indistinguishable across a stale LAN address,
+    // a blocked port, a cert mismatch and a genuine outage.
+    var attemptFailures: [String] = []
+    // TASK-949: a LAN candidate refused for Local Network access. When nothing answered, that
+    // is the one cause the user can fix, so it leads the message.
+    var localNetworkRefused = false
+    for (index, candidate) in candidates.enumerated() {
+      do {
+        var tempClient = makeClient(baseURL: candidate.url, token: nil)
+        tempClient.usesTunnelCookie = candidate.requiresTunnelCookie
+        // LAN candidates (first lanCount entries) get 2s — fail-fast so WAN isn't delayed
+        // when the user is away from home. Relay gets 15s. WAN direct gets 8s.
+        let timeout: TimeInterval
+        if candidate.requiresTunnelCookie {
+          timeout = 15
+        } else if index < lanCount {
+          timeout = 2
+        } else {
+          timeout = 8
         }
+        homeLog.info("login: trying \(candidate.url) tunnel=\(candidate.requiresTunnelCookie) timeout=\(timeout)s")
+        let resp = try await tempClient.login(username: username, password: savedPassword, timeoutInterval: timeout)
+        sessionToken = resp.token
+        clearNetworkError()
+        api = makeClient(baseURL: candidate.url, token: resp.token, usesTunnelCookie: candidate.requiresTunnelCookie)
+        // Keep the ID before adoptWinningAddress overwrites baseURL with the winner (TASK-1030).
+        quickConnectID = configuredQuickConnectID ?? ""
+        adoptWinningAddress(candidate)
+        if !savedPassword.isEmpty {
+          Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
+        }
+        startHeartbeatTimer()
+        dlog.info(.auth, "login OK via \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") token=\(DiagnosticLog.redact(resp.token))")
+        return
+      } catch {
+        homeLog.warning("login: \(candidate.url) failed — \(error.localizedDescription)")
+        // Per-candidate failure reason. This is what distinguishes "wrong password"
+        // (server answered 401) from "wrong address" (nothing answered at all) — the
+        // exact ambiguity that cost an evening when the app reported both identically.
+        let why: String
+        if let apiErr = error as? APIError {
+          why = apiErr.serverReached ? "server rejected: \(apiErr.userMessage)" : apiErr.userMessage
+        } else if let urlErr = error as? URLError {
+          why = urlErr.code.diagnosticName
+        } else {
+          why = error.localizedDescription
+        }
+        dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
+        attemptFailures.append("\(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") — \(why)")
+        if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
+        lastError = error
       }
-      // If a candidate actually reached the server, the server's own error is the
-      // truth — surface it. Only fall back to "couldn't find" when the failure was
-      // purely a connectivity/resolution miss (no server ever answered). Otherwise a
-      // real 401/403 (wrong password, or account lacks app permission) gets hidden
-      // behind a misleading "check the QuickConnect ID" message.
-      dlog.error(.auth, "login FAILED — all \(candidates.count) candidate(s) exhausted")
+    }
+    // If a candidate actually reached the server, the server's own error is the
+    // truth — surface it. Only fall back to "couldn't find" when the failure was
+    // purely a connectivity/resolution miss (no server ever answered). Otherwise a
+    // real 401/403 (wrong password, or account lacks app permission) gets hidden
+    // behind a misleading "check the QuickConnect ID" message.
+    dlog.error(.auth, "login FAILED — all \(candidates.count) candidate(s) exhausted")
 
-      // NAME WHAT WAS TRIED. The old messages ("Login failed. Check that DSVideoServer is
-      // running on your NAS.") pointed at the server even when the server was answering
-      // perfectly — the app had simply tried a stale address, or a port that speaks a
-      // different scheme, and said nothing about which. Diagnosing that took hours.
-      //
-      // A server that ANSWERED and rejected us is different: its own message is the truth
-      // and must not be buried under connection detail.
-      if let apiErr = lastError as? APIError, apiErr.serverReached {
-        loginError = apiErr.userMessage
-      } else if localNetworkRefused {
-        loginError = LocalNetworkPermission.deniedMessage
-      } else if let qcID = configuredQuickConnectID {
-        let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
-        // The saved LAN/WAN addresses failed AND the QuickConnect lookup failed: the lookup is
-        // the actionable half (a typo, or no internet), so lead with it.
-        let headline = quickConnectFailure?.userMessage ?? "Couldn't reach \"\(qcID)\" on any known address."
-        loginError = headline + detail
-      } else if !attemptFailures.isEmpty {
-        loginError = attemptFailures.count == 1
-          ? "Couldn't reach \(attemptFailures[0])"
-          : "Couldn't reach the server. Tried:\n" + attemptFailures.joined(separator: "\n")
-      } else {
-        loginError = (lastError as? APIError)?.userMessage
-          ?? (lastError as? URLError).map { APIError.transport($0).userMessage }
-          ?? "Login failed — no server address could be built. Check the address."
-      }
-    } catch {
-      // Do NOT collapse an unrecognised error into a generic string here: a transport
-      // failure is now APIError.connection and carries the actual reason, and the fallback
-      // must not imply the credentials were the problem.
-      loginError = (error as? APIError)?.userMessage
-        ?? (error as? URLError).map { APIError.transport($0).userMessage }
-        ?? "Login failed."
+    // NAME WHAT WAS TRIED. The old messages ("Login failed. Check that DSVideoServer is
+    // running on your NAS.") pointed at the server even when the server was answering
+    // perfectly — the app had simply tried a stale address, or a port that speaks a
+    // different scheme, and said nothing about which. Diagnosing that took hours.
+    //
+    // A server that ANSWERED and rejected us is different: its own message is the truth
+    // and must not be buried under connection detail.
+    if let apiErr = lastError as? APIError, apiErr.serverReached {
+      loginError = apiErr.userMessage
+    } else if localNetworkRefused {
+      loginError = LocalNetworkPermission.deniedMessage
+    } else if let qcID = configuredQuickConnectID {
+      let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
+      // The saved LAN/WAN addresses failed AND the QuickConnect lookup failed: the lookup is
+      // the actionable half (a typo, or no internet), so lead with it.
+      let headline = quickConnectFailure?.userMessage ?? "Couldn't reach \"\(qcID)\" on any known address."
+      loginError = headline + detail
+    } else if !attemptFailures.isEmpty {
+      loginError = attemptFailures.count == 1
+        ? "Couldn't reach \(attemptFailures[0])"
+        : "Couldn't reach the server. Tried:\n" + attemptFailures.joined(separator: "\n")
+    } else {
+      loginError = (lastError as? APIError)?.userMessage
+        ?? (lastError as? URLError).map { APIError.transport($0).userMessage }
+        ?? "Login failed — no server address could be built. Check the address."
     }
   }
 
