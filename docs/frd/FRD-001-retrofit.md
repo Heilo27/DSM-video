@@ -356,8 +356,10 @@ player menu, next episode, filter chips, sidebar items): a pressed button visibl
 one draws a clear outline, a disabled one is dimmed with a not-allowed cursor and does not lift on hover.
 There is one primary-button look; the Play button is that button, only larger. The sign-in error tint
 follows the theme's danger colour in both light and dark. *Derivation:* TRUTHS S2 (every control works and
-can be reached). Which accent the web player carries (its blue, or the apps' brand red) is not decided
-here; it is open for Ryan under TASK-959.
+can be reached). The web player carries the apps' brand red, #D1262F, as its accent in both themes
+(decided by Friday for Ryan, 2026-10-17, replacing the earlier blue). The colour is defined once, as
+the page's `--brand-red` custom property; the accent tokens (normal, hover, tinted background) and the
+logo and avatar gradients all derive from it, so it cannot drift between themes. [TASK-1000, TASK-959 AC4]
 
 ---
 
