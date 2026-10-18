@@ -289,6 +289,17 @@ also retries itself when the network returns at the same address, picking up nea
 A video that stopped for any other reason waits for the user's Retry.
 *Clarified 2026-10-17 (TASK-1009):* a video or download requested just as the app moves between
 addresses plays or downloads from the address the app is now using, never from the one it just left.
+*Clarified 2026-10-18 (TASK-991):* when the video stops on a network failure before the app has
+noticed the move, it does not wait for the app to notice: it shows "Reconnecting…" and checks once
+for an address that answers (home first, then away). If one does, the video picks up near where it
+stopped with no tap; if none does, the original failure message returns with Retry, and the video
+still retries itself when the network comes back. One stop starts one reconnect, however many
+signals arrive with it, and a video that stops again straight after reconnecting shows its message
+rather than reconnecting in a loop. "Reconnecting…" never stays up longer than 20 seconds in total:
+when that passes, the reconnect stops and the real failure message shows with Retry (or, if the old
+video was already cleared, "Couldn't reconnect to the server…" with Retry), and the video still
+retries itself when the network comes back. A video that fails to load shows Retry beside Dismiss,
+except after an expired session, where only signing in again can help.
 **FR-053 [STATED]** — Transient buffering and permanent disconnection are distinguishable; recoverable
 buffering never raises the connection-lost error.
 *Derivation:* competitive research explicitly frames this distinction as the requirement.

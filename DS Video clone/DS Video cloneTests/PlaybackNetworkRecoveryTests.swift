@@ -73,7 +73,9 @@ struct PlaybackNetworkRecoveryTests {
     let reports = player.components(separatedBy: "onPlaybackError?(").count - 1
     #expect(errorSites == 2, "precondition: two AVPlayer error sites")
     #expect(reports == errorSites, "every AVPlayer error site reports to the sheet")
-    #expect(sheet.contains("playbackFailedOnConnection = failedOnNetwork"))
+    // Sticky since TASK-991: AVPlayer can report one drop twice, the second time with no
+    // underlying error, and that second report must not clear the first.
+    #expect(sheet.contains("if failedOnNetwork { playbackFailedOnConnection = true }"))
     #expect(sheet.contains("playbackFailedOnConnection: playbackFailedOnConnection"))
     #expect(sheet.contains(".onChange(of: appState.serverUnreachable)"))
   }

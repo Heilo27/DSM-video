@@ -1438,8 +1438,10 @@ private struct QualityBadge: View {
 // MARK: - Player Sheet
 
 private struct PlayerSheet: View {
-  /// The "Playback failed" screen's Dismiss; `dsPrimaryButton` draws the focus look, this binds it.
-  @FocusState private var dismissFocused: Bool
+  /// The "Playback failed" screen's Retry and Dismiss; `dsPrimaryButton` draws the focus look,
+  /// this binds it.
+  @FocusState private var loadFailureFocus: LoadFailureControl?
+  private enum LoadFailureControl: Hashable { case retry, dismiss }
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
@@ -1466,6 +1468,8 @@ private struct PlayerSheet: View {
   /// The open stream stopped mid-playback on a network failure, so the network returning
   /// retries it even at the same address (TASK-1008, FR-052).
   @State private var playbackFailedOnConnection = false
+  /// The one in-flight stream rebuild, whichever signal started it (TASK-991).
+  @State private var recovery = StreamRecovery()
   /// Server playback session backing `playbackURL`, so it can be released when the sheet
   /// closes or when a re-fetch supersedes it. Nothing released these before: each play,
   /// each retry, and every subtitle-offset nudge opened a fresh transcode that lived on
@@ -1495,6 +1499,8 @@ private struct PlayerSheet: View {
   @State private var subtitles: [Subtitle] = []
   @State private var subtitleOffset: Double = 0
   @State private var subtitleOffsetRestartTask: Task<Void, Never>? = nil
+  /// The stream re-fetch started by a Retry, held so closing the player cancels it (TASK-991).
+  @State private var retryTask: Task<Void, Never>?
 
   // Progress sync debouncing
   @State private var lastSyncTime: Date = .distantPast
@@ -1639,15 +1645,16 @@ private struct PlayerSheet: View {
           onPlaybackFailed: {
             // Reset and re-fetch a fresh playback URL. Handles stale HLS sessions
             // (e.g. server restart clears in-memory sessions, causing 404 on stream).
-            // TASK-719: snapshot the position BEFORE start() wipes the sync trackers, so
-            // recovery resumes where the user was and a quick dismiss afterward still
-            // records progress.
-            snapshotResumePoint()
-            playbackURL = nil
-            Task { await start() }
+            retryPlayback()
           },
           onPlaybackError: { failedOnNetwork in
-            playbackFailedOnConnection = failedOnNetwork
+            // Sticky for this stream: AVPlayer can report one drop twice (failedToPlayToEnd,
+            // then the item's .failed status with no underlying error), and the second report
+            // must not clear the first. start() resets it for the next stream.
+            if failedOnNetwork { playbackFailedOnConnection = true }
+            // TASK-991: the player can notice the drop before the app notices the address
+            // change. Re-resolve now instead of leaving the error up until a reconnect signal.
+            reresolveStreamIfNeeded(.playbackFailed(onNetwork: failedOnNetwork))
           },
           onPlaybackFinished: {
             guard nextEpisode != nil, onPlayNextEpisode != nil else { return }
@@ -1687,7 +1694,8 @@ private struct PlayerSheet: View {
             }
           },
           onGoToShow: onGoToShow,
-          blockDpadSeek: showNextEpisodeOverlay
+          blockDpadSeek: showNextEpisodeOverlay,
+          reconnecting: recovery.isRecovering
         )
         .ignoresSafeArea()
 
@@ -1702,13 +1710,21 @@ private struct PlayerSheet: View {
             description: error
           )
             .foregroundStyle(.white)
-          Button("Dismiss") { dismiss() }
-            .dsPrimaryButton(.card, minWidth: 200)
-            .focused($dismissFocused)
+          // FR-052: the user can retry a load that failed, not only leave (TASK-991).
+          HStack(spacing: .dsSpaceMD) {
+            if GestureVideoPlayer.retryCanHelp(error) {
+              Button("Retry") { retryPlayback() }
+                .dsPrimaryButton(.card, minWidth: 200)
+                .focused($loadFailureFocus, equals: .retry)
+            }
+            Button("Dismiss") { dismiss() }
+              .dsPrimaryButton(.card, minWidth: 200)
+              .focused($loadFailureFocus, equals: .dismiss)
+          }
         }
       } else {
         VStack(spacing: .dsSpaceXL) {
-          ProgressView("Loading video")
+          ProgressView(recovery.isRecovering ? StreamRecovery.reconnectingLabel : "Loading video")
             .tint(.white)
           Button("Cancel") { dismiss() }
             .foregroundStyle(.white.opacity(0.7))
@@ -1726,13 +1742,13 @@ private struct PlayerSheet: View {
     // segments it can no longer reach. Re-resolve through the new address and resume in place.
     // A load that failed on the network is retried the same way once the network is back.
     .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
-      reresolveStreamIfNeeded()
+      reresolveStreamIfNeeded(.networkReturned)
     }
     // TASK-1008: the server coming back at the SAME address posts no networkDidReconnect (that
     // fires on an address switch or the device going offline and back). The heartbeat or the
     // background retry clears serverUnreachable instead, so that is the other "network is back".
     .onChange(of: appState.serverUnreachable) { wasUnreachable, isUnreachable in
-      if wasUnreachable && !isUnreachable { reresolveStreamIfNeeded() }
+      if wasUnreachable && !isUnreachable { reresolveStreamIfNeeded(.networkReturned) }
     }
     .onDisappear {
       // FIX-12: Cancel countdown when player is dismissed via system back gesture or swipe-to-dismiss.
@@ -1742,6 +1758,10 @@ private struct PlayerSheet: View {
       countdownTask = nil
       subtitleOffsetRestartTask?.cancel()
       subtitleOffsetRestartTask = nil
+      retryTask?.cancel()
+      retryTask = nil
+      // TASK-991: a reconnect still probing must not rebuild a stream for a closed player.
+      recovery.cancel()
       // Release the server's transcode session now that playback is over. Detached from
       // this view's lifetime on purpose: onDisappear is synchronous and the view is going
       // away, so the request must outlive it. Best-effort — the idle reaper remains the
@@ -1862,7 +1882,12 @@ private struct PlayerSheet: View {
     await appState.api.stopPlayback(sessionID: sid)
   }
 
-  private func start() async {
+  /// `reconnectOnFailure` false: the caller has just re-resolved the address itself (a stream
+  /// rebuild, TASK-991), so a failed request reports at once instead of probing a second time.
+  ///
+  /// A cancelled start() changes nothing on screen: the player closed, the item changed, or a
+  /// rebuild hit its deadline and already showed its own message.
+  private func start(reconnectOnFailure: Bool = true) async {
     // Reset state for retry — ensures stale duration/position from a prior attempt
     // can't suppress the final progress write on the next dismiss (TASK-401).
     lastKnownDuration = 0
@@ -1944,6 +1969,7 @@ private struct PlayerSheet: View {
       let (info, base) = try await appState.playbackThroughCurrentAddress(
         id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset,
         startSeconds: requestedStart)
+      guard !Task.isCancelled else { return }
       await play(info, resolvedThrough: base)
     } catch APIError.converting {
       // Server is auto-normalizing this title (TASK-755). Show the informational
@@ -1952,6 +1978,8 @@ private struct PlayerSheet: View {
       self.error = APIError.converting.userMessage
       return
     } catch {
+      // Cancellation surfaces here as a cancelled request; it is not a server failure.
+      if Task.isCancelled { return }
       // TASK-848: route through handlePlaybackFailure so an expired/revoked token is
       // recognised as auth expiry rather than surfacing a generic "Playback Failed" whose
       // Retry re-fetches with the same dead token forever. It tears the session down
@@ -1966,17 +1994,19 @@ private struct PlayerSheet: View {
       var failure: Error = error
       // If this was a network failure and the server is a QuickConnect ID,
       // try re-resolving candidates (network context may have changed since login).
-      if appState.serverUnreachable, await appState.reconnect() {
+      if reconnectOnFailure, appState.serverUnreachable, await appState.reconnect() {
         do {
           // Same start position as the first attempt: this retry used to drop it, so a
           // mid-file transcode restarted from zero on the new address (TASK-991).
           let (info, base) = try await appState.playbackThroughCurrentAddress(
             id: itemID, quality: appState.qualityCap, subtitleOffset: subtitleOffset,
             startSeconds: requestedStart)
+          guard !Task.isCancelled else { return }
           await play(info, resolvedThrough: base)
           appState.clearNetworkError()
           return
         } catch {
+          if Task.isCancelled { return }
           appState.handleConnectionFailure(error)
           failure = error
         }
@@ -1985,6 +2015,7 @@ private struct PlayerSheet: View {
       case .connection?, .network?: loadFailedOnConnection = true
       default: loadFailedOnConnection = false
       }
+      guard !Task.isCancelled else { return }
       self.error = (failure as? APIError)?.userMessage ?? "Couldn't connect to server."
     }
   }
@@ -2018,22 +2049,78 @@ private struct PlayerSheet: View {
     playbackURL = url
   }
 
-  /// Rebuilds the stream when the network returns and StreamReresolution says the open one is
-  /// stranded or failed on the network (TASK-991, TASK-1008). Both flags drop before start()
-  /// runs so a second "network is back" signal in the same moment cannot start it twice.
-  private func reresolveStreamIfNeeded() {
-    guard StreamReresolution.isNeeded(playing: playbackURL,
-                                      resolvedThrough: streamResolvedThrough,
-                                      currentBase: appState.api.baseURL,
-                                      lastLoadFailedOnConnection: loadFailedOnConnection,
-                                      playbackFailedOnConnection: playbackFailedOnConnection)
-    else { return }
+  /// Rebuilds the stream when StreamReresolution says the open one is stranded or failed on the
+  /// network (TASK-991, TASK-1008). The one path for every trigger: the network returning, or
+  /// the player failing on the network first. StreamRecovery runs one rebuild at a time, so a
+  /// failure and a reconnect signal arriving together rebuild once.
+  private func reresolveStreamIfNeeded(_ trigger: StreamRecovery.Trigger) {
+    let needed = StreamReresolution.isNeeded(playing: playbackURL,
+                                             resolvedThrough: streamResolvedThrough,
+                                             currentBase: appState.api.baseURL,
+                                             lastLoadFailedOnConnection: loadFailedOnConnection,
+                                             playbackFailedOnConnection: playbackFailedOnConnection)
+    recovery.begin(trigger, isNeeded: needed) { trigger in
+      await rebuildStream(after: trigger)
+    } onDeadline: {
+      recoveryGaveUp()
+    }
+  }
+
+  /// The rebuild ran out of time (StreamRecovery.overallDeadline). If the old stream is still
+  /// up, the player's own error (the real cause) returns with Retry by itself once
+  /// `isRecovering` drops. If the rebuild had already cleared it, nothing would say what went
+  /// wrong, so the load-failure screen says it, with Retry. Either way the network returning
+  /// still rebuilds the stream.
+  private func recoveryGaveUp() {
+    guard playbackURL == nil, error == nil else { return }
+    loadFailedOnConnection = true
+    error = StreamRecovery.gaveUpMessage
+  }
+
+  /// The user's Retry, from the player's failure screen or the load-failure screen (FR-052).
+  /// Replaces any rebuild in flight, so the two never fetch side by side.
+  private func retryPlayback() {
+    recovery.cancel()
+    // TASK-719: snapshot the position BEFORE start() wipes the sync trackers, so the retry
+    // resumes where the user was and a quick dismiss afterward still records progress.
+    snapshotResumePoint()
+    playbackURL = nil
+    error = nil
+    retryTask?.cancel()
+    retryTask = Task { await start() }
+  }
+
+  private func rebuildStream(after trigger: StreamRecovery.Trigger) async {
+    if case .playbackFailed = trigger {
+      // The network returning has already re-resolved the address; a failure has not. The
+      // path monitor may be probing right now (the walk out of Wi-Fi range fires both), and
+      // reconnect() refuses a second caller, so wait for that probe instead of racing it.
+      // Its own probe timeouts end it; the cap only guards against a flag left stuck.
+      var polls = 0
+      while appState.isReconnecting, polls < 240, !Task.isCancelled {
+        try? await Task.sleep(for: .milliseconds(250))
+        polls += 1
+      }
+      guard !Task.isCancelled else { return }
+      let addressMoved = streamResolvedThrough.map {
+        $0.absoluteString != appState.api.baseURL.absoluteString
+      } ?? false
+      // One probe of LAN, then the remote address, then QuickConnect. Nothing answers: stop.
+      // The player's own error (the real cause) comes back with Retry, and the network-failure
+      // flag stays set so the network returning still rebuilds the stream.
+      if !addressMoved {
+        guard await appState.reconnect() else { return }
+      }
+      guard !Task.isCancelled else { return }
+    }
     loadFailedOnConnection = false
     playbackFailedOnConnection = false
     snapshotResumePoint()
     playbackURL = nil
     error = nil
-    Task { await start() }
+    // One attempt: the address was re-resolved just above (or by the signal that started
+    // this), so a failure here must not open a second probe inside the same reconnect.
+    await start(reconnectOnFailure: false)
   }
 
   /// Carries the position across a stream rebuild so playback resumes where the user was
@@ -2045,6 +2132,101 @@ private struct PlayerSheet: View {
       resumeOverrideSeconds = position
       resumeOverrideDuration = lastKnownDuration
     }
+  }
+}
+
+/// Runs one stream rebuild at a time and decides which signals may start one (FR-052, M5,
+/// TASK-991). The signals overlap: leaving the house can fail the player, flip the path
+/// monitor and clear serverUnreachable within the same second, and each used to be able to
+/// start its own rebuild.
+///
+/// Refuses a rebuild when one is already running, when StreamReresolution says none is needed,
+/// for a failure that was not a network failure (that waits for the user's Retry), and for a
+/// network failure within `failureWindow` of the last failure-started rebuild, so a stream that
+/// fails again straight after a rebuild shows its error instead of looping. The network
+/// returning is never refused by that window: it is new information.
+///
+/// Every rebuild has one hard overall deadline (`overallDeadline`). Its steps each carry their
+/// own timeouts (waiting out a probe already running, reconnect()'s LAN/remote/QuickConnect
+/// probe, the playback request), and chained they could hold "Reconnecting…" on screen for two
+/// minutes. When the deadline passes the rebuild is cancelled and `onDeadline` runs, so the
+/// user sees the real failure and Retry instead of a spinner.
+@MainActor @Observable
+final class StreamRecovery {
+  enum Trigger: Equatable {
+    /// The app reached the server again: an address switch, or the server answering again.
+    case networkReturned
+    /// The player put a failure on screen; `onNetwork` says whether the network caused it.
+    case playbackFailed(onNetwork: Bool)
+  }
+
+  /// Shown by the player and the loading screen while a rebuild runs.
+  static let reconnectingLabel = "Reconnecting…"
+  /// The longest "Reconnecting…" stays on screen, from the first signal to a playing stream.
+  static let overallDeadline: Duration = .seconds(20)
+  /// Shown when the deadline passes with no stream on screen to carry the player's own error.
+  static let gaveUpMessage = "Couldn't reconnect to the server. Check that your NAS is reachable, then try again."
+
+  private(set) var isRecovering = false
+  /// The running rebuild, if any. Exposed so tests can await it.
+  @ObservationIgnored private(set) var task: Task<Void, Never>?
+  /// The running rebuild's deadline timer. Exposed so tests can await it.
+  @ObservationIgnored private(set) var deadlineTask: Task<Void, Never>?
+  @ObservationIgnored private var lastFailureRecovery: Date?
+  /// Bumped on every start, finish, deadline and cancel, so a rebuild or timer that ends late
+  /// cannot clear the state of the one that replaced it.
+  @ObservationIgnored private var generation = 0
+  let failureWindow: TimeInterval
+  let deadline: Duration
+
+  init(failureWindow: TimeInterval = 30, deadline: Duration = StreamRecovery.overallDeadline) {
+    self.failureWindow = failureWindow
+    self.deadline = deadline
+  }
+
+  /// Starts `operation` unless a rule above refuses it. Returns whether it started.
+  /// `onDeadline` runs if `deadline` passes first; the operation is cancelled at that moment
+  /// and must not change the screen after it (check `Task.isCancelled` after each await).
+  @discardableResult
+  func begin(_ trigger: Trigger, isNeeded: Bool, now: Date = .now,
+             operation: @escaping @MainActor (Trigger) async -> Void,
+             onDeadline: (@MainActor () -> Void)? = nil) -> Bool {
+    guard !isRecovering, isNeeded else { return false }
+    if case .playbackFailed(let onNetwork) = trigger {
+      guard onNetwork else { return false }
+      if let last = lastFailureRecovery, now.timeIntervalSince(last) < failureWindow { return false }
+      lastFailureRecovery = now
+    }
+    generation += 1
+    let current = generation
+    isRecovering = true
+    task = Task { [weak self] in
+      await operation(trigger)
+      guard let self, self.generation == current else { return }
+      self.finish()
+    }
+    let limit = deadline
+    deadlineTask = Task { [weak self] in
+      try? await Task.sleep(for: limit)
+      guard !Task.isCancelled, let self, self.generation == current else { return }
+      self.cancel()
+      onDeadline?()
+    }
+    return true
+  }
+
+  /// Stops the running rebuild: the player closed, or the deadline passed.
+  func cancel() {
+    task?.cancel()
+    finish()
+  }
+
+  private func finish() {
+    deadlineTask?.cancel()
+    deadlineTask = nil
+    task = nil
+    generation += 1
+    isRecovering = false
   }
 }
 
