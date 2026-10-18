@@ -31,7 +31,9 @@ sudo chmod +x /var/packages/DSVideoServer/scripts/start-stop-status
 
 # Set environment variables
 export DSVIDEO_PORT=8080
-export DSVIDEO_BASE_URL="http://192.168.50.146:8080"
+# Leave DSVIDEO_BASE_URL unset: stream URLs then follow the address each
+# client connected through (LAN, DSM alias or QuickConnect). Set it only to
+# pin a public address.
 export DSVIDEO_DB_PATH="/var/packages/DSVideoServer/var/dsvideo.db"
 export DSVIDEO_MOVIES_PATH="/volume1/video/Movies"
 export DSVIDEO_TV_PATH="/volume1/video/TV"
@@ -60,7 +62,6 @@ Type=simple
 User=root
 WorkingDirectory=/var/packages/DSVideoServer
 Environment="DSVIDEO_PORT=8080"
-Environment="DSVIDEO_BASE_URL=http://192.168.50.146:8080"
 Environment="DSVIDEO_DB_PATH=/var/packages/DSVideoServer/var/dsvideo.db"
 Environment="DSVIDEO_MOVIES_PATH=/volume1/video/Movies"
 Environment="DSVIDEO_TV_PATH=/volume1/video/TV"

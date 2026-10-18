@@ -99,7 +99,6 @@ start() {
     exit 0
   fi
   export DSVIDEO_PORT="${DSVIDEO_PORT:-8080}"
-  export DSVIDEO_BASE_URL="${DSVIDEO_BASE_URL:-http://192.168.50.146:${DSVIDEO_PORT}}"
   export DSVIDEO_DB_PATH="${DSVIDEO_DB_PATH:-${VAR}/dsvideo.db}"
   export DSVIDEO_MOVIES_PATH="${DSVIDEO_MOVIES_PATH:-/volume1/video/Movies}"
   export DSVIDEO_TV_PATH="${DSVIDEO_TV_PATH:-/volume1/video/TV}"
