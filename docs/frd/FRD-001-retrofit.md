@@ -281,9 +281,16 @@ before and its picker shows one track. This holds in the iOS and tvOS apps wheth
 file directly or the server converts it to HLS. The playback response lists the same tracks in its
 `audioTracks` array, named and defaulted exactly as the HLS master playlist names them (one source,
 the probe), whatever way the title is served. [TASK-1004] The web player never loses a track
-either: the realtime remux it uses for a single-audio file in a non-browser container carries one
-audio stream, so a web request for a title with two or more audio tracks is served as the HLS
-audio renditions instead, and the picker offers every track. [TASK-1003]
+either. A single served file gives a browser only one reachable track: the realtime remux it
+uses for a file in a non-browser container carries one audio stream, and a file the browser
+could play as is plays only its default track, with no way to switch outside Safari. So a web
+request for a title with two or more audio tracks is always served as the HLS audio renditions,
+the video copied rather than re-encoded when the browser could have played it directly.
+[TASK-1003, TASK-1028] The web player then shows an Audio menu listing every track by the same
+label, the default ticked, and switching keeps playing; a quality change keeps the chosen track.
+A single-audio title is served exactly as before (direct or remux) and shows no Audio menu, since
+there is nothing to choose. The apps are unaffected: they still direct play such a file and
+offer its tracks themselves. [TASK-1028]
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than

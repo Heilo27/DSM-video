@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -261,6 +262,20 @@ type PlaySession struct {
 }
 
 func main() {
+	// A listing for the conversion scripts (TASK-1025), answered before any database or
+	// server setup: it reads only the environment, for the originals dir, and the disk.
+	if len(os.Args) > 1 && os.Args[1] == "--list-video-files" {
+		out := bufio.NewWriter(os.Stdout)
+		err := listVideoFiles(out, os.Stderr, os.Args[2:], loadConfig().OriginalsDir)
+		if ferr := out.Flush(); err == nil {
+			err = ferr
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dsvideo-backend: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	log.Printf("DS Video backend starting... (build=%s)", BuildVersion)
 	cfg := loadConfig()
 	log.Printf("Config: listen=%s db=%s movies=%s tv=%s",
@@ -4038,16 +4053,21 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		return liveProbe
 	}
 
-	// TASK-1003: the realtime remux (handleRemuxStream) writes ONE fragmented MP4 with
-	// one audio stream, so a web title with a second language or a commentary track
-	// would lose it. Such a title goes to the HLS audio renditions (FR-061) instead,
-	// where every track is its own selectable rendition. A probe that cannot be read
-	// leaves the remux in place: playable, as before.
-	webRemuxWouldDropAudio := false
-	if isWebClient && playbackMode == transcode.RemuxOnly {
+	// TASK-1003 / TASK-1028: on the web plane a single served file gives the browser ONE
+	// reachable audio track, whichever way it is served. The realtime remux
+	// (handleRemuxStream) writes one fragmented MP4 with one audio stream; a direct-played
+	// file keeps all its tracks, but a browser <video> plays only the default one and,
+	// outside Safari, has no way to switch. So a web title with two or more audio tracks
+	// goes to the HLS audio renditions (FR-061) instead, where every track is its own
+	// selectable rendition. A direct-playable file goes there as RemuxOnly: its video is
+	// copied, never re-encoded. A probe that cannot be read leaves the single-file path
+	// in place: playable, as before.
+	webSingleFileDropsAudio := false
+	if isWebClient && (playbackMode == transcode.DirectPlay || playbackMode == transcode.RemuxOnly) {
 		if pr := livePlaybackProbe(); pr != nil && len(pr.AudioStreams) >= 2 {
-			webRemuxWouldDropAudio = true
-			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of the single-audio remux", itemID, len(pr.AudioStreams))
+			webSingleFileDropsAudio = true
+			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of single-file %s", itemID, len(pr.AudioStreams), playbackMode)
+			playbackMode = transcode.RemuxOnly
 		}
 	}
 
@@ -4121,7 +4141,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Determine playback kind based on mode
 	if playbackMode == transcode.DirectPlay {
 		ps.Kind = "direct"
-	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webRemuxWouldDropAudio {
+	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webSingleFileDropsAudio {
 		// For web clients needing remux (MKV+H264 or MP4+H264+AC3),
 		// stream a remuxed fragmented MP4 in real-time through ffmpeg.
 		// This is much faster than full HLS generation (just copies video stream).
@@ -6055,12 +6075,13 @@ func showGroupFolders(paths []string, showNames []sql.NullString, tvRoot string)
 	return out
 }
 
-// showIDGroupSeparator qualifies a show id when one folder holds more than one show.
+// showIDGroupSeparator is the qualifier in a "folder::groupKey" show id.
 //
 // "::" cannot appear in a folder name on any filesystem this server runs on, and the id is
-// already rejected if it contains "/" or "..", so this is unambiguous to split on. Kept as a
-// constant because the emit side and the resolve side must agree exactly — two spellings of
-// this would make qualified ids un-openable, which is worse than the duplicate it fixes.
+// already rejected if it contains "/" or "..", so this is unambiguous to split on. The list
+// no longer EMITS qualified ids: grouping resolves one show per folder, so a folder is never
+// ambiguous (TASK-1027, handleTVShowsList). Only the read side remains, so an id a client
+// persisted while the list did emit them still opens.
 const showIDGroupSeparator = "::"
 
 // splitShowID separates a show id into its folder and its optional group qualifier.
@@ -7938,10 +7959,97 @@ var scanVideoExt = map[string]bool{
 	".iso": false,
 }
 
-// isDVDDiscFolder reports whether a directory name is a DVD disc's VIDEO_TS or AUDIO_TS
-// folder (any case: rips from Windows and macOS tools differ).
-func isDVDDiscFolder(name string) bool {
-	return strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS")
+// isDiscRipFolder reports whether dir is the structure folder of a disc rip, whose video
+// files are fragments of the disc's titles rather than standalone videos: a DVD's
+// VIDEO_TS or AUDIO_TS (VTS_01_1.VOB ...), or a Blu-ray's BDMV (BDMV/STREAM/00001.m2ts
+// ...). Any case: rips from Windows and macOS tools differ. A BDMV directly inside an
+// AVCHD folder is NOT a disc rip: that is a camcorder card (PRIVATE/AVCHD/BDMV/STREAM),
+// and each of its .MTS clips is a complete recording that plays on its own (TASK-990).
+// This is the ONE disc-folder rule; the scanner's walker is its only caller.
+func isDiscRipFolder(dir string) bool {
+	name := filepath.Base(dir)
+	if strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS") {
+		return true
+	}
+	return strings.EqualFold(name, "BDMV") && !strings.EqualFold(filepath.Base(filepath.Dir(dir)), "AVCHD")
+}
+
+// scanSkipsDir reports whether the library scanner never descends into dir, and whether
+// that is because dir is a disc rip (the walker logs those, once). This and scanIndexesFile
+// are the whole of the scanner's file filter; the walker and --list-video-files (the
+// conversion scripts' file list, TASK-1025) both use them, so neither can drift.
+func scanSkipsDir(dir, originalsDir string) (skip, discRip bool) {
+	// TASK-755: never descend into the auto-normalize backup tree. Originals moved there
+	// after conversion must NOT be re-indexed (they'd resurrect the non-DirectPlay rows we
+	// just replaced). Match both the configured originals dir and the conventional
+	// basename so a custom DSVIDEO_ORIGINALS_DIR is also skipped.
+	if originalsDir != "" && filepath.Clean(dir) == filepath.Clean(originalsDir) {
+		return true, false
+	}
+	if filepath.Base(dir) == "_dsvideo_originals" {
+		return true, false
+	}
+	// TASK-998, TASK-1026 (FRD-000 M1): a disc rip's VIDEO_TS/AUDIO_TS (DVD) or BDMV
+	// (Blu-ray) holds title FRAGMENTS (VTS_01_1.VOB ..., STREAM/00001.m2ts ...) that only
+	// play as a sequence or through the disc's playlists. Indexing each as a movie filled
+	// the library with unplayable rows, and joining them needs a concat pass too costly
+	// for NAS hardware. Skip the folder whole.
+	if isDiscRipFolder(dir) {
+		return true, true
+	}
+	return false, false
+}
+
+// scanIndexesFile reports whether the scanner indexes a file with this name (indexed), and
+// whether its extension is a video format at all (known; a known format it does not index
+// is logged by the walker).
+func scanIndexesFile(name string) (indexed, known bool) {
+	// TASK-755: skip in-progress conversion temps (".<stem>.converting.mp4"). Indexing a
+	// half-written temp created the ghost-row bug; the dotfile name is the marker.
+	if strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".converting.mp4") {
+		return false, false
+	}
+	indexed, known = scanVideoExt[strings.ToLower(filepath.Ext(name))]
+	return indexed, known
+}
+
+// listVideoFiles writes every file under roots that the library scanner would index, each
+// path NUL-terminated (a file name can hold a newline), using the scanner's own filter.
+// It backs `dsvideo-backend --list-video-files ROOT...`: tools/convert-library.sh and
+// scripts/sprint-convert.sh take their file list from it instead of carrying a copy of the
+// extension list and the disc-rip rule, which had already drifted (TASK-1025). A folder it
+// cannot read is reported on stderr and skipped; an unreadable root is an error, so a
+// script never mistakes a failed listing for an empty library.
+func listVideoFiles(w io.Writer, stderr io.Writer, roots []string, originalsDir string) error {
+	if len(roots) == 0 {
+		return errors.New("--list-video-files needs at least one root folder")
+	}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				if path == root {
+					return fmt.Errorf("root %q unreadable: %w", root, err)
+				}
+				fmt.Fprintf(stderr, "list-video-files: cannot read %q: %v (skipped)\n", path, err)
+				return nil
+			}
+			if d.IsDir() {
+				if skip, _ := scanSkipsDir(path, originalsDir); skip {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if indexed, _ := scanIndexesFile(d.Name()); !indexed {
+				return nil
+			}
+			_, err = io.WriteString(w, path+"\x00")
+			return err
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
@@ -8169,39 +8277,20 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		}
 
 		if d.IsDir() {
-			// TASK-755: never descend into the auto-normalize backup tree. Originals
-			// moved there after conversion must NOT be re-indexed (they'd resurrect the
-			// non-DirectPlay rows we just replaced). Match both the configured originals
-			// dir and the conventional basename so a custom DSVIDEO_ORIGINALS_DIR is also
-			// skipped.
-			if s.cfg.OriginalsDir != "" && filepath.Clean(path) == filepath.Clean(s.cfg.OriginalsDir) {
-				return filepath.SkipDir
-			}
-			if d.Name() == "_dsvideo_originals" {
-				return filepath.SkipDir
-			}
-			// TASK-998 (FRD-000 M1): a DVD rip's VIDEO_TS/AUDIO_TS holds title FRAGMENTS
-			// (VTS_01_1.VOB ...) that only play as a sequence. Indexing each as a movie
-			// filled the library with unplayable rows, and joining them needs a concat pass
-			// too costly for NAS hardware. Skip the folder whole and say so, once.
-			if isDVDDiscFolder(d.Name()) {
-				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
-					log.Printf("scan: library %s: skipping DVD folder %q — its .VOB files are title fragments that do not play on their own; this server does not index disc rips", libraryID, path)
+			if skip, discRip := scanSkipsDir(path, s.cfg.OriginalsDir); skip {
+				if discRip {
+					if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
+						log.Printf("scan: library %s: skipping disc-rip folder %q — its video files are fragments of the disc's titles that do not play on their own; this server does not index disc rips", libraryID, path)
+					}
 				}
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		// TASK-755: skip in-progress conversion temps (".<stem>.converting.mp4"). Indexing
-		// a half-written temp created the ghost-row bug; the dotfile name is the marker.
-		if strings.HasPrefix(d.Name(), ".") && strings.HasSuffix(d.Name(), ".converting.mp4") {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if indexed, known := scanVideoExt[ext]; !indexed {
+		if indexed, known := scanIndexesFile(d.Name()); !indexed {
 			if known {
 				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
-					log.Printf("scan: library %s: skipping %q — %s is a video format this server does not index", libraryID, path, ext)
+					log.Printf("scan: library %s: skipping %q — %s is a video format this server does not index", libraryID, path, strings.ToLower(filepath.Ext(d.Name())))
 				}
 			}
 			return nil
@@ -9724,39 +9813,19 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(showMap[sortedKeys[i]].displayName) < strings.ToLower(showMap[sortedKeys[j]].displayName)
 	})
 
-	// IDS ARE UNIQUE BY CONSTRUCTION, not by hoping the folder names differ.
-	//
-	// The id was info.folderName, and one folder can legitimately hold TWO shows —
-	// Daredevil/ carries 39 episodes of "Marvel's Daredevil" and 9 of "Daredevil: Born
-	// Again". Both groups then emitted the same id, and a client keyed on id renders one
-	// and silently loses the other (this is how Star Trek: The Next Generation disappeared
-	// from a real Apple TV — a collision elsewhere in the list ate it).
-	//
-	// The folder stays the id whenever it is unambiguous, which is the overwhelming
-	// majority and keeps every persisted id stable. Only a genuinely ambiguous folder gets
-	// a qualified id, and only the extra shows in it — so the first show in Daredevil/ keeps
-	// "Daredevil" and the second becomes "Daredevil::daredevil: born again". The detail
-	// endpoint splits on "::" and matches on the group key, so both resolve correctly.
-	folderUses := map[string]int{}
-	for _, key := range sortedKeys {
-		folderUses[showMap[key].folderName]++
-	}
-
+	// IDS ARE UNIQUE BY CONSTRUCTION. groupEpisodesByShow resolves ONE show name per folder
+	// (resolveFolderShowNames, a majority vote), so every folder maps to exactly one group key
+	// and no two groups here can carry the same folderName. A folder holding two shows
+	// (Daredevil/ with "Marvel's Daredevil" and "Daredevil: Born Again") lists as ONE show
+	// under the majority name. This used to qualify a second show in the same folder as
+	// "folder::key"; that branch could not be reached once grouping became per-folder, and
+	// was removed (TASK-1027). splitShowID still reads such ids, which clients may have
+	// persisted. dedupeByID below remains the guard if this invariant is ever broken.
 	shows := make([]map[string]any, 0, len(sortedKeys))
-	emittedFolder := map[string]bool{}
 	for _, key := range sortedKeys {
 		info := showMap[key]
 
 		showID := info.folderName
-		if folderUses[info.folderName] > 1 {
-			// Ambiguous folder. The first group out keeps the bare folder name so the
-			// common id does not churn; the rest are qualified with their group key,
-			// which is unique across the whole library by definition.
-			if emittedFolder[info.folderName] {
-				showID = info.folderName + showIDGroupSeparator + key
-			}
-			emittedFolder[info.folderName] = true
-		}
 		// id stays the FOLDER name, deliberately. The merged group key is the lowercased
 		// TMDb show name, which differs from the folder for nearly every matched show — so
 		// emitting it would invalidate every persisted id in the wild (watchlist, Top Shelf,

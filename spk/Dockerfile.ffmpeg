@@ -91,6 +91,13 @@ RUN ./configure \
 # Collect the two binaries we ship and HARD-VERIFY they are static + have the
 # decoders that were the whole reason for this rebuild. The build fails loudly if
 # the binary is still dynamic or any required decoder is missing.
+#
+# TASK-1029: the decoder check matches the decoder NAME (field 2) exactly and fails
+# with `{ ...; exit 1; }`. The old check had two holes. `grep -w hevc` also matched
+# the "(codec hevc)" suffix ffmpeg prints on hwaccel lines such as hevc_qsv, so a
+# build with the native decoder disabled still passed. And `|| (echo; exit 1)` only
+# exits a subshell, so the loop's status was the LAST iteration's: any missing
+# decoder other than vorbis went unnoticed.
 RUN mkdir -p /artifacts && \
     cp /out/bin/ffmpeg /artifacts/ffmpeg && \
     cp /out/bin/ffprobe /artifacts/ffprobe && \
@@ -99,13 +106,15 @@ RUN mkdir -p /artifacts && \
     ( ldd /artifacts/ffmpeg 2>&1 | grep -q "not a dynamic executable" || \
       (echo "ERROR: ffmpeg is NOT statically linked" && ldd /artifacts/ffmpeg && exit 1) ) && \
     echo "=== decoder check ===" && \
+    /artifacts/ffmpeg -hide_banner -decoders > /tmp/decoders.txt 2>/dev/null && \
+    /artifacts/ffmpeg -hide_banner -encoders > /tmp/encoders.txt 2>/dev/null && \
     for dec in aac ac3 eac3 dca truehd h264 hevc mp3 mpeg2video wmv3 vc1 rv40 cook theora vorbis; do \
-      /artifacts/ffmpeg -hide_banner -decoders 2>/dev/null | grep -qwE "$dec" || \
-        (echo "ERROR: decoder '$dec' missing from built ffmpeg" && exit 1); \
+      awk -v d="$dec" '$2==d{f=1} END{exit !f}' /tmp/decoders.txt || \
+        { echo "ERROR: decoder '$dec' missing from built ffmpeg"; exit 1; }; \
     done && \
     echo "=== encoder check ===" && \
-    /artifacts/ffmpeg -hide_banner -encoders 2>/dev/null | grep -qw libx264 || \
-      (echo "ERROR: libx264 encoder missing" && exit 1) && \
+    { awk '$2=="libx264"{f=1} END{exit !f}' /tmp/encoders.txt || \
+      { echo "ERROR: libx264 encoder missing"; exit 1; }; } && \
     echo "All checks passed."
 
 FROM scratch AS export

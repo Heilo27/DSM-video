@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // A show id must be unique, by construction rather than by luck.
 //
@@ -71,8 +77,8 @@ func TestShowGroupWhereNarrowsOnShowNameForAQualifiedID(t *testing.T) {
 	}
 }
 
-// The round trip: an id emitted for an ambiguous folder must resolve back to that folder
-// plus the group that produced it.
+// The round trip: a qualified id a client persisted (the list emitted them before TASK-1027)
+// must still resolve back to that folder plus the group that produced it.
 func TestQualifiedIDRoundTripsToItsFolderAndGroup(t *testing.T) {
 	const folder = "Daredevil"
 	const groupKey = "daredevil: born again"
@@ -104,5 +110,76 @@ func TestSeparatorCannotBeConfusedWithARealFolderName(t *testing.T) {
 		if f, g := splitShowID(folder); f != folder || g != "" {
 			t.Errorf("real folder %q was mis-split into (%q, %q)", folder, f, g)
 		}
+	}
+}
+
+// TASK-1027. The list's ids are unique because grouping is per FOLDER, which is why the
+// "folder::key" emission was deleted as unreachable: resolveFolderShowNames picks one name
+// per folder, so a folder can never back two groups. This pins that invariant at both
+// layers. If grouping ever becomes per-episode again, a folder holding two shows would put
+// two groups under one folder name; this fails then, and the qualifier has to come back.
+func TestEveryFolderBacksOneShowAndIDsAreBareFolders(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(showMergeSchema); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	seedOwnerProfile(t, db, "u1")
+	seed := []struct{ path, show string }{
+		// Two shows in one folder: the case the qualifier was written for.
+		{"/Daredevil/S01E01.mkv", "Marvel's Daredevil"},
+		{"/Daredevil/S01E02.mkv", "Marvel's Daredevil"},
+		{"/Daredevil/S01E03.mkv", "Marvel's Daredevil"},
+		{"/Daredevil/S01E04.mkv", "Daredevil: Born Again"},
+		{"/Daredevil/S01E05.mkv", "Daredevil: Born Again"},
+		{"/Born Again/S01E06.mkv", "Daredevil: Born Again"},
+		// Part-matched folder with a season subfolder, unmatched folder, root-level file.
+		{"/Shameless/Season 1/S01E01.mkv", "Shameless"},
+		{"/Shameless/Season 1/S01E02.mkv", ""},
+		{"/Home Movies/S01E01.mkv", ""},
+		{"/Loose Episode S01E01.mkv", ""},
+	}
+	ins := `INSERT INTO items(id, library_id, type, title, path, show_name, season_number,
+	        episode_number, added_at, change_seq) VALUES(?,?,?,?,?,?,?,?,?,?)`
+	refs := make([]episodeRef, 0, len(seed))
+	for i, r := range seed {
+		show := sql.NullString{String: r.show, Valid: r.show != ""}
+		refs = append(refs, episodeRef{Path: testTVRoot + r.path, ShowName: show})
+		if _, err := db.Exec(ins, fmt.Sprintf("ep%d", i), "lib_tv", "episode", "Episode",
+			testTVRoot+r.path, show, 1, i+1, "2024-01-01T00:00:00Z", i+1); err != nil {
+			t.Fatalf("insert %s: %v", r.path, err)
+		}
+	}
+
+	// Grouping layer: one key per folder, whatever mix of show names the folder holds.
+	keyOf := map[string]string{}
+	for _, g := range groupEpisodesByShow(refs, testTVRoot+"/") { // the root as the handler passes it
+		if prev, ok := keyOf[g.Folder]; ok && prev != g.Key {
+			t.Errorf("folder %q grouped under two keys, %q and %q", g.Folder, prev, g.Key)
+		}
+		keyOf[g.Folder] = g.Key
+	}
+
+	// List layer: every id a bare folder name, none repeated, no episode lost.
+	s := &Server{cfg: Config{TVPath: testTVRoot}, db: db}
+	seen, total := map[string]bool{}, 0
+	for _, sh := range listShows(t, s, "u1") {
+		if strings.Contains(sh.ID, showIDGroupSeparator) {
+			t.Errorf("id %q is qualified; every folder backs one show, so ids are bare folders", sh.ID)
+		}
+		if _, ok := keyOf[sh.ID]; !ok {
+			t.Errorf("id %q is not the folder of any episode", sh.ID)
+		}
+		if seen[sh.ID] {
+			t.Errorf("id %q listed twice", sh.ID)
+		}
+		seen[sh.ID] = true
+		total += sh.EpisodeCount
+	}
+	if total != len(seed) {
+		t.Errorf("list counts %d episodes, want %d: a group was dropped", total, len(seed))
 	}
 }

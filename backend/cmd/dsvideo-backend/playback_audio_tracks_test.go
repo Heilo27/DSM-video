@@ -203,3 +203,47 @@ func TestWebRemux_SingleAudioTitleStaysOnTheRemux(t *testing.T) {
 		t.Errorf("audioTracks = %v, want the one track labelled Main", got)
 	}
 }
+
+// TASK-1028: an MP4 a browser can play as is (H.264 + AAC) was direct played on the web
+// plane even with two audio tracks. A browser <video> plays only the file's default track
+// and, outside Safari, offers no way to switch, so the French track was unreachable. Such
+// a title now goes to the HLS audio renditions too: the video is copied, every track is a
+// selectable rendition.
+const probeAudioEngAACDefault = `{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"eng","title":"Main"},"disposition":{"default":1}}`
+
+func TestWebDirectPlay_MultiAudioTitleGoesToHLSRenditions(t *testing.T) {
+	w := newPlaybackAudioWorld(t, "film.mp4", "mov,mp4,m4a,3gp,3g2,mj2", "h264", "aac", "mp4",
+		probeVideoH264, probeAudioEngAACDefault, probeAudioFreAAC)
+	resp := w.playback(t, "?client=web")
+	if resp["kind"] != "hls" {
+		t.Fatalf("web multi-audio MP4 kind = %v, want hls (a browser plays only the default track)", resp["kind"])
+	}
+	if resp["hlsMasterUrl"] == nil || resp["hlsMasterUrl"] == "" {
+		t.Errorf("hlsMasterUrl missing: %v", resp)
+	}
+	tracks := audioTracksOf(t, resp)
+	if len(tracks) != 2 || tracks[0]["label"] != "Main" || tracks[1]["label"] != "fre" || tracks[0]["default"] != true {
+		t.Errorf("audioTracks = %v, want Main (default) and fre", tracks)
+	}
+}
+
+// The same file played by the apps is still direct play: AVPlayer offers every track of
+// a direct-played file itself.
+func TestWebDirectPlay_MultiAudioTitleIsStillDirectForTheApps(t *testing.T) {
+	w := newPlaybackAudioWorld(t, "film.mp4", "mov,mp4,m4a,3gp,3g2,mj2", "h264", "aac", "mp4",
+		probeVideoH264, probeAudioEngAACDefault, probeAudioFreAAC)
+	resp := w.playback(t, "")
+	if resp["kind"] != "direct" || resp["transcoding"] == true {
+		t.Fatalf("app multi-audio MP4 = kind %v transcoding %v, want direct play", resp["kind"], resp["transcoding"])
+	}
+}
+
+// A single-audio browser-playable MP4 stays direct play on the web.
+func TestWebDirectPlay_SingleAudioTitleStaysDirect(t *testing.T) {
+	w := newPlaybackAudioWorld(t, "film.mp4", "mov,mp4,m4a,3gp,3g2,mj2", "h264", "aac", "mp4",
+		probeVideoH264, probeAudioEngAACDefault)
+	resp := w.playback(t, "?client=web")
+	if resp["kind"] != "direct" || resp["transcoding"] == true {
+		t.Fatalf("web single-audio MP4 = kind %v transcoding %v, want direct play", resp["kind"], resp["transcoding"])
+	}
+}
