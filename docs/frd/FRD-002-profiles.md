@@ -225,6 +225,10 @@ keeps it in one place (ADR-001), and **no client parses certification strings**.
 
 Matching ignores case and surrounding whitespace.
 
+When the profile editor offers a level, it names the level by its label and lists the certifications it
+allows (plus "Unrated" on the unrated level, FR-242), all taken from `GET /profiles/age-levels`. A level
+shown without its label is not a choice a parent can make. [2026-10-17]
+
 **FR-242 [RYAN] The unrated rule.** A title whose certification is `NULL` (FR-240 stores every "not rated"
 spelling as `NULL`), or **any string not in the table above**, is **unrated**. Its age level is **4**: hidden on every restricted profile, visible on
 Adult profiles. Unknown strings fail closed. The server sends unrated titles as `ageLevel: 4` with

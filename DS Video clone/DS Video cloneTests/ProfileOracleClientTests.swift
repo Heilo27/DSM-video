@@ -92,6 +92,23 @@ struct CeilingEmptyCopyTests {
     }
   }
 
+  /// FR-241 editor · each level the editor offers names the ratings it allows, from the
+  /// server's ladder; the unrated level also says "Unrated" (FR-242). No ladder, no list.
+  /// Red if: the ratings come from a hard-coded table, a tier's movie or TV list is dropped,
+  /// or "Unrated" lands on the wrong level.
+  @Test func eachLevelNamesTheRatingsItAllows() async {
+    await ocAccount(active: kid, routes: [
+      "GET /api/v1/profiles/age-levels": .json(200, ageLevelsJSON)
+    ]) { state in
+      #expect(state.ageLevelRatings(1) == nil, "precondition: no ladder yet")
+      await state.loadAgeLevelsIfNeeded()
+      #expect(state.ageLevelRatings(1) == "G · TV-Y, TV-G")
+      #expect(state.ageLevelRatings(2) == "PG · TV-Y7, TV-PG")
+      #expect(state.ageLevelRatings(3) == "PG-13 · TV-14")
+      #expect(state.ageLevelRatings(4) == "R, NC-17 · TV-MA · Unrated")
+    }
+  }
+
   /// OC-2186 negative · before the ladder has loaded the level cannot be named, and the copy
   /// must then say so honestly (no invented or stale level) while still not claiming the
   /// library is empty.

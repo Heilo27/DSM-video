@@ -182,8 +182,21 @@ final class AppState {
   /// server has never sent a ladder to this device; callers then fall back to wording that
   /// does not name the level.
   func ageLevelLabel(_ level: Int) -> String? {
-    if let live = ageLevels.first(where: { $0.level == level }) { return live.label }
-    return profileStore.cachedAgeLevels.first { $0.level == level }?.label
+    ageLevel(level)?.label
+  }
+
+  /// The certifications an age level covers, as the server's ladder lists them
+  /// ("PG · TV-Y7, TV-Y7-FV, TV-PG"), plus "Unrated" on the level unrated titles count as
+  /// (FR-242). Same source and fallback as `ageLevelLabel`; nil when no ladder has ever arrived.
+  func ageLevelRatings(_ level: Int) -> String? {
+    guard let tier = ageLevel(level) else { return nil }
+    var parts = [tier.movie, tier.tv].map { $0.joined(separator: ", ") }.filter { !$0.isEmpty }
+    if level == profileStore.unratedLevel { parts.append("Unrated") }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
+  }
+
+  private func ageLevel(_ level: Int) -> AgeLevelsResponse.Level? {
+    ageLevels.first { $0.level == level } ?? profileStore.cachedAgeLevels.first { $0.level == level }
   }
   /// When the app last went to the background, for the tvOS 30-minute rule.
   private var enteredBackgroundAt: Date?

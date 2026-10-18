@@ -946,7 +946,9 @@ struct ProfileEditorView: View {
     #endif
   }
 
+  @ViewBuilder
   private var levelRow: some View {
+    #if os(tvOS)
     HStack(spacing: 20) {
       ForEach(1...ProfileScope.unrestrictedLevel, id: \.self) { value in
         Button { level = value } label: {
@@ -962,8 +964,49 @@ struct ProfileEditorView: View {
         .accessibilityIdentifier("profileEditor.level.\(value)")
       }
     }
-    #if os(tvOS)
     .focusSection()
+    // Four capsules fit across a TV, their certifications don't: name the ratings of the
+    // level under focus (else the chosen one) on one line below the row.
+    if let ratings = appState.ageLevelRatings(focusedLevel ?? level) {
+      Text(ratings)
+        .font(ProfileMetrics.body)
+        .foregroundStyle(Color.dsTextSecondary)
+    }
+    #else
+    // A vertical list on iPhone: four capsules side by side left each label too narrow to
+    // draw, so the row showed four blank bars. Each row names the ratings it allows.
+    VStack(spacing: 10) {
+      ForEach(1...ProfileScope.unrestrictedLevel, id: \.self) { value in
+        let selected = level == value
+        Button { level = value } label: {
+          HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text(appState.ageLevelLabel(value) ?? "Level \(value)")
+                .font(ProfileMetrics.body.weight(.semibold))
+              if let ratings = appState.ageLevelRatings(value) {
+                Text(ratings)
+                  .font(.footnote)
+                  .foregroundStyle(selected ? Color.black.opacity(0.6) : Color.dsTextSecondary)
+              }
+            }
+            Spacer(minLength: 0)
+            if selected {
+              Image(systemName: "checkmark").font(.body.weight(.semibold))
+            }
+          }
+          .padding(.horizontal, 18).padding(.vertical, 12)
+          .frame(maxWidth: 520, alignment: .leading)
+          .background(RoundedRectangle(cornerRadius: 14)
+            .fill(selected ? Color.white : Color.white.opacity(0.1)))
+          .foregroundStyle(selected ? Color.black : Color.white)
+          .contentShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(ProfileTileButtonStyle())
+        .focused($focusedLevel, equals: value)
+        .accessibilityAddTraits(level == value ? .isSelected : [])
+        .accessibilityIdentifier("profileEditor.level.\(value)")
+      }
+    }
     #endif
   }
 
