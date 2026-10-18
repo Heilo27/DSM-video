@@ -338,6 +338,14 @@ focused. If nothing matches, it opens search with the phrase filled in and says 
 "Find <title> in DSM Video" opens search results for the phrase. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
 an Apple TV-app catalog partnership, not an API. Siri results obey the active profile's ceiling (FRD-002
 FR-264). *Derivation:* 542d543.
+**FR-148 [DESIGN, 2026-10-17, TASK-959]** — *Every control in the /web player shows when it is pressed,
+focused from the keyboard, and disabled.* One shared style covers all buttons (primary, secondary, close,
+player menu, next episode, filter chips, sidebar items): a pressed button visibly dips, a keyboard-focused
+one draws a clear outline, a disabled one is dimmed with a not-allowed cursor and does not lift on hover.
+There is one primary-button look; the Play button is that button, only larger. The sign-in error tint
+follows the theme's danger colour in both light and dark. *Derivation:* TRUTHS S2 (every control works and
+can be reached). Which accent the web player carries (its blue, or the apps' brand red) is not decided
+here; it is open for Ryan under TASK-959.
 
 ---
 
