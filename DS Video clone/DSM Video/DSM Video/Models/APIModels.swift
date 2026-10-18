@@ -120,6 +120,31 @@ extension ItemSummary {
     return showFolderId?.lowercased()
   }
 
+  /// How many titles the Just Added rail holds (FRD-001 FR-088).
+  nonisolated static let justAddedLimit = 16
+
+  /// The one definition of the Just Added rail (FRD-001 FR-088, TASK-1019): the newest titles by
+  /// `addedAt`, one entry per show (`showDedupKey`, so a show is its newest episode), at most
+  /// `justAddedLimit`, and NO progress filter. LocalStore.queryJustAdded (the offline stand-in for
+  /// the server's rail) and AppState.computeHomeRails (the demo library) both call this; the SQL in
+  /// the first only narrows the window it hands in. The demo path used to drop every title in
+  /// Continue Watching or Recently Watched, which TASK-986 had already removed from the offline path.
+  /// `addedAt` is compared as text, newest first, exactly as the server's ORDER BY does; titles with
+  /// no `addedAt` are not new and are skipped.
+  nonisolated static func justAddedRail(from items: [ItemSummary]) -> [ItemSummary] {
+    var seenShows = Set<String>()
+    var rail: [ItemSummary] = []
+    let newestFirst = items
+      .filter { !$0.addedAt.isEmpty }
+      .sorted { $0.addedAt != $1.addedAt ? $0.addedAt > $1.addedAt : $0.id < $1.id }
+    for item in newestFirst {
+      if let key = item.showDedupKey, !seenShows.insert(key).inserted { continue }
+      rail.append(item)
+      if rail.count >= justAddedLimit { break }
+    }
+    return rail
+  }
+
   // `withoutProgress` lived here; its only caller was HomeCache.save(), removed with the
   // rest of that superseded cache.
 

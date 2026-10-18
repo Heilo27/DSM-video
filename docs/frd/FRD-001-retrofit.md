@@ -345,7 +345,7 @@ new episodes appears once, as that show, not once per episode. On a restricted p
 titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, the device's own list of
 its newest synced titles stands in, under the same rules. The rail has no watched filter: a title the
 profile has started or finished is listed exactly while it is among the newest, online and offline alike
-(TASK-986; it also appears in Continue Watching or Recently Watched). *Derivation:* 0c9b4cd (Ryan: "the server decides
+(TASK-986; it also appears in Continue Watching or Recently Watched). The demo library builds its Just Added rail with the same function as the offline list, so it has no watched filter either (TASK-1019). *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
 player sends no `limit` on Just Added or Suggested and takes the server's default for each, so its Just

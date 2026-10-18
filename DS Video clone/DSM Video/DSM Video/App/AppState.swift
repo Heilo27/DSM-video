@@ -1999,24 +1999,6 @@ final class AppState {
         return seen.insert(key).inserted
       }
     }
-    func deduplicatedByShow(_ items: [ItemSummary]) -> [ItemSummary] {
-      var seen = Set<String>()
-      return items.filter { item in
-        let key: String
-        if let showKey = item.showDedupKey {
-          key = "show|\(showKey)"
-        } else if item.type == "episode" || item.seasonNumber != nil || item.episodeNumber != nil {
-          let base = item.title
-            .replacingOccurrences(of: #"\s+[Ss]\d+.*$"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+[Ee]\d+.*$"#, with: "", options: .regularExpression)
-            .lowercased()
-          key = "show|\(base)"
-        } else {
-          key = item.title.lowercased() + "|\(item.type)"
-        }
-        return seen.insert(key).inserted
-      }
-    }
 
     let continueWatching = Array(deduplicated(
       allItems
@@ -2049,12 +2031,8 @@ final class AppState {
         .sorted { parseDate($0.progress?.updatedAt ?? $0.addedAt) > parseDate($1.progress?.updatedAt ?? $1.addedAt) }
     ).prefix(16))
 
-    let watchedIDs = Set((continueWatching + recentlyWatched).map(\.id))
-    let justAdded = Array(deduplicatedByShow(
-      allItems
-        .filter { !watchedIDs.contains($0.id) }
-        .sorted { parseDate($0.addedAt) > parseDate($1.addedAt) }
-    ).prefix(16))
+    // The same function LocalStore.queryJustAdded uses: no progress filter (FR-088, TASK-1019).
+    let justAdded = ItemSummary.justAddedRail(from: allItems)
 
     return (continueWatching, justAdded, recentlyWatched)
   }
