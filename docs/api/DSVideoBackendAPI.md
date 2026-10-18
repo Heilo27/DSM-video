@@ -50,35 +50,48 @@ Response:
 Invalidate the app token (and, if held, the DSM session).
 
 ### POST `/auth/pairing/generate`
-Generate a 6-digit pairing code for tvOS authentication. **Requires authentication** (user must be logged in).
+Generate a 6-digit pairing code for another device (FR-117). **Requires authentication** (user must be logged in). Either platform can generate; the signed-out device redeems.
+
+Request (optional; an empty body or `null` is accepted from older clients): how this signed-in device reaches the server, handed to the device that redeems the code [TASK-972]. Every field is optional. A field that is not a plain address (credentials, query, fragment, whitespace, non-ASCII, over 255 bytes) or not a QuickConnect ID shape is dropped, and the code is still issued.
+```json
+{
+  "quickConnectId": "ryans-nas",
+  "lanAddress": "http://192.168.50.148:8090",
+  "wanAddress": "nas.example.org:8091"
+}
+```
 
 Response:
 ```json
 {
   "code": "123456",
-  "expiresInSeconds": 600
+  "expires_in_seconds": 600
 }
 ```
 
+Errors: `missing_token` (401), `invalid_json` (400, malformed body), `pairing_busy` (503, no free code could be drawn).
+
 ### POST `/auth/pairing/exchange`
-Exchange a pairing code for a session token. **Public endpoint** (no auth required).
+Exchange a pairing code for a session token. **Public endpoint** (no auth required). Per-IP auth rate limit applies (10/min). Codes are single-use and expire after 10 minutes. Once 20 wrong codes (from any address) have been tried while codes are outstanding, every outstanding code is revoked and the count starts again [TASK-972].
 
 Request:
 ```json
 { "code": "123456" }
 ```
 
-Response:
+Response (`server` is present only when the generating device sent connection details):
 ```json
 {
   "token": "<jwt>",
-  "user": { "id": "u_123", "username": "admin", "displayName": "admin" }
+  "user": { "id": "u_123", "username": "admin", "displayName": "admin" },
+  "server": { "quickConnectId": "ryans-nas", "lanAddress": "http://192.168.50.148:8090", "wanAddress": "nas.example.org:8091" }
 }
 ```
 
 Errors:
-- `invalid_pairing_code` - code format invalid (must be 6 digits)
-- `invalid_or_expired_pairing_code` - code not found or expired
+- `invalid_json` (400)
+- `missing_code` (400)
+- `invalid_or_expired_code` (401) - code not found, expired, already used, or revoked
 
 ## Libraries & browsing
 

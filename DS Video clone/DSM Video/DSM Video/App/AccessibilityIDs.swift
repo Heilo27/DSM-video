@@ -34,6 +34,10 @@ enum A11y {
     /// Keyboard-accessory Done. The only way to reach Connect once the keyboard is up
     /// and the form is too short to scroll (TASK-906).
     static let keyboardDoneButton = "setup.keyboardDone"
+    /// "Have a code from your Apple TV?" and its code entry (FR-117, TASK-972). iOS only.
+    static let pairingCodeToggle = "setup.pairingCodeToggle"
+    static let pairingCodeField = "setup.pairingCode"
+    static let pairButton = "setup.pair"
   }
 
   // MARK: - Main navigation
