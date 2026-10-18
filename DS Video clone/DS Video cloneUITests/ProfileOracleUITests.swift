@@ -76,4 +76,80 @@ final class ProfileOracleUITests: XCTestCase {
     XCTAssertFalse(app.buttons[UIID.Profile.Picker.manageButton].exists,
                    "The picker's Manage button is showing for a single-profile account.")
   }
+
+  /// Finds an element by identifier whatever its accessibility type, so a row does not depend on
+  /// how SwiftUI happened to surface it.
+  private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+    app.descendants(matching: .any).matching(identifier: id).firstMatch
+  }
+
+  /// OC-2168 / FR-260. Given the app remembers an active profile (Dana) that the server later
+  /// stops listing, when it cold-launches, then the picker returns offering exactly the profiles
+  /// that still exist, and Dana is not offered or entered.
+  /// Red if: ProfileGate.shouldShowPicker stops checking the remembered id against the list.
+  func testRememberedProfileMissingFromServerListBringsBackThePicker() throws {
+    server = try StubServer.withProfiles([
+      StubProfile(id: "p-owner", name: "Dana", isOwner: true),
+      StubProfile(id: "p-kid", name: "Robin", maxAgeLevel: 1, kids: true),
+    ])
+    let first = UITest.launchAgainst(server)
+    requireExists(first.buttons[UIID.Profile.Picker.profileTile(named: "Dana")],
+                  "Dana's tile on the first-launch picker", timeout: UITest.launchTimeout)
+    first.buttons[UIID.Profile.Picker.profileTile(named: "Dana")].tap()
+    requireExists(element(first, UIID.Profile.activeProfileChip),
+                  "the active-profile chip after choosing Dana (Dana is now remembered)",
+                  timeout: UITest.launchTimeout)
+    first.terminate()
+
+    server.setProfiles([
+      StubProfile(id: "p-robin", name: "Robin2", maxAgeLevel: 1, kids: true),
+      StubProfile(id: "p-casey", name: "Casey"),
+    ])
+    let second = UITest.launchAgainst(server, resetState: false)
+
+    requireExists(second.buttons[UIID.Profile.Picker.profileTile(named: "Robin2")],
+                  "Robin2's tile on the picker after Dana vanished", timeout: UITest.launchTimeout)
+    requireExists(second.buttons[UIID.Profile.Picker.profileTile(named: "Casey")],
+                  "Casey's tile on the picker after Dana vanished")
+    XCTAssertFalse(second.buttons[UIID.Profile.Picker.profileTile(named: "Dana")].exists,
+                   "The picker still offers Dana although the server no longer lists her.")
+    XCTAssertFalse(element(second, UIID.Profile.activeProfileChip).exists,
+                   "The app entered a profile (chip showing) instead of showing the picker.")
+  }
+
+  /// OC-2134 / OC-2186 / FR-265. Given a Little Kids profile and a library with nothing the
+  /// profile may see, when Home loads, then it says "No Little Kids titles in your library yet."
+  /// under the restricted empty state (not the NAS-is-empty copy).
+  /// Red if: Home's empty branch stops routing a restricted profile to RestrictedEmptyState, or
+  /// ProfileText.restrictedEmpty changes its wording.
+  func testRestrictedProfileWithNothingVisibleSaysSoInItsLevelsWords() throws {
+    server = try StubServer.withProfiles([
+      StubProfile(id: "p-kid", name: "Robin", maxAgeLevel: 1, kids: true),
+    ])
+    server.emptyLibrary()
+    let app = UITest.launchAgainst(server)
+
+    requireExists(element(app, UIID.Profile.restrictedEmptyState),
+                  "the restricted empty state on Home", timeout: UITest.launchTimeout)
+    requireExists(app.staticTexts["No Little Kids titles in your library yet."],
+                  "the level-and-place sentence")
+    XCTAssertFalse(app.staticTexts["Add videos to your NAS to get started."].exists,
+                   "The NAS-is-empty copy is showing for an age-limited profile.")
+  }
+
+  /// OC-2134 negative. Given an Adult (unrestricted) profile and the same empty library, when Home
+  /// loads, then the generic empty state shows and the restricted one does not.
+  /// Red if: the restricted empty state starts showing for unrestricted profiles.
+  func testUnrestrictedProfileWithEmptyLibraryGetsTheGenericEmptyState() throws {
+    server = try StubServer.withProfiles([
+      StubProfile(id: "p-owner", name: "Dana", isOwner: true),
+    ])
+    server.emptyLibrary()
+    let app = UITest.launchAgainst(server)
+
+    requireExists(app.staticTexts["Add videos to your NAS to get started."],
+                  "the generic empty-library copy", timeout: UITest.launchTimeout)
+    XCTAssertFalse(element(app, UIID.Profile.restrictedEmptyState).exists,
+                   "The restricted empty state is showing for an unrestricted profile.")
+  }
 }

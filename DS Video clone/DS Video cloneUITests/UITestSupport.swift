@@ -227,6 +227,8 @@ enum UIID {
   }
 
   enum Detail {
+    static let playButton = "detail.play"
+    static let title = "detail.title"
     static let downloadButton = "detail.download"
     static let downloadError = "detail.downloadError"
     static let nextEpisodeButton = "detail.nextEpisode"

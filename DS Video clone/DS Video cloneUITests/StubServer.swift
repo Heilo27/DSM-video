@@ -202,6 +202,16 @@ extension StubServer {
     return server
   }
 
+  /// Makes the library answer "nothing here" on every route the home rails read, so the home
+  /// screen lands on its empty state (restricted or generic, depending on the profile).
+  func emptyLibrary() {
+    setRoute("/api/v1/items", Response(#"{"total":0,"items":[]}"#))
+    setRoute("/api/v1/just-added", Response(#"{"items":[]}"#))
+    setRoute("/api/v1/sync/items",
+      Response(#"{"items":[],"nextSeq":1,"hasMore":false,"nextAfterRowid":null}"#))
+    setRoute("/api/v1/sync/status", Response(#"{"itemSeq":1,"progressSeq":0,"totalItems":0}"#))
+  }
+
   func setProfiles(_ profiles: [StubProfile], activeProfileId: String? = nil) {
     let active = activeProfileId.map { "\"\($0)\"" } ?? "null"
     setRoute("/api/v1/profiles", Response(
