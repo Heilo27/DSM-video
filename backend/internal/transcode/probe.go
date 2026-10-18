@@ -249,26 +249,25 @@ func ProbeQuick(path string) *ProbeResult {
 		result.Container = "mkv"
 		result.VideoCodec = "h264" // Could be anything
 		result.AudioCodec = "unknown"
-		result.NeedsTranscode = true // MKV likely needs transcoding
 	case ".webm":
 		result.Container = "webm"
 		result.VideoCodec = "vp9"
 		result.AudioCodec = "opus"
-		result.NeedsTranscode = true
 	case ".avi":
 		result.Container = "avi"
 		result.VideoCodec = "unknown"
 		result.AudioCodec = "unknown"
-		result.NeedsTranscode = true
 	case ".ts":
 		result.Container = "ts"
 		result.VideoCodec = "h264"
 		result.AudioCodec = "aac"
 	default:
 		result.Container = strings.TrimPrefix(ext, ".")
-		result.NeedsTranscode = true
 	}
 
+	// One rule (Rule 9): the same decision Probe() applies to a real probe. The per-extension
+	// flags this replaced left .ts false even though "ts" is not a direct-play container.
+	result.NeedsTranscode = needsTranscode(result)
 	return result
 }
 

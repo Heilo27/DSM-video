@@ -28,7 +28,10 @@ their files for this app; the app reads what is there.
 - A title the user can see in Synology's own file browser must be findable in this app.
   The scanner indexes .mp4 .m4v .mov .mkv .avi .ts .webm and the older camera, disc and web
   formats .wmv .mpg .mpeg .m2ts .mts .flv .vob .3gp. Those older containers are never direct
-  played: they always go through the transcoder. A video format the server recognises but does
+  played: they always go through the transcoder. So is a .ts: whether a file plays direct or
+  is repackaged is decided by ONE rule (its container and probed codecs), the same whether or
+  not ffprobe could read it; a quick extension guess never overrules that rule. [TASK-997]
+  A video format the server recognises but does
   not index (.rm .rmvb .divx .asf .ogv .ogm .f4v .iso) is logged by path, once, so the gap is
   visible. Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
