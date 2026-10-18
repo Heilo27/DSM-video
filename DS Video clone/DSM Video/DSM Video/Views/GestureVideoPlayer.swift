@@ -2353,10 +2353,23 @@ private extension GestureVideoPlayer {
         }
     }
 
+}
+
+// Internal rather than private so the error-to-message mapping is testable (TASK-981).
+extension GestureVideoPlayer {
     /// TASK-375: Maps common AVFoundation error codes to user-friendly messages.
     /// Falls back to the system localizedDescription for unrecognised codes.
-    private static func friendlyPlayerError(_ error: Error) -> String {
+    ///
+    /// TASK-981: AVPlayer reports a dropped stream as a generic AVFoundation error
+    /// (usually -11800) with the real transport failure nested under
+    /// NSUnderlyingErrorKey, often behind a CoreMedia error. The chain is searched
+    /// for a transport cause first, so a lost connection is not reported as a
+    /// corrupt file (FR-054, FR-002).
+    nonisolated static func friendlyPlayerError(_ error: Error) -> String {
         let nsError = error as NSError
+        for link in underlyingChain(of: nsError) {
+            if let message = transportMessage(for: link) { return message }
+        }
         if nsError.domain == AVFoundationErrorDomain {
             switch nsError.code {
             case -11800: return "Playback failed. The file may be corrupted."
@@ -2369,9 +2382,25 @@ private extension GestureVideoPlayer {
             default: break
             }
         }
-        // The most likely errors for a NAS on home Wi-Fi are transport failures, not
-        // AVFoundation ones. Left unmapped they fall through to Apple's opaque
-        // "The operation could not be completed", which tells the user nothing.
+        return error.localizedDescription
+    }
+
+    /// The error itself followed by each NSUnderlyingErrorKey beneath it. Bounded and
+    /// identity-checked so a malformed, self-referencing chain cannot loop.
+    nonisolated private static func underlyingChain(of error: NSError) -> [NSError] {
+        var chain: [NSError] = []
+        var current: NSError? = error
+        while let link = current, chain.count < 8, !chain.contains(where: { $0 === link }) {
+            chain.append(link)
+            current = link.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return chain
+    }
+
+    /// The most likely errors for a NAS on home Wi-Fi are transport failures, not
+    /// AVFoundation ones. Left unmapped they fall through to Apple's opaque
+    /// "The operation could not be completed", which tells the user nothing.
+    nonisolated private static func transportMessage(for nsError: NSError) -> String? {
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorNotConnectedToInternet:
@@ -2387,7 +2416,7 @@ private extension GestureVideoPlayer {
             default: break
             }
         }
-        return error.localizedDescription
+        return nil
     }
 }
 
