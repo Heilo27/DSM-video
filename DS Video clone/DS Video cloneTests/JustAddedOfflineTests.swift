@@ -30,6 +30,15 @@ private func jaItem(_ id: String, type: String = "movie", added: String, show: S
 }
 
 @MainActor
+private func jaWithProgress(_ i: ItemSummary, _ p: ItemProgress) -> ItemSummary {
+  ItemSummary(
+    id: i.id, type: i.type, title: i.title, year: i.year, durationSeconds: i.durationSeconds,
+    addedAt: i.addedAt, progress: p, showName: i.showName, showFolderId: i.showFolderId,
+    seasonNumber: i.seasonNumber, episodeNumber: i.episodeNumber, libraryId: i.libraryId,
+    changeSeq: i.changeSeq, ageLevel: i.ageLevel)
+}
+
+@MainActor
 struct JustAddedOfflineTests {
 
   /// A watched title and a half-watched film are listed, a show appears once as its NEWEST episode
@@ -72,5 +81,63 @@ struct JustAddedOfflineTests {
       profileID: "pf_someone_else")
 
     #expect(await store.queryRails().justAdded.map(\.id) == ["a", "b"])
+  }
+}
+
+// MARK: - TASK-1019 · the demo library's Just Added is the same rail as the offline one (FR-088)
+//
+// AppState.computeHomeRails (the demo library) kept a watched filter and its own dedup after
+// TASK-986 took both out of LocalStore.queryJustAdded. Both now call ItemSummary.justAddedRail.
+
+@MainActor
+struct JustAddedSharedRuleTests {
+
+  private static func library() -> (items: [ItemSummary], progress: [String: ItemProgress]) {
+    var items = [
+      jaItem("m_watched", added: "2026-10-10T00:00:00Z"),
+      jaItem("m_half", added: "2026-10-09T00:00:00Z"),
+      jaItem("e1", type: "episode", added: "2026-10-08T00:00:00Z", show: "Foundation", folder: "f1", duration: 1320),
+      jaItem("e2", type: "episode", added: "2026-10-07T00:00:00Z", show: "Foundation", folder: "f1", duration: 1320),
+      jaItem("fresh", added: "2026-10-06T00:00:00Z"),
+    ]
+    for n in 0..<20 {
+      items.append(jaItem(String(format: "old%02d", n), added: String(format: "2026-09-%02dT00:00:00Z", n + 1)))
+    }
+    let progress: [String: ItemProgress] = [
+      "m_watched": ItemProgress(positionSeconds: 7200, durationSeconds: 7200, updatedAt: "2026-10-11T09:00:00Z"),
+      "m_half": ItemProgress(positionSeconds: 3600, durationSeconds: 7200, updatedAt: "2026-10-11T09:00:00Z"),
+      "e1": ItemProgress(positionSeconds: 1320, durationSeconds: 1320, updatedAt: "2026-10-11T09:00:00Z"),
+    ]
+    return (items, progress)
+  }
+
+  /// The demo rail keeps a finished film, a half-watched film and a finished episode, one entry for
+  /// the show, newest first, 16 long. Red before the fix: the watched filter dropped the first three.
+  @Test func demoJustAddedHasNoWatchedFilter() {
+    let (items, progress) = Self.library()
+    let withProgress = items.map { item in
+      progress[item.id].map { jaWithProgress(item, $0) } ?? item
+    }
+
+    let ids = AppState.computeHomeRails(withProgress).justAdded.map(\.id)
+
+    #expect(Array(ids.prefix(4)) == ["m_watched", "m_half", "e1", "fresh"])
+    #expect(!ids.contains("e2"))
+    #expect(ids.count == 16)
+  }
+
+  /// The same library through the offline store and through the demo path gives the same ids.
+  @Test func offlineAndDemoRailsAreTheSameList() async throws {
+    let (items, progress) = Self.library()
+    let (store, dir) = try await jaStore(items: items, progress: progress)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let offline = await store.queryRails().justAdded.map(\.id)
+
+    let demo = AppState.computeHomeRails(items.map { item in
+      progress[item.id].map { jaWithProgress(item, $0) } ?? item
+    }).justAdded.map(\.id)
+
+    #expect(demo == offline)
+    #expect(!demo.isEmpty)
   }
 }

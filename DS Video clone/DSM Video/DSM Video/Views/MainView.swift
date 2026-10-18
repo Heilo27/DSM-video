@@ -98,7 +98,7 @@ struct MainView: View {
     .overlay(alignment: .top) {
       OfflineBanner(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable,
                     localNetworkDenied: appState.localNetworkDenied)
-        .animation(.easeInOut(duration: 0.3), value: appState.isOffline || appState.serverUnreachable)
+        .animation(.easeInOut(duration: 0.3), value: appState.isServerUnavailable)
         .animation(.easeInOut(duration: 0.3), value: appState.localNetworkDenied)
     }
     // A watchlist change the NAS never received is reported, not silently undone (FR-137).
@@ -1431,25 +1431,24 @@ private struct DownloadedItemCell: View {
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
 
-        // Resume progress bar — only shown when there is a meaningful resume position
-        if resumeSeconds > 0 && item.durationSeconds > 0 {
-          let frac = min(1.0, Double(resumeSeconds) / Double(item.durationSeconds))
-          if frac < PlaybackProgress.watchedThreshold {
-            VStack(spacing: 0) {
-              Spacer()
-              GeometryReader { barGeo in
-                ZStack(alignment: .leading) {
-                  Color.white.opacity(0.25)
-                    .frame(height: 3)
-                  Color.dsAccent
-                    .frame(width: barGeo.size.width * frac, height: 3)
-                }
+        // Resume progress bar — the same card rule as every poster (PlaybackProgress.cardIndicator,
+        // FR-020): a bar for a position above zero that is not finished, nothing otherwise.
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(
+            positionSeconds: resumeSeconds, durationSeconds: item.durationSeconds) {
+          VStack(spacing: 0) {
+            Spacer()
+            GeometryReader { barGeo in
+              ZStack(alignment: .leading) {
+                Color.white.opacity(0.25)
+                  .frame(height: 3)
+                Color.dsAccent
+                  .frame(width: barGeo.size.width * frac, height: 3)
               }
-              .frame(height: 3)
             }
-            .padding(.horizontal, 6)
-            .padding(.bottom, 6)
+            .frame(height: 3)
           }
+          .padding(.horizontal, 6)
+          .padding(.bottom, 6)
         }
       }
       .frame(width: width, height: height)

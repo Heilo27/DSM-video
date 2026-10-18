@@ -287,17 +287,19 @@ private struct TVShowDetailSplitView: View {
   // Find the resume point across seasons. Fetches seasons sequentially (up to a cap)
   // and stops early once an in-progress episode is found — avoids 20+ parallel requests.
   //
-  // Algorithm:
+  // Algorithm (PlaybackProgress.showResumePick; thresholds in PlaybackProgress, FRD-001 FR-016):
   //   Walk all episodes in season order.
-  //   - Track the latest episode with 2%–95% progress as inProgressEp.
-  //   - Fully-watched (≥95%) episodes advance the firstUnwatched cursor past them.
-  //   - An episode with no progress is firstUnwatched only if no fully-watched or
-  //     in-progress episode has been seen yet in this season.
+  //   - Track the latest episode that is in progress (started: 5% or more, and not
+  //     finished) as the resume pick.
+  //   - A finished episode (past 95%, or within the last 90 seconds) moves the
+  //     first-unwatched cursor past it.
+  //   - An episode with no progress, or under 5% (never genuinely started), is
+  //     unwatched: it becomes first-unwatched if the cursor is empty.
   //   After scanning:
-  //   - If inProgressEp found: resume point IS that episode (resumes from its saved
-  //     position). Advancing to the next episode only happens for fully-watched
-  //     episodes, via the firstUnwatched cursor.
-  //   - Else: resume point is firstUnwatchedEp (first episode with no progress at all).
+  //   - If an in-progress episode was found: the resume point IS that episode (resumes
+  //     from its saved position). Advancing to the next episode only happens for
+  //     finished episodes, via the first-unwatched cursor.
+  //   - Else: the resume point is the first unwatched episode after the last finished one.
   //
   // TASK-654: capped to scanLimit seasons; sequential fetch exits early on first
   //           in-progress find — worst case 3–4 calls, not 20 parallel.
@@ -676,30 +678,31 @@ private struct TVEpisodeRow: View {
       Spacer()
 
       // Progress indicator (tvOS)
-      if let prog = ep.progress, prog.durationSeconds > 0 {
-        let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
-        if frac >= PlaybackProgress.watchedThreshold {
-          Circle()
-            .fill(Color.dsSuccess)
-            .frame(width: 32, height: 32)
-            .overlay(
-              Image(systemName: "checkmark")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(.black)
-            )
-            .accessibilityLabel("Watched")
-        } else {
-          ZStack {
-            Circle()
-              .stroke(Color(white: 0.25), lineWidth: 3)
-            Circle()
-              .trim(from: 0, to: frac)
-              .stroke(Color.dsAccent, lineWidth: 3)
-              .rotationEffect(.degrees(-90))
-          }
+      // One rule for every progress indicator (FR-020): PlaybackProgress.cardIndicator.
+      switch PlaybackProgress.cardIndicator(for: ep.progress) {
+      case .none:
+        EmptyView()
+      case .watchedBadge:
+        Circle()
+          .fill(Color.dsSuccess)
           .frame(width: 32, height: 32)
-          .accessibilityLabel("\(ep.episodeNumber.map { "Episode \($0), " } ?? "")\(Int(frac * 100)) percent watched")
+          .overlay(
+            Image(systemName: "checkmark")
+              .font(.system(size: 14, weight: .bold))
+              .foregroundStyle(.black)
+          )
+          .accessibilityLabel("Watched")
+      case .bar(let frac):
+        ZStack {
+          Circle()
+            .stroke(Color(white: 0.25), lineWidth: 3)
+          Circle()
+            .trim(from: 0, to: frac)
+            .stroke(Color.dsAccent, lineWidth: 3)
+            .rotationEffect(.degrees(-90))
         }
+        .frame(width: 32, height: 32)
+        .accessibilityLabel("\(ep.episodeNumber.map { "Episode \($0), " } ?? "")\(Int(frac * 100)) percent watched")
       }
     }
     .padding(.vertical, 16)
@@ -1480,19 +1483,20 @@ private struct iOSEpisodeRow: View {
       // TASK-983 · FR-041: a downloaded episode says so in its row.
       DownloadedRowGlyph(itemID: ep.id)
 
-      if let prog = ep.progress, prog.durationSeconds > 0 {
-        let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
-        if frac >= PlaybackProgress.watchedThreshold {
-          Image(systemName: "checkmark.circle.fill")
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(Color.dsSuccess)
-            .frame(width: 20, height: 20)
-            .accessibilityLabel("Watched")
-        } else {
-          iOSCircularProgress(fraction: frac)
-            .frame(width: 20, height: 20)
-            .accessibilityLabel("\(Int(frac * 100)) percent watched")
-        }
+      // One rule for every progress indicator (FR-020): PlaybackProgress.cardIndicator.
+      switch PlaybackProgress.cardIndicator(for: ep.progress) {
+      case .none:
+        EmptyView()
+      case .watchedBadge:
+        Image(systemName: "checkmark.circle.fill")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(Color.dsSuccess)
+          .frame(width: 20, height: 20)
+          .accessibilityLabel("Watched")
+      case .bar(let frac):
+        iOSCircularProgress(fraction: frac)
+          .frame(width: 20, height: 20)
+          .accessibilityLabel("\(Int(frac * 100)) percent watched")
       }
 
       Image(systemName: "chevron.right")

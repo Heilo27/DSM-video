@@ -94,11 +94,25 @@ struct CardIndicatorSingleSourceTests {
     #expect(!text.contains("frac >= PlaybackProgress.watchedThreshold"))
   }
 
-  /// tvOS landscape bar, portrait bar, portrait badge.
+  /// tvOS landscape bar, landscape badge, portrait bar, portrait badge.
   @Test func theTVOSCardsAskTheSharedFunction() throws {
     let text = try source("TVMainView.swift")
-    #expect(count(of: "PlaybackProgress.cardIndicator(for: item.progress)", in: text) == 3)
+    #expect(count(of: "PlaybackProgress.cardIndicator(for: item.progress)", in: text) == 4)
     #expect(!text.contains("if frac < 1.0"), "a tvOS card drew a bar for anything under 100%")
     #expect(!text.contains("frac >= PlaybackProgress.watchedThreshold"))
+  }
+
+  /// TASK-1018: the landscape card used to draw a bar and never a badge, so a finished title on a
+  /// landscape rail looked untouched. Both tvOS cards draw the one shared badge view.
+  @Test func bothTVOSCardsDrawTheWatchedBadge() throws {
+    let text = try source("TVMainView.swift")
+    let landscapeStart = try #require(text.range(of: "private struct TVLandscapeCard"))
+    let portraitStart = try #require(text.range(of: "private struct TVPortraitCard"))
+    let landscape = String(text[landscapeStart.lowerBound..<portraitStart.lowerBound])
+    let portrait = String(text[portraitStart.lowerBound...])
+    #expect(landscape.contains("== .watchedBadge"))
+    #expect(landscape.contains("TVCardWatchedBadge("))
+    #expect(portrait.contains("TVCardWatchedBadge("))
+    #expect(count(of: "private struct TVCardWatchedBadge", in: text) == 1, "one badge view, not one per card")
   }
 }

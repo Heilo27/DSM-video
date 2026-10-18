@@ -83,7 +83,7 @@ struct ItemDetailView: View {
     // isOffline as well as serverUnreachable: in airplane mode before any request has
     // actually failed, only isOffline is set — so Play stayed enabled on a non-downloaded
     // item and dead-ended on the playback-failed panel instead of being disabled up front.
-    (serverUnreachable || isOffline) && !isDownloaded
+    AppState.serverUnavailable(isOffline: isOffline, serverUnreachable: serverUnreachable) && !isDownloaded
   }
 
   /// Whether an autoPlay entry (Home hero Play, Continue Watching card, episode

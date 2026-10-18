@@ -250,7 +250,7 @@ struct ItemsGridView: View {
         SortChipBar(selection: $sortOption)
         browseFilterBar
         refreshNoticeBar
-        if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
+        if !items.isEmpty && appState.isServerUnavailable {
           Text("Showing cached content")
             .font(.caption2)
             .foregroundStyle(.white.opacity(0.5))

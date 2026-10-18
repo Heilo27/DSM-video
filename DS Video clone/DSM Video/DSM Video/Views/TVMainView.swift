@@ -935,6 +935,11 @@ private struct TVLandscapeCard: View {
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
           .accessibilityHidden(true)
         }
+
+        // Watched badge (FR-020, TASK-1018): same rule and same view as the portrait card.
+        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
+          TVCardWatchedBadge(cardWidth: cardWidth, cardHeight: cardHeight)
+        }
       }
       .frame(width: cardWidth, height: cardHeight)
 
@@ -1035,23 +1040,7 @@ private struct TVPortraitCard: View {
 
         // Watched badge
         if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
-          VStack {
-            HStack {
-              Spacer()
-              Circle()
-                .fill(Color.dsSuccess)
-                .frame(width: 28, height: 28)
-                .overlay(
-                  Image(systemName: "checkmark")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.black)
-                )
-                .padding(8)
-            }
-            Spacer()
-          }
-          .frame(width: cardWidth, height: cardHeight)
-          .accessibilityHidden(true)
+          TVCardWatchedBadge(cardWidth: cardWidth, cardHeight: cardHeight)
         }
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -1072,6 +1061,35 @@ private struct TVPortraitCard: View {
       .padding(.leading, 10)
     }
     .privacySensitive()  // TASK-693/698: redact in app switcher / recordings
+  }
+}
+
+// MARK: - Watched badge (shared by the landscape and portrait cards)
+
+/// The check drawn in a tvOS card's top-right corner when `PlaybackProgress.cardIndicator` says the
+/// title is complete. One view for both card shapes so they cannot drift (TASK-1018).
+private struct TVCardWatchedBadge: View {
+  let cardWidth: CGFloat
+  let cardHeight: CGFloat
+
+  var body: some View {
+    VStack {
+      HStack {
+        Spacer()
+        Circle()
+          .fill(Color.dsSuccess)
+          .frame(width: 28, height: 28)
+          .overlay(
+            Image(systemName: "checkmark")
+              .font(.system(size: 13, weight: .bold))
+              .foregroundStyle(.black)
+          )
+          .padding(8)
+      }
+      Spacer()
+    }
+    .frame(width: cardWidth, height: cardHeight)
+    .accessibilityHidden(true)
   }
 }
 
