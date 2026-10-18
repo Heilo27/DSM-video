@@ -208,6 +208,10 @@ server must transcode still play.
 **FR-051 [STATED]** — Playback resumes at the title's recorded position, with an option to start over.
 **FR-052 [STATED]** — If the NAS drops off the network mid-video, the user gets a clear message and can
 retry — never an endless spinner. Retry resumes at the stall position.
+*Clarified 2026-10-17 (TASK-991):* when the app moves between the home and away addresses
+mid-video (M5), the video picks up again on the new address near where it was, with no tap. A video
+that failed to load for lack of network retries itself when the network returns. If the new address
+cannot play it either, the message names that failure, not the one that led to it.
 **FR-053 [STATED]** — Transient buffering and permanent disconnection are distinguishable; recoverable
 buffering never raises the connection-lost error.
 *Derivation:* competitive research explicitly frames this distinction as the requirement.
