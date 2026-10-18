@@ -348,7 +348,9 @@ no history it is simply absent rather than filled with guesses. *Derivation:* 0a
 **FR-146 [DESIGN, 2026-09-16, TASK-920]** — *The Apple TV Top Shelf gets you back into what you were
 watching.* It shows Continue Watching, with resume bars, as widescreen artwork, and falls back to Just Added
 when nothing is in progress, so a caught-up viewer still sees content rather than a bare icon. It refreshes
-when Continue Watching changes, so a title just finished does not linger. On an account with a restricted
+when Continue Watching changes, so a title just finished does not linger. [DESIGN, 2026-10-17, TASK-992]
+Refreshing means the app tells tvOS the shelf changed whenever it writes a different shelf or clears one;
+tvOS reloads only when told. A rewrite that leaves the shelf as it was tells it nothing. On an account with a restricted
 profile, FRD-002 FR-264 narrows this. *Derivation:* 38c6cb5.
 **FR-147 [DESIGN, 2026-09-16, TASK-920]** — *Siri can find a title and open it.* App-scoped phrases
 resolve against the library. "Play <title> in DSM Video" opens the title's detail page, with Play already

@@ -1585,7 +1585,14 @@ final class AppState {
   /// Called on logout/clearHomeState so no cached content survives sign-out (TASK-775).
   func deleteTopShelfSnapshot() {
     guard let fileURL = topShelfSnapshotURL else { return }
-    try? FileManager.default.removeItem(at: fileURL)
+    // Nothing on disk means the shelf is already empty: no change to announce (TASK-992).
+    guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+    do {
+      try FileManager.default.removeItem(at: fileURL)
+      TopShelfRefresh.notify()
+    } catch {
+      homeLog.error("deleteTopShelfSnapshot: could not remove the shelf file — \(error.localizedDescription)")
+    }
   }
 
   /// Where the Top Shelf snapshot lives: topshelf.json in the app group the extension reads.
@@ -3165,7 +3172,16 @@ final class AppState {
       items: items
     )
     do {
-      try JSONEncoder().encode(snapshot).write(to: fileURL, options: .atomic)
+      // sortedKeys: key order is otherwise unspecified, so the same shelf could encode to different
+      // bytes and the unchanged-file check below would announce a change that is not one.
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys]
+      let data = try encoder.encode(snapshot)
+      // The rails' didSet fires this on every change, most of which leave the shelf as it was.
+      // Rewriting and announcing an identical file would make tvOS reload for nothing (TASK-992).
+      if (try? Data(contentsOf: fileURL)) == data { return }
+      try data.write(to: fileURL, options: .atomic)
+      TopShelfRefresh.notify()  // tvOS reloads the shelf only when told (FR-146)
     } catch {
       // Fail closed: a failed write must not leave the PREVIOUS snapshot advertised.
       homeLog.error("writeTopShelfSnapshot: write failed — \(error.localizedDescription); clearing the shelf")
