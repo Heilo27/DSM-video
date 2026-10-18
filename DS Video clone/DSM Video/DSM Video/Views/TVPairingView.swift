@@ -2,6 +2,12 @@ import SwiftUI
 
 #if os(tvOS)
 
+/// Focus targets for the `dsPrimaryButton`s on the pairing screen. The code field has its own
+/// Bool (`codeFieldFocused`), and the system-styled buttons take focus from the system.
+enum PairingControl: Hashable {
+  case generate, tryAgain, connect
+}
+
 struct TVPairingView: View {
   @Environment(AppState.self) private var appState
   @State private var pairingCode: String?
@@ -22,6 +28,9 @@ struct TVPairingView: View {
   /// the field so the user can correct one digit) doesn't retry itself in a loop.
   @State private var lastAttemptedCode: String?
   @FocusState private var codeFieldFocused: Bool
+  /// The primary buttons on this screen. They are drawn by `dsPrimaryButton`, which only draws
+  /// the focus look, so each one binds here (TASK-1037/1038).
+  @FocusState private var control: PairingControl?
 
   var body: some View {
     ZStack {
@@ -154,6 +163,10 @@ struct TVPairingView: View {
                 .padding(.horizontal, .dsSpaceJumbo)
                 .padding(.vertical, 18)
             }
+            // Not a dsPrimaryButton on purpose: this is the SECONDARY action beside a live
+            // code, drawn quieter (raised-surface fill, not the accent) so the code stays the
+            // focal point. There is no shared secondary-button style yet; this one takes the
+            // system tvOS focus effect, so it needs no .focused() binding.
             .buttonStyle(.borderedProminent)
             .tint(Color.dsSurfaceRaised)
           }
@@ -172,24 +185,18 @@ struct TVPairingView: View {
               Task { await generate() }
             } label: {
               Text("Try Again")
-                .font(.dsTVLabel)
-                .padding(.horizontal, .dsSpaceJumbo)
-                .padding(.vertical, 18)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.dsAccent)
+            .dsPrimaryButton(.card)
+            .focused($control, equals: .tryAgain)
           }
         } else {
           Button {
             Task { await generate() }
           } label: {
             Text("Generate Pairing Code")
-              .font(.dsTVHeadline)
-              .padding(.horizontal, .dsSpaceGiant)
-              .padding(.vertical, .dsSpaceXXL)
           }
-          .buttonStyle(.borderedProminent)
-          .tint(Color.dsAccent)
+          .dsPrimaryButton(.card, minWidth: 420)
+          .focused($control, equals: .generate)
         }
 
 
@@ -316,12 +323,9 @@ struct TVPairingView: View {
         Task { await redeem() }
       } label: {
         Text("Connect")
-          .font(.dsTVHeadline)
-          .padding(.horizontal, .dsSpaceGiant)
-          .padding(.vertical, .dsSpaceXXL)
       }
-      .buttonStyle(.borderedProminent)
-      .tint(Color.dsAccent)
+      .dsPrimaryButton(.card, minWidth: 420)
+      .focused($control, equals: .connect)
       .disabled(enteredCode.count != 6 || isRedeeming)
     }
   }
@@ -393,6 +397,7 @@ private struct TVOtherWaysView: View {
   let onManualLogin: () -> Void
 
   @State private var discovery = BonjourDiscovery()
+  @FocusState private var manualFocused: Bool
 
   var body: some View {
     ZStack {
@@ -494,12 +499,9 @@ private struct TVOtherWaysView: View {
             onManualLogin()
           } label: {
             Text("Enter server address manually")
-              .font(.dsTVHeadline)
-              .padding(.horizontal, .dsSpaceHuge)
-              .padding(.vertical, .dsSpaceXL)
           }
-          .buttonStyle(.borderedProminent)
-          .tint(Color.dsAccent)
+          .dsPrimaryButton(.card, minWidth: 520)
+          .focused($manualFocused)
 
           Button("Back") { dismiss() }
             .buttonStyle(.bordered)

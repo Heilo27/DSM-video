@@ -105,7 +105,7 @@ struct LibrariesView: View {
             description: error
           )
           Button("Retry") { Task { await load() } }
-            .buttonStyle(.borderedProminent)
+            .dsPrimaryButton(.card, minWidth: 200)
             .accessibilityLabel("Retry loading libraries")
         }
       } else if libraries.isEmpty {

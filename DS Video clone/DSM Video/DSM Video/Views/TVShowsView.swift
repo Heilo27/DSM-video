@@ -57,7 +57,13 @@ enum TVShowSortOption: String, CaseIterable {
 
 // MARK: - TVShowsView
 
+/// Focus targets for the `dsPrimaryButton`s on the shows screen's error and empty states.
+enum ShowsControl: Hashable {
+  case retry, refresh
+}
+
 struct TVShowsView: View {
+  @FocusState private var control: ShowsControl?
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   let library: Library
@@ -144,8 +150,8 @@ struct TVShowsView: View {
           Button("Retry") {
             Task { await load() }
           }
-          .buttonStyle(.borderedProminent)
-          .tint(Color.dsAccent)
+          .dsPrimaryButton(.card, minWidth: 240)
+          .focused($control, equals: .retry)
         }
         #if os(tvOS)
         .padding(.top, .dsSpaceTitleSafe)
@@ -168,8 +174,8 @@ struct TVShowsView: View {
           Button("Refresh") {
             Task { await load() }
           }
-          .buttonStyle(.borderedProminent)
-          .tint(Color.dsAccent)
+          .dsPrimaryButton(.card, minWidth: 240)
+          .focused($control, equals: .refresh)
         }
         #if os(tvOS)
         .padding(.top, .dsSpaceColossal)

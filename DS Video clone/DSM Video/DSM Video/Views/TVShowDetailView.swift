@@ -1699,6 +1699,7 @@ private struct TVShowMetadataFixerSheet: View {
           }()
           ForEach(results) { candidate in
             let isDuplicate = duplicateKeys.contains("\(candidate.title)|\(candidate.year.map(String.init) ?? "")")
+            // focus-exempt: row in the metadata-match results List; the List grants it focus
             Button {
               Task { await apply(candidate) }
             } label: {

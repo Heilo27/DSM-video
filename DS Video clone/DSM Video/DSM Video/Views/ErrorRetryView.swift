@@ -8,6 +8,8 @@ struct ErrorRetryView: View {
   let message: String
   /// Optional retry handler. When nil, no Retry button is shown.
   var retry: (() -> Void)?
+  /// `dsPrimaryButton` draws the focus look; the binding is what lets the tvOS focus engine land here.
+  @FocusState private var retryFocused: Bool
 
   init(title: String = "Something went wrong", message: String, retry: (() -> Void)? = nil) {
     self.title = title
@@ -28,8 +30,8 @@ struct ErrorRetryView: View {
 
       if let retry {
         Button("Retry", action: retry)
-          .buttonStyle(.borderedProminent)
-          .tint(Color.dsAccent)
+          .dsPrimaryButton(.card, minWidth: 200)
+          .focused($retryFocused)
           .accessibilityHint("Reloads this screen")
       }
     }

@@ -194,10 +194,11 @@ struct CollectionsRail: View {
       Label("Retry", systemImage: "arrow.clockwise")
     }
     #if os(tvOS)
-    .buttonStyle(.borderedProminent)
-    .tint(Color.dsAccent)
+    .dsPrimaryButton(.card, minWidth: 240)
     .focused($focusedControl, equals: .retry)
     #else
+    // iOS keeps the quieter system .bordered look this inline rail retry already had; it is
+    // not one of the accent-prominent sites TASK-1038 routes through dsPrimaryButton.
     .buttonStyle(.bordered)
     #endif
     .padding(.horizontal, horizontalInset)
@@ -269,8 +270,7 @@ struct CollectionGridView: View {
           DSContentUnavailable(title: "Couldn't Load", systemImage: "exclamationmark.triangle",
                                description: error)
           Button("Retry") { Task { await loadFirstPage() } }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.dsAccent)
+            .dsPrimaryButton(.card, minWidth: 240)
             #if os(tvOS)
             .focused($focusedControl, equals: .gridRetry)
             #endif

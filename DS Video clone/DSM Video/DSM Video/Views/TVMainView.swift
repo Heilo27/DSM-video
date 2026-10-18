@@ -67,6 +67,7 @@ struct TVLoginView: View {
   @State private var server: String = ""
   @State private var username: String = ""
   @State private var password: String = ""
+  @FocusState private var signInFocused: Bool
 
   var body: some View {
     NavigationStack {
@@ -166,13 +167,14 @@ struct TVLoginView: View {
                 Task { await appState.login() }
               } label: {
                 if appState.isLoggingIn {
-                  ProgressView().tint(.white).frame(maxWidth: 480)
+                  ProgressView().tint(Color.dsAccentOn)
                 } else {
-                  Text("Sign In").font(.dsTVHeadline).frame(maxWidth: 480)
+                  Text("Sign In")
                 }
               }
-              .buttonStyle(.borderedProminent)
-              .tint(Color.dsAccent)
+              .dsPrimaryButton(.card, fillsWidth: true)
+              .frame(maxWidth: 480)
+              .focused($signInFocused)
               .accessibilityLabel(appState.isLoggingIn ? "Signing in, please wait" : "Sign In")
               .disabled(appState.isLoggingIn || username.isEmpty || (server.isEmpty && username.trimmingCharacters(in: .whitespaces).lowercased() != "appledemo"))
             }
@@ -202,6 +204,11 @@ struct TVLoginView: View {
 // MARK: - Home
 
 
+/// Focus targets for the `dsPrimaryButton`s on the home screen's error and empty states.
+private enum HomeControl: Hashable {
+  case retry, refresh
+}
+
 private struct TVHomeView: View {
   @Environment(AppState.self) private var appState
   @State private var showPairing: Bool = false
@@ -209,6 +216,7 @@ private struct TVHomeView: View {
   @State private var showSearch: Bool = false
   @State private var deepLinkItemID: String? = nil
   @State private var navPath: [String] = []
+  @FocusState private var homeControl: HomeControl?
 
   var body: some View {
     NavigationStack(path: $navPath) {
@@ -230,12 +238,9 @@ private struct TVHomeView: View {
                   Task { await appState.homeLoad() }
                 } label: {
                   Label("Retry", systemImage: "arrow.clockwise")
-                    .font(.dsTVHeadline)
-                    .padding(.horizontal, .dsSpaceHuge)
-                    .padding(.vertical, .dsSpaceXL)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.dsAccent)
+                .dsPrimaryButton(.card, minWidth: 360)
+                .focused($homeControl, equals: .retry)
 
                 Button {
                   appState.logout()
@@ -245,6 +250,10 @@ private struct TVHomeView: View {
                     .padding(.horizontal, .dsSpaceHuge)
                     .padding(.vertical, .dsSpaceXL)
                 }
+                // Not a dsPrimaryButton on purpose: Sign Out is the SECONDARY action beside
+                // Retry, drawn quieter (raised-surface fill, not the accent). There is no
+                // shared secondary-button style yet; it takes the system tvOS focus effect,
+                // so it needs no .focused() binding.
                 .buttonStyle(.borderedProminent)
                 .tint(Color.dsSurfaceRaised)
               }
@@ -320,8 +329,8 @@ private struct TVHomeView: View {
                   .padding(.top, .dsSpaceJumbo)
                 }
                 Button("Refresh") { Task { await appState.homeLoad() } }
-                  .buttonStyle(.borderedProminent)
-                  .tint(Color.dsAccent)
+                  .dsPrimaryButton(.card, minWidth: 360)
+                  .focused($homeControl, equals: .refresh)
               }
               // NOTE: no separate "libraries exist but are empty" branch is needed —
               // TVLibraryRail always renders a focusable NavigationLink header even when the

@@ -197,9 +197,11 @@ struct GestureVideoPlayer: View {
     //   3. actionable — a case in handleTVSelectPress, or Select falls through to play/pause
     // `skipIntro` previously existed here and satisfied none of them: the case was added
     // by the fix meant to close this bug and never wired to anything.
+    // errorRetry / errorDismiss (TASK-1037) are the error screen's two buttons. They rendered
+    // with no binding, so a remote user on a failed playback had nothing the d-pad could reach.
     enum TVFocusField { case playPause, captions, speed, hidden,
                         skipStart, back15, forward15, skipEnd, skipIntro,
-                        close, goToShow }
+                        close, goToShow, errorRetry, errorDismiss }
     #endif
 
     @Environment(\.scenePhase) private var scenePhase
@@ -317,6 +319,17 @@ struct GestureVideoPlayer: View {
                 }
             }
         }
+        #if os(tvOS)
+        // When a failure appears, put focus on its first live button; when it clears, hand
+        // focus back to where the screen was before.
+        .onChange(of: playerError) { _, newValue in
+            if let err = newValue {
+                focusedControl = retryOffered(for: err) ? .errorRetry : .errorDismiss
+            } else {
+                focusedControl = showControls ? .playPause : .hidden
+            }
+        }
+        #endif
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Play/Pause") { togglePlayPause() }
         .accessibilityAction(named: "Skip forward \(Int(skipForwardSeconds)) seconds") { skipForward() }
@@ -544,7 +557,7 @@ struct GestureVideoPlayer: View {
                 // offering the button just invites the user to loop. The session has
                 // already been torn down by handlePlaybackFailure, so Dismiss returns them
                 // to the login screen, which is the only action that can actually help.
-                if onPlaybackFailed != nil, !err.localizedCaseInsensitiveContains("session expired") {
+                if retryOffered(for: err) {
                     Button("Retry") {
                         playerError = nil
                         onPlaybackFailed?()
@@ -555,6 +568,14 @@ struct GestureVideoPlayer: View {
                     .padding(.horizontal, .dsSpaceXXL)
                     .padding(.vertical, 10)
                     .background(Color.dsAccent.opacity(0.8), in: Capsule())
+                    #if os(tvOS)
+                    .buttonStyle(.plain)
+                    .focused($focusedControl, equals: .errorRetry)
+                    .focusEffectDisabled()
+                    .scaleEffect(focusedControl == .errorRetry ? 1.15 : 1.0)
+                    .brightness(focusedControl == .errorRetry ? 0.25 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                    #endif
                 }
                 Button("Dismiss") {
                     #if os(iOS)
@@ -568,8 +589,22 @@ struct GestureVideoPlayer: View {
                 .padding(.horizontal, .dsSpaceXXL)
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.2), in: Capsule())
+                #if os(tvOS)
+                .buttonStyle(.plain)
+                .focused($focusedControl, equals: .errorDismiss)
+                .focusEffectDisabled()
+                .scaleEffect(focusedControl == .errorDismiss ? 1.15 : 1.0)
+                .brightness(focusedControl == .errorDismiss ? 0.25 : 0)
+                .animation(.easeInOut(duration: 0.15), value: focusedControl)
+                #endif
             }
         }
+    }
+
+    /// Whether the error screen offers Retry. One rule for the button and for the tvOS
+    /// d-pad handler, so the remote never aims at a button that is not drawn.
+    private func retryOffered(for err: String) -> Bool {
+        onPlaybackFailed != nil && !err.localizedCaseInsensitiveContains("session expired")
     }
 
     // MARK: - Gesture Overlay
@@ -1274,6 +1309,10 @@ struct GestureVideoPlayer: View {
 
     #if os(tvOS)
     private func handleTVSelectPress() {
+        // On the error screen Retry and Dismiss are real buttons and run their own actions.
+        // Select landing here means the focus sink still held focus; it must not toggle
+        // playback behind the error.
+        if playerError != nil { return }
         // NOTE: the old "if isScrubbing { commitTVScrub(); return }" branch is gone.
         //
         // isScrubbing is now unreachable on tvOS — the interactive Slider and the drag
@@ -1365,6 +1404,21 @@ struct GestureVideoPlayer: View {
     // is debounced — it fires once after ~0.6s of no input, or immediately on Select.
     // First press just reveals controls if they were hidden.
     private func handleTVMoveCommand(direction: MoveCommandDirection) {
+        // The error screen owns the remote: only Retry and Dismiss are live, and the
+        // transport controls behind it must not take focus. Left/right chooses between the
+        // two; any other press just makes sure one of them holds focus.
+        if let err = playerError {
+            let retry = retryOffered(for: err)
+            switch direction {
+            case .left: focusedControl = retry ? .errorRetry : .errorDismiss
+            case .right: focusedControl = .errorDismiss
+            default:
+                if focusedControl != .errorRetry && focusedControl != .errorDismiss {
+                    focusedControl = retry ? .errorRetry : .errorDismiss
+                }
+            }
+            return
+        }
         // Up/down move focus between the transport row and the top action row
         // (subtitles / playback speed). Without this the top row was unreachable:
         // its buttons had no focus targets, so focus stayed pinned to play/pause.
@@ -2770,6 +2824,7 @@ private struct SubtitleAudioPickerView: View {
             let noneSelected = currentSelection?.selectedMediaOption(in: group) == nil
             // "None" applies to full subtitles; forced/translation is handled separately
             // and auto-managed, so keep the off control at the top of the list.
+            // focus-exempt: row in the captions/audio/chapters sheet List; the List grants it focus
             Button {
                 player.currentItem?.select(nil, in: group)
                 currentSelection = player.currentItem?.currentMediaSelection
@@ -2823,6 +2878,7 @@ private struct SubtitleAudioPickerView: View {
                                    in group: AVMediaSelectionGroup,
                                    forced: Bool) -> some View {
         let isSelected = currentSelection?.selectedMediaOption(in: group) == option
+        // focus-exempt: row in the captions/audio/chapters sheet List; the List grants it focus
         Button {
             player.currentItem?.select(option, in: group)
             currentSelection = player.currentItem?.currentMediaSelection
@@ -2913,6 +2969,7 @@ private struct SubtitleAudioPickerView: View {
         if let group = audioGroup {
             ForEach(group.options, id: \.self) { option in
                 let isSelected = currentSelection?.selectedMediaOption(in: group) == option
+                // focus-exempt: row in the captions/audio/chapters sheet List; the List grants it focus
                 Button {
                     player.currentItem?.select(option, in: group)
                     currentSelection = player.currentItem?.currentMediaSelection
@@ -2935,6 +2992,7 @@ private struct SubtitleAudioPickerView: View {
     @ViewBuilder
     private var chaptersSection: some View {
         ForEach(chapters, id: \.id) { ch in
+            // focus-exempt: row in the captions/audio/chapters sheet List; the List grants it focus
             Button {
                 onSeekToChapter?(ch.startSecs)
                 dismiss()
@@ -3055,6 +3113,7 @@ private struct SubtitleDownloadSheet: View {
           )
                 } else {
                     List(results) { result in
+                        // focus-exempt: row in the subtitle-search results List; the List grants it focus
                         Button {
                             onDownload(result)
                         } label: {

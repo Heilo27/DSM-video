@@ -493,6 +493,7 @@ struct PinPadView<Header: View>: View {
   }
 
   private func key(_ digit: String) -> some View {
+    // focus-exempt: every caller in keypad binds it with .focused($focusedKey, equals:)
     Button { append(digit) } label: {
       Text(digit).font(ProfileMetrics.keyFont)
         .frame(width: ProfileMetrics.key, height: ProfileMetrics.key)
@@ -502,6 +503,7 @@ struct PinPadView<Header: View>: View {
   }
 
   private func command(_ title: String, symbol: String?, action: @escaping () -> Void) -> some View {
+    // focus-exempt: every caller in keypad binds it with .focused($focusedKey, equals:)
     Button(action: action) {
       Group {
         if let symbol {
@@ -782,6 +784,12 @@ struct ProfileManagementView: View {
                   spacing: 28) { tiles }
           .frame(maxWidth: 560)
         #endif
+        // Deliberately NOT dsPrimaryButton (TASK-1038): this is a white-on-black fill, not
+        // dsAccent, so it is not one of the accent-prominent sites that style replaces. It
+        // matches the neutral white the profile screens use for every selected state (the
+        // level chips, the avatar ring, the lifted tile). That is read from the code: no
+        // spec or commit records why it was made white (introduced with the screens in
+        // TASK-917). Changing it is a design call, not a consistency fix.
         Button("Done", action: close)
           .font(ProfileMetrics.body.weight(.semibold))
           .buttonStyle(.borderedProminent)
@@ -916,10 +924,9 @@ struct OwnerPinResetView: View {
             Button {
               Task { await send() }
             } label: {
-              Text(sending ? "Resetting…" : "Reset PIN").frame(minWidth: 160)
+              Text(sending ? "Resetting…" : "Reset PIN")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.dsAccent)
+            .dsPrimaryButton(.card, minWidth: 160)
             .disabled(!form.canSubmit || sending)
             .focused($focusedField, equals: .reset)
             .accessibilityIdentifier("ownerPinReset.reset")
@@ -1092,10 +1099,9 @@ struct ProfileEditorView: View {
             Button {
               Task { await save() }
             } label: {
-              Text(saving ? "Saving…" : "Save").frame(minWidth: 160)
+              Text(saving ? "Saving…" : "Save")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.dsAccent)
+            .dsPrimaryButton(.card, minWidth: 160)
             .disabled(!nameValid || saving)
             .focused($focusedControl, equals: .save)
             .accessibilityIdentifier("profileEditor.save")

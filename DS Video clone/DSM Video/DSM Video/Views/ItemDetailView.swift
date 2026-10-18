@@ -351,7 +351,7 @@ struct ItemDetailView: View {
   // that is not bound here is visible and permanently unreachable by the Siri Remote. That
   // exact omission has now shipped five times in this project — if you add a tvOS button to
   // this view, add its case here too, and scripts/check-tvos-focus.sh will hold you to it.
-  enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched, nextEpisode }
+  enum ActionButton: Hashable { case play, fromBeginning, watchlist, watched, nextEpisode, retry }
 
   private var tvPlayButton: some View {
     Button {
@@ -800,7 +800,10 @@ struct ItemDetailView: View {
           )
             // FIX-18: retry button so users aren't stuck on error without navigating away
             Button("Retry") { Task { await load() } }
-              .buttonStyle(.borderedProminent)
+              .dsPrimaryButton(.card, minWidth: 200)
+              #if os(tvOS)
+              .focused($focusedAction, equals: .retry)
+              #endif
           }
         )
     } else {
@@ -988,6 +991,7 @@ struct ItemDetailView: View {
 
   @ViewBuilder
   private var downloadIconButton: some View {
+    // focus-exempt: only used inside the #if !os(tvOS) action row (never renders on tvOS)
     Button {
       guard !appState.isDemoMode else { return }
       switch downloadManager.affordance(for: itemID) {
@@ -1044,6 +1048,7 @@ struct ItemDetailView: View {
 
   @ViewBuilder
   private var watchlistIconButton: some View {
+    // focus-exempt: only used inside the #if !os(tvOS) action row (never renders on tvOS)
     Button {
       guard let d = detail else { return }
       let summary = ItemSummary(
@@ -1433,6 +1438,8 @@ private struct QualityBadge: View {
 // MARK: - Player Sheet
 
 private struct PlayerSheet: View {
+  /// The "Playback failed" screen's Dismiss; `dsPrimaryButton` draws the focus look, this binds it.
+  @FocusState private var dismissFocused: Bool
   @Environment(AppState.self) private var appState
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
@@ -1696,7 +1703,8 @@ private struct PlayerSheet: View {
           )
             .foregroundStyle(.white)
           Button("Dismiss") { dismiss() }
-            .buttonStyle(.borderedProminent)
+            .dsPrimaryButton(.card, minWidth: 200)
+            .focused($dismissFocused)
         }
       } else {
         VStack(spacing: .dsSpaceXL) {
