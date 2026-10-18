@@ -3067,8 +3067,15 @@ final class AppState {
   // MARK: - Heartbeat
 
   /// Lightweight check — fires every 30s in foreground. Only syncs if sequences changed.
+  ///
+  /// SKIPS (does not defer) while the home load is decoding the local catalog (TASK-1062).
+  /// A skip loses nothing: this runs on a 30s timer and re-reads the server and local cursors
+  /// from scratch each time, so a change missed now is seen on the next beat. The decode ends
+  /// within moments, and the cold start that owns it starts its own delta sync right after
+  /// (`loadHomeColdStartWithCache`), so waiting here would only queue a second sync behind it.
+  /// Same reasoning for the loading and background-refreshing states.
   func runHeartbeat() async {
-    guard !isDemoMode, !homeIsLoading, !homeIsBackgroundRefreshing,
+    guard !isDemoMode, !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing,
           api.baseURL != AppState.fallbackURL else { return }
     let apiSnapshot = api
     do {
@@ -3493,6 +3500,13 @@ final class AppState {
   }
 
   #if DEBUG
+  /// TEST SEAM (TASK-1062). `.cacheDecoding` lasts only the few milliseconds of a local read,
+  /// so a test cannot hold it by driving `homeLoad`. This puts the state there directly so a
+  /// guard that reads it can be exercised deterministically.
+  func setHomeLoadStateForTesting(_ state: HomeLoadState) {
+    homeLoadState = state
+  }
+
   /// QA hook only (ProfileScreenPreviewHost): the ladder labels without a server.
   func seedAgeLevelsForPreview(_ levels: [AgeLevelsResponse.Level]) {
     ageLevels = levels

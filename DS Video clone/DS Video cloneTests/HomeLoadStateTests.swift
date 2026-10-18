@@ -84,14 +84,6 @@ private func waitUntil(_ condition: () -> Bool) async -> Bool {
   return condition()
 }
 
-/// AppState starts an NWPathMonitor in init, and its first update (a satisfied path, on this
-/// machine) lands a few milliseconds later and writes `isOffline = false`. A test that sets
-/// `isOffline` must let that update land first, or the monitor undoes the test's setup.
-@MainActor
-private func letNetworkMonitorSettle() async {
-  try? await Task.sleep(for: .milliseconds(300))
-}
-
 /// A signed-in-looking AppState over its own stores, pointed at `host`, with the stub
 /// servers reset. Runs inside ProfileStateGate: the stubs' route tables are process-wide.
 @MainActor
@@ -439,6 +431,33 @@ struct HomeLoadStateTests {
       #expect(ProfileStubServer.count("GET /api/v1/sync/status") >= 1, "the sync really ran")
       #expect(state.homeLoadState == .idle)
       #expect(state.libraryRailsVersion != versionBefore)
+    }
+  }
+
+  // MARK: Heartbeat (TASK-1062)
+
+  /// A heartbeat that fires while the home load is decoding the local catalog does nothing: it
+  /// does not even ask the server, so it cannot start a sync mid-decode. The next beat (30 s on)
+  /// re-reads both cursors, so skipping loses no change. The control half shows the same state
+  /// object beats normally once the decode is over, so the skip is the decode's doing.
+  /// Red if: runHeartbeat stops checking .cacheDecoding (the beat reaches the server while the
+  /// decode is running), or the guard also swallows beats in the idle state.
+  @Test func heartbeatSkipsWhileTheCacheIsDecodingAndRunsOnceItIsOver() async {
+    let beat = "GET /api/v1/sync/heartbeat"
+    await homeLoadAccount(routes: [
+      beat: .json(200, #"{"itemSeq":0,"progressSeq":0,"serverTimeMs":0}"#)
+    ]) { state in
+      state.setHomeLoadStateForTesting(.cacheDecoding)
+
+      await state.runHeartbeat()
+
+      #expect(ProfileStubServer.count(beat) == 0, "no heartbeat request while the decode runs")
+      #expect(state.homeLoadState == .cacheDecoding, "and the skip left the decode's state alone")
+
+      state.setHomeLoadStateForTesting(.idle)
+      await state.runHeartbeat()
+
+      #expect(ProfileStubServer.count(beat) == 1, "control: idle again, the beat reaches the server")
     }
   }
 
