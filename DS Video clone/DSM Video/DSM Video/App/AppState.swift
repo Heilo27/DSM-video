@@ -582,7 +582,7 @@ final class AppState {
   /// Scoped deliberately: only keys this app owns (the `dsReel.` prefix), never the whole
   /// domain, and DEBUG-only behind an explicit launch argument.
   static var isUITestResetLaunch: Bool {
-    ProcessInfo.processInfo.arguments.contains("-UITestResetState")
+    UITestLaunch.isResetLaunch
   }
 
   private static func resetPersistedStateForUITests() {

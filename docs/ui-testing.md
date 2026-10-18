@@ -71,7 +71,7 @@ build, which is what catches drift.
 | Argument | Effect |
 |---|---|
 | `-UITestDemoMode` | Signs in with deterministic demo content, no network |
-| `-UITestResetState` | Clears `dsReel.`-prefixed defaults and the two Keychain entries |
+| `-UITestResetState` | Clears `dsReel.`-prefixed defaults, the two Keychain entries, the app-group profile state (`ActiveProfileStore.clearAll`) and the `dsreel.db`, `-wal`, `-shm` files |
 | `-QALiveToken` / `-QALiveServer` | Boots into a real session against a live NAS |
 
 Tests use demo mode. **Never make a test depend on the live NAS** — its reachability would make

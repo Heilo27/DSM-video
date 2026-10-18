@@ -26,8 +26,17 @@ nonisolated final class ActiveProfileStore: @unchecked Sendable {
   /// The request and response header naming the profile (FR-220, FR-222).
   static let headerName = "X-DSVideo-Profile"
 
-  static let shared = ActiveProfileStore(
-    defaults: UserDefaults(suiteName: appGroupID) ?? .standard)
+  static let shared: ActiveProfileStore = {
+    let store = ActiveProfileStore(
+      defaults: UserDefaults(suiteName: appGroupID) ?? .standard)
+    #if DEBUG
+    // UI-test reset (-UITestResetState): the profile state lives in the app-group suite, which
+    // the standard-defaults sweep in AppState never touches, so a profile chosen by one test
+    // would greet the next. Runs inside this initializer so it is ordered BEFORE the first read.
+    if UITestLaunch.isResetLaunch { store.clearAll() }
+    #endif
+    return store
+  }()
 
   private enum Keys {
     static let activeID = "dsReel.profile.activeID"
@@ -166,3 +175,15 @@ extension Notification.Name {
   /// request named is gone. `object` is the profile id that was sent (String), if any.
   nonisolated static let activeProfileRejected = Notification.Name("dsReel.activeProfileRejected")
 }
+
+#if DEBUG
+/// Launch arguments the DEBUG UI-test hooks share. Nonisolated, so the stores' static
+/// initializers (which are not on the main actor) can read the same answer AppState does.
+nonisolated enum UITestLaunch {
+  static let resetArgument = "-UITestResetState"
+  /// True when this launch must start from first-run state (docs/ui-testing.md).
+  static var isResetLaunch: Bool {
+    ProcessInfo.processInfo.arguments.contains(resetArgument)
+  }
+}
+#endif
