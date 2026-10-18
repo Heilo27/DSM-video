@@ -95,6 +95,30 @@ extension XCTestCase {
     )
   }
 
+  /// Taps a text field, waits until it actually holds keyboard focus, then types.
+  ///
+  /// A bare `tap(); typeText()` races the form: when the keyboard rises after the previous
+  /// field the form scrolls, a tap on the stale position lands on nothing, and `typeText`
+  /// dies with "Neither element nor any descendant has keyboard focus" (measured: a 1-in-3
+  /// flake on the password field). The wait is on the real condition, focus, and re-taps
+  /// once; it never relaxes what the caller asserts afterwards.
+  func focusAndType(
+    _ field: XCUIElement,
+    _ text: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    func hasFocus() -> Bool { (field.value(forKey: "hasKeyboardFocus") as? Bool) ?? false }
+    for _ in 0..<3 {
+      field.tap()
+      let deadline = Date().addingTimeInterval(2)
+      while !hasFocus() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+      if hasFocus() { break }
+    }
+    XCTAssertTrue(hasFocus(), "Tapping \(field) never gave it keyboard focus.", file: file, line: line)
+    field.typeText(text)
+  }
+
   /// Dismisses the keyboard via the setup screen's Done accessory, if it is up.
   ///
   /// Deliberately NOT a tap on empty space: that is a coordinate guess which passes by
@@ -218,5 +242,54 @@ enum UIID {
     static let emptyState = "shared.emptyState"
     static let errorState = "shared.errorState"
     static let offlineBanner = "shared.offlineBanner"
+  }
+
+  /// Mirror of A11y.Profile (App/AccessibilityIDs.swift); a drifted value makes the test queries miss.
+  enum Profile {
+    static let activeProfileChip = "home.activeProfile"
+    static let manageProfilesRow = "settings.manageProfiles"
+    static let restrictedEmptyState = "emptyState.restricted"
+
+    enum Picker {
+      static let manageButton = "profilePicker.manage"
+      static let addButton = "profilePicker.add"
+      static func profileTile(named name: String) -> String { "profilePicker.profile.\(name)" }
+    }
+
+    enum PinPad {
+      static let message = "pinPad.message"
+      static let forgotButton = "pinPad.forgot"
+      static let cancelButton = "pinPad.cancel"
+      static let deleteButton = "pinPad.delete"
+      static func key(_ digit: String) -> String { "pinPad.key.\(digit)" }
+    }
+
+    enum Manage {
+      static let addButton = "profileManage.add"
+      static let doneButton = "profileManage.done"
+      static func profileRow(named name: String) -> String { "profileManage.profile.\(name)" }
+    }
+
+    enum OwnerPinReset {
+      static let passwordField = "ownerPinReset.password"
+      static let codeField = "ownerPinReset.code"
+      static let error = "ownerPinReset.error"
+      static let resetButton = "ownerPinReset.reset"
+      static let cancelButton = "ownerPinReset.cancel"
+      static let choosePin = "ownerPinReset.choosePin"
+    }
+
+    enum Editor {
+      static let nameField = "profileEditor.name"
+      static let error = "profileEditor.error"
+      static let saveButton = "profileEditor.save"
+      static let cancelButton = "profileEditor.cancel"
+      static let deleteButton = "profileEditor.delete"
+      static let nameReason = "profileEditor.nameReason"
+      static let nameCounter = "profileEditor.nameCounter"
+      static let pinSet = "profileEditor.pinSet"
+      static let pinRemove = "profileEditor.pinRemove"
+      static func level(_ value: Int) -> String { "profileEditor.level.\(value)" }
+    }
   }
 }

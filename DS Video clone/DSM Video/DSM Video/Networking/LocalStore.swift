@@ -28,6 +28,11 @@ struct HomeRails: Sendable {
 /// All public methods are nonisolated-safe to call from any context.
 actor LocalStore {
   static let shared: LocalStore = {
+    #if DEBUG
+    // UI-test reset (-UITestResetState): start from an empty library cache and no saved
+    // progress. Before the open, because an open database would be written back over.
+    if UITestLaunch.isResetLaunch { deleteDatabaseFiles() }
+    #endif
     let store = LocalStore(scope: ActiveProfileStore.shared.activeScope)
     Task { await store.setupLogged() }
     return store
@@ -315,11 +320,28 @@ actor LocalStore {
   /// reports "not corrupt".
   private func resolvedDatabaseURL() -> URL {
     if let override = databaseURLOverride { return override }
+    return Self.defaultDatabaseURL()
+  }
+
+  /// `<Documents>/dsreel.db`: the production location, nonisolated so the DEBUG reset can find
+  /// the file before the actor exists. The one definition of that path.
+  nonisolated static func defaultDatabaseURL() -> URL {
     guard let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
       return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("dsreel.db")
     }
     return d.appendingPathComponent("dsreel.db")
   }
+
+  #if DEBUG
+  /// Deletes the database and its WAL/SHM sidecars (a stale -wal left beside a new database
+  /// would be applied to it on open, see quarantine above). Only the UI-test reset calls this.
+  nonisolated static func deleteDatabaseFiles() {
+    let db = defaultDatabaseURL()
+    for suffix in ["", "-wal", "-shm"] {
+      try? FileManager.default.removeItem(at: URL(fileURLWithPath: db.path + suffix))
+    }
+  }
+  #endif
 
   private func openDatabase() throws {
     if databaseURLOverride == nil,
