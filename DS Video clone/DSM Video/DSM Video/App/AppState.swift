@@ -658,6 +658,14 @@ final class AppState {
   }
 
   func buildCandidates() async throws -> [QuickConnectResolver.Candidate] {
+    await resolveCandidateSet().candidates
+  }
+
+  /// The cascade plus, when baseURL is a QuickConnect ID whose lookup produced nothing, why.
+  /// login() needs the reason to tell an unknown ID from a failed lookup (TASK-974); reconnect
+  /// only needs the list. Returned rather than stored so a background reconnect resolving at the
+  /// same moment cannot overwrite the reason a sign-in is about to show.
+  func resolveCandidateSet() async -> (candidates: [QuickConnectResolver.Candidate], quickConnectFailure: QuickConnectError?) {
     let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     let wan = wanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -687,8 +695,20 @@ final class AppState {
     addDirect(wan)
 
     // If baseURL is a QC ID, append its full cascade after direct addresses
+    var quickConnectFailure: QuickConnectError?
     if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-      let qcCandidates = (try? await quickConnectResolve(qcID)) ?? []
+      // A failed lookup must not sink the LAN/WAN addresses already in the list: they are tried
+      // regardless, and the failure is only reported if nothing else answers.
+      var qcCandidates: [QuickConnectResolver.Candidate] = []
+      do {
+        qcCandidates = try await quickConnectResolve(qcID)
+      } catch let failure as QuickConnectError {
+        quickConnectFailure = failure
+      } catch let urlError as URLError {
+        quickConnectFailure = .unreachable(id: qcID, code: urlError.code)
+      } catch {
+        quickConnectFailure = .unreachable(id: qcID, code: .unknown)
+      }
       // Avoid duplicating any LAN IP that QC also resolved
       let existing = Set(candidates.map(\.url.absoluteString))
       for c in qcCandidates where !existing.contains(c.url.absoluteString) {
@@ -699,8 +719,13 @@ final class AppState {
       addDirect(raw)
     }
 
-    return Self.preferringLastGood(candidates, lastGood: lastGoodAddress)
+    return (Self.preferringLastGood(candidates, lastGood: lastGoodAddress), quickConnectFailure)
   }
+
+  /// The one sentence for an address that could not be turned into a URL at all. Only for input
+  /// that does not parse; a QuickConnect ID that parses but resolves to nothing has its own
+  /// messages (QuickConnectError.userMessage).
+  static let invalidServerAddressMessage = "Invalid server address. Please check the URL."
 
   /// Moves the last known-good address to the front of the cascade.
   ///
@@ -777,9 +802,9 @@ final class AppState {
     }
 
     do {
-      let candidates = try await buildCandidates()
+      let (candidates, quickConnectFailure) = await resolveCandidateSet()
       guard !candidates.isEmpty else {
-        loginError = "Invalid server address. Please check the URL."
+        loginError = quickConnectFailure?.userMessage ?? Self.invalidServerAddressMessage
         return
       }
 
@@ -892,7 +917,10 @@ final class AppState {
         loginError = apiErr.userMessage
       } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
         let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
-        loginError = "Couldn't reach \"\(qcID)\" on any known address.\(detail)"
+        // The saved LAN/WAN addresses failed AND the QuickConnect lookup failed: the lookup is
+        // the actionable half (a typo, or no internet), so lead with it.
+        let headline = quickConnectFailure?.userMessage ?? "Couldn't reach \"\(qcID)\" on any known address."
+        loginError = headline + detail
       } else if !attemptFailures.isEmpty {
         loginError = attemptFailures.count == 1
           ? "Couldn't reach \(attemptFailures[0])"
@@ -1475,8 +1503,17 @@ final class AppState {
     // If baseURL is a QuickConnect ID, resolve candidates and try each with a
     // short timeout — same strategy as login() so external networks work.
     if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-      guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID), !candidates.isEmpty else {
-        loginError = "Couldn't reach \"\(qcID)\". Check your connection and try again."
+      let candidates: [QuickConnectResolver.Candidate]
+      do {
+        candidates = try await quickConnectResolve(qcID)
+      } catch {
+        // Same reasons and sentences as sign-in (TASK-974): an unknown ID is not a network fault.
+        loginError = (error as? QuickConnectError)?.userMessage
+          ?? QuickConnectError.unreachable(id: qcID, code: (error as? URLError)?.code ?? .unknown).userMessage
+        return
+      }
+      guard !candidates.isEmpty else {
+        loginError = QuickConnectError.noAddress(id: qcID).userMessage
         return
       }
       var lastError: Error?
@@ -1503,7 +1540,7 @@ final class AppState {
     // TASK-817: same LAN guard as updateAPI()/buildCandidates — never force https on a bare private IP.
     let pairingEffectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
     guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: pairingEffectiveHTTPS, defaultPort: defaultPort) else {
-      loginError = "Invalid server address. Please check the URL."
+      loginError = Self.invalidServerAddressMessage
       return
     }
 

@@ -353,6 +353,12 @@ discovered servers is not an error.
 **FR-115 [INFERRED]** — Failure causes are distinguished: wrong credentials; unreachable server;
 unresolvable QuickConnect ID; account not permitted to use this application; malformed address;
 certificate/secure-transport failure (instance of FR-002).
+*Clarified 2026-10-17 (TASK-974):* a QuickConnect ID that yields nothing to connect to has three
+separate messages, on sign-in and on pairing alike. An ID QuickConnect does not know is named as not
+found. An ID that is registered but whose NAS publishes no address says so and points at the
+QuickConnect setting in DSM. A lookup that never reached QuickConnect says QuickConnect couldn't be
+reached. "Invalid server address" is reserved for input that is neither a parseable address nor
+shaped like a QuickConnect ID (letters, digits, hyphens).
 *Note on account permission:* this one is derived from operational project memory rather than from
 product copy, and is flagged as such.
 **FR-116 [INFERRED]** — Concurrent sign-in attempts yield exactly one session and one definite outcome.

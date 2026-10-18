@@ -3,6 +3,30 @@ import os.log
 
 private let qcLog = Logger(subsystem: "com.dsm.qc", category: "resolver")
 
+/// Why a QuickConnect lookup produced no address to try. The three are different problems with
+/// different fixes for the user, so each carries its own sentence (TASK-974, FR-115): a mistyped
+/// ID, a NAS that is registered but not publishing an address, and a lookup that never reached
+/// Synology at all. None of them is "Invalid server address" — the input parsed fine.
+enum QuickConnectError: Error, Equatable {
+  /// QuickConnect answered and has no server registered under this ID.
+  case notFound(id: String)
+  /// The ID is registered, but its NAS is advertising no address the app can use.
+  case noAddress(id: String)
+  /// The lookup itself failed: Synology's QuickConnect service was not reached.
+  case unreachable(id: String, code: URLError.Code)
+
+  var userMessage: String {
+    switch self {
+    case .notFound(let id):
+      return "QuickConnect ID \"\(id)\" wasn't found. Check the spelling, or enter your NAS's address instead."
+    case .noAddress(let id):
+      return "QuickConnect found \"\(id)\", but your NAS isn't sharing an address. Check that QuickConnect is turned on in DSM, or enter your NAS's address instead."
+    case .unreachable:
+      return "Couldn't reach QuickConnect. Check your internet connection and try again."
+    }
+  }
+}
+
 enum QuickConnectResolver {
   /// Returns the bare QuickConnect ID if `input` looks like a QC identifier, nil otherwise.
   /// Handles bare IDs ("mynas"), full domains ("mynas.quickconnect.to"),
@@ -19,11 +43,21 @@ enum QuickConnectResolver {
     let qcDomain = ".quickconnect.to"
     if s.lowercased().hasSuffix(qcDomain) {
       s = String(s.dropLast(qcDomain.count))
-      return s.isEmpty ? nil : s
+      return isQuickConnectIDShaped(s) ? s : nil
     }
     // Bare ID: no dots or colons (e.g. "mynas")
-    if !s.isEmpty && !s.contains(".") && !s.contains(":") { return s }
+    if !s.contains(".") && !s.contains(":") && isQuickConnectIDShaped(s) { return s }
     return nil
+  }
+
+  /// A QuickConnect ID is letters, digits, hyphens (and underscores, to be lenient). Anything
+  /// else — "[nas", "my nas" — is a mistyped address, not an ID. Without this check such input
+  /// was sent to Synology as an ID and came back "not found", while the user's real mistake was
+  /// a malformed address (TASK-974: "Invalid server address" is for input that does not parse).
+  private static func isQuickConnectIDShaped(_ s: String) -> Bool {
+    !s.isEmpty && s.unicodeScalars.allSatisfy {
+      ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "-" || $0 == "_"
+    }
   }
 
   /// A resolved candidate URL and whether it requires the QuickConnect tunnel cookie.
@@ -32,19 +66,39 @@ enum QuickConnectResolver {
     let requiresTunnelCookie: Bool
   }
 
+  /// One QuickConnect `Serv.php` command: (command, serverID) → decoded JSON. Injectable so the
+  /// response handling can be exercised without Synology's servers.
+  typealias Query = @MainActor (_ command: String, _ serverID: String) async throws -> [String: Any]
+
   /// Resolves a QuickConnect ID and returns all candidate base URLs ordered for login attempts.
   /// LAN IPs first (faster on home network), WAN direct next, relay last.
   /// Each URL uses the DSM port (5000/5001) so DSM nginx can proxy to the backend.
-  static func resolveCandidates(id: String) async throws -> [Candidate] {
+  ///
+  /// Never returns an empty list for a QuickConnect ID: when there is nothing to try it throws
+  /// a `QuickConnectError` naming why (TASK-974). Callers used to get `[]` for an unknown ID, a
+  /// silent NAS and a failed lookup alike, and all three surfaced as "Invalid server address".
+  static func resolveCandidates(id: String, query: Query = liveQuery) async throws -> [Candidate] {
     guard let bareID = extractBareID(from: id) else { return [] }
-    let json = try await queryServerInfo(id: bareID)
+    let json: [String: Any]
+    do {
+      json = try await query("get_server_info", bareID)
+    } catch let urlError as URLError {
+      throw QuickConnectError.unreachable(id: bareID, code: urlError.code)
+    } catch {
+      // Not JSON (a captive portal's login page, a proxy's error page): Synology never answered.
+      throw QuickConnectError.unreachable(id: bareID, code: .cannotParseResponse)
+    }
 
-    if let errno = json["errno"] as? Int, errno != 0 { return [] }
+    // errno != 0 is QuickConnect's own "no such server" answer for an unregistered ID.
+    if let errno = json["errno"] as? Int, errno != 0 {
+      qcLog.warning("resolveCandidates: QuickConnect errno \(errno) for \(bareID, privacy: .public)")
+      throw QuickConnectError.notFound(id: bareID)
+    }
 
     guard let server = json["server"] as? [String: Any],
           let ext = server["external"] as? [String: Any],
           let wanIP = ext["ip"] as? String, !wanIP.isEmpty
-    else { return [] }
+    else { throw QuickConnectError.noAddress(id: bareID) }
 
     var httpsPort: Int?
     var httpPort: Int?
@@ -109,10 +163,11 @@ enum QuickConnectResolver {
 
     // Relay candidates — Synology's tunnel infrastructure, no port forwarding needed.
     // Appended last; only tried when all direct connections fail.
-    if let relayURL = try? await resolveRelay(id: bareID, httpsPort: httpsPort, httpPort: httpPort) {
+    if let relayURL = try? await resolveRelay(id: bareID, httpsPort: httpsPort, httpPort: httpPort, query: query) {
       candidates.append(relayURL)
     }
 
+    guard !candidates.isEmpty else { throw QuickConnectError.noAddress(id: bareID) }
     qcLog.info("resolveCandidates: \(candidates.count) candidates: \(candidates.map { "\($0.url) tunnel=\($0.requiresTunnelCookie)" }.joined(separator: ", "))")
     return candidates
   }
@@ -125,8 +180,8 @@ enum QuickConnectResolver {
 
   /// Requests a relay tunnel from Synology's infrastructure and returns a tunnel candidate.
   /// Uses the `request_tunnel` command; relay URL requires `Cookie: type=tunnel` on every request.
-  private static func resolveRelay(id: String, httpsPort: Int?, httpPort: Int?) async throws -> Candidate? {
-    let json = try await queryCommand("request_tunnel", id: id)
+  private static func resolveRelay(id: String, httpsPort: Int?, httpPort: Int?, query: Query) async throws -> Candidate? {
+    let json = try await query("request_tunnel", id)
     guard let service = json["service"] as? [String: Any] else { return nil }
 
     // SECURITY (TASK-776): the relay carries the login password and every subsequent
@@ -149,8 +204,9 @@ enum QuickConnectResolver {
     return Candidate(url: url, requiresTunnelCookie: true)
   }
 
-  private static func queryServerInfo(id: String) async throws -> [String: Any] {
-    try await queryCommand("get_server_info", id: id)
+  /// The real `Serv.php` round trip.
+  static let liveQuery: Query = { command, serverID in
+    try await queryCommand(command, id: serverID)
   }
 
   private static func queryCommand(_ command: String, id: String) async throws -> [String: Any] {
@@ -167,7 +223,10 @@ enum QuickConnectResolver {
       "serverID": id,
     ])
     let (data, _) = try await URLSession.shared.data(for: request)
-    return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw URLError(.cannotParseResponse)
+    }
+    return json
   }
 
   /// Returns the first non-empty, non-null String from a list of heterogeneous JSON values.
