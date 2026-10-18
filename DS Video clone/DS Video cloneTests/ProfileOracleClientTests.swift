@@ -374,6 +374,11 @@ struct HomeFallbackCeilingTests {
 
   private func ids(_ items: [ItemSummary]) -> Set<String> { Set(items.map(\.id)) }
 
+  /// Just Added has no progress filter (FR-088, TASK-986): every level-1 title seeded above is
+  /// listed, started or finished or not, and no level-4 title is. The ceiling is what this suite
+  /// pins; before TASK-986 this was only "ja-l1" because the fallback hid started and finished titles.
+  private static let justAddedAtLevel1: Set<String> = ["ja-l1", "cw-l1", "rw-l1"]
+
   /// OC-2174 · given a level-1 profile, the device offline and a cached catalog holding both
   /// level-1 and level-4 titles in every rail, when home loads, then Continue Watching, Just
   /// Added and Recently Watched hold only the level-1 titles.
@@ -386,7 +391,7 @@ struct HomeFallbackCeilingTests {
       await state.homeLoad()
 
       #expect(ids(state.homeContinueWatching) == ["cw-l1"])
-      #expect(ids(state.homeJustAdded) == ["ja-l1"])
+      #expect(ids(state.homeJustAdded) == Self.justAddedAtLevel1)
       #expect(ids(state.homeRecentlyWatched) == ["rw-l1"])
     }
   }
@@ -404,7 +409,7 @@ struct HomeFallbackCeilingTests {
       #expect(state.applyRails(rails, startedAt: state.homeStateGeneration))
       await state.loadJustAddedRail()
       #expect(ProfileStubServer.count("GET /api/v1/just-added") >= 1, "the server was asked and failed")
-      #expect(ids(state.homeJustAdded) == ["ja-l1"])
+      #expect(ids(state.homeJustAdded) == Self.justAddedAtLevel1)
     }
   }
 
@@ -420,7 +425,7 @@ struct HomeFallbackCeilingTests {
       #expect(state.applyRails(rails, startedAt: state.homeStateGeneration))
       await state.loadJustAddedRail()
       #expect(ProfileStubServer.count("GET /api/v1/just-added") >= 1)
-      #expect(ids(state.homeJustAdded) == ["ja-l1"])
+      #expect(ids(state.homeJustAdded) == Self.justAddedAtLevel1)
     }
   }
 }
