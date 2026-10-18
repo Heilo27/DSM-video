@@ -111,6 +111,15 @@ struct ItemSummary: Codable, Identifiable, Hashable, Sendable {
 }
 
 extension ItemSummary {
+  /// The one key that says two items belong to the same show (TASK-963, FR-021): the show name
+  /// when the server supplied one, else the show folder id, lowercased. nil for an item that is
+  /// not part of a show. Every "one entry per show" rail (LocalStore.fetchItems, and the demo
+  /// path AppState.computeHomeRails) reads this and nothing else.
+  nonisolated var showDedupKey: String? {
+    if let name = showName, !name.isEmpty { return name.lowercased() }
+    return showFolderId?.lowercased()
+  }
+
   // `withoutProgress` lived here; its only caller was HomeCache.save(), removed with the
   // rest of that superseded cache.
 

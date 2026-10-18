@@ -131,14 +131,17 @@ private struct ProfileTileButtonStyle: ButtonStyle {
     let configuration: Configuration
     let scalesLabel: Bool
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-      let lifted = isFocused || configuration.isPressed
-      let scale: CGFloat = isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1)
+      let lifted = ProfileControlLook.isLit(isFocused: isFocused, isPressed: configuration.isPressed,
+                                            isEnabled: isEnabled)
+      let scale: CGFloat = !isEnabled ? 1 : (isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1))
       configuration.label
         .scaleEffect(scalesLabel ? scale : 1)
         .environment(\.profileTileLifted, lifted)
         .environment(\.profileTileScale, scale)
+        .opacity(ProfileControlLook.opacity(isEnabled: isEnabled))
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isFocused)
         .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -514,14 +517,19 @@ private struct PinKeyStyle: ButtonStyle {
     let configuration: Configuration
     let outlined: Bool
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-      let lit = isFocused || configuration.isPressed
+      let lit = ProfileControlLook.isLit(isFocused: isFocused, isPressed: configuration.isPressed,
+                                         isEnabled: isEnabled)
       configuration.label
-        .foregroundStyle(lit ? Color.black : Color.white)
-        .background(Circle().fill(lit ? Color.white : Color.white.opacity(outlined ? 0.1 : 0)))
-        .scaleEffect(isFocused ? 1.1 : 1)
+        .foregroundStyle(lit ? Color.dsBackground : Color.dsTextPrimary)
+        .background(Circle().fill(lit ? Color.dsTextPrimary
+                                      : Color.dsTextPrimary.opacity(outlined ? 0.1 : 0)))
+        .scaleEffect(ProfileControlLook.keyScale(isFocused: isFocused, isEnabled: isEnabled))
+        .opacity(ProfileControlLook.opacity(isEnabled: isEnabled))
         .animation(.easeOut(duration: 0.15), value: isFocused)
+        .animation(.easeOut(duration: 0.15), value: isEnabled)
     }
   }
 }
@@ -784,8 +792,8 @@ struct ProfileEditorView: View {
     return nil
   }
   private var isOwner: Bool { existing?.isOwner ?? false }
-  private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-  private var nameValid: Bool { (1...20).contains(trimmedName.count) }
+  private var trimmedName: String { ProfileNameRules.trimmed(name) }
+  private var nameValid: Bool { ProfileNameRules.isValid(name) }
 
   /// Whether the profile will have a PIN after saving.
   private var willHavePin: Bool {
@@ -820,6 +828,7 @@ struct ProfileEditorView: View {
                 #endif
                 .frame(maxWidth: 700)
                 .accessibilityIdentifier("profileEditor.name")
+              nameFeedback
             }
           }
 
@@ -912,6 +921,27 @@ struct ProfileEditorView: View {
     #if os(tvOS)
     .onExitCommand { close() }
     #endif
+  }
+
+  /// The count against the limit, and the reason Save is off while the name is empty or too long
+  /// (TASK-952). Without it the button just greyed out.
+  private var nameFeedback: some View {
+    let reason = ProfileNameRules.reason(for: name)
+    let over = !nameValid && !trimmedName.isEmpty
+    return HStack(alignment: .firstTextBaseline, spacing: 16) {
+      if let reason {
+        Text(reason)
+          .foregroundStyle(over ? Color.dsError : Color.dsTextSecondary)
+          .accessibilityIdentifier("profileEditor.nameReason")
+      }
+      Spacer(minLength: 0)
+      Text(ProfileNameRules.counter(for: name))
+        .monospacedDigit()
+        .foregroundStyle(over ? Color.dsError : Color.dsTextTertiary)
+        .accessibilityIdentifier("profileEditor.nameCounter")
+    }
+    .font(ProfileMetrics.body)
+    .frame(maxWidth: 700)
   }
 
   private func sectionLabel(_ text: String) -> some View {

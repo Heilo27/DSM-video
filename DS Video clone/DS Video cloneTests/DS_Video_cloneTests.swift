@@ -1212,10 +1212,15 @@ struct WatchStateTests {
 
   /// The boundaries are the thing that drifted, so pin them explicitly rather than
   /// trusting a value in the middle of a band.
+  ///
+  /// TASK-962: "watched" is `isFinished` (strictly past 95%, OR inside the last 90s), so the
+  /// 95% edge is pinned on a 2-hour runtime where 95% is still 6 minutes from the end and the
+  /// two clauses cannot be confused. Exactly 95.000% is still IN PROGRESS: `isFinished` and
+  /// the rail SQL use a strict `>`, and this used to say `.watched`.
   @Test func boundariesFollowTheSharedThresholds() {
-    let dur = 1000
-    let atStarted = Int(PlaybackProgress.startedThreshold * Double(dur))      // exactly 5%
-    let atWatched = Int(PlaybackProgress.watchedThreshold * Double(dur))      // exactly 95%
+    let dur = 7200
+    let atStarted = Int(PlaybackProgress.startedThreshold * Double(dur))      // exactly 5%  = 360
+    let atWatched = Int(PlaybackProgress.watchedThreshold * Double(dur))      // exactly 95% = 6840
 
     // `startedThreshold` is INCLUSIVE, matching the rail SQL in LocalStore. The show-page
     // scans used a strict `>` while the rail used `>=`, so an item at exactly 5.000%
@@ -1223,9 +1228,8 @@ struct WatchStateTests {
     #expect(PlaybackProgress.watchState(positionSeconds: atStarted, durationSeconds: dur) == .inProgress)
     #expect(PlaybackProgress.watchState(positionSeconds: atStarted - 1, durationSeconds: dur) == .unwatched)
 
-    // `watchedThreshold` is inclusive — exactly 95% counts as watched.
-    #expect(PlaybackProgress.watchState(positionSeconds: atWatched, durationSeconds: dur) == .watched)
-    #expect(PlaybackProgress.watchState(positionSeconds: atWatched - 1, durationSeconds: dur) == .inProgress)
+    #expect(PlaybackProgress.watchState(positionSeconds: atWatched, durationSeconds: dur) == .inProgress)
+    #expect(PlaybackProgress.watchState(positionSeconds: atWatched + 1, durationSeconds: dur) == .watched)
   }
 
   /// The three states must partition the space: every input lands in exactly one, and
@@ -1240,9 +1244,10 @@ struct WatchStateTests {
         #expect(frac < PlaybackProgress.startedThreshold)
       case .inProgress:
         #expect(frac >= PlaybackProgress.startedThreshold)
-        #expect(frac < PlaybackProgress.watchedThreshold)
+        #expect(frac <= PlaybackProgress.watchedThreshold)
       case .watched:
-        #expect(frac >= PlaybackProgress.watchedThreshold)
+        // Past 95%, or inside the last 90s (which on a 45-minute runtime starts at 96.7%).
+        #expect(frac > PlaybackProgress.watchedThreshold || dur - pos < PlaybackProgress.finishedRemainingSeconds)
       }
     }
   }

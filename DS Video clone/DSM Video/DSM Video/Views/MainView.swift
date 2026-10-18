@@ -12,6 +12,10 @@ struct MainView: View {
   /// Set when a dsvideo:// deep link arrives; drives the detail sheet.
   @State private var deepLinkItem: DeepLinkTarget?
 
+  /// Set when Siri asks to search ("Find X in DSM Video", or a "Play X" that matched nothing);
+  /// drives the search sheet (TASK-993, FRD-001 FR-147).
+  @State private var siriSearch: SiriSearchTarget?
+
   var body: some View {
     // TASK-884: the offline banner is an OVERLAY on the content, not a ZStack sibling.
     //
@@ -125,6 +129,20 @@ struct MainView: View {
           .padding(.bottom, 32)
       }
     }
+    // Siri search (FRD-001 FR-147). The intents set `pendingSearchTerm`; only TVMainView read it,
+    // so on iPhone/iPad "Find X" opened the app and did nothing. A sheet for the same reason as
+    // the deep link above: it lands correctly from any tab and from the iPad split view.
+    .sheet(item: $siriSearch) { target in
+      NavigationStack {
+        SearchView(isEmbedded: true, initialTerm: target.term)
+          .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+              Button("Done") { siriSearch = nil }
+            }
+          }
+      }
+    }
+    .onChange(of: appState.pendingSearchTerm) { _, _ in presentPendingSearch() }
     .onChange(of: appState.pendingDeepLinkItemID) { _, newID in
       guard let id = newID else { return }
       deepLinkItem = DeepLinkTarget(id: id)
@@ -138,7 +156,21 @@ struct MainView: View {
         deepLinkItem = DeepLinkTarget(id: id)
         appState.pendingDeepLinkItemID = nil
       }
+      presentPendingSearch()
     }
+  }
+
+  private func presentPendingSearch() {
+    guard appState.pendingSearchTerm != nil else { return }
+    if let term = appState.takePendingSearchTerm() {
+      siriSearch = SiriSearchTarget(term: term)
+    }
+  }
+
+  /// A fresh id per request so a second "Find X" while the sheet is up shows the new term.
+  private struct SiriSearchTarget: Identifiable {
+    let id = UUID()
+    let term: String
   }
 
   /// Identifiable wrapper so `.sheet(item:)` can drive presentation off the item id.
@@ -353,6 +385,11 @@ struct SearchView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   var isEmbedded: Bool = false
+  /// A term to look up as soon as the screen appears (Siri "Find X"). Runs as an explicit search
+  /// (so one character works) and is not saved to recent searches.
+  var initialTerm: String? = nil
+  /// The seeded term, so the change it causes in `searchText` does not also start a live search.
+  @State private var seededTerm: String?
   @State private var searchText: String = ""
   @State private var results: [ItemSummary] = []
   @State private var isSearching: Bool = false
@@ -388,7 +425,7 @@ struct SearchView: View {
             searches: recentSearches,
             onSelect: { query in
               searchText = query
-              Task { await search(commit: true) }
+              Task { await search(explicit: true, record: true) }
             },
             onRemove: { query in removeRecentSearch(query) },
             onClearAll: { recentSearchesRaw = "" }
@@ -413,7 +450,7 @@ struct SearchView: View {
             .multilineTextAlignment(.center)
             .padding(.horizontal, 32)
           Button {
-            Task { await search(commit: true) }
+            Task { await search(explicit: true, record: true) }
           } label: {
             Text("Retry")
               .font(.subheadline.weight(.semibold))
@@ -428,6 +465,12 @@ struct SearchView: View {
         .padding(.top, 60)
       } else if hasSearched && results.isEmpty {
         DSContentUnavailable(title: "No Results", systemImage: "magnifyingglass", description: "No videos match \"\(searchText)\"")
+          .padding(.top, 60)
+      } else if !hasSearched && SearchRules.needsExplicitSubmit(searchText) {
+        // One character is below the live-search floor. Say so, rather than leave a blank
+        // screen: pressing Search still looks it up (TASK-977).
+        DSContentUnavailable(title: SearchRules.shortQueryTitle, systemImage: "magnifyingglass",
+                             description: SearchRules.shortQueryHint(for: searchText))
           .padding(.top, 60)
       } else if !results.isEmpty {
         LazyVStack(spacing: 0) {
@@ -477,23 +520,27 @@ struct SearchView: View {
     .onSubmit(of: .search) {
       // Explicit submit — this is the only path that records a recent search.
       searchTask?.cancel()
-      searchTask = Task { await search(commit: true) }
+      searchTask = Task { await search(explicit: true, record: true) }
     }
     .onChange(of: searchText) { _, newValue in
+      if let seeded = seededTerm {
+        seededTerm = nil
+        if newValue == seeded { return }
+      }
       if newValue.isEmpty {
         debounceTask?.cancel()
         searchTask?.cancel()
         results = []
         hasSearched = false
         searchError = nil
-      } else if newValue.count >= 2 {
+      } else if SearchRules.queryToSend(newValue, explicit: false) != nil {
         debounceTask?.cancel()
         debounceTask = Task {
           if (try? await Task.sleep(for: .milliseconds(400))) != nil {
             // Live/debounced search as you type — show results but do NOT save the
             // partial query to recent searches (only an explicit submit does).
             searchTask?.cancel()
-            searchTask = Task { await search(commit: false) }
+            searchTask = Task { await search(explicit: false) }
           }
         }
       }
@@ -507,8 +554,17 @@ struct SearchView: View {
       // the navigation bar during this same layout pass, and setting focus before it
       // exists is a no-op that fails silently.
       #if !os(tvOS)
-      DispatchQueue.main.async { searchFocused = true }
+      if initialTerm == nil {
+        DispatchQueue.main.async { searchFocused = true }
+      }
       #endif
+    }
+    .task {
+      // Siri asked for this term: run it now, explicitly, without recording it as a recent search.
+      guard let term = SearchRules.siriTerm(initialTerm), searchText.isEmpty else { return }
+      seededTerm = term
+      searchText = term
+      await search(explicit: true)
     }
     .onChange(of: results) { _, newResults in
       guard hasSearched && !isSearching else { return }
@@ -525,12 +581,13 @@ struct SearchView: View {
     }
   }
 
-  /// commit == true only on explicit submit (return key / tapping a recent search),
-  /// which is the only case that records the query into recent searches. Live
-  /// debounced searches pass false so partial phrases aren't saved.
-  private func search(commit: Bool) async {
-    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard query.count >= 2 else { return }
+  /// - explicit: the user pressed Search, tapped a recent search, or asked Siri. Any non-empty
+  ///   query runs, including one character. Live debounced searches pass false and wait for
+  ///   `SearchRules.liveMinimumLength` characters (TASK-977).
+  /// - record: save the query to recent searches. Only a typed submit or recent-search tap does;
+  ///   live partial phrases are never saved.
+  private func search(explicit: Bool, record: Bool = false) async {
+    guard let query = SearchRules.queryToSend(searchText, explicit: explicit) else { return }
     // TASK-795: re-entrancy guard — rapid recent-search taps were spawning concurrent
     // search() calls racing the same result state. Bail if one is already in flight.
     guard !isSearching else { return }
@@ -546,20 +603,22 @@ struct SearchView: View {
         $0.title.localizedCaseInsensitiveContains(query)
       }
       searchError = nil
-      if commit { saveRecentSearch(query) }
+      if record { saveRecentSearch(query) }
       return
     }
 
-    do {
-      let response = try await appState.api.search(query: query, limit: 100)
-      results = response.items
+    switch await SearchRules.fetch(query, explicit: explicit, api: appState.api) {
+    case .success(let found)?:
+      results = found
       searchError = nil
-      if commit { saveRecentSearch(query) }
-    } catch {
+      if record { saveRecentSearch(query) }
+    case .failure(let error)?:
       appState.handleConnectionFailure(error)
       results = []
       let msg = (error as? APIError)?.userMessage ?? error.localizedDescription
       searchError = msg
+    case nil:
+      break
     }
   }
 

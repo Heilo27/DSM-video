@@ -78,9 +78,10 @@ struct LibrarySearchSheet<Item: Identifiable, Destination: View>: View {
 
 struct LibrariesView: View {
   @Environment(AppState.self) private var appState
-  @State private var libraries: [Library] = []
+  /// The loaded list and the last load failure. A failed refresh never clears the list (FR-098).
+  @State private var content = LibraryListContent()
   @State private var isLoading: Bool = false
-  @State private var error: String?
+  private var libraries: [Library] { content.libraries }
 
   /// Pass `true` when this view is embedded as the detail column of a
   /// `NavigationSplitView`. The split view itself acts as the navigation
@@ -94,8 +95,9 @@ struct LibrariesView: View {
         ProgressView("Loading libraries")
           .accessibilityLabel("Loading libraries, please wait")
           .accessibilityAddTraits(.updatesFrequently)
-      } else if let error {
-        // FIX-18: retry button for transient network failures on the libraries screen
+      } else if let error = content.blockingError {
+        // FIX-18: retry button for transient network failures on the libraries screen.
+        // Blocking only when there is no list to keep (FR-098, TASK-975).
         VStack(spacing: 12) {
           DSContentUnavailable(
             title: "Couldn't load libraries",
@@ -118,6 +120,10 @@ struct LibrariesView: View {
         // poster collage and the item count.
         ScrollView {
           VStack(alignment: .leading, spacing: 28) {
+            if let notice = content.noticeMessage {
+              RefreshFailedNotice(message: notice) { Task { await load(force: true) } }
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
             ForEach(libraries) { lib in
               VStack(alignment: .leading, spacing: 10) {
                 Text(lib.title)
@@ -155,13 +161,12 @@ struct LibrariesView: View {
       // already loaded pops any pushed NavigationLink destination (e.g. TVShowsView)
       // and cancels its in-flight .task, preventing TV shows from loading.
       if !libs.isEmpty && libs.map(\.id) != libraries.map(\.id) {
-        libraries = libs
+        content.finish(.success(libs))
       }
     }
     .onChange(of: appState.sessionToken) { _, token in
       if token == nil {
-        libraries = []
-        error = nil
+        content = LibraryListContent()
       }
     }
 
@@ -175,26 +180,26 @@ struct LibrariesView: View {
   private func load(force: Bool = false) async {
     guard !isLoading else { return }
     if appState.isDemoMode {
-      libraries = DemoData.libraries
+      content.finish(.success(DemoData.libraries))
       return
     }
     // Use already-fetched libraries from AppState to avoid redundant network call (TASK-410).
     // Skip the cache when force=true (e.g. pull-to-refresh — TASK-518).
     if !force && !appState.homeLibraries.isEmpty {
-      libraries = appState.homeLibraries
+      content.finish(.success(appState.homeLibraries))
       return
     }
-    error = nil
+    content.failure = nil
     isLoading = true
     defer { isLoading = false }
 
     do {
       let response = try await appState.api.libraries()
-      libraries = response.libraries
+      content.finish(.success(response.libraries))
     } catch {
       appState.handleConnectionFailure(error)
-      let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
-      self.error = errorMsg
+      // Keeps the loaded list and sets a notice; the full-screen error is only for an empty list.
+      content.finish(.failure(error))
     }
   }
 }

@@ -43,7 +43,8 @@ same account never sees, resumes from or changes them.
 **FR-202 [RYAN]** Each profile has a maximum age level (§6). A profile sees only titles at or below it.
 
 **FR-203 [DESIGN]** A profile has: a name (1–20 characters after trimming, unique within the account
-regardless of case), an avatar key chosen from a fixed set built into the apps (no image uploads), a
+regardless of case; **[DESIGN, 2026-10-17, TASK-952]** a character is a Unicode code point, counted the same by the server
+and by the apps' editor, so an emoji sequence such as a family counts as several and "Grandma 👨‍👩‍👧‍👦 Smith" is 21; the editor shows the count as n/20 and says why Save is off), an avatar key chosen from a fixed set built into the apps (no image uploads), a
 maximum age level, and whether a PIN is set. The PIN itself is never returned by any endpoint. An avatar
 key is 1–32 characters of letters, digits, `-` and `_`; anything else is refused with `invalid_avatar`.
 
@@ -84,7 +85,8 @@ would protect nothing. The owner may set a first PIN with no prior PIN, because 
 has a session at that point.
 
 **FR-213 [DESIGN]** Selecting a PIN-protected profile requires its PIN, verified **by the server** every time
-the profile is entered. The app never stores or checks PINs itself.
+the profile is entered. The app never stores or checks PINs itself. **[DESIGN, 2026-10-17, TASK-958]** While the
+server is checking, the keypad is disabled and every key is drawn dimmed, so it never looks tappable while taps do nothing.
 
 **FR-214 [DESIGN]** PINs are stored only as a salted, deliberately slow hash; the cost is tuned so one check
 stays well under a second on the slowest supported NAS CPU. A PIN is never stored in plain text, logged or
@@ -458,7 +460,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | `password_incorrect` | 403 | Owner PIN reset with a wrong DSM password or OTP. |
 | `otp_required` | 403 | Owner PIN reset on a two-factor DSM account without an OTP (FR-216). |
 | `invalid_pin_format` | 400 | PIN is not exactly 4 ASCII digits. |
-| `invalid_profile_name` | 400 | Name empty or longer than 20 characters after trimming. |
+| `invalid_profile_name` | 400 | Name empty or longer than 20 Unicode code points after trimming (an emoji sequence counts as several). |
 | `duplicate_profile_name` | 409 | Another profile in the account already has the name (ignoring case). |
 | `invalid_age_level` | 400 | `maxAgeLevel` not an integer 1–4. |
 | `profile_limit_reached` | 409 | The account already has 4 profiles. |

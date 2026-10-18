@@ -35,3 +35,36 @@ struct ErrorRetryView: View {
     }
   }
 }
+
+/// FR-098 (TASK-975): the non-blocking counterpart of `ErrorRetryView`. A refresh failed but the
+/// content already on screen is still valid, so this sits above it as a slim bar instead of
+/// replacing it. Which of the two to show is `LoadFailurePresentation.decide`.
+struct RefreshFailedNotice: View {
+  let message: String
+  let retry: () -> Void
+
+  var body: some View {
+    HStack(spacing: 12) {
+      Image(systemName: "exclamationmark.triangle")
+        .foregroundStyle(Color.dsAccent)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(LoadFailurePresentation.noticeTitle)
+          .font(.footnote.weight(.semibold))
+          .foregroundStyle(Color.dsTextPrimary)
+        Text("\(message) Showing what was already loaded.")
+          .font(.caption)
+          .foregroundStyle(Color.dsTextSecondary)
+          .lineLimit(2)
+      }
+      Spacer(minLength: 8)
+      Button("Retry", action: retry)
+        .accessibilityHint("Tries to refresh again")
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 8)
+    .frame(maxWidth: .infinity)
+    .background(Color.dsSurface)
+    .accessibilityElement(children: .contain)
+  }
+}

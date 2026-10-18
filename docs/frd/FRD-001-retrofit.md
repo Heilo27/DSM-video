@@ -119,6 +119,12 @@ stands, so it never keeps showing its own stale one.
 reconciled to the server when connectivity returns; it is never discarded.
 **FR-016 [STATED]** — Continue Watching contains exactly the titles with progress strictly between zero
 and complete, ordered most-recently-watched first. *Derivation:* design-spec B2 data requirements.
+**Complete [DESIGN, 2026-10-17, TASK-962]** — "Complete" means one thing everywhere: the position is above
+zero and either past 95% of the runtime or within the last 90 seconds of it. A title is "started" from 5%.
+The Continue Watching and Recently Watched rails, the poster-card indicator and badge (FR-020), the show
+page's Resume-or-next-episode choice (FR-011) and the restart-from-zero on reopening all read that one
+rule (`PlaybackProgress.isFinished`; the rail SQL mirrors it). A 22-minute episode stopped 80 seconds from the
+end is therefore complete: its show offers the next episode, not a resume.
 **FR-017 [INFERRED]** — With zero in-progress titles the rail is absent rather than rendered empty, and
 its absence is not an error.
 **FR-018 [STATED]** — Mark as Watched sets a title to fully watched, removes it from Continue Watching,
@@ -129,6 +135,11 @@ destroyed.) This includes an older save replayed from an offline device after th
 title was marked watched: it never brings back the resume point or un-watches the title (TASK-960).
 **FR-020 [STATED]** — Poster cards show a progress indicator only when progress is above zero and below
 complete, and a watched badge when complete. *Derivation:* design-spec B3 §3–4.
+**Card indicator [DESIGN, 2026-10-17, TASK-978]** — One function decides what a poster card draws
+(`PlaybackProgress.cardIndicator`), and the iOS grid and rails and both tvOS cards use it. At position zero
+the card draws nothing: no bar, no empty track, no percentage in its VoiceOver label. Complete (see FR-016)
+draws the watched badge and no bar. Anything between draws a bar whose width is exactly the fraction watched;
+there is no minimum width and no upper cutoff (iOS used to hide the bar below 2% and above 98%).
 **FR-021 [INFERRED]** — A TV show contributes at most one Continue Watching entry, identifying the
 specific partially-watched episode.
 **FR-022 [INFERRED]** — Progress reached while the screen is locked (background audio) is recorded.
@@ -305,7 +316,8 @@ server's metadata — posters, episode guides, descriptions. The server exposes 
 failure to load presents as an error with retry (instance of FR-001).
 **FR-082 [INFERRED]** — All titles in a library are reachable, each exactly once, across pagination
 boundaries; the displayed item count matches the server's total. *(Item count display stated in
-design-spec B3 §5.)*
+design-spec B3 §5.)* Identity is the server's id: the client applies no second rule, so distinct ids that
+share title, year and runtime (two files of one film) are each a tile. The same id twice is one tile.
 **FR-083 [STATED]** — TV content is organised as show → season → episode, with seasons and episodes
 matching what the server reports.
 **FR-084 [INFERRED]** — A show whose episodes are split across multiple folders/paths on the NAS
@@ -322,7 +334,9 @@ an orphaned separator — and **missing artwork must not prevent the detail scre
 Just Added shows the newest titles as the server reports them, newest first, at most **16**. A show with
 new episodes appears once, as that show, not once per episode. On a restricted profile the rail holds only
 titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, the device's own list of
-its newest synced titles stands in, under the same rules. *Derivation:* 0c9b4cd (Ryan: "the server decides
+its newest synced titles stands in, under the same rules. The rail has no watched filter: a title the
+profile has started or finished is listed exactly while it is among the newest, online and offline alike
+(TASK-986; it also appears in Continue Watching or Recently Watched). *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
 player sends no `limit` on Just Added or Suggested and takes the server's default for each, so its Just
@@ -347,11 +361,17 @@ supported platform. Entries above the profile's age ceiling are hidden, never de
 removal decreases it by exactly one and leaves other entries intact; both survive relaunch.
 **FR-097 [INFERRED]** — An empty watchlist explains how to add titles.
 **FR-098 [INFERRED]** — A failed refresh of an already-loaded library keeps the existing content visible
-with a refresh-failed indication; it must not wipe the grid to empty.
+with a refresh-failed indication; it must not wipe the grid to empty. This covers the Libraries list (the
+list stays, a "Couldn't refresh" notice with Retry sits above it; the full-screen error is only for a first
+load with nothing to keep) and the library grid on iOS and tvOS. The kept grid must still answer what the user
+asked for: if the failed load was for a different genre filter or library, the old grid is not shown as that
+result, so the error screen applies instead. Offline, an unfiltered grid falls back to the on-device catalog.
 **FR-099 [INFERRED]** — Home-video-type libraries are browsable with whatever metadata exists; they are
 not hidden and do not break the library view.
 **FR-100 [INFERRED]** — Titles with unusual names (quotes, ampersands, non-ASCII, very long) list, open,
-and are findable by search.
+and are findable by search. That includes one-character titles ("M", "Z", "1"): as-you-type search waits
+for two characters, but an explicit search (the Search key, a recent search, or Siri) runs at any non-empty
+length, and a lone character shows a "press Search" hint instead of a blank screen.
 
 **FR-143 [DESIGN, DESTRUCTIVE, 2026-10-17, TASK-933/937]** — *A server scan resolves doubt toward keeping.*
 A folder the server cannot read keeps every title already known under it, and the failure is logged with
@@ -374,12 +394,18 @@ no history it is simply absent rather than filled with guesses. *Derivation:* 0a
 **FR-146 [DESIGN, 2026-09-16, TASK-920]** — *The Apple TV Top Shelf gets you back into what you were
 watching.* It shows Continue Watching, with resume bars, as widescreen artwork, and falls back to Just Added
 when nothing is in progress, so a caught-up viewer still sees content rather than a bare icon. It refreshes
-when Continue Watching changes, so a title just finished does not linger. On an account with a restricted
+when Continue Watching changes, so a title just finished does not linger. [DESIGN, 2026-10-17, TASK-992]
+Refreshing means the app tells tvOS the shelf changed whenever it writes a different shelf or clears one;
+tvOS reloads only when told. A rewrite that leaves the shelf as it was tells it nothing. On an account with a restricted
 profile, FRD-002 FR-264 narrows this. *Derivation:* 38c6cb5.
 **FR-147 [DESIGN, 2026-09-16, TASK-920]** — *Siri can find a title and open it.* App-scoped phrases
 resolve against the library. "Play <title> in DSM Video" opens the title's detail page, with Play already
 focused. If nothing matches, it opens search with the phrase filled in and says so, rather than failing silently.
-"Find <title> in DSM Video" opens search results for the phrase. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
+"Find <title> in DSM Video" opens search results for the phrase, on iPhone and iPad as well as Apple TV
+[DESIGN, 2026-10-17, TASK-993]: iPhone and iPad had no reader for the request, so the app opened and did
+nothing. They now show search, over whatever tab is open, with the phrase filled in and the search already run.
+The search is an explicit one, so a one-character title ("M") runs; it is not added to recent searches, which
+hold only what the viewer typed. A request is acted on once. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
 an Apple TV-app catalog partnership, not an API. Siri results obey the active profile's ceiling (FRD-002
 FR-264). *Derivation:* 542d543.
 **FR-148 [DESIGN, 2026-10-17, TASK-959]** — *Every control in the /web player shows when it is pressed,

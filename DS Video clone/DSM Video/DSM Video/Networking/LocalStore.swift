@@ -958,9 +958,14 @@ actor LocalStore {
   private static let sqlRemaining = "(p.duration_seconds - p.position_seconds)"
 
   /// Mirrors PlaybackProgress.isFinished: past the watched ratio OR inside the final 90s.
+  ///
+  /// `position_seconds > 0` mirrors the guard in `isFinished`: a row at position 0 (Mark as
+  /// Unwatched writes one) is never finished, even on a clip shorter than 90s, where
+  /// `remaining < 90` alone would put it in Recently Watched (TASK-962).
   private static let sqlIsFinished = """
-    (\(sqlRatio) > \(PlaybackProgress.watchedThreshold) \
-    OR \(sqlRemaining) < \(PlaybackProgress.finishedRemainingSeconds))
+    (p.position_seconds > 0 \
+    AND (\(sqlRatio) > \(PlaybackProgress.watchedThreshold) \
+    OR \(sqlRemaining) < \(PlaybackProgress.finishedRemainingSeconds)))
     """
 
   /// Started (>= 5%) but not finished — the exact complement of sqlIsFinished within
@@ -1031,16 +1036,16 @@ actor LocalStore {
   }
 
   private func queryJustAdded() -> [ItemSummary] {
-    // Show recently-added items that have not been started (< 5% watched).
-    // Mirrors the iOS home rail: exclude in-progress (>= 5%) and fully-watched (>= 95%)
-    // items, which belong in Continue Watching / Recently Watched respectively.
+    // Offline stand-in for the server's Just Added (FR-088, TASK-986): the newest titles by
+    // added_at the profile can see, one per show, at most 16. NO progress filter. The server
+    // rail (backend justadded.go queryJustAdded) has none, so a title the profile has started
+    // or finished is listed here exactly when it is listed online. A progress join here would be
+    // a second, drifted copy of that rule.
     let sql = """
       SELECT \(Self.itemSelectColumns)
       FROM items i
       LEFT JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
-      WHERE (p.item_id IS NULL
-         OR p.duration_seconds = 0
-         OR \(Self.sqlRatio) < \(PlaybackProgress.startedThreshold))
+      WHERE i.added_at != ''
         AND \(Self.sqlVisibleToScope)
       ORDER BY i.added_at DESC
       LIMIT 500
@@ -1102,9 +1107,9 @@ actor LocalStore {
       let item = itemFromStatement(stmt)
 
       if deduplicateByShow {
-        // Deduplicate by show_name when available, fall back to show_folder_id.
-        // show_name may be null for shows where TMDb metadata was never fetched.
-        if let key = (item.showName ?? item.showFolderId).map({ $0.lowercased() }) {
+        // One entry per show, keyed by ItemSummary.showDedupKey (the single definition; the demo
+        // rails use the same one). show_name may be null where TMDb metadata was never fetched.
+        if let key = item.showDedupKey {
           if seenShows.contains(key) { continue }
           seenShows.insert(key)
         }

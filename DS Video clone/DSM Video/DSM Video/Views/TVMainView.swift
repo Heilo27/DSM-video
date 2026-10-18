@@ -916,27 +916,24 @@ private struct TVLandscapeCard: View {
         .frame(width: cardWidth, height: cardHeight)
 
         // Progress bar at bottom edge
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac < 1.0 {
-            VStack(spacing: 0) {
-              Spacer()
-              GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                  Rectangle()
-                    .fill(Color(white: 0.3))
-                    .frame(height: 4)
-                  Rectangle()
-                    .fill(Color.dsAccent)
-                    .frame(width: geo.size.width * frac, height: 4)
-                }
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+          VStack(spacing: 0) {
+            Spacer()
+            GeometryReader { geo in
+              ZStack(alignment: .leading) {
+                Rectangle()
+                  .fill(Color(white: 0.3))
+                  .frame(height: 4)
+                Rectangle()
+                  .fill(Color.dsAccent)
+                  .frame(width: geo.size.width * frac, height: 4)
               }
-              .frame(height: 4)
             }
-            .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .accessibilityHidden(true)
+            .frame(height: 4)
           }
+          .frame(width: cardWidth, height: cardHeight)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .accessibilityHidden(true)
         }
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -1020,47 +1017,41 @@ private struct TVPortraitCard: View {
         .frame(width: cardWidth, height: cardHeight)
 
         // Progress bar
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac < 1.0 {
-            VStack(spacing: 0) {
-              Spacer()
-              GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                  Rectangle().fill(Color(white: 0.3)).frame(height: 4)
-                  Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 4)
-                }
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+          VStack(spacing: 0) {
+            Spacer()
+            GeometryReader { geo in
+              ZStack(alignment: .leading) {
+                Rectangle().fill(Color(white: 0.3)).frame(height: 4)
+                Rectangle().fill(Color.dsAccent).frame(width: geo.size.width * frac, height: 4)
               }
-              .frame(height: 4)
             }
-            .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .accessibilityHidden(true)
+            .frame(height: 4)
           }
+          .frame(width: cardWidth, height: cardHeight)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .accessibilityHidden(true)
         }
 
         // Watched badge
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= PlaybackProgress.watchedThreshold {
-            VStack {
-              HStack {
-                Spacer()
-                Circle()
-                  .fill(Color.dsSuccess)
-                  .frame(width: 28, height: 28)
-                  .overlay(
-                    Image(systemName: "checkmark")
-                      .font(.system(size: 13, weight: .bold))
-                      .foregroundStyle(.black)
-                  )
-                  .padding(8)
-              }
+        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
+          VStack {
+            HStack {
               Spacer()
+              Circle()
+                .fill(Color.dsSuccess)
+                .frame(width: 28, height: 28)
+                .overlay(
+                  Image(systemName: "checkmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.black)
+                )
+                .padding(8)
             }
-            .frame(width: cardWidth, height: cardHeight)
-            .accessibilityHidden(true)
+            Spacer()
           }
+          .frame(width: cardWidth, height: cardHeight)
+          .accessibilityHidden(true)
         }
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -1249,7 +1240,7 @@ private struct TVSearchView: View {
             .textInputAutocapitalization(.never)
             .onSubmit {
               debounceTask?.cancel()
-              debounceTask = Task { await search() }
+              debounceTask = Task { await search(explicit: true) }
             }
             .onChange(of: searchText) { _, newValue in
               if newValue.isEmpty {
@@ -1257,12 +1248,12 @@ private struct TVSearchView: View {
                 results = []
                 hasSearched = false
                 searchError = nil
-              } else if newValue.count >= 2 {
+              } else if SearchRules.queryToSend(newValue, explicit: false) != nil {
                 debounceTask?.cancel()
                 debounceTask = Task {
                   do {
                     try await Task.sleep(for: .milliseconds(600))
-                    await search()
+                    await search(explicit: false)
                   } catch { /* debounce cancelled */ }
                 }
               }
@@ -1361,6 +1352,20 @@ private struct TVSearchView: View {
                 .focusSection()
                 .privacySensitive()  // TASK-693/698: redact search results (titles + posters)
               }
+            } else if !hasSearched && SearchRules.needsExplicitSubmit(searchText) {
+              // One character is below the live-search floor: say so (TASK-977).
+              VStack(spacing: 16) {
+                Image(systemName: "magnifyingglass")
+                  .font(.system(size: 60))
+                  .foregroundStyle(Color.dsTextMuted)
+                Text(SearchRules.shortQueryTitle)
+                  .font(.system(size: 28, weight: .semibold))
+                  .foregroundStyle(.white)
+                Text(SearchRules.shortQueryHint(for: searchText))
+                  .font(.system(size: 20))
+                  .foregroundStyle(Color.dsTextSecondary)
+              }
+              .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             } else {
               VStack(spacing: 16) {
                 Image(systemName: "magnifyingglass")
@@ -1394,16 +1399,16 @@ private struct TVSearchView: View {
         if let term = initialTerm, !term.isEmpty, searchText.isEmpty {
           searchText = term
           appState.pendingSearchTerm = nil
-          Task { await search() }
+          Task { await search(explicit: true) }
         }
       }
       .onDisappear { debounceTask?.cancel() }
     }
   }
 
-  private func search() async {
-    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard query.count >= 2 else { return }
+  /// explicit: return pressed or Siri asked, so a one-character query runs (TASK-977).
+  private func search(explicit: Bool) async {
+    guard let query = SearchRules.queryToSend(searchText, explicit: explicit) else { return }
 
     isSearching = true
     hasSearched = true
@@ -1416,13 +1421,15 @@ private struct TVSearchView: View {
       return
     }
 
-    do {
-      let response = try await appState.api.search(query: query, limit: 100)
-      results = response.items
+    switch await SearchRules.fetch(query, explicit: explicit, api: appState.api) {
+    case .success(let found)?:
+      results = found
       searchError = nil
-    } catch {
+    case .failure(let error)?:
       results = []
       searchError = (error as? APIError)?.userMessage ?? error.localizedDescription
+    case nil:
+      break
     }
 
     if !results.isEmpty {

@@ -25,8 +25,7 @@ nonisolated enum PlaybackProgress {
     /// 5% is the canonical value — it filters out the accidental tap / trailer-length sample
     /// that 2% lets through. Every threshold check should reference this, not a literal.
     ///
-    /// NOTE: ItemsGridView's separate 0.02 is a deliberate *rendering* cutoff for the progress
-    /// bar sliver (documented at its site) and is intentionally not this constant.
+    /// The poster-card bar no longer has a cutoff of its own (TASK-978): see `cardIndicator`.
     static let startedThreshold: Double = 0.05
 
     /// Seconds remaining at/below which an item is treated as finished regardless of
@@ -72,10 +71,19 @@ nonisolated enum PlaybackProgress {
     /// how the 0.05-vs-0.02 mismatch documented on startedThreshold above happened: one copy
     /// was updated and the other was not, so the show page offered to resume an episode the
     /// home rail said had never been started. Single definition, so it cannot drift again.
+    ///
+    /// TASK-962: "watched" is `isFinished` and nothing else. This used to test the fraction
+    /// alone (`>= 0.95`), so a 22-minute episode stopped at 1240s (93.9%, 80s left) was
+    /// `.inProgress` here while `isFinished`, the rail SQL and playback all called it finished:
+    /// the show page offered Resume on an episode that restarted from 0 and that the rail had
+    /// already dropped, instead of advancing to the next one. It also disagreed at exactly
+    /// 95.000%, which `isFinished` (strictly greater) does not treat as finished.
     static func watchState(positionSeconds: Int, durationSeconds: Int) -> WatchState {
         guard durationSeconds > 0 else { return .unwatched }
+        if isFinished(positionSeconds: positionSeconds, durationSeconds: durationSeconds) {
+            return .watched
+        }
         let frac = Double(positionSeconds) / Double(durationSeconds)
-        if frac >= watchedThreshold { return .watched }
         // INCLUSIVE at startedThreshold, matching the rail SQL in LocalStore
         // (`ratio >= startedThreshold`). The show-page scans used a strict `>` while the
         // rail used `>=`, so an item sitting at exactly 5.000% appeared in one place and
@@ -84,6 +92,81 @@ nonisolated enum PlaybackProgress {
         // authority for "is this in Continue Watching", so its boundary wins.
         if frac >= startedThreshold { return .inProgress }
         return .unwatched
+    }
+
+    /// Where the Play / Resume button on a show page should land, over every scanned episode
+    /// in watch order (seasons concatenated). Pure, so the iOS and tvOS show pages share one
+    /// walk instead of keeping two copies, and so it can be tested without a view.
+    ///
+    /// - The latest `.inProgress` episode wins and resumes itself (`isResume == true`).
+    /// - Otherwise the first episode with no progress record AFTER the last watched or
+    ///   in-progress one (`isResume == false`): a finished episode advances the show to the
+    ///   next one.
+    /// - `nil` when neither exists (everything watched, or nothing to scan); the caller
+    ///   falls back to the first episode.
+    ///
+    /// An episode with progress below `startedThreshold` is neither a resume point nor
+    /// "unwatched" here, exactly as both scans behaved before this was extracted.
+    struct ShowResumePick: Equatable {
+        let index: Int
+        let isResume: Bool
+    }
+
+    static func showResumePick(progress: [ItemProgress?]) -> ShowResumePick? {
+        var inProgress: Int?
+        var firstUnwatched: Int?
+        for (i, prog) in progress.enumerated() {
+            if let prog, prog.durationSeconds > 0 {
+                switch watchState(positionSeconds: prog.positionSeconds,
+                                  durationSeconds: prog.durationSeconds) {
+                case .inProgress:
+                    inProgress = i
+                    firstUnwatched = nil
+                case .watched:
+                    firstUnwatched = nil
+                case .unwatched:
+                    break
+                }
+            } else if firstUnwatched == nil {
+                firstUnwatched = i
+            }
+        }
+        if let inProgress { return ShowResumePick(index: inProgress, isResume: true) }
+        if let firstUnwatched { return ShowResumePick(index: firstUnwatched, isResume: false) }
+        return nil
+    }
+
+    /// What a poster card draws for an item's progress (FRD-001 FR-020, TASK-978).
+    enum CardIndicator: Equatable {
+        /// Nothing: no progress, or a position of zero.
+        case none
+        /// A progress bar whose width is `fraction` of the card, strictly between 0 and 1.
+        case bar(fraction: Double)
+        /// The watched badge, and no bar.
+        case watchedBadge
+    }
+
+    /// The one decision behind every poster card's bar and badge (iOS grid and rails, tvOS portrait
+    /// and landscape cards).
+    ///
+    /// TASK-978: each card made its own call. tvOS drew the bar for any `frac < 1.0`, so a record at
+    /// position 0 drew an empty track, and a title at 96% (finished) drew a bar beside the badge,
+    /// because the bar test stopped at 1.0 and the badge test started at 0.95. iOS had a third pair of
+    /// literals (0.02 and 0.98). Now there is one answer, and it is `isFinished`, the same rule the
+    /// rails and playback use: a finished title shows the badge and no bar; an unfinished one with a
+    /// position above zero shows a bar of exactly its fraction; zero shows nothing.
+    static func cardIndicator(positionSeconds: Int, durationSeconds: Int) -> CardIndicator {
+        guard durationSeconds > 0, positionSeconds > 0 else { return .none }
+        if isFinished(positionSeconds: positionSeconds, durationSeconds: durationSeconds) {
+            return .watchedBadge
+        }
+        return .bar(fraction: Double(positionSeconds) / Double(durationSeconds))
+    }
+
+    /// Convenience over an item's optional progress record.
+    static func cardIndicator(for progress: ItemProgress?) -> CardIndicator {
+        guard let progress else { return .none }
+        return cardIndicator(positionSeconds: progress.positionSeconds, durationSeconds: progress.durationSeconds)
     }
 
     /// The position playback should actually start from: the saved position, or 0 once the

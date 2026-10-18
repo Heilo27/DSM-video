@@ -125,6 +125,8 @@ struct LocalReadsHonourTheCeilingTests {
 
   /// OC: AC-002-43 · same, for Just Added (the LEFT JOIN rail: a title with no progress for
   /// this profile must still be filtered by level, not passed through the join).
+  /// Just Added has no watched filter (FR-088, TASK-986), so the started cw-* and watched rw-*
+  /// titles are on it too; the ceiling is what bounds the set (3 groups x visible <= 16).
   /// Red if: `AND sqlVisibleToScope` is removed from queryJustAdded.
   @Test(arguments: CeilingCase.all)
   func justAddedNeverExceedsTheCeiling(_ c: CeilingCase) async throws {
@@ -133,8 +135,8 @@ struct LocalReadsHonourTheCeilingTests {
     await store.setActiveProfile(ProfileScope(id: ccProfileID, maxAgeLevel: c.maxAgeLevel))
 
     let rail = await store.queryRails().justAdded
-    #expect(Set(rail.map(\.id)) == Set(c.visible.map { "ja-" + $0 }))
-    #expect(rail.count == c.visible.count)
+    #expect(Set(rail.map(\.id)) == Set(c.visible.flatMap { ["cw-" + $0, "rw-" + $0, "ja-" + $0] }))
+    #expect(rail.count == c.visible.count * 3)
   }
 
   /// OC: AC-002-43 · same, for the offline library listing.
@@ -177,10 +179,10 @@ struct LocalReadsHonourTheCeilingTests {
     let store = await ccSeededStore(dir: dir)
 
     await store.setActiveProfile(ProfileScope(id: ccProfileID, maxAgeLevel: ProfileScope.unrestrictedLevel))
-    #expect(await store.queryRails().justAdded.count == 5, "precondition: unrestricted sees all five")
+    #expect(await store.queryRails().justAdded.count == 15, "precondition: unrestricted sees all fifteen")
 
     await store.setActiveProfile(ProfileScope(id: ccProfileID, maxAgeLevel: 1))
-    #expect(Set(await store.queryRails().justAdded.map(\.id)) == ["ja-l1"])
+    #expect(Set(await store.queryRails().justAdded.map(\.id)) == ["cw-l1", "rw-l1", "ja-l1"])
   }
 }
 

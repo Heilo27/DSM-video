@@ -29,10 +29,13 @@ struct ItemsGridView: View {
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   let library: Library
 
-  @State private var items: [ItemSummary] = []
+  /// Items, the library and filter they answer, and the last load failure (FR-098, TASK-975).
+  @State private var content = LibraryGridContent()
   @State private var sortedItems: [ItemSummary] = []
   @State private var isLoading: Bool = false
-  @State private var error: String?
+  @State private var reloadRequested = false
+  private var items: [ItemSummary] { content.items }
+  private var error: String? { content.blockingError }
   @State private var sortOption: SortOption = {
     let raw = UserDefaults.standard.string(forKey: "dsReel.sortOption") ?? ""
     let stored = SortOption(rawValue: raw) ?? .addedNewest
@@ -246,6 +249,7 @@ struct ItemsGridView: View {
       VStack(spacing: 0) {
         SortChipBar(selection: $sortOption)
         browseFilterBar
+        refreshNoticeBar
         if !items.isEmpty && (appState.isOffline || appState.serverUnreachable) {
           Text("Showing cached content")
             .font(.caption2)
@@ -277,6 +281,7 @@ struct ItemsGridView: View {
       VStack(spacing: 0) {
         SortChipBar(selection: $sortOption)
         browseFilterBar
+        refreshNoticeBar
       }
     }
     .onChange(of: items) { _, new in sortedItems = sorted(new, by: sortOption) }
@@ -297,6 +302,15 @@ struct ItemsGridView: View {
     CollectionsBrowse.showsGenres(isKids: appState.activeProfile?.kids ?? false)
   }
 
+  /// FR-098: a failed refresh with the grid still loaded. iOS and tvOS share it.
+  @ViewBuilder private var refreshNoticeBar: some View {
+    if let notice = content.noticeMessage {
+      RefreshFailedNotice(message: notice) {
+        Task { await load() }
+      }
+    }
+  }
+
   @ViewBuilder private var browseFilterBar: some View {
     if showsGenres {
       GenreFilterBar(available: availableGenres, selected: $selectedGenres, mode: $genreMode)
@@ -310,9 +324,11 @@ struct ItemsGridView: View {
     if let year = item.year {
       label += ", \(year)"
     }
-    if let progress = item.progress, progress.durationSeconds > 0 {
-      let percent = Int((Double(progress.positionSeconds) / Double(progress.durationSeconds)) * 100)
-      label += ", \(percent) percent watched"
+    // Same decision as the card's bar and badge (TASK-978): nothing is said at zero progress.
+    switch PlaybackProgress.cardIndicator(for: item.progress) {
+    case .none: break
+    case .watchedBadge: label += ", watched"
+    case .bar(let fraction): label += ", \(Int(fraction * 100)) percent watched"
     }
     return label
   }
@@ -330,92 +346,55 @@ struct ItemsGridView: View {
     }
   }
 
+  private var currentSelection: GenreSelection {
+    GenreSelection(genres: selectedGenres, mode: genreMode)
+  }
+
   private func load() async {
-    guard !isLoading else { return }
+    // A request that arrives while one is running (a genre chip tapped mid-load) used to be
+    // dropped, leaving the previous filter's grid under the new chips. Remember it and run again.
+    if isLoading { reloadRequested = true; return }
+    isLoading = true
+    defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested
+  }
+
+  private func loadOnce() async {
+    let libraryID = library.id
     if appState.isDemoMode {
-      items = DemoData.items(for: library)
+      content.adopt(DemoData.items(for: library), libraryID: libraryID, requested: currentSelection)
       sortedItems = sorted(items, by: sortOption)
       return
     }
-    isLoading = true
-    defer { isLoading = false }
 
+    let requested = currentSelection
+    let result: Result<[ItemSummary], any Error>
     do {
-      // Fetch all items by paginating through the API (server limits to 200 per request)
-      var allItems: [ItemSummary] = []
-      var offset = 0
-      let pageSize = 200
-      // TASK-790: app-side safety valves so a misbehaving/regressed server (total that
-      // never converges, or overlapping pages that never satisfy the total break) can't
-      // paginate forever. 50 pages × 200 = 10k items is well past any real library.
-      let maxPages = 50
-      var seenIDs = Set<String>()
-
-      for _ in 0..<maxPages {
-        let response = try await appState.api.items(
-          libraryId: library.id, limit: pageSize, offset: offset,
-          genres: Array(selectedGenres), genreMode: genreMode)
-        allItems.append(contentsOf: response.items)
-
-        // Break if the page returned no NEW ids — guards against a server that keeps
-        // returning full but overlapping pages (which would never trip the total check).
-        let newIDs = response.items.filter { seenIDs.insert($0.id).inserted }
-        if newIDs.isEmpty { break }
-
-        if response.items.count < pageSize || allItems.count >= response.effectiveTotal {
-          break
-        }
-        offset += pageSize
-      }
-
-      // Deduplicate: prefer items with a poster; break ties by keeping earliest addedAt.
-      // The NAS can index the same movie from multiple paths (e.g. extras folder + main),
-      // producing entries with different IDs but identical title+year.
-      //
-      // Duration is part of the key so this only collapses what is really the same
-      // film. Keying on title+year alone silently hid distinct entries — a remake
-      // released the same year, a theatrical vs extended cut, or a director's cut —
-      // and the user would never learn the item existed. Runtime is bucketed to the
-      // nearest minute so a one-second probe difference between two encodes of the
-      // SAME file still dedups (the case this logic exists for), while genuinely
-      // different cuts stay visible. Items with no duration fall back to title+year.
-      func dedupKey(_ item: ItemSummary) -> String {
-        let minutes = item.durationSeconds.map { String(Int(($0 + 30) / 60)) } ?? "?"
-        return "\(item.title)|\(item.year ?? -1)|\(minutes)"
-      }
-      var deduped: [String: ItemSummary] = [:]
-      for item in allItems {
-        let key = dedupKey(item)
-        if let existing = deduped[key] {
-          // Prefer the entry that has a poster image
-          let keepNew = item.posterImageId != nil && existing.posterImageId == nil
-          if keepNew { deduped[key] = item }
-        } else {
-          deduped[key] = item
-        }
-      }
-      items = allItems.filter { deduped[dedupKey($0)]?.id == $0.id }
-      sortedItems = sorted(items, by: sortOption)
-      error = nil
+      // Every id the server sends, once each (FR-082, TASK-976). No client-side title dedup.
+      result = .success(try await LibraryPaging.loadAll { limit, offset in
+        try await appState.api.items(
+          libraryId: libraryID, limit: limit, offset: offset,
+          genres: Array(requested.genres), genreMode: requested.mode)
+      })
     } catch {
       // Classify the failure so session/offline state stays accurate (see ItemDetailView.load).
-      // The cached fallback below still runs — this only makes the app's own view of the
-      // connection honest, so the offline banner appears instead of silent staleness.
       appState.handleConnectionFailure(error)
-      let errorMsg = (error as? APIError)?.userMessage ?? "Unknown error."
-      if items.isEmpty {
-        // Network failed — try LocalStore as offline fallback before showing error.
-        let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 5000)
-        if !cached.isEmpty {
-          items = cached
-          sortedItems = sorted(cached, by: sortOption)
-          // Don't set error — the offline banner (via appState.isOffline / serverUnreachable)
-          // already communicates to the user that they're on cached content.
-        } else {
-          self.error = errorMsg
-        }
+      result = .failure(error)
+    }
+    content.finish(libraryID: libraryID, requested: requested, result: result)
+
+    // Nothing usable on screen after a failure: try the on-device catalog before the error screen.
+    if content.blockingError != nil, LibraryGridContent.cacheMayAnswer(requested) {
+      let cached = await LocalStore.shared.fetchItems(forLibraryId: libraryID, limit: 5000)
+      if !cached.isEmpty {
+        // The offline banner (appState.isOffline / serverUnreachable) already says this is cached.
+        content.adopt(cached, libraryID: libraryID, requested: requested)
       }
     }
+    sortedItems = sorted(items, by: sortOption)
   }
 }
 
@@ -522,46 +501,38 @@ struct ItemPosterCell: View {
             .allowsHitTesting(false)
           }
 
-        // Progress bar — pinned to bottom edge, INSIDE clip boundary.
-        // Only render meaningful progress: below ~2% it's a glitchy sliver, and at
-        // ≥98% the watched badge already conveys "done" (avoids a near-full bar that
-        // reads as a rendering bug).
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= 0.02 && frac < 0.98 {
-            GeometryReader { barGeo in
-              ZStack(alignment: .leading) {
-                Rectangle()
-                  .fill(Color.dsBorderStrong)
-                  .frame(height: 3)
-                Rectangle()
-                  .fill(Color.dsAccent)
-                  .frame(width: barGeo.size.width * frac, height: 3)
-              }
+        // Progress bar — pinned to bottom edge, INSIDE clip boundary. Whether and how wide is
+        // PlaybackProgress.cardIndicator's call (TASK-978), shared with the tvOS cards.
+        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+          GeometryReader { barGeo in
+            ZStack(alignment: .leading) {
+              Rectangle()
+                .fill(Color.dsBorderStrong)
+                .frame(height: 3)
+              Rectangle()
+                .fill(Color.dsAccent)
+                .frame(width: barGeo.size.width * frac, height: 3)
             }
-            .frame(height: 3)
-            .accessibilityHidden(true)
           }
+          .frame(height: 3)
+          .accessibilityHidden(true)
         }
       }
       .frame(width: width, height: height)
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
       // Watched badge — overlaid on top-right corner, outside clip so badge isn't clipped
       .overlay(alignment: .topTrailing) {
-        if let progress = item.progress, progress.durationSeconds > 0 {
-          let frac = min(1.0, Double(progress.positionSeconds) / Double(progress.durationSeconds))
-          if frac >= PlaybackProgress.watchedThreshold {
-            Circle()
-              .fill(Color.dsSuccess)
-              .frame(width: 22, height: 22)
-              .overlay(
-                Image(systemName: "checkmark")
-                  .font(.system(size: 11, weight: .bold))
-                  .foregroundStyle(.black)
-              )
-              .padding(6)
-              .accessibilityHidden(true)
-          }
+        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
+          Circle()
+            .fill(Color.dsSuccess)
+            .frame(width: 22, height: 22)
+            .overlay(
+              Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.black)
+            )
+            .padding(6)
+            .accessibilityHidden(true)
         }
       }
       // Ambient elevation on the Cinematic theme; no-op on flat themes.
