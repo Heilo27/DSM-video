@@ -283,7 +283,9 @@ an orphaned separator — and **missing artwork must not prevent the detail scre
 Just Added shows the newest titles as the server reports them, newest first, at most **16**. A show with
 new episodes appears once, as that show, not once per episode. On a restricted profile the rail holds only
 titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, the device's own list of
-its newest synced titles stands in, under the same rules. *Derivation:* 0c9b4cd (Ryan: "the server decides
+its newest synced titles stands in, under the same rules. The rail has no watched filter: a title the
+profile has started or finished is listed exactly while it is among the newest, online and offline alike
+(TASK-986; it also appears in Continue Watching or Recently Watched). *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
 player asks for 20; that divergence is open under TASK-920.

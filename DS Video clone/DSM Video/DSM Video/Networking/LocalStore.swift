@@ -1036,16 +1036,16 @@ actor LocalStore {
   }
 
   private func queryJustAdded() -> [ItemSummary] {
-    // Show recently-added items that have not been started (< 5% watched).
-    // Mirrors the iOS home rail: exclude in-progress (>= 5%) and fully-watched (>= 95%)
-    // items, which belong in Continue Watching / Recently Watched respectively.
+    // Offline stand-in for the server's Just Added (FR-088, TASK-986): the newest titles by
+    // added_at the profile can see, one per show, at most 16. NO progress filter. The server
+    // rail (backend justadded.go queryJustAdded) has none, so a title the profile has started
+    // or finished is listed here exactly when it is listed online. A progress join here would be
+    // a second, drifted copy of that rule.
     let sql = """
       SELECT \(Self.itemSelectColumns)
       FROM items i
       LEFT JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
-      WHERE (p.item_id IS NULL
-         OR p.duration_seconds = 0
-         OR \(Self.sqlRatio) < \(PlaybackProgress.startedThreshold))
+      WHERE i.added_at != ''
         AND \(Self.sqlVisibleToScope)
       ORDER BY i.added_at DESC
       LIMIT 500
