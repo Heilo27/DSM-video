@@ -1008,6 +1008,21 @@ actor LocalStore {
     sqlite3_bind_int64(stmt, 3, Int64(activeScope.unratedLevel))
   }
 
+  /// Every title the active profile may see, for the system search index (FR-153). Scoped by
+  /// the same sqlVisibleToScope as every other offline read, so a restricted profile's list
+  /// never contains a title it may not see. The progress join only satisfies the shared column
+  /// list; nothing here reads watch history.
+  func queryAllVisibleItems() -> [ItemSummary] {
+    let sql = """
+      SELECT \(Self.itemSelectColumns)
+      FROM items i
+      LEFT JOIN progress p ON p.item_id = i.id AND \(Self.sqlProgressForScope)
+      WHERE \(Self.sqlVisibleToScope)
+      ORDER BY i.id
+    """
+    return fetchItems(sql: sql, deduplicateByShow: false, maxCount: Int.max)
+  }
+
   func queryRails() -> HomeRails {
     HomeRails(
       continueWatching: queryContinueWatching(),

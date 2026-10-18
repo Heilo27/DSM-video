@@ -31,6 +31,11 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- FR-153: the activity the detail page donates, so Siri and Spotlight suggestions can reopen it. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>com.dsm.dsvideo.viewItem</string>
+	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.entertainment</string>
 	<!-- ATS: cleartext is scoped to the local network ONLY (TASK-777).

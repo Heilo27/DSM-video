@@ -736,6 +736,32 @@ AC-5 this requirement.
 way to get one). Ryan, 2026-10-18 (onboarding gaps found by walking a first-time user through the app).
 [TASK-748]
 
+**FR-153 [DESIGN, 2026-10-18, TASK-743]** — *Titles are findable from the iPhone's system search, and the
+detail page is offered back to Siri.* Spotlight (iPhone and iPad; Apple TV has no equivalent) lists the
+library: one result per movie and **one per show** (never one per episode), showing the title, the year,
+and a small poster when one is available. Choosing a result opens that title's detail page, the same
+destination as FR-147 and the Top Shelf link, and never starts playback. A show's result opens its first
+episode's page. Opening a title's detail page also donates it to Siri, so it can be suggested again.
+*What is shared:* title, year, show name and a small poster picture only. Never a stream address, a sign-in
+token or the address of the poster.
+*Whose library:* only what the **active profile** may see, by the same ceiling rule as every other list
+(FRD-002 FR-242). An account with profiles where none has been chosen yet indexes nothing. The index is
+emptied on sign-out and on every profile switch, then rebuilt for whoever is active, so a restricted
+profile never finds a title that the previous profile could. Demo mode indexes nothing.
+*Keeping it current:* after each library sync and each profile switch the app compares what it should
+list with what it listed before and adds, updates or removes only the difference; it never rebuilds the
+whole index just because something changed. Posters are fetched in limited batches (150 per pass) so a
+large library does not hammer the NAS; titles listed without a poster get one on a later pass.
+*Server change:* the app has no separate "change server" action; signing out is the path that discards
+the library, and it empties the index. Switching between a server's LAN and remote addresses (a base-URL
+change on the same server) is the same library, so it deliberately keeps the index; only sign-out clears it.
+*Acceptance:* AC-1 a movie is one result and a show is one result; AC-2 a restricted profile's index
+contains no title above its ceiling and an unchosen profile's is empty; AC-3 a profile switch and a sign-out
+empty the index, then a profile switch refills it for the new profile; AC-4 a result opens the detail
+page without playing; AC-5 nothing indexed carries a URL or token; AC-6 this requirement.
+*Derivation:* P1 (every title is findable, here from the phone's own search), S4 (nothing shared that
+could expose the account) and S5 (profiles keep their ceilings). TASK-743.
+
 ---
 
 ## 8. Offline (no server reachable)

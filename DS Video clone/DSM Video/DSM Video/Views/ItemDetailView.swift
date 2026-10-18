@@ -181,6 +181,14 @@ struct ItemDetailView: View {
       .toolbarBackground(Color.dsBackground.opacity(0.85), for: .navigationBar)
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
+      // FR-153: donate the page so Siri can suggest reopening it. Carries the title and the id only.
+      .userActivity(SpotlightPolicy.viewItemActivityType, isActive: detail != nil) { activity in
+        activity.title = shownTitle
+        activity.isEligibleForPrediction = true
+        activity.persistentIdentifier = itemID
+        activity.userInfo = [SpotlightPolicy.activityItemIDKey: itemID]
+        activity.requiredUserInfoKeys = [SpotlightPolicy.activityItemIDKey]
+      }
       .onAppear {
         if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
