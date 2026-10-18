@@ -71,7 +71,7 @@ struct ProfileAvatarView: View {
   }
 
   var body: some View {
-    RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)
+    RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)  // literal: avatar corner scales with size (16%), so it cannot be a fixed token
       .fill(LinearGradient(
         colors: [Color(hue: hue / 360, saturation: 0.62, brightness: 0.78),
                  Color(hue: hue / 360, saturation: 0.78, brightness: 0.42)],
@@ -958,7 +958,7 @@ struct ProfileEditorView: View {
           Button { avatar = choice.rawValue } label: {
             ProfileAvatarView(avatar: choice.rawValue, name: name, size: ProfileMetrics.tile * 0.5)
               .overlay(
-                RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.08, style: .continuous)
+                RoundedRectangle(cornerRadius: ProfileMetrics.tile * 0.08, style: .continuous)  // literal: tile corner scales with the tile size (8%)
                   .strokeBorder(.white, lineWidth: avatar == choice.rawValue ? 4 : 0))
               .padding(8)
           }
@@ -1026,10 +1026,10 @@ struct ProfileEditorView: View {
           }
           .padding(.horizontal, 18).padding(.vertical, 12)
           .frame(maxWidth: 520, alignment: .leading)
-          .background(RoundedRectangle(cornerRadius: 14)
+          .background(RoundedRectangle(cornerRadius: .dsRadiusMd)
             .fill(selected ? Color.white : Color.white.opacity(0.1)))
           .foregroundStyle(selected ? Color.black : Color.white)
-          .contentShape(RoundedRectangle(cornerRadius: 14))
+          .contentShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
         }
         .buttonStyle(ProfileTileButtonStyle())
         .focused($focusedLevel, equals: value)

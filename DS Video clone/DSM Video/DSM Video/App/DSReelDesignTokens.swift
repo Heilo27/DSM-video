@@ -43,6 +43,27 @@ extension Color {
     static var dsAccentGlow:    Color { ThemeHolder.shared.current.accentGlow }
 }
 
+// MARK: - Radius Tokens
+//
+// Corner radii resolve through the active Theme, like the colors above. A view picks the
+// token by ROLE, never by number, so a theme that rounds more (Cinematic) rounds every
+// surface of that role together.
+@MainActor
+extension CGFloat {
+    static var dsRadiusSm:   CGFloat { ThemeHolder.shared.current.radiusSm }
+    static var dsRadiusMd:   CGFloat { ThemeHolder.shared.current.radiusMd }
+    static var dsRadiusLg:   CGFloat { ThemeHolder.shared.current.radiusLg }
+    static var dsRadiusPill: CGFloat { ThemeHolder.shared.current.radiusPill }
+
+    /// Poster and card artwork: PosterCard, ContinueWatchingCard and the tvOS cards.
+    /// One role, one value, so movie and show grids cannot round differently.
+    static var dsRadiusPoster: CGFloat { ThemeHolder.shared.current.radiusMd }
+
+    /// Small poster thumbnails (50x75 to 60x90) in list rows. Fixed: at that size the
+    /// theme's card radius would swallow the image, and no theme varies it.
+    static var dsRadiusThumb: CGFloat { 6 }
+}
+
 // MARK: - Hex Color Initializer
 
 extension Color {

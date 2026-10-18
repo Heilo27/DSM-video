@@ -39,7 +39,7 @@ struct TVPairingView: View {
       VStack(spacing: 0) {
         // Header
         VStack(spacing: 16) {
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
+          RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
             .fill(Color.dsAccent)
             .frame(width: 64, height: 64)
             .overlay(
@@ -118,9 +118,9 @@ struct TVPairingView: View {
                 .padding(.horizontal, 72)
                 .padding(.vertical, 40)
                 .background(Color.dsSurfaceHigh)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous))
                 .overlay(
-                  RoundedRectangle(cornerRadius: 20, style: .continuous)
+                  RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous)
                     .stroke(Color.dsBorderStrong, lineWidth: 1)
                 )
                 .speechSpellsOutCharacters(true)
@@ -458,9 +458,9 @@ private struct TVOtherWaysView: View {
                   .padding(.horizontal, 32)
                   .padding(.vertical, 18)
                   .background(Color.dsSurfaceHigh)
-                  .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                  .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
                   .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous)
                       .stroke(Color.dsBorderStrong, lineWidth: 1)
                   )
                 }

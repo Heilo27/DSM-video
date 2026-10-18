@@ -1157,8 +1157,8 @@ struct GestureVideoPlayer: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 240)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.25), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusSm))
+                    .overlay(RoundedRectangle(cornerRadius: .dsRadiusSm).stroke(.white.opacity(0.25), lineWidth: 1))
             }
             #endif
             Text(formatTime(scrubTime))
@@ -1171,7 +1171,7 @@ struct GestureVideoPlayer: View {
                 .foregroundStyle(delta >= 0 ? Color.dsSuccess : Color.dsError)
         }
         .padding(24)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: .dsRadiusLg))
         .accessibilityHidden(true)
     }
 

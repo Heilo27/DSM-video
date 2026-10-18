@@ -51,6 +51,15 @@ extension Color {
     static let dsFocusFillStrong = Color(white: 0.35)
 }
 
+// Corner radii resolve through the active Theme too (CGFloat.dsRadius*). A view names the ROLE,
+// never a number, so a theme that rounds more rounds every surface of that role together.
+//   dsRadiusSm / Md / Lg / Pill   Classic and Nitrate 8 / 12 / 16 / 20, Cinematic 10 / 14 / 18 / 22
+//   dsRadiusPoster                poster and card artwork = radiusMd; ONE value for PosterCard,
+//                                 ContinueWatchingCard and the tvOS cards
+//   dsRadiusThumb                 6, fixed: 50x75 to 60x90 list thumbnails
+// Raw cornerRadius literals are allowed only where the radius is not a theme choice (a bar
+// track, a chip, a corner that scales with its tile); each carries a one-line reason.
+
 extension Color {
     init(hex: String) {
         let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
@@ -164,9 +173,11 @@ NavigationView
 
 **New components needed:**
 
-`ContinueWatchingCard` — 200x120, rounded corners 10, image fill, gradient overlay bottom-half, title text at bottom-left (11pt semibold), red progress bar pinned to bottom edge (3pt height, progress fraction * 200 width).
+`ContinueWatchingCard` — 200x120, rounded corners `dsRadiusPoster`, image fill, gradient overlay bottom-half, title text at bottom-left (11pt semibold), red progress bar pinned to bottom edge (3pt height, progress fraction * 200 width).
 
-`PosterCard` — 110x165, rounded corners 8, image fill. Optional watched badge: 24pt green circle with checkmark in top-right corner (x: width-32, y: 8).
+`PosterCard` — the one 2:3 poster shell (`Views/PosterCard.swift`). Width comes from the parent, height is always width x 1.5, independent of the artwork or footer. Rounded corners `dsRadiusPoster`. Bottom scrim plus a footer scrim sized to the footer's measured height, a 3pt progress bar inside the clip, the watched badge outside it, `dsCardDepth()` on Cinematic. Movie cells (`ItemPosterCell`), TV-show cells and collection tiles are all `PosterCard`s, so a Cinematic movie grid and show grid show the same card depth. The tvOS portrait cards (`TVPortraitCard`, `TVShowPortraitCard`) are NOT: they put the title below the artwork and scale on focus. They share `dsRadiusPoster` and `CardWatchedBadge` only.
+
+`CardWatchedBadge` — green `dsSuccess` circle with a black checkmark in the top-trailing corner, drawn when `PlaybackProgress.cardIndicator` returns `.watchedBadge`. One view for every card, including `ContinueWatchingCard`: 22pt on iOS, 28pt on tvOS.
 
 `SectionHeader` — HStack with title (18pt bold) and optional "See All" link (14pt `dsAccent`).
 
@@ -374,8 +385,9 @@ These components are used across multiple screens — build as reusable SwiftUI 
 
 | Component | Used In | Notes |
 |-----------|---------|-------|
-| `PosterCard` | Grid, Home, Search | 110x165, progress bar, watched badge |
-| `ContinueWatchingCard` | Home | 200x120, landscape, progress bar |
+| `PosterCard` | Movie grid, TV-show grid, Collections | 2:3 shell shared by `ItemPosterCell`, `TVShowPosterCell`, `CollectionTile`: `dsRadiusPoster`, progress bar, watched badge, Cinematic depth |
+| `CardWatchedBadge` | Every card, iOS and tvOS | 22pt (iOS) / 28pt (tvOS); applied with `.cardWatchedBadge(_:size:)` |
+| `ContinueWatchingCard` | Home | 200x120, landscape, progress bar, watched badge |
 | `SectionHeader` | Home | Title + optional "See All" link |
 | `DSTabBar` | All main screens | HOME / SEARCH / DOWNLOADS, active in red |
 | `AirPlayButton` | Video Player | Wraps `AVRoutePickerView` |

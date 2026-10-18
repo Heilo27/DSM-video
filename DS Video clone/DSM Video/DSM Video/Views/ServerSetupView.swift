@@ -322,7 +322,7 @@ struct SetupConnectScreen: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
             .background(Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
           }
           .buttonStyle(.plain)
           .accessibilityLabel("\(server.name), \(server.baseURL)")
@@ -381,7 +381,7 @@ struct SetupConnectScreen: View {
       .padding(.horizontal, 16)
       .frame(minHeight: 52)
       .background(Color.dsSurface)
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
 
       Text("IP address, hostname, QuickConnect ID, or Tailscale IP — whatever you have.")
         .font(.caption)
@@ -453,7 +453,7 @@ struct SetupConnectScreen: View {
       .frame(minHeight: 52)
     }
     .background(Color.dsSurface)
-    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
     .privacySensitive()
   }
 
@@ -470,7 +470,7 @@ struct SetupConnectScreen: View {
     }
     .padding(14)
     .background(Color.dsError.opacity(0.08))
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
     // The identifier is on the container and the message is exposed as its a11y value, so a
     // test can assert WHAT the error says — the project rule is that error text must name the
     // real cause, and a test that only checks "an error appeared" cannot catch a wrong one.
@@ -494,7 +494,7 @@ struct SetupConnectScreen: View {
       }
       .frame(maxWidth: .infinity, minHeight: 52)
       .background(canConnect && !isConnecting ? Color.dsAccent : Color.dsSurface)
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
     }
     .buttonStyle(.plain)
     .disabled(!canConnect || isConnecting)
@@ -547,7 +547,7 @@ struct SetupConnectScreen: View {
             .padding(.horizontal, 16)
             .frame(minHeight: 52)
             .background(Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
 
           Button {
             Task { await pair() }
@@ -563,7 +563,7 @@ struct SetupConnectScreen: View {
             }
             .frame(minWidth: 88, minHeight: 52)
             .background(canPair && !isPairing ? Color.dsAccent : Color.dsSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
           }
           .buttonStyle(.plain)
           .disabled(!canPair || isPairing)
@@ -850,7 +850,7 @@ private struct HelpTopic: View {
         }
         .padding(16)
         .background(Color.dsSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
       }
     }
   }

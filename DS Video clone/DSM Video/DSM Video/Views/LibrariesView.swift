@@ -122,7 +122,7 @@ struct LibrariesView: View {
           VStack(alignment: .leading, spacing: 28) {
             if let notice = content.noticeMessage {
               RefreshFailedNotice(message: notice) { Task { await load(force: true) } }
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
             }
             ForEach(libraries) { lib in
               VStack(alignment: .leading, spacing: 10) {
@@ -290,15 +290,15 @@ private struct LibraryCard: View {
       .padding(.vertical, 12)
     }
     .frame(height: height)
-    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
     .overlay(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
+      RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
         .strokeBorder(Color.dsBorderStrong, lineWidth: 1)
     )
     // Make the ENTIRE card a single tap target. Without this, only the opaque
     // rendered pixels (text/icons) register taps, so transparent gaps between
     // collage tiles aren't tappable — which made parts of the card dead.
-    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .contentShape(RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
     // One element with a spoken state. The failed case shows a refresh glyph a sighted
     // user can read; without this, VoiceOver announced only the library name and count
     // (and on failure there IS no count), so the state was invisible to it (TASK-815).
@@ -667,6 +667,10 @@ private struct ContinueWatchingCard: View {
   @Environment(AppState.self) private var appState
   let item: ItemSummary
 
+  private var indicator: PlaybackProgress.CardIndicator {
+    PlaybackProgress.cardIndicator(for: item.progress)
+  }
+
   var body: some View {
     ZStack(alignment: .bottomLeading) {
       Group {
@@ -735,7 +739,7 @@ private struct ContinueWatchingCard: View {
 
       // Progress bar
       // The shared card rule (PlaybackProgress.cardIndicator, FR-020), not a fraction of its own.
-      if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
+      if case .bar(let frac) = indicator {
         GeometryReader { geo in
           ZStack(alignment: .leading) {
             Rectangle().fill(Color.dsBorderStrong).frame(height: 3)
@@ -747,9 +751,11 @@ private struct ContinueWatchingCard: View {
       }
     }
     .frame(width: 200, height: 120)
-    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
+    // The same watched badge as the poster cards and the tvOS landscape card.
+    .cardWatchedBadge(indicator)
     // Ambient elevation on the Cinematic theme; no-op on flat themes.
-    .dsCardDepth(cornerRadius: 10)
+    .dsCardDepth()
     // TASK-693/698: redact in app switcher / screen recordings.
     .privacySensitive()
     #if !os(tvOS)
@@ -856,7 +862,7 @@ private struct HomeRail: View {
               } label: {
                 ItemPosterCell(item: displayItem)
                   .frame(width: 110)
-                  .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                  .contentShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityElement(children: .ignore)
@@ -868,7 +874,7 @@ private struct HomeRail: View {
               } label: {
                 ItemPosterCell(item: item)
                   .frame(width: 110)
-                  .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                  .contentShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
               }
               .buttonStyle(.plain)
               .accessibilityElement(children: .ignore)

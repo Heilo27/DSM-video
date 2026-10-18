@@ -11,8 +11,6 @@ import SwiftUI
 // MARK: Card depth
 
 private struct CinematicCardDepth: ViewModifier {
-    let radius: CGFloat
-
     func body(content: Content) -> some View {
         let theme = ThemeHolder.shared.current
         if theme.usesCinematicChrome {
@@ -31,8 +29,8 @@ private struct CinematicCardDepth: ViewModifier {
 
 extension View {
     /// Ambient card elevation on the Cinematic theme; nothing on flat themes.
-    func dsCardDepth(cornerRadius: CGFloat = 12) -> some View {
-        modifier(CinematicCardDepth(radius: cornerRadius))
+    func dsCardDepth() -> some View {
+        modifier(CinematicCardDepth())
     }
 }
 

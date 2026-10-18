@@ -698,7 +698,7 @@ private struct RecentSearchesView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(
-              RoundedRectangle(cornerRadius: 20, style: .continuous)
+              RoundedRectangle(cornerRadius: .dsRadiusPill, style: .continuous)
                 .fill(Color.dsSurface)
             )
           }
@@ -740,7 +740,7 @@ private struct SearchResultCell: View {
       // Thumbnail: 60x90pt
       posterThumbnail
         .frame(width: 60, height: 90)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb, style: .continuous))
         .accessibilityHidden(true)
 
       // Metadata
@@ -1091,10 +1091,10 @@ struct DownloadsView: View {
       }
       GeometryReader { geo in
         ZStack(alignment: .leading) {
-          RoundedRectangle(cornerRadius: 5)
+          RoundedRectangle(cornerRadius: 5)  // literal: storage-bar track, half its 10pt height; not a card radius
             .fill(Color.dsSurface)
             .frame(height: 10)
-          RoundedRectangle(cornerRadius: 5)
+          RoundedRectangle(cornerRadius: 5)  // literal: storage-bar fill, matches the track
             .fill(Color.dsAccent)
             .frame(
               width: totalBytes > 0
@@ -1111,7 +1111,7 @@ struct DownloadsView: View {
     }
     .padding()
     .background(Color.dsSurface.opacity(0.5))
-    .clipShape(RoundedRectangle(cornerRadius: 12))
+    .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
     .padding(.horizontal)
     .padding(.top, 8)
     .accessibilityElement(children: .combine)
@@ -1183,7 +1183,7 @@ struct DownloadsView: View {
         }
       }
       .background(Color.dsSurface.opacity(0.5))
-      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
       .padding(.horizontal)
     }
   }
@@ -1232,7 +1232,7 @@ struct DownloadsView: View {
         }
       }
       .background(Color.dsSurface.opacity(0.5))
-      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd))
       .padding(.horizontal)
     }
   }
@@ -1322,7 +1322,7 @@ private struct ActiveDownloadCell: View {
               .padding(.horizontal, 6)
               .padding(.vertical, 2)
               .background(Color.dsSurface)
-              .clipShape(RoundedRectangle(cornerRadius: 4))
+              .clipShape(RoundedRectangle(cornerRadius: 4))  // literal: 4pt status chip, below radiusSm
           }
         }
         ProgressView(value: progress)
@@ -1452,7 +1452,7 @@ private struct DownloadedItemCell: View {
         }
       }
       .frame(width: width, height: height)
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
       .contextMenu {
         Button(role: .destructive) {
           onDelete()

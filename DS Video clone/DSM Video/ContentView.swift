@@ -305,7 +305,7 @@ private struct LaserView: View {
             if impactVisible {
                 HStack {
                     Spacer()
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: 4)  // literal: 4pt impact-flash sliver, decorative
                         .fill(Color.white)
                         .frame(width: 12, height: 40)
                         .blur(radius: 4)

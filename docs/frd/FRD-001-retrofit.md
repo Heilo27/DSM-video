@@ -147,7 +147,7 @@ complete, and a watched badge when complete. *Derivation:* design-spec B3 §3–
 **Card indicator [DESIGN, 2026-10-17, TASK-978]** — One function decides what a poster card draws
 (`PlaybackProgress.cardIndicator`), and the iOS grid and rails and both tvOS cards use it. At position zero
 the card draws nothing: no bar, no empty track, no percentage in its VoiceOver label. Complete (see FR-016)
-draws the watched badge and no bar, on every card shape (the tvOS landscape card drew no badge until TASK-1018). Anything between draws a bar whose width is exactly the fraction watched;
+draws the watched badge and no bar, on every card shape (the tvOS landscape card drew no badge until TASK-1018, and the iOS Continue Watching card none until TASK-1035). One view draws the badge on all of them (`CardWatchedBadge`). Anything between draws a bar whose width is exactly the fraction watched;
 there is no minimum width and no upper cutoff (iOS used to hide the bar below 2% and above 98%).
 **FR-021 [INFERRED]** — A TV show contributes at most one Continue Watching entry, identifying the
 specific partially-watched episode.
@@ -367,7 +367,7 @@ new episodes appears once, as that show, not once per episode. On a restricted p
 titles that profile can see and is not trimmed short (FRD-002 FR-250). Offline, the device's own list of
 its newest synced titles stands in, under the same rules. The rail has no watched filter: a title the
 profile has started or finished is listed exactly while it is among the newest, online and offline alike
-(TASK-986; it also appears in Continue Watching or Recently Watched). The demo library builds its Just Added rail with the same function as the offline list, so it has no watched filter either (TASK-1019). The device's own list is shown only until the server answers, or when the server cannot be reached: a server answer that is empty (a profile whose ceiling hides every new title, a library with nothing added) empties the rail, and the device's list is not put back (TASK-1020). *Derivation:* 0c9b4cd (Ryan: "the server decides
+(TASK-986; it also appears in Continue Watching or Recently Watched). The demo library builds its Just Added rail with the same function as the offline list, so it has no watched filter either (TASK-1035). The device's own list is shown only until the server answers, or when the server cannot be reached: a server answer that is empty (a profile whose ceiling hides every new title, a library with nothing added) empties the rail, and the device's list is not put back (TASK-1020). *Derivation:* 0c9b4cd (Ryan: "the server decides
 what is new, because it is the one that knows"), superseding design-spec B2's client-side "first 10". The
 cap of 16 is what the iPhone and Apple TV apps already request and what the server defaults to. The /web
 player sends no `limit` on Just Added or Suggested and takes the server's default for each, so its Just

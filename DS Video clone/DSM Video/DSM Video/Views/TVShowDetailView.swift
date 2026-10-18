@@ -445,7 +445,7 @@ private struct TVSeasonSection: View {
         // lands on the season header rather than skipping past a thin frame.
         .frame(minHeight: 60)
         .background(
-          RoundedRectangle(cornerRadius: 8)
+          RoundedRectangle(cornerRadius: .dsRadiusSm)
             .fill(isHeaderFocused ? Color.dsFocusFill : Color.clear)
         )
         .contentShape(Rectangle())
@@ -599,7 +599,7 @@ private struct TVEpisodeNavRow<Destination: View>: View {
     } label: {
       TVEpisodeRow(ep: ep, isHighlighted: isHighlighted)
         .background(
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
+          RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous)
             .fill(isFocused ? Color.dsFocusFill : Color.clear)
         )
     }
@@ -627,7 +627,7 @@ private struct TVEpisodeRow: View {
 
       // Thumbnail (16:9 landscape)
       ZStack {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
+        RoundedRectangle(cornerRadius: .dsRadiusSm, style: .continuous)
           .fill(Color.dsSurfaceHigh)
           .frame(width: 120, height: 68)
 
@@ -636,7 +636,7 @@ private struct TVEpisodeRow: View {
             .resizable()
             .scaledToFill()
             .frame(width: 120, height: 68, alignment: .top)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusSm, style: .continuous))
         } else if let posterID = ep.posterImageId {
           AuthenticatedImage(
             url: appState.api.imageURL(id: posterID, width: 240),
@@ -645,7 +645,7 @@ private struct TVEpisodeRow: View {
           )
           .scaledToFill()
           .frame(width: 120, height: 68, alignment: .top)
-          .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusSm, style: .continuous))
         } else {
           Image(systemName: "play.fill")
             .font(.system(size: 20))
@@ -927,7 +927,7 @@ private struct StillWatchingOverlay: View {
         }
       }
       .padding(60)
-      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))  // literal: 24pt tvOS prompt panel, larger than radiusPill
     }
     .onAppear { focused = .yes }
   }
@@ -951,7 +951,7 @@ private struct StillWatchingOverlay: View {
             }
           }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusMd, style: .continuous))
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
@@ -1710,7 +1710,7 @@ private struct TVShowMetadataFixerSheet: View {
                 AuthenticatedImage(url: candidate.posterURL, token: nil)
                   .scaledToFill()
                   .frame(width: 50, height: 75, alignment: .top)
-                  .clipShape(RoundedRectangle(cornerRadius: 6))
+                  .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb))
                   .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {

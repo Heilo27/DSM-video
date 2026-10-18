@@ -24,11 +24,9 @@ struct CollectionTile: View {
   private var height: CGFloat { width * 1.5 }
 
   var body: some View {
-    ZStack(alignment: .bottomLeading) {
+    PosterCard { _, _ in
       art
-      LinearGradient(
-        colors: [.black.opacity(0), .black.opacity(0.55), .black.opacity(0.9)],
-        startPoint: .center, endPoint: .bottom)
+    } footer: {
       VStack(alignment: .leading, spacing: 2) {
         Text(collection.title)
           .font(titleFont)
@@ -38,10 +36,10 @@ struct CollectionTile: View {
           .font(countFont)
           .foregroundStyle(.white.opacity(0.75))
       }
+      .frame(maxWidth: .infinity, alignment: .leading)
       .padding(padding)
     }
     .frame(width: width, height: height)
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }
 
   @ViewBuilder private var art: some View {

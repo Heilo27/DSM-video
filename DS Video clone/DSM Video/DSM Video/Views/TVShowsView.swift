@@ -385,17 +385,12 @@ private struct TVShowPosterCell: View {
   let show: TVShow
 
   var body: some View {
-    ZStack(alignment: .bottom) {
-      // Size anchor: a content-independent 2:3 spacer defines the cell's frame so the
-      // ZStack's height NEVER depends on the poster or title. Without this, the ZStack
-      // took its size from its content — an unloaded AuthenticatedImage collapsed the
-      // cell to the title height (the "blank spot"), and when the image loaded mid-
-      // scroll the cell grew and shoved everything below it down (the "Daredevil
-      // glitches and slides into the blank spot" reflow). The spacer makes every cell
-      // identical and stable regardless of load state, so the grid can't reflow.
-      Color.clear
-        .aspectRatio(2.0 / 3.0, contentMode: .fit)
-
+    // PosterCard fixes the 2:3 size from the column width alone, so the cell never depends
+    // on the poster or the title. That is what stops a late-loading image from collapsing
+    // the cell to the title height (the "blank spot") or growing it mid-scroll and shoving
+    // everything below it down (the "Daredevil glitches and slides into the blank spot"
+    // reflow).
+    PosterCard { width, height in
       // Poster image — fills the anchored frame and clips. Filling a fixed frame
       // (not .scaledToFill() on an unconstrained image) also stops wide/landscape
       // posters from overflowing and covering neighbouring cells.
@@ -419,19 +414,9 @@ private struct TVShowPosterCell: View {
               .accessibilityHidden(true)
           }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: width, height: height)
         .clipped()
-
-      // Bottom gradient
-      LinearGradient(
-        stops: [
-          .init(color: .clear, location: 0.45),
-          .init(color: .black.opacity(0.88), location: 1.0)
-        ],
-        startPoint: .top,
-        endPoint: .bottom
-      )
-
+    } footer: {
       // Title + season label
       VStack(alignment: .leading, spacing: 4) {
         Text(show.title)
@@ -448,10 +433,6 @@ private struct TVShowPosterCell: View {
       .padding(.horizontal, 10)
       .padding(.bottom, 10)
     }
-    // The Color.clear spacer (first ZStack layer) fixes the 2:3 size; the ZStack
-    // just fills the column width the grid hands it.
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
   }
 
   private func seasonLabel(_ show: TVShow) -> String {

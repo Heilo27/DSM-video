@@ -471,70 +471,11 @@ struct ItemPosterCell: View {
   private var posterScale: CGFloat { max(displayScale, 2) }
 
   var body: some View {
-    GeometryReader { geo in
-      let width = geo.size.width
-      let height = width * (3.0 / 2.0)
-
-      ZStack(alignment: .bottom) {
-        posterImage(width: width, height: height)
-        // TASK-857: the gradient's opaque region is a fixed fraction of card height, so at
-        // accessibility text sizes the footer grew up past it and drew unreadably over bare
-        // poster art (title text on top of the poster's own baked-in title). Backing the
-        // footer with a scrim sized to the footer's MEASURED height keeps text legible at
-        // every Dynamic Type size instead of only the ones that happen to fit under 45%.
-        gradientOverlay
-        cellFooter
-          .background(alignment: .bottom) {
-            LinearGradient(
-              colors: [.black.opacity(0), .black.opacity(0.85), .black.opacity(0.92)],
-              startPoint: .top,
-              endPoint: .bottom
-            )
-            .padding(.top, -14)   // fade in above the text rather than starting hard at it
-            .allowsHitTesting(false)
-          }
-
-        // Progress bar — pinned to bottom edge, INSIDE clip boundary. Whether and how wide is
-        // PlaybackProgress.cardIndicator's call (TASK-978), shared with the tvOS cards.
-        if case .bar(let frac) = PlaybackProgress.cardIndicator(for: item.progress) {
-          GeometryReader { barGeo in
-            ZStack(alignment: .leading) {
-              Rectangle()
-                .fill(Color.dsBorderStrong)
-                .frame(height: 3)
-              Rectangle()
-                .fill(Color.dsAccent)
-                .frame(width: barGeo.size.width * frac, height: 3)
-            }
-          }
-          .frame(height: 3)
-          .accessibilityHidden(true)
-        }
-      }
-      .frame(width: width, height: height)
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      // Watched badge — overlaid on top-right corner, outside clip so badge isn't clipped
-      .overlay(alignment: .topTrailing) {
-        if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
-          Circle()
-            .fill(Color.dsSuccess)
-            .frame(width: 22, height: 22)
-            .overlay(
-              Image(systemName: "checkmark")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.black)
-            )
-            .padding(6)
-            .accessibilityHidden(true)
-        }
-      }
-      // Ambient elevation on the Cinematic theme; no-op on flat themes.
-      .dsCardDepth(cornerRadius: 10)
+    PosterCard(indicator: PlaybackProgress.cardIndicator(for: item.progress)) { width, height in
+      posterImage(width: width, height: height)
+    } footer: {
+      cellFooter
     }
-    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    // TASK-693/698: redact poster + title in the app switcher / screen recordings.
-    .privacySensitive()
     #if !os(tvOS)
     .downloadStatus(itemID: item.id)   // TASK-983 · FR-041/FR-133
     #endif
@@ -581,18 +522,6 @@ struct ItemPosterCell: View {
             .accessibilityHidden(true)
         )
     }
-  }
-
-  @ViewBuilder
-  private var gradientOverlay: some View {
-    LinearGradient(
-      stops: [
-        .init(color: .clear, location: 0.45),
-        .init(color: .black.opacity(0.85), location: 1.0)
-      ],
-      startPoint: .top,
-      endPoint: .bottom
-    )
   }
 
   @ViewBuilder

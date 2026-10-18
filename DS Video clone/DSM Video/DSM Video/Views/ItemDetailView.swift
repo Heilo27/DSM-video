@@ -1312,7 +1312,7 @@ private struct MetadataFixerSheet: View {
                   Color.dsSurfaceRaised
                 }
                 .frame(width: 50, height: 75)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb))
                 .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {

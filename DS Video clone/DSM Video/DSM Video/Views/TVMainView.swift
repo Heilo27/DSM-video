@@ -78,7 +78,7 @@ struct TVLoginView: View {
           VStack(alignment: .leading, spacing: 0) {
             Spacer()
             VStack(alignment: .leading, spacing: 16) {
-              RoundedRectangle(cornerRadius: 16, style: .continuous)
+              RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous)
                 .fill(Color.dsAccent)
                 .frame(width: 72, height: 72)
                 .overlay(
@@ -783,7 +783,7 @@ private struct TVShowPortraitCard: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       ZStack(alignment: .bottom) {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous)
           .fill(Color.dsSurfaceHigh)
           .frame(width: cardWidth, height: cardHeight)
 
@@ -795,9 +795,9 @@ private struct TVShowPortraitCard: View {
           )
           .scaledToFill()
           .frame(width: cardWidth, height: cardHeight, alignment: .top)
-          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         } else {
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
+          RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous)
             .fill(Color.dsSurface)
             .frame(width: cardWidth, height: cardHeight)
             .overlay(
@@ -816,7 +816,7 @@ private struct TVShowPortraitCard: View {
           startPoint: .top,
           endPoint: .bottom
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         .frame(width: cardWidth, height: cardHeight)
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -854,7 +854,7 @@ private struct TVLandscapeCard: View {
     VStack(alignment: .leading, spacing: 10) {
       ZStack(alignment: .bottom) {
         // Backdrop/poster image
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous)
           .fill(Color.dsSurfaceHigh)
           .frame(width: cardWidth, height: cardHeight)
 
@@ -881,7 +881,7 @@ private struct TVLandscapeCard: View {
           // without exception, so .top keeps the subject.
           .frame(width: cardWidth, height: cardHeight,
                  alignment: item.backdropImageId != nil ? .center : .top)
-          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
@@ -890,9 +890,9 @@ private struct TVLandscapeCard: View {
             // Demo assets are portrait poster art with no backdrop counterpart, so this
             // is always the fallback case from the note above: crop from the top.
             .frame(width: cardWidth, height: cardHeight, alignment: .top)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         } else {
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
+          RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous)
             .fill(Color.dsSurfaceHigh)
             .frame(width: cardWidth, height: cardHeight)
             .overlay(
@@ -912,7 +912,7 @@ private struct TVLandscapeCard: View {
           startPoint: .top,
           endPoint: .bottom
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         .frame(width: cardWidth, height: cardHeight)
 
         // Progress bar at bottom edge
@@ -932,13 +932,14 @@ private struct TVLandscapeCard: View {
             .frame(height: 4)
           }
           .frame(width: cardWidth, height: cardHeight)
-          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
           .accessibilityHidden(true)
         }
 
         // Watched badge (FR-020, TASK-1018): same rule and same view as the portrait card.
         if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
-          TVCardWatchedBadge(cardWidth: cardWidth, cardHeight: cardHeight)
+          CardWatchedBadge(size: .tv)
+            .frame(width: cardWidth, height: cardHeight, alignment: .topTrailing)
         }
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -977,7 +978,7 @@ private struct TVPortraitCard: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       ZStack(alignment: .bottom) {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous)
           .fill(Color.dsSurfaceHigh)
           .frame(width: cardWidth, height: cardHeight)
 
@@ -989,16 +990,16 @@ private struct TVPortraitCard: View {
           )
           .scaledToFill()
           .frame(width: cardWidth, height: cardHeight, alignment: .top)
-          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         } else if let assetName = DemoData.posterAssetNames[item.id],
                   let img = UIImage(named: assetName) {
           Image(uiImage: img)
             .resizable()
             .scaledToFill()
             .frame(width: cardWidth, height: cardHeight, alignment: .top)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         } else {
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
+          RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous)
             .fill(Color.dsSurface)
             .frame(width: cardWidth, height: cardHeight)
             .overlay(
@@ -1018,7 +1019,7 @@ private struct TVPortraitCard: View {
           startPoint: .top,
           endPoint: .bottom
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
         .frame(width: cardWidth, height: cardHeight)
 
         // Progress bar
@@ -1034,13 +1035,14 @@ private struct TVPortraitCard: View {
             .frame(height: 4)
           }
           .frame(width: cardWidth, height: cardHeight)
-          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusPoster, style: .continuous))
           .accessibilityHidden(true)
         }
 
         // Watched badge
         if PlaybackProgress.cardIndicator(for: item.progress) == .watchedBadge {
-          TVCardWatchedBadge(cardWidth: cardWidth, cardHeight: cardHeight)
+          CardWatchedBadge(size: .tv)
+            .frame(width: cardWidth, height: cardHeight, alignment: .topTrailing)
         }
       }
       .frame(width: cardWidth, height: cardHeight)
@@ -1061,35 +1063,6 @@ private struct TVPortraitCard: View {
       .padding(.leading, 10)
     }
     .privacySensitive()  // TASK-693/698: redact in app switcher / recordings
-  }
-}
-
-// MARK: - Watched badge (shared by the landscape and portrait cards)
-
-/// The check drawn in a tvOS card's top-right corner when `PlaybackProgress.cardIndicator` says the
-/// title is complete. One view for both card shapes so they cannot drift (TASK-1018).
-private struct TVCardWatchedBadge: View {
-  let cardWidth: CGFloat
-  let cardHeight: CGFloat
-
-  var body: some View {
-    VStack {
-      HStack {
-        Spacer()
-        Circle()
-          .fill(Color.dsSuccess)
-          .frame(width: 28, height: 28)
-          .overlay(
-            Image(systemName: "checkmark")
-              .font(.system(size: 13, weight: .bold))
-              .foregroundStyle(.black)
-          )
-          .padding(8)
-      }
-      Spacer()
-    }
-    .frame(width: cardWidth, height: cardHeight)
-    .accessibilityHidden(true)
   }
 }
 
@@ -1251,7 +1224,7 @@ private struct TVSearchView: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 48)
             .padding(.vertical, 24)
-            .background(Color.dsSurfaceHigh, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color.dsSurfaceHigh, in: RoundedRectangle(cornerRadius: .dsRadiusLg, style: .continuous))
             .padding(.horizontal, 60)
             .focused($searchFieldFocused)
             .autocorrectionDisabled()
@@ -1340,9 +1313,9 @@ private struct TVSearchView: View {
                           )
                           .scaledToFill()
                           .frame(width: 60, height: 90, alignment: .top)
-                          .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                          .clipShape(RoundedRectangle(cornerRadius: .dsRadiusThumb, style: .continuous))
                         } else {
-                          RoundedRectangle(cornerRadius: 6)
+                          RoundedRectangle(cornerRadius: .dsRadiusThumb)
                             .fill(Color.dsSurfaceRaised)
                             .frame(width: 60, height: 90)
                         }
