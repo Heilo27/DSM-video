@@ -175,8 +175,10 @@ as used storage and never yields a completed state.
 *Derivation:* design-spec B7 §1.
 **FR-039 [INFERRED]** — The reported storage figure corresponds to the actual bytes of the listed
 downloads and changes by the deleted item's size after a deletion.
-**FR-040 [INFERRED]** — A title already downloaded, or already downloading, cannot be enqueued twice;
-exactly one entry per title identity exists.
+**FR-040 [INFERRED]** — A title already downloaded, already downloading, or paused (or failed and
+awaiting retry), cannot be enqueued twice; exactly one entry per title identity exists. A request for
+such a title opens no second transfer and hands back the playback session opened for the request. The
+title page offers Resume (not Download) for a paused download.
 **FR-041 [STATED]** — Downloaded titles are distinguishable in the library from non-downloaded ones, and
 with the server offline, Play on a non-downloaded title is presented as unavailable **before** the tap.
 **FR-042 [INFERRED]** — A download entry for an episode identifies the specific episode, not just the show.

@@ -57,6 +57,11 @@ struct ItemDetailView: View {
     downloadManager.isDownloading(itemId: itemID)
   }
 
+  /// A paused download offers Resume, not Download (TASK-964, FR-040).
+  private var isPausedDownload: Bool {
+    downloadManager.affordance(for: itemID) == .resume
+  }
+
   /// Playback is impossible when the NAS is unreachable and the title isn't on disk.
   ///
   /// Browsing offline works (ItemsGridView serves cached items from LocalStore) and the
@@ -955,13 +960,18 @@ struct ItemDetailView: View {
   private var downloadIconButton: some View {
     Button {
       guard !appState.isDemoMode else { return }
-      if isDownloading {
+      switch downloadManager.affordance(for: itemID) {
+      case .cancel:
         Haptics.play(.light)
         downloadManager.cancelDownload(itemId: itemID)
-      } else if isDownloaded {
+      case .remove:
         Haptics.play(.light)
         downloadManager.deleteDownload(itemId: itemID)
-      } else {
+      case .resume:
+        // TASK-964: a paused download continues; it never opens a second transfer.
+        Haptics.play(.medium)
+        downloadManager.resumeDownload(itemId: itemID)
+      case .download:
         Haptics.play(.medium)
         Task { await startDownload() }
       }
@@ -980,7 +990,7 @@ struct ItemDetailView: View {
         } else if isStartingDownload {
           ProgressView().tint(.white).frame(width: 22, height: 22)
         } else {
-          Image(systemName: isDownloaded ? "checkmark" : "arrow.down")
+          Image(systemName: isDownloaded ? "checkmark" : (isPausedDownload ? "play.fill" : "arrow.down"))
             .font(.title3.weight(.semibold))
             .foregroundStyle(isDownloaded ? Color.dsAccent : .white)
         }
@@ -990,7 +1000,7 @@ struct ItemDetailView: View {
     .background(Color.dsSurfaceHigh)
     .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
     .disabled(isStartingDownload && !isDownloading)
-    .accessibilityLabel(isStartingDownload ? "Starting download" : (isDownloaded ? "Remove download" : (isDownloading ? "Cancel download" : "Download")))
+    .accessibilityLabel(isStartingDownload ? "Starting download" : (isDownloaded ? "Remove download" : (isDownloading ? "Cancel download" : (isPausedDownload ? "Resume download" : "Download"))))
     .accessibilityValue(isDownloading && downloadProgress > 0 && downloadProgress < 1 ? "\(Int(downloadProgress * 100)) percent downloaded" : "")
     .accessibilityIdentifier(A11y.Detail.downloadButton)
   }

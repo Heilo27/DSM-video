@@ -560,6 +560,23 @@ final class DownloadManager: NSObject {
     pausedDownloads[itemId] != nil
   }
 
+  /// What tapping a title's download control does (FR-040, TASK-964). ONE home for the
+  /// choice, so the title page cannot open a second transfer beside a paused one: a paused
+  /// download offers Resume, which continues the partial under its own session, instead of
+  /// Download, which would open a fresh playback session first and then have it released.
+  enum DownloadAffordance: Equatable, Sendable {
+    case download, cancel, resume, remove
+  }
+
+  func affordance(for itemId: String) -> DownloadAffordance {
+    if isDownloading(itemId: itemId) { return .cancel }
+    if playableDownloadedItem(itemId: itemId) != nil { return .remove }
+    // Resume needs the metadata to resume under (resumeDownload guards on it); a partial
+    // without it cannot be continued, and a fresh start replaces it.
+    if isPaused(itemId: itemId), pendingDownloadInfo[itemId] != nil { return .resume }
+    return .download
+  }
+
   /// Returns the display title for a paused download (sourced from pendingDownloadInfo).
   func pausedDownloadTitle(itemId: String) -> String? {
     pendingDownloadInfo[itemId]?.title
