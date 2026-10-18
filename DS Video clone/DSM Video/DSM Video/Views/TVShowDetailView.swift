@@ -1793,8 +1793,7 @@ private struct TVShowMetadataFixerSheet: View {
               let base = "\(candidate.title)\(candidate.year.map { ", \($0)" } ?? "")"
               return isDuplicate ? "\(base), TMDb ID \(candidate.tmdbId)" : base
             }())
-            .dsPlainButton()
-            .dsFocusFill()
+            .dsPlainButton(focusFill: true)
             .disabled(isApplying)
             .listRowBackground(Color.dsSurfaceHigh)
           }

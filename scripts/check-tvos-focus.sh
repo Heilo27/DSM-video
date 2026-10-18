@@ -18,7 +18,7 @@
 #     3. No case is declared and then never mentioned again (the .skipIntro failure)
 #   PART 2 (every Button, exactly)
 #     Every `Button` that compiles into the tvOS target and carries a CUSTOM look
-#     (dsPrimaryButton, dsSecondaryButton, .buttonStyle(.plain) or any non-system style, .background, .overlay)
+#     (dsPrimaryButton, dsSecondaryButton, dsPlainButton, .buttonStyle(.plain) or any non-system style, .background, .overlay)
 #     must be bound with .focused(...). A custom look replaces the system focus effect, so an
 #     unbound one renders and can never be reached by the Siri Remote. It fails the run; it is
 #     not a count heuristic.
@@ -35,6 +35,14 @@
 #     grants focus), an iOS-only helper view, a helper whose callers bind it. "Forgot" is not one.
 #   * System-styled buttons (.bordered, .borderedProminent, .borderless, .automatic, .card,
 #     .glass) keep the system focus effect and are outside the rule.
+#   PART 3 (the white platter, TASK-1060)
+#     `.buttonStyle(.plain)` on tvOS draws the system focus platter, a white slab behind the
+#     focused control, and `.focusEffectDisabled()` does not remove it. Any `.buttonStyle(.plain)`
+#     on a line that compiles into tvOS fails unless it carries `// plain-exempt: <reason>` on
+#     the same line or in the comment block directly above. Use `.dsPlainButton()` instead
+#     (App/CinematicChrome.swift): it is the one pressable style on tvOS and `.plain` elsewhere.
+#     Valid reasons: a zero-size focus sink that draws nothing, a List row whose platter is the
+#     intended focus treatment. "It looked fine in the simulator" is not one.
 #   The analyzer tests itself against small embedded fixtures first, so a broken analyzer fails
 #   loudly instead of passing everything.
 #
@@ -294,7 +302,7 @@ def buttons(src):
         yield ln0 + 1, raw[ln0].strip(), chain, 'focus-exempt:' in around
 
 def custom_look(chain):
-    if 'dsPrimaryButton' in chain or 'dsSecondaryButton' in chain or '.background(' in chain or '.overlay(' in chain:
+    if 'dsPrimaryButton' in chain or 'dsSecondaryButton' in chain or 'dsPlainButton' in chain or '.background(' in chain or '.overlay(' in chain:
         return True
     for m in re.finditer(r'\.buttonStyle\(\s*([^)\n]*)', chain):
         if m.group(1).strip() not in SYSTEM_STYLES:
@@ -310,6 +318,22 @@ def unbound(src):
         elif ex: exempt += 1
         else: out.append((line, head))
     return out, bound, exempt
+
+PLAIN = re.compile(r'\.buttonStyle\(\s*\.plain\s*\)')
+
+def plain_sites(src):
+    """[(line, text)] of `.buttonStyle(.plain)` that compile into tvOS with no plain-exempt marker."""
+    clean = blank(src); lines = clean.split('\n'); raw = src.split('\n'); flags = tvos_lines(lines)
+    out = []
+    for i, l in enumerate(lines):
+        if not flags[i] or not PLAIN.search(l): continue
+        if 'plain-exempt:' in raw[i]: continue
+        k = i - 1; marked = False
+        while k >= 0 and raw[k].strip().startswith('//'):
+            if 'plain-exempt:' in raw[k]: marked = True; break
+            k -= 1
+        if not marked: out.append((i + 1, raw[i].strip()))
+    return out
 
 # The analyzer proves itself on fixtures before it is trusted with the app.
 FIXTURES = [
@@ -366,6 +390,10 @@ Button { go() } label: { Text("x") }
 Button { go() } label: { Text("x") }
   .dsSecondaryButton()
 """),
+    ("dsPlainButton without a binding is flagged", 1, """
+Button { go() } label: { Text("x") }
+  .dsPlainButton()
+"""),
     ("dsSecondaryButton with a binding passes", 0, """
 Button { go() } label: { Text("x") }
   .dsSecondaryButton(minWidth: 200)
@@ -376,6 +404,49 @@ for name, want, src in FIXTURES:
     got = len(unbound(src)[0])
     if got != want:
         print(f"FAIL: analyzer self-test '{name}': expected {want} unbound, got {got}. "
+              "Fix the analyzer before trusting any result from it.")
+        sys.exit(2)
+
+PLAIN_FIXTURES = [
+    ("plain on tvOS is flagged", 1, """
+Button("x") { go() }
+  .buttonStyle(.plain)
+"""),
+    ("plain in an iOS-only region is skipped", 0, """
+#if os(iOS)
+Button("x") { go() }
+  .buttonStyle(.plain)
+#endif
+"""),
+    ("plain-exempt on the same line passes", 0, """
+Button("x") { go() }
+  .buttonStyle(.plain) // plain-exempt: draws nothing
+"""),
+    ("plain-exempt in the comment block above passes", 0, """
+Button("x") { go() }
+  // plain-exempt: List row
+  // second line of the reason
+  .buttonStyle(.plain)
+"""),
+    ("plain-exempt does not leak across code", 1, """
+Button("a") { go() }
+  // plain-exempt: first only
+  .buttonStyle(.plain)
+Button("b") { go() }
+  .buttonStyle(.plain)
+"""),
+    ("plain in a comment is ignored", 0, """
+// use .buttonStyle(.plain) here
+"""),
+    ("dsPlainButton is not flagged", 0, """
+Button("x") { go() }
+  .dsPlainButton()
+"""),
+]
+for name, want, src in PLAIN_FIXTURES:
+    got = len(plain_sites(src))
+    if got != want:
+        print(f"FAIL: analyzer self-test '{name}': expected {want} plain sites, got {got}. "
               "Fix the analyzer before trusting any result from it.")
         sys.exit(2)
 
@@ -407,18 +478,23 @@ for fname, reason in IOS_ONLY.items():
                           "and bind its buttons.")
                     failed += 1
 
-total_bound = total_exempt = 0
+total_bound = total_exempt = total_plain = 0
 for p in paths:
     fname = os.path.basename(p)
     if fname in IOS_ONLY: continue
     bad, b, e = unbound(texts[p]); total_bound += b; total_exempt += e
+    for line, head in plain_sites(texts[p]):
+        print(f"FAIL: {fname}:{line} .buttonStyle(.plain) renders the white system focus platter on tvOS: {head[:60]}")
+        print("      Use .dsPlainButton(), or mark it '// plain-exempt: <reason>'.")
+        failed += 1
+        total_plain += 1
     for line, head in bad:
         print(f"FAIL: {fname}:{line} renders on tvOS with a custom look but no .focused(...): {head[:70]}")
         print("      Bind it to this view's focus enum, or mark it '// focus-exempt: <reason>' if a")
         print("      List/Form grants its focus or it never renders on tvOS.")
         failed += 1
 print(f"check-tvos-focus: buttons with a custom look: {total_bound} bound, {total_exempt} exempt (annotated); "
-      f"{len(IOS_ONLY)} iOS-only files; {failed} failing")
+      f"{len(IOS_ONLY)} iOS-only files; {total_plain} unjustified .plain; {failed} failing")
 sys.exit(1 if failed else 0)
 PYEOF
 )"

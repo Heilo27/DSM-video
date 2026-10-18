@@ -439,7 +439,7 @@ struct ItemDetailView: View {
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
-    .buttonStyle(.plain)
+    .dsPlainButton()
     .focusEffectDisabled()
     .focused($focusedAction, equals: .fromBeginning)
     .accessibilityLabel("Start \(shownTitle) from the beginning")
@@ -466,7 +466,7 @@ struct ItemDetailView: View {
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
-    .buttonStyle(.plain)
+    .dsPlainButton()
     .focusEffectDisabled()
     .focused($focusedAction, equals: .watchlist)
     .disabled(detail == nil)
@@ -497,7 +497,7 @@ struct ItemDetailView: View {
         .scaleEffect(focused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: focused)
     }
-    .buttonStyle(.plain)
+    .dsPlainButton()
     .focusEffectDisabled()
     .focused($focusedAction, equals: .watched)
     .disabled(dur <= 0)
@@ -692,7 +692,7 @@ struct ItemDetailView: View {
               .clipShape(RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous))
               #endif
             }
-            .buttonStyle(.plain)
+            .dsPlainButton()
             #if os(tvOS)
             .focused($focusedAction, equals: .nextEpisode)
             #endif
@@ -2475,7 +2475,7 @@ private struct _NextEpisodeOverlayView: View {
               .padding(.vertical, 14)
               .background(Color.white.opacity(focused == .stay ? 0.3 : 0.18), in: Capsule())
           }
-          .buttonStyle(.plain)
+          .dsPlainButton()
           .focusEffectDisabled()
           .scaleEffect(focused == .stay ? 1.05 : 1.0)
           .animation(.easeInOut(duration: 0.15), value: focused)

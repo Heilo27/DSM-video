@@ -13,9 +13,9 @@ import SwiftUI
 struct SortChip: View {
   @Environment(\.theme) private var theme
   #if os(tvOS)
-  // tvOS has no cursor: the focus engine drives selection, so the chip must show a
-  // focused state or it's impossible to tell what the remote is pointing at.
-  @Environment(\.isFocused) private var isFocused
+  // Binds the chip into the focus engine (check_focus requires every tvOS button to be
+  // bound). It does NOT drive the look: measured on the tvOS sim this Bool never turned
+  // true for the chip, so the visual reads `isFocused` inside `TVSortChipLabel` instead.
   @FocusState private var focused: Bool
   #endif
 
@@ -28,17 +28,7 @@ struct SortChip: View {
   var body: some View {
     #if os(tvOS)
     Button(action: action) {
-      Text(label)
-        .font(.dsTVSectionTitle)
-        .foregroundStyle(isActive ? Color.dsAccentOn : (focused ? .black : Color.dsTextSecondary))
-        .frame(minHeight: 56)
-        .padding(.horizontal, .dsSpaceXXL)
-        .background(
-          RoundedRectangle(cornerRadius: theme.radiusPill, style: .continuous)
-            .fill(isActive ? Color.dsAccent : (focused ? .white : Color.dsSurface))
-        )
-        .scaleEffect(focused ? 1.06 : 1.0)
-        .animation(.easeOut(duration: 0.15), value: focused)
+      TVSortChipLabel(label: label, isActive: isActive)
     }
     .dsPlainButton()
     .focused($focused)
@@ -83,6 +73,38 @@ struct SortChipScroller<Content: View>: View {
 }
 
 #if os(tvOS)
+/// tvOS chip face. Reads `isFocused` from INSIDE the Button's label, the only place the
+/// environment value reflects the button's own focus (read on the Button's parent it is
+/// always false). tvOS has no cursor: the focus engine drives selection, so the chip must
+/// draw a focused state itself, since `dsPlainButton()` draws no system platter. An active
+/// chip is already accent-filled, so focus there is a white ring plus the lift; an
+/// inactive chip turns white.
+private struct TVSortChipLabel: View {
+  @Environment(\.theme) private var theme
+  @Environment(\.isFocused) private var focused
+
+  let label: String
+  let isActive: Bool
+
+  var body: some View {
+    Text(label)
+      .font(.dsTVSectionTitle)
+      .foregroundStyle(isActive ? Color.dsAccentOn : (focused ? .black : Color.dsTextSecondary))
+      .frame(minHeight: 56)
+      .padding(.horizontal, .dsSpaceXXL)
+      .background(
+        RoundedRectangle(cornerRadius: theme.radiusPill, style: .continuous)
+          .fill(isActive ? Color.dsAccent : (focused ? .white : Color.dsSurface))
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: theme.radiusPill, style: .continuous)
+          .strokeBorder(Color.white, lineWidth: isActive && focused ? 4 : 0)
+      )
+      .scaleEffect(focused ? 1.06 : 1.0)
+      .animation(.easeOut(duration: 0.15), value: focused)
+  }
+}
+
 /// tvOS library screen heading plus an optional item count (TASK-1059).
 ///
 /// Replaces `.navigationTitle` on the library grids: tvOS renders that as a dim, centred

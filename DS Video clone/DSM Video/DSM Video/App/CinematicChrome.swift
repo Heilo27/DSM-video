@@ -69,8 +69,31 @@ struct DSPressFeedback: ViewModifier {
 }
 
 private struct DSPressableStyle: ButtonStyle {
+    /// Non-nil: draw `Color.dsFocusFill` behind the label while the button is focused
+    /// (tvOS rows that relied on the system platter for their focus cue).
+    var focusFillRadius: CGFloat?
+
     func makeBody(configuration: Configuration) -> some View {
+        DSPressableBody(configuration: configuration, focusFillRadius: focusFillRadius)
+    }
+}
+
+/// `isFocused` only reflects the button's own focus when read from INSIDE its label, which
+/// is why the focus fill lives here and not in a modifier applied to the Button (an
+/// `@FocusState` bound by such a modifier measured as never true on the tvOS sim).
+private struct DSPressableBody: View {
+    let configuration: ButtonStyleConfiguration
+    let focusFillRadius: CGFloat?
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
         configuration.label
+            .background {
+                if let radius = focusFillRadius {
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(isFocused ? Color.dsFocusFill : Color.clear)
+                }
+            }
             .modifier(DSPressFeedback(pressed: configuration.isPressed, dimsWhenDisabled: true))
     }
 }
@@ -91,43 +114,17 @@ extension View {
     /// control that `.focusEffectDisabled()` does not remove. A custom ButtonStyle draws no
     /// platter, so tvOS gets the one pressable style (`DSPressableStyle`); every other
     /// platform keeps `.plain`, whose look is unchanged. The control then owns its focus
-    /// treatment: bind it with `.focused(...)` and draw a fill/scale, or add `dsFocusFill()`.
+    /// treatment: bind it with `.focused(...)` and draw a fill/scale, or pass
+    /// `focusFill: true` for a row that only needs a rounded `dsFocusFill` highlight.
     /// scripts/check-tvos-focus.sh fails a tvOS-compiled `.buttonStyle(.plain)` that is not
     /// marked `// plain-exempt: <reason>`.
     @ViewBuilder
-    func dsPlainButton() -> some View {
+    func dsPlainButton(focusFill: Bool = false, cornerRadius: CGFloat = .dsRadiusMd) -> some View {
         #if os(tvOS)
-        buttonStyle(DSPressableStyle())
+        buttonStyle(DSPressableStyle(focusFillRadius: focusFill ? cornerRadius : nil))
         #else
         buttonStyle(.plain)
         #endif
-    }
-}
-
-// MARK: Focus fill for rows
-
-private struct DSFocusFillModifier: ViewModifier {
-    let cornerRadius: CGFloat
-    @FocusState private var isFocused: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .focused($isFocused)
-            .background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(isFocused ? Color.dsFocusFill : Color.clear)
-            )
-    }
-}
-
-extension View {
-    /// Focus highlight for a row whose button style draws none (`dsPlainButton()` on tvOS):
-    /// binds the control's focus and fills a rounded rect behind it while focused, so focus
-    /// stays visible without the white system platter. Apply it to the NavigationLink/Button
-    /// after `dsPlainButton()`. A row that needs the focus state itself (to scale, or to
-    /// report it upward) keeps its own `@FocusState` and `Color.dsFocusFill`.
-    func dsFocusFill(cornerRadius: CGFloat = .dsRadiusMd) -> some View {
-        modifier(DSFocusFillModifier(cornerRadius: cornerRadius))
     }
 }
 

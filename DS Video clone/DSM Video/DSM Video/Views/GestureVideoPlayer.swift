@@ -488,7 +488,7 @@ struct GestureVideoPlayer: View {
             Button { handleTVSelectPress() } label: { Color.clear.frame(width: 0, height: 0) }
                 .frame(width: 0, height: 0)
                 .focused($focusedControl, equals: .hidden)
-                .buttonStyle(.plain)
+                .buttonStyle(.plain)  // plain-exempt: zero-size focus sink draws nothing, so there is no platter to avoid
                 .clipShape(Rectangle())
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
@@ -617,7 +617,7 @@ struct GestureVideoPlayer: View {
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.2), in: Capsule())
                 #if os(tvOS)
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .focused($focusedControl, equals: .errorDismiss)
                 .focusEffectDisabled()
                 .scaleEffect(focusedControl == .errorDismiss ? 1.15 : 1.0)
@@ -745,7 +745,7 @@ struct GestureVideoPlayer: View {
                 }
                 .accessibilityLabel("Close")
                 #if os(tvOS)
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .focused($focusedControl, equals: .close)
                 .focusEffectDisabled()
                 .scaleEffect(focusedControl == .close ? 1.15 : 1.0)
@@ -782,7 +782,7 @@ struct GestureVideoPlayer: View {
                     }
                     .accessibilityLabel("Go to TV show")
                     #if os(tvOS)
-                    .buttonStyle(.plain)
+                    .dsPlainButton()
                     .focused($focusedControl, equals: .goToShow)
                     .focusEffectDisabled()
                     .scaleEffect(focusedControl == .goToShow ? 1.15 : 1.0)
@@ -840,8 +840,12 @@ struct GestureVideoPlayer: View {
                     }
                     .accessibilityLabel("Subtitles and Audio")
                     #if os(tvOS)
-                    .buttonStyle(.plain)
+                    .dsPlainButton()
                     .focused($focusedControl, equals: .captions)
+                    .focusEffectDisabled()
+                    .scaleEffect(focusedControl == .captions ? 1.15 : 1.0)
+                    .brightness(focusedControl == .captions ? 0.25 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: focusedControl)
                     #endif
 
                     // Fill mode toggle (iOS only — Dynamic Island concern)
@@ -876,8 +880,12 @@ struct GestureVideoPlayer: View {
                             .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Playback speed: \(playbackRate == 1.0 ? "normal" : "\(playbackRate, specifier: "%.2g") times")")
-                    .buttonStyle(.plain)
+                    .dsPlainButton()
                     .focused($focusedControl, equals: .speed)
+                    .focusEffectDisabled()
+                    .scaleEffect(focusedControl == .speed ? 1.15 : 1.0)
+                    .brightness(focusedControl == .speed ? 0.25 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: focusedControl)
                     #else
                     Menu {
                         ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
@@ -946,7 +954,7 @@ struct GestureVideoPlayer: View {
                         .foregroundStyle(.white)
                         .frame(minWidth: 44, minHeight: 44)
                 }
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .accessibilityLabel("Skip to start")
                 .accessibilityAddTraits(.isButton)
                 #if os(tvOS)
@@ -970,7 +978,7 @@ struct GestureVideoPlayer: View {
                         .foregroundStyle(.white)
                         .frame(minWidth: 55, minHeight: 55)
                 }
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .accessibilityLabel("Rewind \(Int(skipBackwardSeconds)) seconds")
                 .accessibilityAddTraits(.isButton)
                 #if os(tvOS)
@@ -991,7 +999,7 @@ struct GestureVideoPlayer: View {
                         .foregroundStyle(.white)
                         .frame(width: 56, height: 56)
                 }
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .background(Color.white.opacity(0.15), in: Circle())
                 .accessibilityLabel(isPlaying ? "Pause" : "Play")
                 .accessibilityAddTraits(.isButton)
@@ -1020,7 +1028,7 @@ struct GestureVideoPlayer: View {
                         .foregroundStyle(.white)
                         .frame(minWidth: 55, minHeight: 55)
                 }
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .accessibilityLabel("Forward \(Int(skipForwardSeconds)) seconds")
                 .accessibilityAddTraits(.isButton)
                 #if os(tvOS)
@@ -1043,7 +1051,7 @@ struct GestureVideoPlayer: View {
                         .foregroundStyle(.white)
                         .frame(minWidth: 44, minHeight: 44)
                 }
-                .buttonStyle(.plain)
+                .dsPlainButton()
                 .accessibilityLabel("Skip to end")
                 .accessibilityAddTraits(.isButton)
                 #if os(tvOS)
@@ -1080,7 +1088,7 @@ struct GestureVideoPlayer: View {
                                 .background(Color.black.opacity(0.65), in: Capsule())
                                 .overlay(Capsule().stroke(Color.white.opacity(0.35), lineWidth: 1))
                         }
-                        .buttonStyle(.plain)
+                        .dsPlainButton()
                         .accessibilityLabel("Skip intro")
                         .accessibilityAddTraits(.isButton)
                         .padding(.trailing, .dsSpaceXS)
@@ -2952,7 +2960,7 @@ private struct SubtitleAudioPickerView: View {
             } label: {
                 trackRow(name: "Off", isSelected: noneSelected)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain)  // plain-exempt: row in the captions/audio/chapters sheet List; the List row focus is the intended treatment
 
             // Partition the live options by the server's semantics. Options with no
             // metadata (offline/older server) fall into `full` so nothing disappears.
@@ -3003,7 +3011,7 @@ private struct SubtitleAudioPickerView: View {
                      isSelected: isSelected,
                      detail: forced ? "Translation" : nil)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain)  // plain-exempt: row in the captions/audio/chapters sheet List; the List row focus is the intended treatment
     }
 
     @ViewBuilder
@@ -3083,7 +3091,7 @@ private struct SubtitleAudioPickerView: View {
                 } label: {
                     trackRow(name: option.displayName, isSelected: isSelected)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain)  // plain-exempt: row in the captions/audio/chapters sheet List; the List row focus is the intended treatment
             }
         } else {
             Text("No audio tracks available")
@@ -3109,7 +3117,7 @@ private struct SubtitleAudioPickerView: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain)  // plain-exempt: row in the captions/audio/chapters sheet List; the List row focus is the intended treatment
         }
     }
 
