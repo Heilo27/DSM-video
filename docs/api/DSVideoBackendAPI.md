@@ -83,7 +83,7 @@ Errors:
 ## Libraries & browsing
 
 ### GET `/libraries`
-Returns logical libraries (Movies, TV Shows, Home Videos, plus any custom libraries).
+Returns the libraries the server is configured to scan (Movies, TV Shows, Home Videos). A library whose folder is not configured is not listed, and filesystem paths are never included. [TASK-985]
 
 Response:
 ```json

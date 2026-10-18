@@ -256,7 +256,7 @@ than failing after the tap.
 ## 6. Library (browse, shows, search, sort/filter, watchlist)
 
 **FR-080 [STATED]** — The app lists every library the server exposes, with content organised using the
-server's metadata — posters, episode guides, descriptions.
+server's metadata — posters, episode guides, descriptions. The server exposes every library it is configured to scan — Movies, TV Shows and Home Videos — and no library whose folder is not configured. [TASK-985]
 **FR-081 [INFERRED]** — Zero libraries, or an empty library, presents as an explanatory empty state;
 failure to load presents as an error with retry (instance of FR-001).
 **FR-082 [INFERRED]** — All titles in a library are reachable, each exactly once, across pagination

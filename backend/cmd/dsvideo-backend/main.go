@@ -2734,9 +2734,13 @@ func asInt(v any) (int, bool) {
 // -------------------------
 
 func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
-	libs := []map[string]any{
-		{"id": "lib_movies", "title": "Movies", "kind": "movies"},
-		{"id": "lib_tv", "title": "TV Shows", "kind": "tv"},
+	// The list is the configured libraries and nothing else (FR-080, FR-099): a Home Videos
+	// folder gets a tile, an unconfigured Movies or TV path does not get an empty one. The
+	// scanner reads the same configuredLibraries, so what is listed is what is scanned. Paths
+	// are stripped for every caller here (TASK-811): the layout of the NAS is not for clients.
+	libs := configuredLibrariesRedacted(s.cfg, false)
+	if libs == nil {
+		libs = []map[string]any{} // an empty list encodes as [], not null
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"libraries": libs})
 
@@ -3120,13 +3124,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleItemsByFolder(w http.ResponseWriter, r *http.Request, libraryID string, v viewer) {
 	// Get the library root path to compute relative folders
-	var libRoot string
-	switch libraryID {
-	case "lib_movies":
-		libRoot = s.cfg.MoviesPath
-	case "lib_tv":
-		libRoot = s.cfg.TVPath
-	default:
+	libRoot := configuredLibraryRoot(s.cfg, libraryID)
+	if libRoot == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_library")
 		return
 	}
@@ -7589,6 +7588,19 @@ func configuredLibraries(cfg Config) []map[string]any {
 		libs = append(libs, map[string]any{"id": "lib_home", "title": "Home Videos", "kind": "home", "path": cfg.HomePath})
 	}
 	return libs
+}
+
+// configuredLibraryRoot is the folder a library id is configured to scan, "" when that id is
+// not a configured library. Derived from configuredLibraries so the id-to-path mapping has
+// one home.
+func configuredLibraryRoot(cfg Config, libraryID string) string {
+	for _, lib := range configuredLibraries(cfg) {
+		if id, _ := lib["id"].(string); id == libraryID {
+			path, _ := lib["path"].(string)
+			return path
+		}
+	}
+	return ""
 }
 
 // configuredLibrariesRedacted returns the library list with absolute filesystem paths
