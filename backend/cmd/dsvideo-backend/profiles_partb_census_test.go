@@ -196,6 +196,7 @@ var routeDisposition = map[string]string{
 
 	"GET /playback/{sessionId}/stream": "X", "POST /playback/{sessionId}/stop": "X",
 	"GET /playback/{sessionId}/master.m3u8": "X", "GET /playback/{sessionId}/init.mp4": "X",
+	"GET /playback/{sessionId}/{name}.mp4": "X",
 	"GET /playback/{sessionId}/{name}.m4s": "X", "GET /playback/{sessionId}/{name}.ts": "X",
 	"GET /playback/{sessionId}/{variant}.m3u8": "X", "GET /playback/{sessionId}/segments/{name}": "X",
 	"GET /images/{id}": "X", "GET /tmdb/image": "X",

@@ -146,6 +146,14 @@ type HLSSession struct {
 	MaxHeight      int
 	UseABR         bool // true when multi-variant ABR ladder is active
 	SubtitleTracks []SubtitleTrack
+	// AudioTracks is every audio stream the source carries, in source order (FR-061).
+	// Two or more switch the output to alternate audio renditions: one video playlist
+	// plus one playlist per track, tied together by a master we write ourselves (see
+	// usesAudioRenditions). Zero or one keeps the original single-playlist output.
+	AudioTracks []AudioStream
+	// SourceBitrate is the probed overall bitrate in bps (0 if unknown); it only feeds
+	// the BANDWIDTH estimate of the rendition master.
+	SourceBitrate int64
 	// StartSeconds is where this transcode BEGINS in the source, in seconds.
 	//
 	// Transcodes used to always start at byte zero, so a client seeking (or resuming)
@@ -167,6 +175,10 @@ type HLSSession struct {
 	// reaped and nothing will write into OutputDir again. StopSession waits on it before
 	// removing OutputDir. nil for a session that never started a transcode goroutine.
 	done chan struct{}
+	// masterMu serializes writing the rendition master (ensureRenditionMaster) against
+	// itself, so two concurrent readiness polls cannot interleave with the end-of-run
+	// subtitle rewrite of the same file.
+	masterMu sync.Mutex
 }
 
 // NewHLSGenerator creates a new HLS generator with the given config.
@@ -451,11 +463,18 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 	if g.config.FFmpegPath != "" {
 		ffprobePath = filepath.Join(filepath.Dir(g.config.FFmpegPath), "ffprobe")
 	}
+	// The same probe lists the audio streams, so every track can become its own
+	// rendition (FR-061). A failed probe leaves AudioTracks empty, which falls back to
+	// the single-playlist output with the first audio track only: playable, as before.
 	videoCodec := ""
+	var audioTracks []AudioStream
+	var sourceBitrate int64
 	if p := NewProber(ffprobePath); p != nil {
 		pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
 		if pr, perr := p.Probe(pctx, videoPath); perr == nil && pr != nil {
 			videoCodec = pr.VideoCodec
+			audioTracks = pr.AudioStreams
+			sourceBitrate = pr.Bitrate
 		}
 		pcancel()
 	}
@@ -469,6 +488,8 @@ func (g *HLSGenerator) StartSession(ctx context.Context, sessionID, videoPath st
 		MaxHeight:      maxHeight,
 		UseABR:         useABR,
 		SubtitleTracks: subtitles,
+		AudioTracks:    audioTracks,
+		SourceBitrate:  sourceBitrate,
 		OwnerKey:       ownerKey,
 		StartSeconds:   startSeconds,
 		StartedAt:      time.Now(),
@@ -727,6 +748,15 @@ func (g *HLSGenerator) runTranscode(ctx context.Context, session *HLSSession) er
 		return fmt.Errorf("ffmpeg failed: %w", runErr)
 	}
 
+	// Alternate audio renditions: make sure the master exists before the subtitle pass
+	// below reads it. Normally a readiness poll wrote it long ago; this covers a session
+	// nobody polled while it ran.
+	if usesAudioRenditions(session) {
+		if _, err := g.ensureRenditionMaster(session); err != nil {
+			log.Printf("[HLS] write rendition master failed: %v", err)
+		}
+	}
+
 	// For ABR sessions ffmpeg writes per-variant playlists but its auto-generated
 	// master may not have BANDWIDTH values we want. Overwrite with ours.
 	if session.UseABR {
@@ -848,7 +878,12 @@ func (g *HLSGenerator) addSubtitleRenditions(ctx context.Context, session *HLSSe
 		out = append(out, line)
 	}
 
-	if err := os.WriteFile(masterPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	// Temp file plus rename under masterMu: a readiness poll on a rendition session
+	// treats an empty master as missing and would rewrite it without the subtitles.
+	session.masterMu.Lock()
+	err = writeFileAtomic(masterPath, []byte(strings.Join(out, "\n")))
+	session.masterMu.Unlock()
+	if err != nil {
 		log.Printf("[HLS] addSubtitleRenditions: write master: %v", err)
 	}
 }
@@ -1013,18 +1048,27 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 		args = append(args, "-c:v", "copy")
 	}
 
-	args = append(args,
-		"-map", "0:v:0",
-		"-map", "0:a:0?",
-		// AAC, not MP3: fMP4/CMAF segments expect AAC audio, and MP3-in-fMP4 is a
-		// second source of "resource unavailable" on some players. AAC is also what
-		// Apple devices want natively.
-		"-c:a", "aac",
-		"-b:a", g.config.AudioBitrate,
-		"-ac", "2",
-		// Normalize start timestamps so the first segment doesn't carry negative ts.
-		"-avoid_negative_ts", "make_zero",
-	)
+	renditions := usesAudioRenditions(session)
+	if renditions {
+		// Two or more audio tracks: map the video ONCE and every audio stream after it,
+		// so the video is encoded (or copied) a single time however many tracks there
+		// are. Each track becomes its own audio-only rendition via -var_stream_map below.
+		args = append(args, audioRenditionArgs(session.AudioTracks, g.config.AudioBitrate)...)
+		args = append(args, "-avoid_negative_ts", "make_zero")
+	} else {
+		args = append(args,
+			"-map", "0:v:0",
+			"-map", "0:a:0?",
+			// AAC, not MP3: fMP4/CMAF segments expect AAC audio, and MP3-in-fMP4 is a
+			// second source of "resource unavailable" on some players. AAC is also what
+			// Apple devices want natively.
+			"-c:a", "aac",
+			"-b:a", g.config.AudioBitrate,
+			"-ac", "2",
+			// Normalize start timestamps so the first segment doesn't carry negative ts.
+			"-avoid_negative_ts", "make_zero",
+		)
+	}
 
 	segDur := g.config.SegmentSeconds
 	if segDur == 0 {
@@ -1045,6 +1089,22 @@ func (g *HLSGenerator) buildSingleVariantArgs(session *HLSSession) []string {
 		// and reverted because it makes the web UI wait for the entire transcode.)
 		"-hls_playlist_type", "event",
 		"-hls_segment_type", "fmp4",
+	)
+	if renditions {
+		// One playlist, init segment and segment series per rendition (%v is the
+		// rendition name from -var_stream_map). No -master_pl_name: ffmpeg's own master
+		// omits LANGUAGE/NAME and is written late, so ensureRenditionMaster writes
+		// master.m3u8 once every rendition playlist exists.
+		args = append(args,
+			"-hls_fmp4_init_filename", "init_%v.mp4",
+			"-hls_segment_filename", filepath.Join(session.OutputDir, "segment_%v_%05d.m4s"),
+			"-hls_flags", "independent_segments",
+			"-var_stream_map", varStreamMap(len(session.AudioTracks)),
+			filepath.Join(session.OutputDir, "%v.m3u8"),
+		)
+		return args
+	}
+	args = append(args,
 		"-hls_fmp4_init_filename", filepath.Base(initPath),
 		"-hls_segment_filename", segmentPath,
 		"-hls_flags", "independent_segments",
@@ -1214,6 +1274,10 @@ func (g *HLSGenerator) WaitForPlaylist(ctx context.Context, sessionID string, ti
 			return fmt.Errorf("timeout waiting for playlist")
 		}
 
+		// A rendition session's master is ours to write, once every rendition
+		// playlist it references exists.
+		g.ensureRenditionMasterFor(sessionID)
+
 		// Check if playlist exists and has content
 		if info, err := os.Stat(playlistPath); err == nil && info.Size() > 0 {
 			return nil
@@ -1231,6 +1295,7 @@ func (g *HLSGenerator) WaitForPlaylist(ctx context.Context, sessionID string, ti
 
 // IsReady returns true if the playlist is ready for streaming.
 func (g *HLSGenerator) IsReady(sessionID string) bool {
+	g.ensureRenditionMasterFor(sessionID)
 	playlistPath := g.MasterPlaylistPath(sessionID)
 	info, err := os.Stat(playlistPath)
 	return err == nil && info.Size() > 0

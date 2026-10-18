@@ -37,6 +37,21 @@ type ProbeResult struct {
 	NeedsTranscode bool      // Pre-computed flag for whether transcoding is needed
 	Chapters       []Chapter // Chapter list (may be empty)
 	EmbeddedSubs   []EmbeddedSubtitle // Text-based embedded subtitle streams (may be empty)
+	// AudioStreams is EVERY audio stream, in source order. AudioCodec, AudioChannels and
+	// AudioLang above describe AudioStreams[0] and stay for the callers that only care
+	// about the primary track (the playback decision, forced-subtitle language match).
+	AudioStreams []AudioStream
+}
+
+// AudioStream describes one audio stream in the source (FR-061, FR-063): what the
+// transcoder needs to carry it as its own HLS rendition and what the picker shows.
+type AudioStream struct {
+	Index    int    // absolute ffmpeg stream index (for -map 0:<Index>)
+	Codec    string // normalized, e.g. "aac", "ac3", "dts"
+	Channels int
+	Language string // lowercased language tag (e.g. "eng"), or "" if untagged/"und"
+	Title    string // human title from the stream tags (e.g. "Commentary"), or ""
+	Default  bool   // the source marks this track as the default one
 }
 
 // EmbeddedSubtitle describes a subtitle stream muxed inside the container
@@ -178,6 +193,25 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 				// matches the audio the viewer is hearing). "" when untagged.
 				result.AudioLang = strings.ToLower(stream.Tags["language"])
 			}
+			lang := strings.ToLower(stream.Tags["language"])
+			if lang == "und" {
+				lang = ""
+			}
+			// MKV carries a track title as "title"; ffmpeg's MP4 muxer stores it in the
+			// track's udta "name" box, which ffprobe reports as "name". A normalized
+			// MKV->MP4 file therefore keeps its title only under the second key.
+			title := stream.Tags["title"]
+			if title == "" {
+				title = stream.Tags["name"]
+			}
+			result.AudioStreams = append(result.AudioStreams, AudioStream{
+				Index:    stream.Index,
+				Codec:    normalizeAudioCodec(stream.CodecName),
+				Channels: stream.Channels,
+				Language: lang,
+				Title:    title,
+				Default:  stream.Disposition.Default == 1,
+			})
 		case "subtitle":
 			// Text-based codecs (SRT/ASS/mov_text) convert to WebVTT and play. Image-based
 			// codecs (hdmv_pgs_subtitle, dvd_subtitle/VobSub) require OCR and are OUT OF
