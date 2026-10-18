@@ -48,7 +48,7 @@ func withIsolatedAppState(
   await localStore.setActiveProfile(profileStore.activeScope)
 
   let state = AppState(profileStore: profileStore, localStore: localStore,
-                       serverUpdateDefaults: defaults)
+                       serverUpdateDefaults: defaults, firstConnectionDefaults: defaults)
   let savedBase = state.baseURL, savedHTTPS = state.useHTTPS, savedRemember = state.rememberMe
   if let stubHost {
     state.rememberMe = false

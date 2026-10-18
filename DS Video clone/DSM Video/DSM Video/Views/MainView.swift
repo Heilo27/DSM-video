@@ -1856,26 +1856,10 @@ struct HowToView: View {
 
       // MARK: Server Setup
       Section {
-        HowToStep(
-          number: "1",
-          title: "Download DSVideoServer",
-          detail: "Download the latest DSVideoServer .spk package from github.com/Heilo27/DS-Reel/releases onto your Mac or PC."
-        )
-        HowToStep(
-          number: "2",
-          title: "Install on Your NAS",
-          detail: "Open DSM in a browser. Go to Package Center → Manual Install, select the .spk file, and follow the prompts. You may need to allow third-party packages in Package Center settings."
-        )
-        HowToStep(
-          number: "3",
-          title: "Configure Your Video Folders",
-          detail: "After installation, open DSVideoServer from the DSM desktop. Enter the paths to your Movies and TV Shows folders on the NAS, then click Save."
-        )
-        HowToStep(
-          number: "4",
-          title: "Note Your NAS Address",
-          detail: "You'll need your NAS's local IP address (e.g. 192.168.1.100) or your QuickConnect ID. Both are found in DSM → Control Panel → Network or QuickConnect."
-        )
+        // The same steps the pre-sign-in help sheet shows (FR-152).
+        ForEach(Array(ServerInstallGuide.steps.enumerated()), id: \.offset) { index, step in
+          HowToStep(number: "\(index + 1)", title: step.title, detail: step.detail)
+        }
       } header: {
         Label("Server Setup", systemImage: "server.rack")
           .textCase(nil)

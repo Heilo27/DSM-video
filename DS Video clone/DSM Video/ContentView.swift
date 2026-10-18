@@ -75,6 +75,18 @@ struct RootView: View {
                 .ignoresSafeArea()
             }
         }
+        // FR-152: "Found N libraries, M videos", once per server, after the first sync that
+        // finds something. On the root so it appears over whatever screen sign-in landed on;
+        // not focusable and it never blocks input, so it cannot slow sign-in or move focus.
+        .overlay(alignment: .bottom) {
+            TransientNoticeBanner(message: Bindable(appState).firstConnectionNotice)
+                #if os(tvOS)
+                .padding(.bottom, .dsSpaceTitleSafe)
+                #else
+                .padding(.horizontal, .dsSpaceXXL)
+                .padding(.bottom, .dsSpaceGiant)
+                #endif
+        }
         // FR-206: the server said the active profile no longer exists. A fresh list drops it
         // and brings the picker back (refreshProfiles).
         .onReceive(NotificationCenter.default.publisher(for: .activeProfileRejected)) { _ in

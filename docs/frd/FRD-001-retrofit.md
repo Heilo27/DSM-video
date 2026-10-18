@@ -638,6 +638,39 @@ work well together, and given the way to fix it). S4 and A2 hold: the version is
 NAS, nothing is sent to anyone else, and the download page is not in the media or credential path.
 Ryan, 2026-10-18: "for anyone using the iOS/tvos app. If it detects that their server is not updated, it
 suggests downloading the update and installing it." [TASK-1055]
+**FR-152 [DESIGN, 2026-10-18, TASK-748]** — *A person with no server is shown how to install one, and the
+first connection to a server says what it found.* Three parts.
+*(1) Install the server.* The help sheet on the sign-in screen has an **Install the server** topic, and
+Settings > Help has the same steps; both read ONE list (download the package from heiloprojects.com/dsmvideo,
+install it from Package Center > Manual Install, point it at the Movies and TV folders, note the NAS
+address), so they cannot disagree.
+*(2) When the install link appears.* A failed sign-in or pairing offers the install help **only when no
+DSVideo server answered**: the network was unreachable or timed out, or a host answered but is not DSVideo
+Server. It is never offered for a wrong password, a permission refusal (401/403), a Local Network
+permission denial, a failed QuickConnect lookup, or a TLS/certificate failure, because in each of those a
+server is there or the fix is elsewhere. A host that answers the sign-in request with a bodyless 404 (a
+NAS with DSM but no DSVideo Server) says so honestly: "Something answered at this address, but it isn't
+DSVideo Server. Is DSVideo Server installed on your NAS?", and it gets the install help. The link is
+shown for the error on screen only; a later, different error does not inherit it. On iPhone and iPad the
+link opens the download page; Apple TV (sign-in and pairing screens) shows the short address and a QR
+code, with no new button.
+*(3) First connection.* The first time the user signs in to a server, once the first sync has finished the
+app shows "Found N libraries, M videos" (singular when 1; thousands separated) for a few seconds. It is
+computed after the sync, so it never delays or blocks sign-in, and the count is only what the active
+profile may see (a Teen profile is not told about hidden titles). It appears **once per server**: servers
+are told apart by QuickConnect ID when one is used, else by address and port, and a server is marked
+as welcomed only when the moment was shown. A server with nothing synced yet shows nothing and stays
+pending. Only a sign-in the user started (the Sign In button, or a pairing code) triggers it; a silent
+reconnect of an existing install does not. Signing out clears anything pending but not the memory of
+servers already welcomed.
+*Acceptance:* AC-1 the Install the server topic exists on both screens from one step list and the link is
+`RecommendedServer.downloadURL`; AC-2 the link appears for unreachable and not-DSVideo and for nothing
+else; AC-3 the moment shows once per server and never blocks sign-in; AC-4 Apple TV sign-in and pairing
+show the address and QR code on a no-server-answered failure and every tvOS button keeps `.focused()`;
+AC-5 this requirement.
+*Derivation:* P1 and S2 (honest: the error names the real cause; a person with no server is shown the
+way to get one). Ryan, 2026-10-18 (onboarding gaps found by walking a first-time user through the app).
+[TASK-748]
 
 ---
 

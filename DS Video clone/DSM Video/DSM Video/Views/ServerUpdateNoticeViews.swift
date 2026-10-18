@@ -101,21 +101,7 @@ struct TVServerUpdateCard: View {
           .focused($control, equals: .dismiss)
           .accessibilityIdentifier(A11y.Shared.serverUpdateDismiss)
       }
-      VStack(spacing: .dsSpaceSM) {
-        if let code = QRCode.image(for: RecommendedServer.downloadURL.absoluteString) {
-          Image(decorative: code, scale: 1)
-            .interpolation(.none)
-            .resizable()
-            .scaledToFit()
-            .frame(width: 220, height: 220)
-            .padding(.dsSpaceMD)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        Text(RecommendedServer.displayURL)
-          .font(.callout.weight(.semibold))
-          .foregroundStyle(Color.dsTextPrimary)
-      }
-      .accessibilityElement(children: .combine)
+      TVInstallQRCode(size: 220)
     }
     .padding(.dsSpaceXXL)
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -123,6 +109,50 @@ struct TVServerUpdateCard: View {
     .padding(.horizontal, .dsSpaceTitleSafe)
     .accessibilityElement(children: .contain)
     .accessibilityIdentifier(A11y.Shared.serverUpdateCard)
+  }
+}
+
+/// The QR code and short address for the server download page. No controls, so nothing to focus.
+/// Shared by the update card and the install help on the sign-in and pairing screens (Rule 9).
+struct TVInstallQRCode: View {
+  let size: CGFloat
+
+  var body: some View {
+    VStack(spacing: .dsSpaceSM) {
+      if let code = QRCode.image(for: RecommendedServer.downloadURL.absoluteString) {
+        Image(decorative: code, scale: 1)
+          .interpolation(.none)
+          .resizable()
+          .scaledToFit()
+          .frame(width: size, height: size)
+          .padding(.dsSpaceMD)
+          .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+      }
+      Text(RecommendedServer.displayURL)
+        .font(.callout.weight(.semibold))
+        .foregroundStyle(Color.dsTextPrimary)
+    }
+    .accessibilityElement(children: .combine)
+  }
+}
+
+/// Shown under a sign-in or pairing error when no DSVideo server answered: where to get the
+/// server, as a QR code (a TV cannot open a web page). FR-152.
+struct TVInstallHelp: View {
+  var body: some View {
+    VStack(spacing: .dsSpaceMD) {
+      Text(ServerInstallGuide.tvHeading)
+        .font(.callout.weight(.semibold))
+        .foregroundStyle(Color.dsTextPrimary)
+      Text(ServerInstallGuide.tvScanPrompt)
+        .font(.callout)
+        .foregroundStyle(Color.dsTextSecondary)
+        .multilineTextAlignment(.center)
+      TVInstallQRCode(size: 160)
+    }
+    .frame(maxWidth: 480)
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier(A11y.Setup.installLink)
   }
 }
 

@@ -337,6 +337,20 @@ final class AppState {
   }
   var isLoggingIn: Bool = false
   var loginError: String?
+  /// The `loginError` text the install help applies to (FR-152). Holding the text rather than a
+  /// flag means a later, unrelated error (a session expiry) never inherits the link.
+  private(set) var installOfferedForError: String?
+  /// True when the current `loginError` is a "no DSVideo server answered" failure, so the
+  /// sign-in and pairing screens may offer how to install the server. Never for a wrong
+  /// password, a permission refusal, a Local Network denial or a QuickConnect lookup failure.
+  var loginErrorOffersInstall: Bool {
+    loginError != nil && loginError == installOfferedForError
+  }
+  /// FR-152: "Found N libraries, M videos", set once per server after the first sync that
+  /// follows a user-initiated connection. The root views show it briefly and clear it.
+  var firstConnectionNotice: String?
+  /// The server a user-initiated connection just reached and has not yet been welcomed.
+  private var pendingFirstConnectionKey: String?
 
   var pairingCode: String?
   var pairingCodeExpiresInSeconds: Int = 600
@@ -356,6 +370,9 @@ final class AppState {
   /// Where the "update your server" dismissal is remembered (FR-149). Injected so tests use
   /// a throwaway suite.
   let serverUpdateDismissal: ServerUpdateDismissal
+  /// Which servers have already had their first-connection moment (FR-152). Injected so tests
+  /// use a throwaway suite.
+  let firstConnectionRecord: FirstConnectionRecord
 
   // Use custom REST API client (our backend)
   private(set) var api: APIClient
@@ -388,10 +405,12 @@ final class AppState {
   }
 
   init(profileStore: ActiveProfileStore = .shared, localStore: LocalStore = .shared,
-       serverUpdateDefaults: UserDefaults = .standard) {
+       serverUpdateDefaults: UserDefaults = .standard,
+       firstConnectionDefaults: UserDefaults = .standard) {
     self.profileStore = profileStore
     self.localStore = localStore
     self.serverUpdateDismissal = ServerUpdateDismissal(defaults: serverUpdateDefaults)
+    self.firstConnectionRecord = FirstConnectionRecord(defaults: firstConnectionDefaults)
     #if DEBUG
     // Must run BEFORE any stored value is read below, or this launch would load the state it
     // is supposed to be clearing.
@@ -891,7 +910,10 @@ final class AppState {
     lastGoodAddress = candidate.url.absoluteString
   }
 
-  func login() async {
+  /// `userInitiated` is true only for a person pressing Connect or finishing pairing: those
+  /// are the connections that earn the first-connection moment (FR-152). The silent token
+  /// refresh and reconnect paths leave it false.
+  func login(userInitiated: Bool = false) async {
     // TASK-780: re-entrancy guard. login() writes shared @Observable auth state
     // (sessionToken, api, baseURL, useHTTPS, defaultPort). Two concurrent logins — e.g. the
     // proactive near-expiry refresh scheduled in checkTokenExpiryOnLaunch() racing a user tap
@@ -903,6 +925,7 @@ final class AppState {
       return
     }
     loginError = nil
+    installOfferedForError = nil
     isLoggingIn = true
     defer { isLoggingIn = false }
 
@@ -979,6 +1002,9 @@ final class AppState {
     // TASK-949: a LAN candidate refused for Local Network access. When nothing answered, that
     // is the one cause the user can fix, so it leads the message.
     var localNetworkRefused = false
+    // A candidate that answered as DSVideo Server (it rejected us for a real reason). Any such
+    // answer means the server exists, so the install help is never offered (FR-152).
+    var dsvideoAnswered = false
     for (index, candidate) in candidates.enumerated() {
       do {
         var tempClient = makeClient(baseURL: candidate.url, token: nil)
@@ -1005,6 +1031,7 @@ final class AppState {
           Self.saveToKeychain(savedPassword, account: Keys.keychainAccount)
         }
         startHeartbeatTimer()
+        if userInitiated { armFirstConnectionWelcome() }
         dlog.info(.auth, "login OK via \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") token=\(DiagnosticLog.redact(resp.token))")
         return
       } catch {
@@ -1014,7 +1041,11 @@ final class AppState {
         // exact ambiguity that cost an evening when the app reported both identically.
         let why: String
         if let apiErr = error as? APIError {
-          why = apiErr.serverReached ? "server rejected: \(apiErr.userMessage)" : apiErr.userMessage
+          if case .http(404) = apiErr {
+            why = "answered, but it isn't DSVideo Server"
+          } else {
+            why = apiErr.serverReached ? "server rejected: \(apiErr.userMessage)" : apiErr.userMessage
+          }
         } else if let urlErr = error as? URLError {
           why = urlErr.code.diagnosticName
         } else {
@@ -1023,6 +1054,7 @@ final class AppState {
         dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
         attemptFailures.append("\(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") — \(why)")
         if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
+        if Self.answeredAsDSVideo(error) { dsvideoAnswered = true }
         lastError = error
       }
     }
@@ -1040,7 +1072,12 @@ final class AppState {
     //
     // A server that ANSWERED and rejected us is different: its own message is the truth
     // and must not be buried under connection detail.
-    if let apiErr = lastError as? APIError, apiErr.serverReached {
+    if case .http(404)? = lastError as? APIError {
+      // A bodyless 404 is a web server with no DSVideo Server behind the address (DSM itself
+      // answers this way). "The server couldn't find that item" blamed a missing item for a
+      // missing server.
+      loginError = ServerInstallGuide.notDSVideoMessage
+    } else if let apiErr = lastError as? APIError, apiErr.serverReached {
       loginError = apiErr.userMessage
     } else if localNetworkRefused {
       loginError = LocalNetworkPermission.deniedMessage
@@ -1059,6 +1096,53 @@ final class AppState {
         ?? (lastError as? URLError).map { APIError.transport($0).userMessage }
         ?? "Login failed — no server address could be built. Check the address."
     }
+    offerInstallHelpIfNoServerAnswered(
+      lastError: lastError, localNetworkRefused: localNetworkRefused,
+      quickConnectLookupFailed: quickConnectFailure != nil, dsvideoAnswered: dsvideoAnswered)
+  }
+
+  /// True when `error` is a real answer from DSVideo Server (a rejection with a reason), as
+  /// opposed to no answer, or a host that answered with a bodyless 404 (not DSVideo Server).
+  static func answeredAsDSVideo(_ error: Error) -> Bool {
+    guard let api = error as? APIError, api.serverReached else { return false }
+    if case .http(404) = api { return false }
+    return true
+  }
+
+  /// Marks the just-set `loginError` as one the install help applies to (FR-152).
+  private func offerInstallHelpIfNoServerAnswered(
+    lastError: Error?, localNetworkRefused: Bool, quickConnectLookupFailed: Bool, dsvideoAnswered: Bool
+  ) {
+    guard !dsvideoAnswered,
+          InstallLinkPolicy.shouldOffer(
+            lastError: lastError, localNetworkRefused: localNetworkRefused,
+            quickConnectLookupFailed: quickConnectLookupFailed)
+    else { return }
+    installOfferedForError = loginError
+  }
+
+  // MARK: - First-connection moment (FR-152)
+
+  /// Called when a user-initiated connection succeeds. Remembers which server it was, unless
+  /// that server has had its moment already. The moment itself waits for the sync, so signing
+  /// in is never delayed by it.
+  private func armFirstConnectionWelcome() {
+    guard let key = FirstConnectionRecord.serverKey(quickConnectID: configuredQuickConnectID, baseURL: baseURL),
+          !firstConnectionRecord.hasWelcomed(key)
+    else { return }
+    pendingFirstConnectionKey = key
+  }
+
+  /// Runs after a sync has filled the local store. Shows "Found N libraries, M videos" and
+  /// records the server so it is never shown again. With nothing to report yet it stays pending
+  /// for a later sync in the same session.
+  private func showFirstConnectionWelcomeIfPending() async {
+    guard let key = pendingFirstConnectionKey else { return }
+    let videos = await localStore.visibleItemCount()
+    guard let message = FirstConnectionRecord.message(libraries: homeLibraries.count, videos: videos) else { return }
+    pendingFirstConnectionKey = nil
+    firstConnectionRecord.markWelcomed(key)
+    firstConnectionNotice = message
   }
 
   func logout() {
@@ -1082,6 +1166,9 @@ final class AppState {
     username = ""  // SEC-03: clear username so it doesn't persist cross-user on shared devices
     sessionToken = nil
     serverUpdateNotice = nil  // FR-149: belongs to the server just signed out of
+    firstConnectionNotice = nil  // FR-152
+    pendingFirstConnectionKey = nil
+    installOfferedForError = nil
     pairingCode = nil
     loginError = nil
     watchlistItems = []
@@ -1279,6 +1366,7 @@ final class AppState {
   /// that was perfectly valid, repeatedly, with no hint the server was the problem.
   static func pairingErrorMessage(_ error: Error?) -> String {
     if let apiErr = error as? APIError {
+      if case .http(404) = apiErr { return ServerInstallGuide.notDSVideoMessage }
       if case .connection = apiErr {
         // Never reached the server: the code was never even checked.
         return "Couldn't reach your server. Check that it's on and connected, then try again."
@@ -1695,6 +1783,7 @@ final class AppState {
       return
     }
     loginError = nil
+    installOfferedForError = nil
     isLoggingIn = true
     defer { isLoggingIn = false }
 
@@ -1723,6 +1812,9 @@ final class AppState {
     guard !candidates.isEmpty else {
       if nothingConfigured {
         loginError = discoveryDenied ? LocalNetworkPermission.deniedMessage : Self.pairingNoServerFoundMessage
+        // Nothing on the network answered: the one pairing failure where the server may simply
+        // not be installed yet (FR-152). A denied Local Network permission is a different fix.
+        if !discoveryDenied { installOfferedForError = loginError }
       } else if let qcID = configuredQuickConnectID {
         loginError = quickConnectFailure?.userMessage ?? QuickConnectError.noAddress(id: qcID).userMessage
       } else {
@@ -1733,6 +1825,7 @@ final class AppState {
 
     var lastError: Error?
     var localNetworkRefused = false
+    var dsvideoAnswered = false
     for candidate in candidates {
       let timeout: TimeInterval = candidate.requiresTunnelCookie ? 15
         : Self.isPrivateLANAddress(candidate.url.absoluteString) ? 4 : 8
@@ -1752,11 +1845,13 @@ final class AppState {
         adoptWinningAddress(candidate)
         adoptPairedServerInfo(resp.server, winner: candidate)
         startHeartbeatTimer()
+        armFirstConnectionWelcome()
         dlog.info(.auth, "pairing OK via \(candidate.url.host ?? "?") token=\(DiagnosticLog.redact(resp.token))")
         return
       } catch {
         dlog.warn(.auth, "pairing via \(candidate.url.host ?? "?") failed — \((error as? APIError)?.userMessage ?? error.localizedDescription)")
         if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
+        if Self.answeredAsDSVideo(error) { dsvideoAnswered = true }
         lastError = error
         // The server answered and refused the code: every other address is the same server,
         // would refuse it too, and would count one more wrong code against it.
@@ -1768,6 +1863,9 @@ final class AppState {
     loginError = !serverAnswered && localNetworkRefused
       ? LocalNetworkPermission.deniedMessage
       : Self.pairingErrorMessage(lastError)
+    offerInstallHelpIfNoServerAnswered(
+      lastError: lastError, localNetworkRefused: localNetworkRefused,
+      quickConnectLookupFailed: false, dsvideoAnswered: dsvideoAnswered)
   }
 
   /// Keeps the generating device's connection details so this one can reach the server once
@@ -2804,6 +2902,8 @@ final class AppState {
       // screen belongs to the profile, so a superseded pass stops here.
       guard applyRails(rails, startedAt: generation) else { return }
       homeLog.info("runDeltaSync: done — CW=\(rails.continueWatching.count) JA=\(rails.justAdded.count) RW=\(rails.recentlyWatched.count)")
+      // FR-152: after the sync, never before it, so the moment can never delay sign-in.
+      await showFirstConnectionWelcomeIfPending()
       // Step 6: Refresh watchlist so it stays current with server state
       await loadWatchlist()
 

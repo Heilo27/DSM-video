@@ -1158,6 +1158,20 @@ actor LocalStore {
     return Int(sqlite3_column_int(stmt, 0))
   }
 
+  /// How many videos the active profile may see (FR-152's "Found N libraries, M videos").
+  /// Scoped like every other offline read: a Teen profile is not told about titles it will never
+  /// be shown. `totalItemCount()` stays the unscoped number the sync health checks use.
+  func visibleItemCount() -> Int {
+    guard let db else { return 0 }
+    var stmt: OpaquePointer?
+    let sql = "SELECT COUNT(*) FROM items i WHERE \(Self.sqlVisibleToScope)"
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+    defer { sqlite3_finalize(stmt) }
+    bindScope(stmt)
+    guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+    return Int(sqlite3_column_int(stmt, 0))
+  }
+
   func hasItems() -> Bool {
     totalItemCount() > 0
   }
