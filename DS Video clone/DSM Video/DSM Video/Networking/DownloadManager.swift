@@ -1702,10 +1702,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
     // swears is present. Read the status BEFORE copying anything.
     let httpStatus = (downloadTask.response as? HTTPURLResponse)?.statusCode
     if !DownloadManager.shouldAcceptResponse(status: httpStatus), let httpStatus {
+      // The body names the cause ({"error": code}); it is only readable during this call.
+      let errorCode = DownloadManager.errorCode(fromErrorBodyAt: location)
       Task { @MainActor in
         guard let itemId = owner(of: downloadTask) else { return }
         downloadTasks.removeValue(forKey: downloadTask)
-        recordHTTPFailure(itemId: itemId, status: httpStatus)
+        let sentProfileID = downloadTask.originalRequest?.value(forHTTPHeaderField: ActiveProfileStore.headerName)
+        recordHTTPFailure(itemId: itemId, status: httpStatus, errorCode: errorCode, sentProfileID: sentProfileID)
       }
       return
     }
@@ -1824,14 +1827,53 @@ extension DownloadManager: URLSessionDownloadDelegate {
     }
   }
 
+  /// The server's error code from a rejected transfer's body (`{"error": code}`), or nil when
+  /// there is no readable JSON body. Reads at most 4 KB: an error body is a few dozen bytes,
+  /// and a misbehaving server must not make this read a whole file into memory.
+  nonisolated static func errorCode(fromErrorBodyAt location: URL) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: location) else { return nil }
+    defer { try? handle.close() }
+    guard let data = try? handle.read(upToCount: 4096), !data.isEmpty else { return nil }
+    // JSONSerialization, not APIErrorResponse: that type is main-actor isolated and this runs
+    // on the session's delegate queue.
+    let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    return body?["error"] as? String
+  }
+
+  /// The Failed-row message for a transfer the server answered with `status` (and, when the
+  /// body had one, `errorCode`).
+  ///
+  /// TASK-961 (FR-033): only a session failure says "session expired". A 403 is NOT a session
+  /// failure by default: the stream route answers 403 `content_restricted` for a title above the
+  /// profile's age rating and 403 `unknown_profile` for a deleted profile, neither of which
+  /// signing in again can fix. A 403 with a code reads that code's own sentence (one home:
+  /// `APIError.userMessage`); the session test is `APIError.isAuthFailure`, also one home.
+  static func httpFailureMessage(status: Int, errorCode: String?) -> String {
+    if APIError.server(errorCode ?? "", status: status).isAuthFailure {
+      return "Your session expired. Sign in again, then retry the download."
+    }
+    switch status {
+    case 403 where errorCode != nil:
+      return APIError.server(errorCode ?? "", status: status).userMessage
+    case 404, 410:
+      return "The server couldn't provide this video. Try the download again."
+    case 500...599:
+      return "The server had a problem preparing this video. Try again shortly."
+    default:
+      return "The download failed (HTTP \(status)). Try again."
+    }
+  }
+
   /// Surface an HTTP-level download failure through the same path as a transport failure,
   /// so the Downloads list shows a real "failed — retry" row instead of a bogus success.
   ///
-  /// The message names the actual cause. A 401/403 means the session died, which a retry
-  /// with the same dead token cannot fix by itself — but re-resolving on retry can, so it
-  /// is not marked permanent. A 404 means the stream URL no longer resolves, which is what
-  /// happens when the playback session backing it was already released.
-  func recordHTTPFailure(itemId: String, status: Int) {
+  /// The message names the actual cause (`httpFailureMessage`). None is marked permanent: a
+  /// retry re-resolves a fresh session. A 404 means the stream URL no longer resolves, which is
+  /// what happens when the playback session backing it was already released. A 403
+  /// `unknown_profile` also takes the profile-gone path every other request takes (FR-206):
+  /// the app goes back to the picker. Internal, not private, so tests can drive it directly:
+  /// the delegate takes a live download task, which a unit test cannot build with a status.
+  func recordHTTPFailure(itemId: String, status: Int, errorCode: String? = nil, sentProfileID: String? = nil) {
     activeDownloads.removeValue(forKey: itemId)
     forgetProgress(itemId)
     lastProgressUpdate.removeValue(forKey: itemId)
@@ -1849,22 +1891,15 @@ extension DownloadManager: URLSessionDownloadDelegate {
     }
 
     releasePlaybackSession(for: itemId)
-    let message: String
-    switch status {
-    case 401, 403:
-      message = "Your session expired. Sign in again, then retry the download."
-    case 404, 410:
-      message = "The server couldn't provide this video. Try the download again."
-    case 500...599:
-      message = "The server had a problem preparing this video. Try again shortly."
-    default:
-      message = "The download failed (HTTP \(status)). Try again."
+    let message = Self.httpFailureMessage(status: status, errorCode: errorCode)
+    if errorCode == "unknown_profile" {
+      NotificationCenter.default.post(name: .activeProfileRejected, object: sentProfileID)
     }
 
     let info = pendingDownloadInfo.removeValue(forKey: itemId) ?? finishingInfo(for: itemId)
     raiseFailure(failure(itemId: itemId, info: info, message: message))
     forgetDownload(for: itemId)
-    log.error("download \(itemId) failed with HTTP \(status) — no file written")
+    log.error("download \(itemId) failed with HTTP \(status) \(errorCode ?? "no error code") — no file written")
   }
 
   nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {

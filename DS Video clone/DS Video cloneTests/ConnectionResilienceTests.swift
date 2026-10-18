@@ -17,7 +17,7 @@ final class ResolverProbe {
 /// The address settings AppState keeps in UserDefaults.standard, put back after a test that
 /// has to point the state at a QuickConnect id.
 @MainActor
-private struct SavedAddresses {
+struct SavedAddresses {
   let base, lan, wan, lastGood: String
   let https, remember: Bool
   init(_ s: AppState) {

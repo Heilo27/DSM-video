@@ -3,15 +3,20 @@ import SwiftUI
 struct OfflineBanner: View {
   let isOffline: Bool
   let serverUnreachable: Bool
+  /// TASK-949: the server is unreachable because Local Network access is off. Named, so the
+  /// user goes to Settings instead of debugging a NAS that is fine.
+  var localNetworkDenied: Bool = false
 
   private var message: String? {
-    Self.cause(isOffline: isOffline, serverUnreachable: serverUnreachable)
+    Self.cause(isOffline: isOffline, serverUnreachable: serverUnreachable,
+               localNetworkDenied: localNetworkDenied)
   }
 
   /// The one wording for the connection state (FR-130, FR-141). The iOS banner, the tvOS
   /// indicator and messages about a failed write all name the cause with these strings.
-  static func cause(isOffline: Bool, serverUnreachable: Bool) -> String? {
+  static func cause(isOffline: Bool, serverUnreachable: Bool, localNetworkDenied: Bool = false) -> String? {
     if isOffline { return "No internet connection" }
+    if localNetworkDenied { return LocalNetworkPermission.bannerMessage }
     if serverUnreachable { return "Can't reach your NAS" }
     return nil
   }

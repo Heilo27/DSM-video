@@ -208,7 +208,8 @@ struct APIErrorTests {
 
   @Test func authFailureTellsTheUserToSignInAgain() {
     #expect(APIError.http(401).userMessage == "Your session expired. Sign in again.")
-    #expect(APIError.http(403).userMessage == "Your session expired. Sign in again.")
+    // TASK-961: a 403 is a refusal, not an expired session (FR-002).
+    #expect(!APIError.http(403).userMessage.contains("session"))
   }
 
   /// An unmapped status still reports the code, but framed as a rejection rather than as the

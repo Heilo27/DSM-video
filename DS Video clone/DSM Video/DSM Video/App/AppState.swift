@@ -137,6 +137,11 @@ final class AppState {
 
   var isOffline: Bool = false
   var serverUnreachable: Bool = false
+  /// A request to the server was refused because Local Network access is off (TASK-949).
+  /// Rides alongside `serverUnreachable` (the reconnect loop still runs, and can land on the
+  /// WAN address) and only changes what the banner says. Never sets `isOffline`: the device's
+  /// network works, and NWPathMonitor would never clear a flag it did not set.
+  var localNetworkDenied: Bool = false
 
   /// Whether this session's server supports profiles. In memory: `.unknown` at launch and
   /// after sign-out, moved only by `refreshProfiles()`. Read through `progressSyncAllowed`.
@@ -658,6 +663,14 @@ final class AppState {
   }
 
   func buildCandidates() async throws -> [QuickConnectResolver.Candidate] {
+    await resolveCandidateSet().candidates
+  }
+
+  /// The cascade plus, when baseURL is a QuickConnect ID whose lookup produced nothing, why.
+  /// login() needs the reason to tell an unknown ID from a failed lookup (TASK-974); reconnect
+  /// only needs the list. Returned rather than stored so a background reconnect resolving at the
+  /// same moment cannot overwrite the reason a sign-in is about to show.
+  func resolveCandidateSet() async -> (candidates: [QuickConnectResolver.Candidate], quickConnectFailure: QuickConnectError?) {
     let lan = lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     let wan = wanAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -687,8 +700,20 @@ final class AppState {
     addDirect(wan)
 
     // If baseURL is a QC ID, append its full cascade after direct addresses
+    var quickConnectFailure: QuickConnectError?
     if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-      let qcCandidates = (try? await quickConnectResolve(qcID)) ?? []
+      // A failed lookup must not sink the LAN/WAN addresses already in the list: they are tried
+      // regardless, and the failure is only reported if nothing else answers.
+      var qcCandidates: [QuickConnectResolver.Candidate] = []
+      do {
+        qcCandidates = try await quickConnectResolve(qcID)
+      } catch let failure as QuickConnectError {
+        quickConnectFailure = failure
+      } catch let urlError as URLError {
+        quickConnectFailure = .unreachable(id: qcID, code: urlError.code)
+      } catch {
+        quickConnectFailure = .unreachable(id: qcID, code: .unknown)
+      }
       // Avoid duplicating any LAN IP that QC also resolved
       let existing = Set(candidates.map(\.url.absoluteString))
       for c in qcCandidates where !existing.contains(c.url.absoluteString) {
@@ -699,8 +724,13 @@ final class AppState {
       addDirect(raw)
     }
 
-    return Self.preferringLastGood(candidates, lastGood: lastGoodAddress)
+    return (Self.preferringLastGood(candidates, lastGood: lastGoodAddress), quickConnectFailure)
   }
+
+  /// The one sentence for an address that could not be turned into a URL at all. Only for input
+  /// that does not parse; a QuickConnect ID that parses but resolves to nothing has its own
+  /// messages (QuickConnectError.userMessage).
+  static let invalidServerAddressMessage = "Invalid server address. Please check the URL."
 
   /// Moves the last known-good address to the front of the cascade.
   ///
@@ -777,9 +807,9 @@ final class AppState {
     }
 
     do {
-      let candidates = try await buildCandidates()
+      let (candidates, quickConnectFailure) = await resolveCandidateSet()
       guard !candidates.isEmpty else {
-        loginError = "Invalid server address. Please check the URL."
+        loginError = quickConnectFailure?.userMessage ?? Self.invalidServerAddressMessage
         return
       }
 
@@ -820,6 +850,9 @@ final class AppState {
       // these; without them "Login failed" is indistinguishable across a stale LAN address,
       // a blocked port, a cert mismatch and a genuine outage.
       var attemptFailures: [String] = []
+      // TASK-949: a LAN candidate refused for Local Network access. When nothing answered, that
+      // is the one cause the user can fix, so it leads the message.
+      var localNetworkRefused = false
       for (index, candidate) in candidates.enumerated() {
         do {
           var tempClient = makeClient(baseURL: candidate.url, token: nil)
@@ -870,6 +903,7 @@ final class AppState {
           }
           dlog.warn(.auth, "candidate \(index + 1) \(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") failed — \(why)")
           attemptFailures.append("\(candidate.url.host ?? "?"):\(candidate.url.port.map(String.init) ?? "-") — \(why)")
+          if case .localNetworkDenied? = error as? APIError { localNetworkRefused = true }
           lastError = error
         }
       }
@@ -890,16 +924,21 @@ final class AppState {
       // and must not be buried under connection detail.
       if let apiErr = lastError as? APIError, apiErr.serverReached {
         loginError = apiErr.userMessage
+      } else if localNetworkRefused {
+        loginError = LocalNetworkPermission.deniedMessage
       } else if let qcID = QuickConnectResolver.extractBareID(from: raw) {
         let detail = attemptFailures.isEmpty ? "" : "\n\n" + attemptFailures.joined(separator: "\n")
-        loginError = "Couldn't reach \"\(qcID)\" on any known address.\(detail)"
+        // The saved LAN/WAN addresses failed AND the QuickConnect lookup failed: the lookup is
+        // the actionable half (a typo, or no internet), so lead with it.
+        let headline = quickConnectFailure?.userMessage ?? "Couldn't reach \"\(qcID)\" on any known address."
+        loginError = headline + detail
       } else if !attemptFailures.isEmpty {
         loginError = attemptFailures.count == 1
           ? "Couldn't reach \(attemptFailures[0])"
           : "Couldn't reach the server. Tried:\n" + attemptFailures.joined(separator: "\n")
       } else {
         loginError = (lastError as? APIError)?.userMessage
-          ?? (lastError as? URLError).map { APIError.connection($0.code).userMessage }
+          ?? (lastError as? URLError).map { APIError.transport($0).userMessage }
           ?? "Login failed — no server address could be built. Check the address."
       }
     } catch {
@@ -907,7 +946,7 @@ final class AppState {
       // failure is now APIError.connection and carries the actual reason, and the fallback
       // must not imply the credentials were the problem.
       loginError = (error as? APIError)?.userMessage
-        ?? (error as? URLError).map { APIError.connection($0.code).userMessage }
+        ?? (error as? URLError).map { APIError.transport($0).userMessage }
         ?? "Login failed."
     }
   }
@@ -1018,6 +1057,8 @@ final class AppState {
         attemptSilentReauth()
       case .network:
         serverUnreachable = true
+      case .localNetworkDenied:
+        applyLocalNetworkDenied()
       // TASK-953: APIClient wraps EVERY transport failure as .connection(code), so this is
       // the shape a timeout or refused connection actually arrives in. It used to fall to
       // `default`, which made the URLError branch below unreachable from any APIClient call:
@@ -1029,8 +1070,18 @@ final class AppState {
         break  // transient, don't change state
       }
     } else if let urlErr = error as? URLError {
-      applyConnectionFailure(Self.connectionFailureKind(urlErr.code))
+      if case .localNetworkDenied = APIError.transport(urlErr) {
+        applyLocalNetworkDenied()
+      } else {
+        applyConnectionFailure(Self.connectionFailureKind(urlErr.code))
+      }
     }
+  }
+
+  /// TASK-949: the server is unreachable for a reason the user can fix in Settings.
+  private func applyLocalNetworkDenied() {
+    serverUnreachable = true
+    localNetworkDenied = true
   }
 
   enum ConnectionFailureKind: Equatable {
@@ -1149,6 +1200,7 @@ final class AppState {
     let wasDown = serverUnreachable || isOffline
     serverUnreachable = false
     isOffline = false
+    localNetworkDenied = false
     // Also clear the banner. homeError was only ever nil'd on entry to a FOREGROUND load,
     // so a successful background/heartbeat-driven sync left "Can't reach your server."
     // pinned above fully-populated, correct rails until the user pulled to refresh.
@@ -1367,6 +1419,7 @@ final class AppState {
           // so the cancel() it used to call doesn't abort this task mid-flight.
           reconnectRetryTask = nil
           serverUnreachable = false
+          localNetworkDenied = false
           startHeartbeatTimer()
           await homeLoad()
           return
@@ -1475,8 +1528,17 @@ final class AppState {
     // If baseURL is a QuickConnect ID, resolve candidates and try each with a
     // short timeout — same strategy as login() so external networks work.
     if let qcID = QuickConnectResolver.extractBareID(from: raw) {
-      guard let candidates = try? await QuickConnectResolver.resolveCandidates(id: qcID), !candidates.isEmpty else {
-        loginError = "Couldn't reach \"\(qcID)\". Check your connection and try again."
+      let candidates: [QuickConnectResolver.Candidate]
+      do {
+        candidates = try await quickConnectResolve(qcID)
+      } catch {
+        // Same reasons and sentences as sign-in (TASK-974): an unknown ID is not a network fault.
+        loginError = (error as? QuickConnectError)?.userMessage
+          ?? QuickConnectError.unreachable(id: qcID, code: (error as? URLError)?.code ?? .unknown).userMessage
+        return
+      }
+      guard !candidates.isEmpty else {
+        loginError = QuickConnectError.noAddress(id: qcID).userMessage
         return
       }
       var lastError: Error?
@@ -1503,7 +1565,7 @@ final class AppState {
     // TASK-817: same LAN guard as updateAPI()/buildCandidates — never force https on a bare private IP.
     let pairingEffectiveHTTPS = Self.isPrivateLANAddress(baseURL) ? false : useHTTPS
     guard let serverURL = normalizedBaseURL(baseURL, forceHTTPS: pairingEffectiveHTTPS, defaultPort: defaultPort) else {
-      loginError = "Invalid server address. Please check the URL."
+      loginError = Self.invalidServerAddressMessage
       return
     }
 
@@ -2085,7 +2147,9 @@ final class AppState {
       // appropriate error — avoids a loud failure on every network call (TASK-291).
       guard !isOffline && !serverUnreachable else {
         homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
-        homeError = isOffline ? "No internet connection." : "Can't reach your server."
+        homeError = isOffline ? "No internet connection."
+          : localNetworkDenied ? LocalNetworkPermission.deniedMessage
+          : "Can't reach your server."
         return
       }
       // Resolve QC ID before the foreground sync too.

@@ -166,6 +166,10 @@ user retries or dismisses it; every Failed row offers both, none is Dismiss-only
 TASK-782's title.
 **FR-033 [INFERRED]** — A download failure message names the real cause (server unreachable, storage
 full, server error) and never blames the video's format or the user's credentials (instance of FR-002).
+*Clarified 2026-10-17 (TASK-961):* only a server answer that the session is gone says the session
+expired. A download the server refuses for a title above the profile's age rating names the age rating;
+a download refused because its profile no longer exists names that and returns to the profile picker
+like any other request (FRD-002 FR-206). A refusal with no stated reason never claims the session expired.
 **FR-034 [INFERRED]** — Completed downloads and their bookkeeping survive relaunch and are playable
 after a cold start with no server contact.
 **FR-035 [STATED]** — A download can be deleted, via swipe-to-delete among other paths. *Derivation:*
@@ -399,10 +403,25 @@ remote access.
 required.
 **FR-113 [INFERRED]** — When nothing is discovered, manual entry remains available and the absence of
 discovered servers is not an error.
+*Clarified 2026-10-17 (TASK-950):* the search for servers ends. If nothing is found within about eight
+seconds, the "looking" indicator stops and the screen says no servers were found; on iPhone it points the
+user to the address field, and on Apple TV it says so above the manual sign-in option. It is worded as
+information, not as an error. A server that answers later still appears.
 **FR-114 [STATED]** — A correct password never displays a stale error from a previous attempt.
 **FR-115 [INFERRED]** — Failure causes are distinguished: wrong credentials; unreachable server;
 unresolvable QuickConnect ID; account not permitted to use this application; malformed address;
 certificate/secure-transport failure (instance of FR-002).
+*Clarified 2026-10-17 (TASK-974):* a QuickConnect ID that yields nothing to connect to has three
+separate messages, on sign-in and on pairing alike. An ID QuickConnect does not know is named as not
+found. An ID that is registered but whose NAS publishes no address says so and points at the
+QuickConnect setting in DSM. A lookup that never reached QuickConnect says QuickConnect couldn't be
+reached. "Invalid server address" is reserved for input that is neither a parseable address nor
+shaped like a QuickConnect ID (letters, digits, hyphens).
+*Clarified 2026-10-17 (TASK-949):* Local Network access turned off for the app is its own cause, named
+as such wherever it stops something: the server search, sign-in, and a request mid-session (the banner).
+It is never reported as "No network connection" or as the device being offline, because the device's
+network works. On iPhone the message offers a way straight to the app's Settings. When the saved
+remote address still works, the app keeps using it as for any unreachable local server.
 *Note on account permission:* this one is derived from operational project memory rather than from
 product copy, and is flagged as such.
 **FR-116 [INFERRED]** — Concurrent sign-in attempts yield exactly one session and one definite outcome.
