@@ -102,6 +102,26 @@ struct ItemDetailView: View {
     Self.shouldAutoPlay(requested: autoPlay, playUnavailableOffline: playUnavailableOffline)
   }
 
+  /// The arrival decision is taken once per presentation of this screen (TASK-1010, FR-070).
+  ///
+  /// onAppear is not "arrived": it fires again whenever the screen comes back into view, after
+  /// the player cover closes, a pushed screen pops, or a tab switch returns to it. Gated only on
+  /// `autoPlay`, every return reopened the player the user had just closed. The latch lives in
+  /// @State, so a fresh presentation (a new push, or the next episode's new `.id`) auto-plays.
+  @State private var autoPlayLatch = AutoPlayLatch()
+
+  /// Auto-play is decided on the FIRST appearance only. If playback was unavailable then
+  /// (offline, TASK-984), the user saw Play disabled; coming back online later and returning
+  /// to the screen must not spring the player on them.
+  struct AutoPlayLatch: Equatable {
+    private(set) var decided = false
+    mutating func shouldOpen(eligible: Bool) -> Bool {
+      guard !decided else { return false }
+      decided = true
+      return eligible
+    }
+  }
+
   private var downloadProgress: Double {
     downloadManager.downloadProgress[itemID] ?? 0
   }
@@ -112,7 +132,7 @@ struct ItemDetailView: View {
       .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        if autoPlayOnAppear { showPlayer = true }
+        if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
       // Put focus on Play EXPLICITLY, rather than trusting prefersDefaultFocus.
       //
@@ -161,7 +181,7 @@ struct ItemDetailView: View {
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        if autoPlayOnAppear { showPlayer = true }
+        if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
       .fullScreenCover(isPresented: $showPlayer, onDismiss: {
         playFromBeginning = false

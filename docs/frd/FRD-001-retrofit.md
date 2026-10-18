@@ -314,6 +314,11 @@ identity and records the finished episode as watched; the final episode of a sho
 **FR-069 [INFERRED]** — A user's own seeking — including repeated seeks on a transcoded stream — never
 leaves them unable to continue playing the title.
 **FR-070 [INFERRED]** — Double-triggering Play yields exactly one playback session.
+*Clarified (TASK-1010):* a shortcut that starts playback (FR-071's list) opens the player once, on
+arrival at the title's detail screen. Coming back to that screen (closing the player, going back from
+a screen opened from it, switching tabs back) never reopens the player. If playback was unavailable on
+arrival, it stays a decision for that visit: the player does not open later when the NAS returns.
+Opening the title again from a shortcut auto-plays again.
 **FR-071 [STATED]** — With the NAS offline, Play on a non-downloaded title is unavailable up front rather
 than failing after the tap. This includes shortcuts that start playback directly (the Home hero's Play,
 a Continue Watching card, opening an episode to play): they land on the title's detail screen with Play
