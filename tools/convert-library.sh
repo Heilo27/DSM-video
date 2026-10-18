@@ -16,6 +16,9 @@
 # Safety:
 #   - Originals are NEVER deleted. After a verified conversion the original is
 #     MOVED to a sibling backup tree under $BACKUP_DIR (same relative path).
+#   - Nothing is ever overwritten. A taken backup slot gets a "<name>.<n>.<ext>"
+#     name, a failed backup aborts the conversion, and the converted file is only
+#     moved into place with `mv -n`.
 #   - Output is written to a .tmp file, validated with ffprobe, and only then
 #     swapped in. A failed/partial conversion leaves the original in place.
 #   - Resumable: if the target .mp4 already exists and probes valid, the file is
@@ -66,7 +69,7 @@ ts()  { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*" | tee -a "$LOG"; }
 
 # Container-compatible extensions we consider "MP4 family".
-is_mp4_container() { case "${1,,}" in mp4|mov|m4v) return 0;; *) return 1;; esac; }
+is_mp4_container() { case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in mp4|mov|m4v) return 0;; *) return 1;; esac; }
 
 # probe one stream property: probe_field <file> <stream> <entry>
 #   stream: v:0 | a:0   entry: codec_name | codec_type
@@ -104,13 +107,37 @@ verify_out() {
   return 0
 }
 
-# Move original into the backup tree, preserving relative path.
+# Move the original into the backup tree (absolute path minus the leading slash), NEVER
+# overwriting. The tree is shared with the server's worker and sprint-convert.sh, and a
+# backup is the only copy of the original once the converted file replaces it. If the slot
+# is taken (a previous run, another library, a restored file) the original is filed under
+# "<name>.<n>.<ext>" instead. `mv -n` can exit 0 without moving anything when the target
+# exists, so success means the source is gone AND the destination exists.
+# On success sets BACKED_UP_AT to the final path and returns 0; on failure the original is
+# still at $src and the return is non-zero.
+BACKED_UP_AT=""
 backup_original() {
-  local src="$1" rel dest
+  local src="$1" rel preferred cand n=0 rc
+  BACKED_UP_AT=""
   rel="${src#/}"                       # strip leading slash
-  dest="$BACKUP_DIR/$rel"
-  mkdir -p "$(dirname "$dest")"
-  mv -f "$src" "$dest"
+  preferred="$BACKUP_DIR/$rel"
+  mkdir -p "$(dirname "$preferred")" || return 1
+  cand="$preferred"
+  while [ "$n" -lt 1000 ]; do
+    if [ ! -e "$cand" ] && [ ! -L "$cand" ]; then
+      mv -n "$src" "$cand"; rc=$?
+      if [ "$rc" -eq 0 ] && [ ! -e "$src" ] && [ -e "$cand" ]; then
+        BACKED_UP_AT="$cand"
+        return 0
+      fi
+      # Source still here: either a real failure (permissions, disk) or something took the
+      # slot between the check and the move. Only the latter is worth another slot.
+      [ "$rc" -ne 0 ] && return 1
+    fi
+    n=$((n + 1))
+    cand="${preferred%.*}.$n.${preferred##*.}"
+  done
+  return 1
 }
 
 convert_one() {
@@ -128,15 +155,29 @@ convert_one() {
     return 0
   fi
 
+  # The target name is held by a file that is not the (valid, converted) output we skip
+  # above and is not the source itself: never replace it. The swap below uses mv -n as well,
+  # this just avoids a wasted conversion.
+  if [ "$out" != "$src" ] && [ -e "$out" ]; then
+    log "FAIL (target exists but is not a valid conversion: $out) — not replacing it, original untouched: $src"
+    return 1
+  fi
+
   rm -f "$tmp"
 
   if [ "$action" = "remux" ]; then
     # Copy video, transcode audio to AAC, repackage to MP4. faststart moves the
     # moov atom to the front for instant streaming. genpts+igndts repairs the
     # broken DTS some MKVs carry (same flags the server uses).
+    #
+    # HEVC must be tagged hvc1. ffmpeg writes hev1 when it copies HEVC into MP4, and Apple
+    # players (AVFoundation) will not initialise a decoder from it: audio plays and the
+    # picture stays black. -tag:v only for HEVC; it is wrong for any other codec.
+    local -a tag_args=()
+    [ "$(probe_field "$src" v:0 codec_name)" = "hevc" ] && tag_args=(-tag:v hvc1)
     "$FFMPEG" -nostdin -y -fflags +genpts+igndts -i "$src" \
       -map 0:v:0 -map 0:a:0? \
-      -c:v copy -c:a aac -b:a "$AUDIO_BITRATE" -ac 2 \
+      -c:v copy ${tag_args[@]+"${tag_args[@]}"} -c:a aac -b:a "$AUDIO_BITRATE" -ac 2 \
       -movflags +faststart -avoid_negative_ts make_zero \
       "$tmp" >>"$LOG" 2>&1 </dev/null
   else
@@ -157,10 +198,25 @@ convert_one() {
     return 1
   fi
 
-  # Success: back up original, swap in the new file.
-  backup_original "$src"
-  mv -f "$tmp" "$out"
-  log "OK ($action): $src -> $out"
+  # Success: back up the original, then swap in the new file. If the original cannot be
+  # backed up, stop: the converted file must never be moved over the only copy.
+  if ! backup_original "$src"; then
+    log "FAIL (could not back up the original; leaving it and discarding the conversion): $src"
+    rm -f "$tmp"
+    return 1
+  fi
+  # mv -n so nothing already at $out is replaced; it can exit 0 without moving, so the
+  # proof of success is that the temp is gone. On failure put the original back.
+  mv -n "$tmp" "$out"
+  if [ -e "$tmp" ]; then
+    log "FAIL (could not place $out; restoring the original): $src"
+    rm -f "$tmp"
+    if [ -e "$src" ] || ! mv -n "$BACKED_UP_AT" "$src" || [ -e "$BACKED_UP_AT" ]; then
+      log "ERROR: original NOT restored, it is safe at $BACKED_UP_AT (wanted $src)"
+    fi
+    return 1
+  fi
+  log "OK ($action): $src -> $out (original kept at $BACKED_UP_AT)"
   return 0
 }
 

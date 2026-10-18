@@ -2,6 +2,9 @@ package normalize
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -291,7 +294,8 @@ func (w *NormalizeWorker) process(ctx context.Context, item queueItem) {
 		return
 	}
 
-	if err := w.backupOriginal(item.path, item.mediaRoot); err != nil {
+	backedUpAt, err := w.backupOriginalTo(item.path, item.mediaRoot)
+	if err != nil {
 		// Could not safely move the original aside — abandon the swap, delete our
 		// verified temp, and leave the original playable. No data lost.
 		log.Printf("[normalize] backup of %s failed — discarding conversion: %v", item.path, err)
@@ -303,11 +307,14 @@ func (w *NormalizeWorker) process(ctx context.Context, item queueItem) {
 	// "<stem>.mp4" (a remux of an .mp4 — rare) the original is now in the backup tree,
 	// so this rename can't clobber anything live. For a different-path target (.mkv →
 	// .mp4) the clobber guard above already proved target was absent.
-	if err := os.Rename(outTmp, target); err != nil {
-		// The rename failed but the original is already in the backup tree. Restore it
-		// so the library item stays playable, and drop the temp.
+	if err := moveFile(outTmp, target); err != nil {
+		// The swap failed (including: something appeared at target since the clobber check;
+		// moveFile never overwrites) but the original is already in the backup tree. Restore
+		// it so the library item stays playable, and drop the temp.
 		log.Printf("[normalize] swap-in of %s failed — restoring original: %v", target, err)
-		_ = w.restoreOriginal(item.path, item.mediaRoot)
+		if rerr := w.restoreOriginal(item.path, backedUpAt); rerr != nil {
+			log.Printf("[normalize] restore of %s from %s FAILED — original is safe in the backup tree: %v", item.path, backedUpAt, rerr)
+		}
 		_ = os.Remove(outTmp)
 		return
 	}
@@ -480,17 +487,46 @@ func (w *NormalizeWorker) requeueLater(item queueItem) {
 	}()
 }
 
-// backupOriginal moves src into the backup tree under backupDir, preserving its path
-// relative to mediaRoot, and sets the moved file's mtime to NOW. The mtime is the
-// retention clock the reaper reads — "now" means "deleted 7 days from the moment we
-// stopped needing it", matching the spec. Parent dirs are created as needed.
+// backupOriginal moves src into the backup tree; see backupOriginalTo. Kept for callers
+// that do not need the final location.
 func (w *NormalizeWorker) backupOriginal(src, mediaRoot string) error {
-	dest := w.backupPath(src, mediaRoot)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
+	_, err := w.backupOriginalTo(src, mediaRoot)
+	return err
+}
+
+// maxBackupSlots bounds the unique-name search in backupOriginalTo.
+const maxBackupSlots = 1000
+
+// backupOriginalTo moves src into the backup tree under backupDir, preserving its path
+// relative to mediaRoot, and returns where it actually landed. It sets the moved file's
+// mtime to NOW: the mtime is the retention clock the reaper reads, so "now" means
+// "deleted 7 days from the moment we stopped needing it". Parent dirs are created as needed.
+//
+// It never overwrites (TASK-1032). The backup tree is shared by every library, and the
+// layout is relative to each library's own root, so Movies/a/b.mkv and Shows/a/b.mkv want
+// the same slot, as does a later re-run after a user restored a file. When the preferred
+// slot is taken the original is filed under "<name>.<n><ext>" instead. moveFile itself
+// refuses to replace an existing file, so the check below is not what protects the data; a
+// racing writer simply makes us try the next slot.
+func (w *NormalizeWorker) backupOriginalTo(src, mediaRoot string) (string, error) {
+	preferred := w.backupPath(src, mediaRoot)
+	if err := os.MkdirAll(filepath.Dir(preferred), 0o755); err != nil {
+		return "", err
 	}
-	if err := moveFile(src, dest); err != nil {
-		return err
+	dest := preferred
+	for n := 1; ; n++ {
+		err := moveFile(src, dest)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		if n >= maxBackupSlots {
+			return "", fmt.Errorf("no free backup slot for %s under %s: %w", src, filepath.Dir(preferred), err)
+		}
+		ext := filepath.Ext(preferred)
+		dest = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(preferred, ext), n, ext)
 	}
 	now := time.Now()
 	if err := os.Chtimes(dest, now, now); err != nil {
@@ -498,14 +534,14 @@ func (w *NormalizeWorker) backupOriginal(src, mediaRoot string) error {
 		// uses whatever mtime the move preserved. Log via returned-nil + caller logs OK.
 		log.Printf("[normalize] could not set backup mtime on %s: %v", dest, err)
 	}
-	return nil
+	return dest, nil
 }
 
-// restoreOriginal moves a backed-up original back to src (best-effort rollback when
-// the post-backup swap fails). mediaRoot must match the value passed to backupOriginal.
-func (w *NormalizeWorker) restoreOriginal(src, mediaRoot string) error {
-	dest := w.backupPath(src, mediaRoot)
-	return moveFile(dest, src)
+// restoreOriginal moves a backed-up original from backedUpAt (the path backupOriginalTo
+// returned) back to src: best-effort rollback when the post-backup swap fails. It will not
+// overwrite anything now sitting at src.
+func (w *NormalizeWorker) restoreOriginal(src, backedUpAt string) error {
+	return moveFile(backedUpAt, src)
 }
 
 // backupPath computes the destination inside the backup tree for src, preserving the

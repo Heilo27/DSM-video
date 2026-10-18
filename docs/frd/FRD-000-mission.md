@@ -65,6 +65,17 @@ their files for this app; the app reads what is there.
   to the worker; it files each original under its own path in the backup folder (never
   overwriting a backup already there), dated the day it was moved so the retention window
   starts then. [TASK-1025]
+  Backups never overwrite each other, in the worker or in either script. Two libraries can hold
+  the same relative path (for example `Movies/Heat.mkv` in each), and a backup already filed
+  stays exactly as it was: the newer original is filed beside it under a numbered name
+  (`Heat.1.mkv`), and the dated retention window applies to both. If the original cannot be
+  filed, the conversion is abandoned and the original left untouched; the converted file is
+  never put in place first. A converted file is likewise never written over a different file
+  already at its destination. (Destructive-class change: it narrows what the tools may replace
+  and removes no safeguard.) [TASK-1032]
+  Anything stream-copied from HEVC into an MP4 is labelled `hvc1` (ffmpeg's default `hev1` label
+  is one Apple devices refuse to play), in the worker and in tools/convert-library.sh; H.264 is
+  never relabelled. [TASK-1033]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.

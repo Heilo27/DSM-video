@@ -124,7 +124,13 @@ convert_one() {
        -map 0:v:0 -map 0:a:0? -c:v copy -c:a aac -b:a 192k -ac 2 \
        -movflags +faststart -avoid_negative_ts make_zero "$tmp" >> "$LOG" 2>&1; then
     if [ -s "$tmp" ] && [ "$(stat -c%s "$tmp")" -gt 100000 ]; then
-      mv "$tmp" "$mp4"
+      # Never replace a file that appeared at the target while ffmpeg ran. mv -n can exit 0
+      # without moving, so the proof is that the temp is gone.
+      mv -n "$tmp" "$mp4"
+      if [ -e "$tmp" ]; then
+        log "FAIL (a file appeared at $mp4 during conversion; not replacing it, original untouched): $base"
+        rm -f "$tmp"; rmdir "$lock"; return 0
+      fi
       mkdir -p "$(dirname "$backup")"
       mv -n "$f" "$backup"
       if [ -e "$f" ]; then
