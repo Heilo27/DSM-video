@@ -338,64 +338,13 @@ func main() {
 		WHERE key = 'item_seq' AND value = 0 AND (SELECT COUNT(*) FROM items) > 0;
 	`)
 
-	// Runaway item_seq repair. A scan bug (fixed) previously allocated a sequence
-	// number for every file on every 5-minute pass whether or not the row changed,
-	// driving item_seq to 110,235,720 against a 5,108-item library. Clients compare
-	// their cursor to this value, so an inflated counter makes every sync cycle look
-	// like the entire library changed — the NAS served ~36,000 paged requests and
-	// 17.5TB of reads before it was caught.
-	//
-	// Clamp on startup when the counter is wildly beyond what the data can justify.
-	// MAX(change_seq) is the highest sequence any row actually carries; anything far
-	// above that is counter inflation, not real history. Rebasing to that maximum
-	// keeps every existing change_seq valid and strictly below item_seq, so delta
-	// sync stays correct and no client re-downloads anything.
-	// Detection note: the buggy scan wrote its inflated counter into items.change_seq
-	// as well, so item_seq and MAX(change_seq) ran away together and comparing them
-	// finds nothing. The usable signal is item_seq measured against the ITEM COUNT —
-	// a healthy library's sequence numbers stay within a small multiple of N.
-	// The live failure sat at ~21,500x; heavy but legitimate churn is well under 1,000x.
-	{
-		var itemSeq, itemCount int64
-		_ = db.QueryRow(`SELECT value FROM sync_state WHERE key = 'item_seq'`).Scan(&itemSeq)
-		_ = db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&itemCount)
-		if itemCount > 0 && itemSeq > 1000*itemCount && itemSeq > 100000 {
-			// Rebase the counter and every row onto a compact range in one transaction:
-			// change_seq is renumbered by current order, so relative ordering (all that
-			// delta sync depends on) is preserved exactly. Clients whose stored cursor is
-			// now above item_seq will re-sync once, then stay quiet.
-			// sqltx, not db.Begin: a refused COMMIT must not return this connection to the
-			// pool still holding the write lock (TASK-941). Commit discards it; Close
-			// rolls back and releases on the failure branch.
-			tx, txErr := sqltx.Begin(context.Background(), db)
-			if txErr == nil {
-				_, e1 := tx.Exec(`
-					WITH renum AS (
-						SELECT id, ROW_NUMBER() OVER (ORDER BY change_seq ASC, rowid ASC) AS n FROM items
-					)
-					UPDATE items SET change_seq = (SELECT n FROM renum WHERE renum.id = items.id)`)
-				// deleted_items was written from the SAME inflated counter, so it has to be
-				// rebased in the same transaction. Leaving it alone strands every tombstone
-				// permanently above item_seq: /sync/deleted returns the whole history on
-				// every request, and any tombstone naming a since-rescanned item makes the
-				// client delete a row that exists. Clamp them to the new ceiling so they
-				// stay ordered and fall below all future deletions.
-				_, e3 := tx.Exec(
-					`UPDATE deleted_items SET change_seq = ? WHERE change_seq > ?`, itemCount, itemCount)
-				// Drop tombstones for items that exist again — a rescan re-added them, so
-				// the deletion is no longer true and must never be replayed.
-				_, e4 := tx.Exec(
-					`DELETE FROM deleted_items WHERE item_id IN (SELECT id FROM items)`)
-				_, e2 := tx.Exec(`UPDATE sync_state SET value = ? WHERE key = 'item_seq'`, itemCount)
-				if e1 == nil && e2 == nil && e3 == nil && e4 == nil && tx.Commit() == nil {
-					log.Printf("[sync] repaired runaway item_seq: %d -> %d across %d items (was %.0fx item count)",
-						itemSeq, itemCount, itemCount, float64(itemSeq)/float64(itemCount))
-				} else {
-					tx.Close()
-					log.Printf("[sync] runaway item_seq detected (%d for %d items) but repair failed", itemSeq, itemCount)
-				}
-			}
-		}
+	// Runaway item_seq repair (TASK-987): the logic and its rationale live in
+	// repairRunawayItemSeq (sync_seq_repair.go) so the tests exercise this exact code.
+	if repaired, seqBefore, itemCount, repairErr := repairRunawayItemSeq(context.Background(), db); repairErr != nil {
+		log.Printf("[sync] runaway item_seq check or repair failed (item_seq %d, %d items): %v", seqBefore, itemCount, repairErr)
+	} else if repaired {
+		log.Printf("[sync] repaired runaway item_seq: %d -> %d across %d items (was %.0fx item count)",
+			seqBefore, itemCount, itemCount, float64(seqBefore)/float64(itemCount))
 	}
 
 	// Initialize transcode components
@@ -7757,24 +7706,6 @@ const tombstoneRetention = 90 * 24 * time.Hour
 // is still there. The scan guards cover the failures they can detect; this covers the ones
 // they cannot, such as a nested mount point that reads as an ordinary empty folder.
 //
-// scanVideoExt is the ONE list of file extensions the scanner knows as video (FRD-000 M1,
-// TASK-990). true = indexed. false = recognised as video but deliberately not indexed:
-// the file is logged by path (once per process) so the gap is visible instead of silent.
-// Containers the Apple player cannot open natively (everything past .webm) are never direct
-// played: transcode/decision.go routes them through a transcode.
-var scanVideoExt = map[string]bool{
-	".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".avi": true, ".ts": true,
-	".webm": true,
-	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
-	".vob": true, ".3gp": true,
-	".rm": false, ".rmvb": false, ".divx": false, ".asf": false, ".ogv": false,
-	".ogm": false, ".f4v": false, ".iso": false,
-}
-
-// scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
-// the 5-minute scan does not repeat the same line forever.
-var scanSkippedVideoLogged sync.Map
-
 // 30 days: long enough for a drive left unplugged over a holiday, short enough that the
 // stale rows the purge exists to clear (renames, real deletions) still go within a month.
 // It MUST stay below tombstoneRetention: the grace is measured from the tombstone, and
@@ -7825,6 +7756,24 @@ func (s *Server) purgeOrphanedProgress(now time.Time) (int64, error) {
 // errNothingPurged rolls back purgeOrphanedProgress's transaction, and its progress_seq
 // allocation, when no row qualified.
 var errNothingPurged = errors.New("no orphaned progress to purge")
+
+// scanVideoExt is the ONE list of file extensions the scanner knows as video (FRD-000 M1,
+// TASK-990). true = indexed. false = recognised as video but deliberately not indexed:
+// the file is logged by path (once per process) so the gap is visible instead of silent.
+// Containers the Apple player cannot open natively (everything past .webm) are never direct
+// played: transcode/decision.go routes them through a transcode.
+var scanVideoExt = map[string]bool{
+	".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".avi": true, ".ts": true,
+	".webm": true,
+	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
+	".vob": true, ".3gp": true,
+	".rm": false, ".rmvb": false, ".divx": false, ".asf": false, ".ogv": false,
+	".ogm": false, ".f4v": false, ".iso": false,
+}
+
+// scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
+// the 5-minute scan does not repeat the same line forever.
+var scanSkippedVideoLogged sync.Map
 
 func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, root string, tmdbClient *metadata.TMDbClient) error {
 	root = filepath.Clean(root)

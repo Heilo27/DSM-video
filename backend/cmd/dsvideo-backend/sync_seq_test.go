@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -27,6 +28,7 @@ CREATE TABLE items(
   video_width INT, video_height INT, audio_channels INT,
   size_bytes INT, probed_at TEXT, tmdb_id INT);
 CREATE TABLE sync_state(key TEXT PRIMARY KEY, value INT);
+CREATE TABLE deleted_items(item_id TEXT NOT NULL, change_seq INTEGER NOT NULL, deleted_at TEXT NOT NULL);
 INSERT INTO sync_state VALUES('item_seq', 0);
 `
 
@@ -137,29 +139,17 @@ func TestScanOfChangedRowAdvancesSeq(t *testing.T) {
 
 // The startup repair must rebase a runaway counter while preserving relative
 // ordering, and must leave a healthy library completely alone.
+//
+// TASK-987: this calls repairRunawayItemSeq, the same function main() runs at boot. It used
+// to carry its own copy of the repair, which had already drifted (no tombstone handling).
 func TestRunawayItemSeqRepair(t *testing.T) {
-	repair := func(db *sql.DB) bool {
-		var seq, count int64
-		db.QueryRow(`SELECT value FROM sync_state WHERE key='item_seq'`).Scan(&seq)
-		db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&count)
-		if !(count > 0 && seq > 1000*count && seq > 100000) {
-			return false
-		}
-		tx, err := db.Begin()
+	repair := func(t *testing.T, db *sql.DB) bool {
+		t.Helper()
+		repaired, _, _, err := repairRunawayItemSeq(context.Background(), db)
 		if err != nil {
-			return false
+			t.Fatalf("repairRunawayItemSeq: %v", err)
 		}
-		if _, err := tx.Exec(`
-			WITH renum AS (SELECT id, ROW_NUMBER() OVER (ORDER BY change_seq ASC, rowid ASC) AS n FROM items)
-			UPDATE items SET change_seq = (SELECT n FROM renum WHERE renum.id = items.id)`); err != nil {
-			tx.Rollback()
-			return false
-		}
-		if _, err := tx.Exec(`UPDATE sync_state SET value = ? WHERE key='item_seq'`, count); err != nil {
-			tx.Rollback()
-			return false
-		}
-		return tx.Commit() == nil
+		return repaired
 	}
 
 	t.Run("runaway is rebased and ordering preserved", func(t *testing.T) {
@@ -179,7 +169,7 @@ func TestRunawayItemSeqRepair(t *testing.T) {
 		}
 		rows.Close()
 
-		if !repair(db) {
+		if !repair(t, db) {
 			t.Fatal("repair did not fire on a clearly runaway counter")
 		}
 
@@ -207,13 +197,83 @@ func TestRunawayItemSeqRepair(t *testing.T) {
 		}
 	})
 
+	// deleted_items was written from the same inflated counter: left alone, every tombstone
+	// sits above item_seq forever, and one naming a since-rescanned item deletes a live row
+	// on the client.
+	t.Run("tombstones are rebased and stale ones dropped", func(t *testing.T) {
+		db := newTestDB(t)
+		db.Exec(`UPDATE sync_state SET value=110235720 WHERE key='item_seq'`)
+		for i := 1; i <= 200; i++ {
+			db.Exec(`INSERT INTO items(id, change_seq) VALUES(?,?)`, string(rune('a'+i%26))+string(rune('0'+i/26)), 110230607+i)
+		}
+		for _, d := range []struct {
+			id  string
+			seq int64
+		}{
+			{"gone1", 110235000}, {"gone2", 110235500}, {"old", 5},
+			{"b0", 110235600}, // b0 exists again: a rescan re-added it
+		} {
+			if _, err := db.Exec(`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,'2026-01-01T00:00:00Z')`, d.id, d.seq); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if !repair(t, db) {
+			t.Fatal("repair did not fire")
+		}
+
+		seqOf := func(id string) (int64, bool) {
+			var s int64
+			err := db.QueryRow(`SELECT change_seq FROM deleted_items WHERE item_id = ?`, id).Scan(&s)
+			return s, err == nil
+		}
+		for _, id := range []string{"gone1", "gone2"} {
+			if s, ok := seqOf(id); !ok || s != 200 {
+				t.Errorf("tombstone %s: seq=%d present=%v, want clamped to the item count 200", id, s, ok)
+			}
+		}
+		if s, ok := seqOf("old"); !ok || s != 5 {
+			t.Errorf("tombstone below the ceiling must be untouched: seq=%d present=%v, want 5", s, ok)
+		}
+		if _, ok := seqOf("b0"); ok {
+			t.Error("a tombstone for an item that exists again must be dropped, or the client deletes a live row")
+		}
+		var above int
+		db.QueryRow(`SELECT COUNT(*) FROM deleted_items WHERE change_seq > (SELECT value FROM sync_state WHERE key='item_seq')`).Scan(&above)
+		if above != 0 {
+			t.Errorf("%d tombstones still sit above item_seq", above)
+		}
+	})
+
+	// All or nothing: a failure part-way leaves the library exactly as it was found.
+	t.Run("failed repair rolls back and reports the error", func(t *testing.T) {
+		db := newTestDB(t)
+		db.Exec(`UPDATE sync_state SET value=110235720 WHERE key='item_seq'`)
+		for i := 1; i <= 200; i++ {
+			db.Exec(`INSERT INTO items(id, change_seq) VALUES(?,?)`, string(rune('a'+i%26))+string(rune('0'+i/26)), 110230607+i)
+		}
+		if _, err := db.Exec(`DROP TABLE deleted_items`); err != nil {
+			t.Fatal(err)
+		}
+		repaired, _, _, err := repairRunawayItemSeq(context.Background(), db)
+		if err == nil || repaired {
+			t.Fatalf("repaired=%v err=%v, want an error and no repair", repaired, err)
+		}
+		var seq, minCS int64
+		db.QueryRow(`SELECT value FROM sync_state WHERE key='item_seq'`).Scan(&seq)
+		db.QueryRow(`SELECT MIN(change_seq) FROM items`).Scan(&minCS)
+		if seq != 110235720 || minCS < 110230608 {
+			t.Errorf("a failed repair left changes behind: item_seq=%d min change_seq=%d", seq, minCS)
+		}
+	})
+
 	t.Run("healthy library untouched", func(t *testing.T) {
 		db := newTestDB(t)
 		db.Exec(`UPDATE sync_state SET value=5200 WHERE key='item_seq'`)
 		for i := 1; i <= 100; i++ {
 			db.Exec(`INSERT INTO items(id, change_seq) VALUES(?,?)`, string(rune('a'+i%26))+string(rune('0'+i/26)), i)
 		}
-		if repair(db) {
+		if repair(t, db) {
 			t.Error("repair fired on a healthy library — would force a needless full resync")
 		}
 	})
