@@ -959,6 +959,10 @@ enum APIError: Error {
         return "Incorrect DSM password or verification code."
       case "otp_required":
         return "This DSM account uses two-factor sign-in. Enter your DSM verification code along with your password."
+      case "dsm_unavailable":
+        // FR-216 (TASK-1014): the server reached DSM's absence, not a verdict on the password.
+        // Unmapped, this fell to the default and read "Dsm unavailable.".
+        return "Couldn't reach DSM on your NAS to check your password. Nothing was changed. Try again in a moment."
       case "invalid_pin_format":
         return "A PIN must be exactly 4 digits."
       case "invalid_profile_name":

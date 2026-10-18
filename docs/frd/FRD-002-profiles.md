@@ -108,7 +108,10 @@ password. The password must belong to the DSM user who owns the account (FR-224)
 whose name maps to it. If the account has two-factor sign-in and no OTP was sent, the reset is refused with
 `otp_required` (403), never `password_incorrect`: the password may be right, and the app must ask for the
 code. The app says the account uses two-factor sign-in and asks for the DSM verification code with the
-password, never the raw code name. [2026-10-17, TASK-961] A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
+password, never the raw code name. [2026-10-17, TASK-961] When the reset is refused with
+`dsm_unavailable`, the app says it couldn't reach DSM on the NAS to check the password, that nothing
+was changed, and to try again, never that the password is wrong and never the raw code name; the
+user stays signed in. [2026-10-18, TASK-1014] A forgotten PIN on any other profile is cleared or changed by the owner under FR-211.
 
 **FR-217 [DESIGN]** PIN and profile errors are **never** HTTP 401. The apps treat 401 as an expired session
 and sign out (APIClient, DownloadManager), so a wrong PIN answered with 401 would sign the user out and
