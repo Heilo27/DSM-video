@@ -2,15 +2,24 @@ Profiles: everyone in the house gets their own, and the kids only see what's rig
 
 PROFILES
 • Up to four profiles per account, each with its own Continue Watching, watchlist and history.
-• Give each profile an age limit. Titles above it are hidden everywhere: Home, libraries, search and Just Added. Unrated titles are hidden on every limited profile.
-• Kids' profiles browse by collections like Disney, Pixar and Holiday instead of genres.
-• Optional PIN on any profile. Managing profiles always asks for the owner's PIN.
+• Give each profile an age rating limit. Titles above it are hidden everywhere: Home, libraries, search and Just Added. Unrated titles are hidden on every limited profile.
+• Kids' and Teen profiles browse by collections like Disney, Pixar and Holiday. Adult profiles browse by genre.
+• Optional PIN on any profile. Managing profiles always asks for the owner's PIN, and if the owner forgets it, "Forgot PIN" resets it with the DSM password.
 • Apple TV asks who's watching each time it opens, since it's shared by the whole room.
+
+PAIRING
+• Sign in your iPhone or iPad with a code: choose Pair iOS Device at the top of Home, then enter the 6-digit code on the device.
+
+SERVER UPDATES
+• If your DSVideo server is out of date, the app tells you once and suggests updating it.
 
 TOP SHELF
 • On a family account, the Top Shelf shows only titles safe for the youngest profile, and never anyone's watch history.
 
 FIXES
+• Clearer messages when your NAS can't be reached: the app now names the real cause and the next step instead of a vague error.
+• Connection fixes for QuickConnect and host-name sign-in.
+• Remote buttons no longer control a hidden player behind an error screen.
 • Watching on two devices: an older position saved offline no longer overwrites a newer one, or un-watches a title you finished.
 • You can create a second profile when your account only has one.
 

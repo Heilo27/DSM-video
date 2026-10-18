@@ -2,16 +2,25 @@ Profiles: everyone in the house gets their own, and the kids only see what's rig
 
 PROFILES
 • Up to four profiles per account, each with its own Continue Watching, watchlist and history.
-• Give each profile an age limit. Titles above it are hidden everywhere: Home, libraries, search, Just Added and downloads. Unrated titles are hidden on every limited profile.
-• Kids' profiles browse by collections like Disney, Pixar and Holiday instead of genres.
-• Optional PIN on any profile. Managing profiles always asks for the owner's PIN.
+• Give each profile an age rating limit. Titles above it are hidden everywhere: Home, libraries, search, Just Added and downloads. Unrated titles are hidden on every limited profile.
+• Kids' and Teen profiles browse by collections like Disney, Pixar and Holiday. Adult profiles browse by genre.
+• Optional PIN on any profile. Managing profiles always asks for the owner's PIN, and if the owner forgets it, "Forgot PIN" resets it with the DSM password.
 • Your iPhone remembers which profile you picked.
+
+APPLE TV
+• Sign in without typing your password: on a signed-in Apple TV choose Pair iOS Device, then enter the 6-digit code it shows on your iPhone.
+
+SERVER UPDATES
+• If your DSVideo server is out of date, the app tells you once and suggests updating it.
 
 DOWNLOADS
 • Downloads follow the profile's age limit, even offline, and each profile resumes from its own spot.
 • A download that finishes while the app is closed is kept instead of discarded, and tapping Download twice no longer starts a second copy.
 
 FIXES
+• Clearer messages when your NAS can't be reached: the app now names the real cause and the next step instead of a vague error.
+• Connection fixes: signing in with a host name such as localhost, and QuickConnect failures, now work or explain why.
+• If the offline library has to be rebuilt, the app tells you.
 • Watching on two devices: an older position saved offline no longer overwrites a newer one, or un-watches a title you finished.
 • You can create a second profile when your account only has one.
 
