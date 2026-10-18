@@ -107,7 +107,7 @@ theme like every other token: `Theme.tvType` supplies a `TVTypeScale`, and every
 | Role | Classic / Nitrate | Cinematic | Used for |
 |------|-------------------|-----------|----------|
 | `dsTVDisplay` | 72 bold | 72 heavy rounded | Sign-in wordmark |
-| `dsTVLargeTitle` | 48 bold | 48 heavy rounded | Show-detail title, pairing screen titles, profile picker title, PIN-pad digits |
+| `dsTVLargeTitle` | 48 bold | 48 heavy rounded | Show-detail title, tvOS library heading (Movies, TV Shows; the item count sits in the same pinned header, never below the grid), pairing screen titles, profile picker title, PIN-pad digits |
 | `dsTVTitle` | 36 bold | 36 heavy rounded | Sign-in heading, "Are you still watching?" |
 | `dsTVSectionTitle` | 28 semibold | 28 bold rounded | Shelf and library titles, collection titles, sort chips, search result titles, profile tile names |
 | `dsTVHeadline` | 22 semibold | same | Button labels, emphasised lines |

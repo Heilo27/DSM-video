@@ -164,6 +164,8 @@ struct ItemsGridView: View {
         }
         .padding(gridPadding)
 
+        #if !os(tvOS)
+        // tvOS shows the count in TVLibraryHeading: after a LazyVGrid it overlapped row 2.
         if !displayedItems.isEmpty {
           Text("\(displayedItems.count) item\(displayedItems.count == 1 ? "" : "s")")
             .font(.caption)
@@ -172,6 +174,7 @@ struct ItemsGridView: View {
             .padding(.bottom, .dsSpaceLG)
             .accessibilityHidden(true)
         }
+        #endif
       }
     }
     .background(alignment: .top) {
@@ -183,8 +186,8 @@ struct ItemsGridView: View {
       }
       .ignoresSafeArea()
     }
-    .navigationTitle(library.title)
     #if !os(tvOS)
+    .navigationTitle(library.title)
     // Force white nav-bar content (the large title was rendering dim grey on black).
     .toolbarColorScheme(.dark, for: .navigationBar)
     #endif
@@ -272,6 +275,7 @@ struct ItemsGridView: View {
     // top-bar/transport overscan bug: written for iOS, compiled for tvOS, never displayed.
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
+        TVLibraryHeading(title: library.title, count: displayedItems.isEmpty ? nil : displayedItems.count)
         SortChipBar(selection: $sortOption)
         browseFilterBar
         refreshNoticeBar

@@ -81,3 +81,36 @@ struct SortChipScroller<Content: View>: View {
     .background(Color.dsBackground.opacity(0.95))
   }
 }
+
+#if os(tvOS)
+/// tvOS library screen heading plus an optional item count (TASK-1059).
+///
+/// Replaces `.navigationTitle` on the library grids: tvOS renders that as a dim, centred
+/// system title in no type-scale role, which read as disabled next to the white headings
+/// on Home. The count lives here, in the pinned header, instead of in a Text after the
+/// LazyVGrid, where lazy row estimation left it on top of the second row of cards.
+/// Both grid screens share this so the heading cannot drift apart.
+struct TVLibraryHeading: View {
+  let title: String
+  var count: Int? = nil
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline) {
+      Text(title)
+        .font(.dsTVLargeTitle)
+        .foregroundStyle(.white)
+        .accessibilityAddTraits(.isHeader)
+      Spacer()
+      if let count {
+        Text("\(count) item\(count == 1 ? "" : "s")")
+          .font(.dsTVCaption)
+          .foregroundStyle(Color.dsTextSecondary)
+          .accessibilityHidden(true)
+      }
+    }
+    .padding(.horizontal, .dsSpaceGutter)
+    .padding(.top, .dsSpaceMD)
+    .background(Color.dsBackground.opacity(0.95))
+  }
+}
+#endif
