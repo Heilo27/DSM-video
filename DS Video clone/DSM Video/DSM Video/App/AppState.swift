@@ -22,6 +22,26 @@ private nonisolated(unsafe) let homeRailsFormatter: ISO8601DateFormatter = {
   return f
 }()
 
+/// TASK-696: what the home load is doing. Replaces three Bool flags (loading, cache-decoding,
+/// background-refreshing) that formed an implicit state machine: nothing stopped two being true
+/// at once, and a path that missed its reset latched `homeLoad`'s busy guard for the session.
+enum HomeLoadState: Equatable, Sendable {
+  /// Nothing in flight. The only state in which `homeLoad` starts work.
+  case idle
+  /// A foreground sync with nothing cached to show; the rails are empty behind a spinner.
+  case loading
+  /// A cold start reading the local catalog (fast, before any network).
+  case cacheDecoding
+  /// A delta sync running behind rails that are already on screen.
+  case backgroundRefreshing
+
+  /// The state after `owner` finishes. Only the owner of the current state may clear it; if
+  /// something else has taken over since, the finishing path leaves that state alone.
+  func after(leaving owner: HomeLoadState) -> HomeLoadState {
+    self == owner ? .idle : self
+  }
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -1934,11 +1954,24 @@ final class AppState {
   /// you watched" with no reason is just a shrug.
   var homeSuggestedGenre: String = ""
 
-  // Loading state flags
-  var homeIsLoading: Bool = false
-  var homeIsCacheDecoding: Bool = false
-  var homeIsBackgroundRefreshing: Bool = false
+  /// What the home load is doing right now. ONE value, not three flags that could disagree:
+  /// a path that forgets to clear its flag used to leave `homeLoad` bailing at its busy guard
+  /// forever. Every path sets this through `homeLoadState = .x` paired with
+  /// `defer { leaveHomeState(.x) }`, so an early return, a throw or a cancelled task cannot
+  /// leave it latched.
+  private(set) var homeLoadState: HomeLoadState = .idle
+  /// Views read these; they are derived, so a view can never set one half of the state.
+  var homeIsLoading: Bool { homeLoadState == .loading }
+  var homeIsCacheDecoding: Bool { homeLoadState == .cacheDecoding }
+  var homeIsBackgroundRefreshing: Bool { homeLoadState == .backgroundRefreshing }
   var homeError: String?
+
+  /// Releases `owner`'s claim on the home load state. A no-op if something else has taken the
+  /// state since (a force refresh that replaced a cancelled background sync, a clear on
+  /// sign-out): a stale `defer` must never knock the current owner back to idle.
+  private func leaveHomeState(_ owner: HomeLoadState) {
+    homeLoadState = homeLoadState.after(leaving: owner)
+  }
 
   // Background fetch task handle — cancelled on forceRefresh/logout
   private var homeBackgroundFetchTask: Task<Void, Never>?
@@ -1984,9 +2017,7 @@ final class AppState {
     homeBackgroundFetchTask = nil
     discardProfileScopedHomeState()
     homeLibraries = []
-    homeIsLoading = false
-    homeIsCacheDecoding = false
-    homeIsBackgroundRefreshing = false
+    homeLoadState = .idle
     homeError = nil
   }
 
@@ -2422,20 +2453,18 @@ final class AppState {
       homeLog.info("homeLoad[\(callID)]: held — profile picker is showing")
       return
     }
-    homeLog.info("homeLoad[\(callID)]: called — isLoading=\(self.homeIsLoading) isCacheDecoding=\(self.homeIsCacheDecoding) isBackgroundRefreshing=\(self.homeIsBackgroundRefreshing)")
-    guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else {
+    homeLog.info("homeLoad[\(callID)]: called — state=\(String(describing: self.homeLoadState))")
+    guard homeLoadState == .idle else {
       homeLog.warning("homeLoad[\(callID)]: already loading/syncing, bailing")
-      // A guard that never releases is how the rails stayed empty before: the flag latched
-      // and every later call bailed here. If this line repeats with no matching completion,
-      // that is the bug — not a slow network.
-      dlog.warn(.home, "homeLoad bailed — busy (load=\(homeIsLoading) decode=\(homeIsCacheDecoding) bg=\(homeIsBackgroundRefreshing))")
+      // A guard that never releases is how the rails stayed empty before: the state
+      // latched and every later call bailed here. If this line repeats with no matching
+      // completion, that is the bug — not a slow network.
+      dlog.warn(.home, "homeLoad bailed — busy (state=\(String(describing: homeLoadState)))")
       return
     }
 
     if isDemoMode {
-      homeLibraries = DemoData.libraries
-      let demoItems = DemoData.movieItems + DemoData.tvItems
-      recomputeHomeRails(from: demoItems)
+      loadHomeDemo()
       return
     }
 
@@ -2452,18 +2481,38 @@ final class AppState {
     // Watching / Just Added / Recently Watched never appeared on the TV at all while
     // the Movies and TV Shows rails showed fine.
     if !homeAllRailsEmpty {
-      homeLog.info("homeLoad[\(callID)]: PATH=in-memory — rails populated, running heartbeat")
-      dlog.info(.home, "homeLoad: in-memory (CW=\(homeContinueWatching.count) JA=\(homeJustAdded.count) RW=\(homeRecentlyWatched.count))")
-      homeError = nil  // clear any stale error banner alongside populated content
-      Task { await self.runHeartbeat() }
-      // The rails are reused, but a collections load that failed (or never ran) retries.
-      if homeCollectionsLoad != .loaded { Task { await self.loadCollections() } }
+      loadHomeFromMemory(callID: callID)
       return
     }
 
-    // Cold start — load SQLite first (fast), then sync from network
-    homeIsCacheDecoding = true
-    defer { homeIsCacheDecoding = false }
+    await loadHomeColdStart(callID: callID)
+  }
+
+  /// Path 1 — demo mode: the rails come from bundled data. No network, no state to hold.
+  private func loadHomeDemo() {
+    homeLibraries = DemoData.libraries
+    let demoItems = DemoData.movieItems + DemoData.tvItems
+    recomputeHomeRails(from: demoItems)
+  }
+
+  /// Path 2 — rails already in memory: keep them on screen and let the heartbeat decide
+  /// whether anything changed. Holds no state of its own; the heartbeat's sync owns its own.
+  private func loadHomeFromMemory(callID: Int) {
+    homeLog.info("homeLoad[\(callID)]: PATH=in-memory — rails populated, running heartbeat")
+    dlog.info(.home, "homeLoad: in-memory (CW=\(homeContinueWatching.count) JA=\(homeJustAdded.count) RW=\(homeRecentlyWatched.count))")
+    homeError = nil  // clear any stale error banner alongside populated content
+    Task { await self.runHeartbeat() }
+    // The rails are reused, but a collections load that failed (or never ran) retries.
+    if homeCollectionsLoad != .loaded { Task { await self.loadCollections() } }
+  }
+
+  /// Paths 3 and 4 — nothing in memory: read the local catalog (fast), then sync.
+  /// `.cacheDecoding` covers only the local read. The `defer` releases it on EVERY exit, so
+  /// no early return in either branch can leave it latched; each branch also releases it
+  /// itself as soon as the decode is over (see below), because the work after it can await.
+  private func loadHomeColdStart(callID: Int) async {
+    homeLoadState = .cacheDecoding
+    defer { leaveHomeState(.cacheDecoding) }
     let generation = homeStateGeneration
     // Ensure setup has completed before any store access (TASK-420).
     let localStore = self.localStore
@@ -2473,81 +2522,96 @@ final class AppState {
     }.value
 
     if hasLocal {
-      homeLog.info("homeLoad[\(callID)]: PATH=cold-start — local DB has data, loading rails")
-      dlog.info(.home, "homeLoad: cold start from local DB")
-      let rails = await Task.detached(priority: .userInitiated) {
-        await localStore.queryRails()
-      }.value
-      applyRails(rails, startedAt: generation)
-      homeIsCacheDecoding = false
-      // Skip background network sync when offline — cached content is already shown
-      // and network calls will fail anyway (TASK-291).
-      guard !isServerUnavailable else {
-        homeLog.info("homeLoad[\(callID)]: offline — showing cached content, skipping network sync")
-        return
-      }
-      // QuickConnect users: api.baseURL is fallbackURL until resolved. Resolve now so
-      // the background sync and all subsequent API calls use a real server address.
-      if api.baseURL == AppState.fallbackURL {
-        homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before background sync")
-        let resolved = await reconnect()
-        if !resolved {
-          homeLog.warning("homeLoad[\(callID)]: QC resolution failed — showing cached content, starting background retry")
-          startBackgroundReconnectRetry()
-          return
-        }
-        homeLog.info("homeLoad[\(callID)]: QC resolved to \(self.api.baseURL)")
-      }
-      // Sync in background — may update rails once complete
-      // Same rule as the heartbeat: do not cancel a sync that is still running. A relaunch
-      // or a re-entry into homeLoad while a long WAN resync is mid-flight would otherwise
-      // restart it from seq 0 and it would never reach the end.
-      if startBackgroundSyncIfIdle({ await self.runDeltaSyncWithBackgroundTask() }) {
-        homeLog.info("homeLoad[\(callID)]: starting background delta sync")
-      } else {
-        homeLog.info("homeLoad[\(callID)]: a background sync is already running — leaving it alone")
-      }
+      await loadHomeColdStartWithCache(callID: callID, localStore: localStore, generation: generation)
     } else {
-      homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
-      homeIsCacheDecoding = false
-      homeError = nil  // clear stale error before each retry attempt
-      // When offline with no local data, skip the network attempt and surface an
-      // appropriate error — avoids a loud failure on every network call (TASK-291).
-      guard !isServerUnavailable else {
-        homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
-        homeError = isOffline ? "No internet connection."
-          : localNetworkDenied ? LocalNetworkPermission.deniedMessage
-          : "Can't reach your server."
+      await loadHomeColdStartWithoutCache(callID: callID)
+    }
+  }
+
+  /// Path 3 — cold start, catalog on disk: show the cached rails now, sync behind them.
+  private func loadHomeColdStartWithCache(
+    callID: Int, localStore: LocalStore, generation: UInt64
+  ) async {
+    homeLog.info("homeLoad[\(callID)]: PATH=cold-start — local DB has data, loading rails")
+    dlog.info(.home, "homeLoad: cold start from local DB")
+    let rails = await Task.detached(priority: .userInitiated) {
+      await localStore.queryRails()
+    }.value
+    applyRails(rails, startedAt: generation)
+    // The decode is over. What follows can await (QuickConnect), and a homeLoad that
+    // re-enters meanwhile must not be turned away as busy.
+    leaveHomeState(.cacheDecoding)
+    // Skip background network sync when offline — cached content is already shown
+    // and network calls will fail anyway (TASK-291).
+    guard !isServerUnavailable else {
+      homeLog.info("homeLoad[\(callID)]: offline — showing cached content, skipping network sync")
+      return
+    }
+    // QuickConnect users: api.baseURL is fallbackURL until resolved. Resolve now so
+    // the background sync and all subsequent API calls use a real server address.
+    if api.baseURL == AppState.fallbackURL {
+      homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before background sync")
+      let resolved = await reconnect()
+      if !resolved {
+        homeLog.warning("homeLoad[\(callID)]: QC resolution failed — showing cached content, starting background retry")
+        startBackgroundReconnectRetry()
         return
       }
-      // Resolve QC ID before the foreground sync too.
-      if api.baseURL == AppState.fallbackURL {
-        homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before full sync")
-        let resolved = await reconnect()
-        if !resolved {
-          homeError = "Can't reach your server. Check that DSVideoServer is running."
-          return
-        }
+      homeLog.info("homeLoad[\(callID)]: QC resolved to \(self.api.baseURL)")
+    }
+    // Sync in background — may update rails once complete
+    // Same rule as the heartbeat: do not cancel a sync that is still running. A relaunch
+    // or a re-entry into homeLoad while a long WAN resync is mid-flight would otherwise
+    // restart it from seq 0 and it would never reach the end.
+    if startBackgroundSyncIfIdle({ await self.runDeltaSyncWithBackgroundTask() }) {
+      homeLog.info("homeLoad[\(callID)]: starting background delta sync")
+    } else {
+      homeLog.info("homeLoad[\(callID)]: a background sync is already running — leaving it alone")
+    }
+  }
+
+  /// Path 4 — cold start, nothing on disk: a foreground sync is the only way to get content,
+  /// so there is a spinner (`.loading`) until it ends, and a message if it cannot run.
+  private func loadHomeColdStartWithoutCache(callID: Int) async {
+    homeLog.info("homeLoad[\(callID)]: PATH=cold-start — no local data, full sync required")
+    leaveHomeState(.cacheDecoding)
+    homeError = nil  // clear stale error before each retry attempt
+    // When offline with no local data, skip the network attempt and surface an
+    // appropriate error — avoids a loud failure on every network call (TASK-291).
+    guard !isServerUnavailable else {
+      homeLog.info("homeLoad[\(callID)]: offline and no local data — skipping sync")
+      homeError = isOffline ? "No internet connection."
+        : localNetworkDenied ? LocalNetworkPermission.deniedMessage
+        : "Can't reach your server."
+      return
+    }
+    // Resolve QC ID before the foreground sync too.
+    if api.baseURL == AppState.fallbackURL {
+      homeLog.info("homeLoad[\(callID)]: QC ID unresolved — resolving before full sync")
+      let resolved = await reconnect()
+      if !resolved {
+        homeError = "Can't reach your server. Check that DSVideoServer is running."
+        return
       }
-      homeIsLoading = true
-      homeError = nil
-      // defer, NOT a straight-line reset after the await. `.task` cancellation is
-      // cooperative and unwinds through this await, so a plain `homeIsLoading = false` on
-      // the next line never runs when the task is cancelled — the flag LATCHES true and
-      // every later homeLoad() bails at the re-entrancy guard above.
-      //
-      // That is precisely the tvOS pairing case: homeLoad() starts on the pairing screen,
-      // the token arrives, .task(id: sessionToken) cancels the in-flight run and starts a
-      // new one — which then found homeIsLoading still true and returned immediately,
-      // leaving the rails empty. Same defect class as the AuthenticatedImage isLoading
-      // latch (fixed 2026-07-28): a bool guard that a cancelled task never clears.
-      defer { homeIsLoading = false }
-      await runDeltaSync(background: false)
-      // If sync completed but produced no items and no error, the library is either
-      // genuinely empty or the server rejected our state silently. Surface a hint.
-      if homeAllRailsEmpty && homeLibraries.isEmpty && homeError == nil {
-        homeError = "No content found. If your library has videos, try signing out and back in."
-      }
+    }
+    homeLoadState = .loading
+    homeError = nil
+    // defer, NOT a straight-line reset after the await. `.task` cancellation is
+    // cooperative and unwinds through this await, so a plain reset on the next line never
+    // runs when the task is cancelled — the state LATCHES at .loading and every later
+    // homeLoad() bails at the re-entrancy guard above.
+    //
+    // That is precisely the tvOS pairing case: homeLoad() starts on the pairing screen,
+    // the token arrives, .task(id: sessionToken) cancels the in-flight run and starts a
+    // new one — which then found the state still .loading and returned immediately,
+    // leaving the rails empty. Same defect class as the AuthenticatedImage isLoading
+    // latch (fixed 2026-07-28): a guard that a cancelled task never clears.
+    defer { leaveHomeState(.loading) }
+    await runDeltaSync(background: false)
+    // If sync completed but produced no items and no error, the library is either
+    // genuinely empty or the server rejected our state silently. Surface a hint.
+    if homeAllRailsEmpty && homeLibraries.isEmpty && homeError == nil {
+      homeError = "No content found. If your library has videos, try signing out and back in."
     }
   }
 
@@ -2574,11 +2638,11 @@ final class AppState {
     dlog.info(.library, "force refresh — re-fetching the library from seq 0")
     homeBackgroundFetchTask?.cancel()
     homeBackgroundFetchTask = nil
-    homeIsBackgroundRefreshing = false
+    leaveHomeState(.backgroundRefreshing)
     await localStore.setItemSeq(0)
-    homeIsLoading = true
+    homeLoadState = .loading
     homeError = nil
-    defer { homeIsLoading = false }   // see homeLoad(): cancellation must not latch the flag
+    defer { leaveHomeState(.loading) }   // see loadHomeColdStartWithoutCache: cancellation must not latch the state
     await runDeltaSync(background: false)
     // Bump version so TVLibraryRail views re-fetch their content via .task(id:).
     libraryRailsVersion = UUID()
@@ -2591,7 +2655,7 @@ final class AppState {
   func foregroundRefresh() async {
     reconcileOfflineFlag()
     guard !isDemoMode, !isServerUnavailable else { return }
-    guard !homeIsLoading, !homeIsCacheDecoding, !homeIsBackgroundRefreshing else { return }
+    guard homeLoadState == .idle else { return }
     await runDeltaSyncWithBackgroundTask()
   }
 
@@ -2647,11 +2711,19 @@ final class AppState {
   /// Full delta sync: check heartbeat, fetch changed items, refresh progress.
   /// This is the single network path — replaces homeFetchFromNetwork + doHomeFetch.
   private func runDeltaSync(background: Bool) async {
+    // A background pass takes the state only from idle. Started while a decode or a
+    // foreground load is in flight (a heartbeat can land in that window), it still runs but
+    // does not take the state over: that owner's spinner must not vanish under it, and its
+    // own `defer` releases the state when it ends.
+    var ownsBackgroundState = false
     if background {
       guard !homeIsBackgroundRefreshing else { return }
-      homeIsBackgroundRefreshing = true
+      if homeLoadState == .idle {
+        homeLoadState = .backgroundRefreshing
+        ownsBackgroundState = true
+      }
     }
-    defer { if background { homeIsBackgroundRefreshing = false } }
+    defer { if ownsBackgroundState { leaveHomeState(.backgroundRefreshing) } }
 
     // Don't attempt sync without a session token or a real server URL.
     // The login flow will trigger homeLoad() after resolving and setting both.
