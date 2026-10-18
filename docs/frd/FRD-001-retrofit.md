@@ -233,7 +233,9 @@ Every audio track the source carries is offered, with no carve-out: a title with
 or a commentary track lists each one in the audio picker, labelled by its title, else its language,
 else "Track N", with the source's default track preselected. A single-audio title plays exactly as
 before and its picker shows one track. This holds in the iOS and tvOS apps whether they play the
-file directly or the server converts it to HLS.
+file directly or the server converts it to HLS. The playback response lists the same tracks in its
+`audioTracks` array, named and defaulted exactly as the HLS master playlist names them (one source,
+the probe), whatever way the title is served. [TASK-1004]
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than

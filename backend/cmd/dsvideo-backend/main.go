@@ -3966,6 +3966,28 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// livePlaybackProbe is the ONE full probe this request may run for what the response
+	// reports about the source's streams (its audio tracks, its chapters, and whether a
+	// web remux would drop audio). probeResult is nil on the cached-codec path, so this
+	// probes live then, at most once; a probe that already ran with audio streams is
+	// reused. nil when there is no prober or the probe failed.
+	var liveProbe *transcode.ProbeResult
+	liveProbeTried := false
+	livePlaybackProbe := func() *transcode.ProbeResult {
+		if probeResult != nil && len(probeResult.AudioStreams) > 0 {
+			return probeResult
+		}
+		if !liveProbeTried && s.prober != nil {
+			liveProbeTried = true
+			pctx, pcancel := context.WithTimeout(r.Context(), 8*time.Second)
+			defer pcancel()
+			if pr, perr := s.prober.Probe(pctx, path); perr == nil {
+				liveProbe = pr
+			}
+		}
+		return liveProbe
+	}
+
 	sessionID := randID("sess_")
 
 	// Identifies this viewer + this title, so StartSession can supersede the SAME viewer's
@@ -4019,6 +4041,10 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	}
 	classifySubtitleTracks(subtitleTracks, runtimeSecs, audioLang)
 
+	// The audio tracks the response lists (TASK-1004): the HLS session's own list when it
+	// transcodes (the very tracks its renditions carry), else the probe's.
+	var audioStreams []transcode.AudioStream
+
 	ps := PlaySession{
 		ItemID:       itemID,
 		Path:         path,
@@ -4051,6 +4077,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			ps.HLSDir = hlsSession.OutputDir
+			audioStreams = hlsSession.AudioTracks
 		} else {
 			// No HLS generator - fall back to direct serving for web clients
 			// (browser may or may not handle the format, but it's better than nothing)
@@ -4105,17 +4132,18 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// For direct play, try a quick probe for chapters if we don't already have them
-	if chapterList == nil && (ps.Kind == "direct" || ps.Kind == "remux") && s.prober != nil {
-		ctx2, cancel2 := context.WithTimeout(r.Context(), 8*time.Second)
-		defer cancel2()
-		if pr, err := s.prober.Probe(ctx2, path); err == nil && len(pr.Chapters) > 0 {
-			for _, c := range pr.Chapters {
-				chapterList = append(chapterList, map[string]any{
-					"id":        c.ID,
-					"title":     c.Title,
-					"startSecs": c.StartSecs,
-					"endSecs":   c.EndSecs,
-				})
+	if ps.Kind == "direct" || ps.Kind == "remux" {
+		if pr := livePlaybackProbe(); pr != nil {
+			audioStreams = pr.AudioStreams
+			if chapterList == nil {
+				for _, c := range pr.Chapters {
+					chapterList = append(chapterList, map[string]any{
+						"id":        c.ID,
+						"title":     c.Title,
+						"startSecs": c.StartSecs,
+						"endSecs":   c.EndSecs,
+					})
+				}
 			}
 		}
 	}
@@ -4161,7 +4189,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			"sessionId":             sessionID,
 			"streamUrl":             baseURL + "/api/v1/playback/" + sessionID + "/stream",
 			"subtitles":             subtitleInfo,
-			"audioTracks":           []any{},
+			"audioTracks":           playbackAudioTracks(audioStreams),
 			"resumePositionSeconds": resumePos,
 			"durationSeconds":       nullIntToAny(itemDuration),
 			"transcoding":           ps.Kind == "remux",
@@ -4181,7 +4209,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"startSeconds":          startSeconds,
 		"hlsMasterUrl":          baseURL + "/api/v1/playback/" + sessionID + "/master.m3u8",
 		"subtitles":             subtitleInfo,
-		"audioTracks":           []any{},
+		"audioTracks":           playbackAudioTracks(audioStreams),
 		"resumePositionSeconds": resumePos,
 		"durationSeconds":       nullIntToAny(itemDuration),
 		"transcoding":           true,
@@ -4189,6 +4217,28 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"chapters":              chapterList,
 		"quality":               qualityOut,
 	})
+}
+
+// playbackAudioTracks renders the audioTracks array of the playback JSON (TASK-1004):
+// one entry per audio stream, in source order. label and default come from the same two
+// functions that build the HLS master playlist, so a client sees the names and the
+// preselected track the renditions carry. Never nil: a title without audio answers [].
+func playbackAudioTracks(tracks []transcode.AudioStream) []map[string]any {
+	out := make([]map[string]any, 0, len(tracks))
+	labels := transcode.AudioTrackLabels(tracks)
+	def := transcode.DefaultAudioTrack(tracks)
+	for i, t := range tracks {
+		out = append(out, map[string]any{
+			"id":       "a" + strconv.Itoa(i+1),
+			"label":    labels[i],
+			"language": t.Language,
+			"title":    t.Title,
+			"codec":    t.Codec,
+			"channels": t.Channels,
+			"default":  i == def,
+		})
+	}
+	return out
 }
 
 // findSubtitleFiles looks for subtitle files alongside videoPath and returns

@@ -114,30 +114,13 @@ func buildRenditionMaster(tracks []AudioStream, bandwidth int64) string {
 	if bandwidth <= 0 {
 		bandwidth = defaultRenditionBandwidth
 	}
-	def := 0
-	for i, t := range tracks {
-		if t.Default {
-			def = i
-			break
-		}
-	}
+	def := DefaultAudioTrack(tracks)
+	names := AudioTrackLabels(tracks)
 
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
-	used := map[string]bool{}
 	for i, t := range tracks {
-		name := hlsQuotedSafe(t.Title)
-		if name == "" {
-			name = hlsQuotedSafe(t.Language)
-		}
-		if name == "" {
-			name = "Track " + strconv.Itoa(i+1)
-		}
-		unique := name
-		for n := 2; used[unique]; n++ {
-			unique = fmt.Sprintf("%s (%d)", name, n)
-		}
-		used[unique] = true
+		unique := names[i]
 
 		attrs := []string{"TYPE=AUDIO", fmt.Sprintf(`GROUP-ID="%s"`, audioGroupID)}
 		if lang := hlsQuotedSafe(t.Language); lang != "" {
@@ -163,6 +146,44 @@ func buildRenditionMaster(tracks []AudioStream, bandwidth int64) string {
 	fmt.Fprintf(&b, "#EXT-X-STREAM-INF:BANDWIDTH=%d,AUDIO=\"%s\"\n", bandwidth, audioGroupID)
 	b.WriteString(videoRendition + ".m3u8\n")
 	return b.String()
+}
+
+// DefaultAudioTrack is the index of the track a picker preselects: the first the source
+// marks default, else the first track. Exactly one track is the default, in the master
+// playlist and in the playback JSON alike (both read it from here).
+func DefaultAudioTrack(tracks []AudioStream) int {
+	for i, t := range tracks {
+		if t.Default {
+			return i
+		}
+	}
+	return 0
+}
+
+// AudioTrackLabels names each track for a picker: its title, else its language tag, else
+// "Track N" (N is the 1-based position). HLS requires the NAMEs in a group to differ, and
+// two identical labels are no use to a viewer either, so a repeat gets a " (2)", " (3)"
+// suffix. The master playlist's EXT-X-MEDIA NAME and the playback JSON's audioTracks
+// label both come from this one function.
+func AudioTrackLabels(tracks []AudioStream) []string {
+	labels := make([]string, 0, len(tracks))
+	used := map[string]bool{}
+	for i, t := range tracks {
+		name := hlsQuotedSafe(t.Title)
+		if name == "" {
+			name = hlsQuotedSafe(t.Language)
+		}
+		if name == "" {
+			name = "Track " + strconv.Itoa(i+1)
+		}
+		unique := name
+		for n := 2; used[unique]; n++ {
+			unique = fmt.Sprintf("%s (%d)", name, n)
+		}
+		used[unique] = true
+		labels = append(labels, unique)
+	}
+	return labels
 }
 
 // hlsQuotedSafe makes s legal inside an HLS quoted-string, which may not contain a
