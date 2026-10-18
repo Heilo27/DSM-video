@@ -83,6 +83,9 @@ type Config struct {
 	// Metadata settings
 	TMDbAPIKey    string
 	ImageCacheDir string
+	// ImageCacheMaxBytes caps the on-disk image cache (FR-150); 0 = unlimited. Env
+	// DSVIDEO_IMAGE_CACHE_MAX_MB, default metadata.DefaultImageCacheMaxBytes (1 GiB).
+	ImageCacheMaxBytes int64
 
 	// AdminUser is the DSM username permitted to mutate server-global state
 	// (tmdb_api_key + other global settings) and to hit /admin/*. TASK-791/811:
@@ -123,6 +126,8 @@ type Server struct {
 	playSessions   map[string]PlaySession
 	lastScanAt     time.Time
 	scanInProgress atomic.Bool // guards against concurrent background scans
+	// castBackfillRunning guards the scope=cast backfill (cast_backfill.go) to one run at a time.
+	castBackfillRunning atomic.Bool
 
 	// Transcode components
 	prober         *transcode.Prober
@@ -429,6 +434,18 @@ func main() {
 		log.Println("TMDb API key not configured - metadata lookup disabled")
 	}
 	imageCache := metadata.NewImageCache(cfg.ImageCacheDir)
+	imageCache.SetMaxBytes(cfg.ImageCacheMaxBytes)
+	// One sweep at startup trims a cache that grew unbounded before the cap existed; the
+	// background goroutine keeps it off the boot path. Later sweeps follow downloads.
+	go func() {
+		removed, freed, err := imageCache.EvictToCap()
+		if err != nil {
+			log.Printf("image cache: startup eviction: %v", err)
+		}
+		if removed > 0 {
+			log.Printf("image cache: startup eviction removed %d files (%d bytes)", removed, freed)
+		}
+	}()
 
 	s := &Server{
 		cfg:            cfg,
@@ -1256,6 +1273,7 @@ func loadConfig() Config {
 		// Metadata settings
 		TMDbAPIKey:    get("DSVIDEO_TMDB_API_KEY", ""),
 		ImageCacheDir: get("DSVIDEO_IMAGE_CACHE_DIR", filepath.Join(os.TempDir(), "dsvideo_images")),
+		ImageCacheMaxBytes: imageCacheMaxBytes(get("DSVIDEO_IMAGE_CACHE_MAX_MB", "")),
 
 		// TASK-791/811: admin/owner for server-global mutations. Empty = first-user-wins.
 		AdminUser: get("DSVIDEO_ADMIN_USER", ""),
@@ -1650,6 +1668,28 @@ CREATE INDEX IF NOT EXISTS idx_item_keywords_lookup ON item_keywords(keyword_id,
 `)
 	if err != nil {
 		return fmt.Errorf("create item tag tables: %w", err)
+	}
+
+	// TASK-747 FR-150: the billed cast with TMDb person ids and profile photos, one row per
+	// (title, billing position). Additive: a new table, no existing row or column touched, and
+	// the legacy items.cast_names column keeps being written for clients that predate cast
+	// photos. Like item_companies there are no foreign keys; the stale purge deletes these
+	// rows in the same transaction as the item. profile_path is TMDb's own path ("/abc.jpg"),
+	// empty when TMDb has no photo.
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS item_cast (
+  item_id        TEXT NOT NULL,
+  ordinal        INTEGER NOT NULL,
+  tmdb_person_id INTEGER NOT NULL,
+  name           TEXT NOT NULL,
+  character      TEXT NOT NULL DEFAULT '',
+  profile_path   TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (item_id, ordinal)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_item_cast_person ON item_cast(tmdb_person_id);
+`)
+	if err != nil {
+		return fmt.Errorf("create item_cast: %w", err)
 	}
 
 	// TASK-931: which DSM user owns each account key (account_identity.go). Additive:
@@ -3351,6 +3391,13 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// FR-150: the billed cast with photos. "cast" above is unchanged for older clients.
+	castMembers, err := s.loadCastMembers(r.Context(), itemID, castNames.String)
+	if err != nil {
+		writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("item %s cast: %w", itemID, err))
+		return
+	}
+
 	// Build images object
 	images := map[string]any{
 		"poster":   map[string]any{"id": nil},
@@ -3374,6 +3421,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		"rating":          nullFloatToAny(rating),
 		"genres":          genreList,
 		"cast":            castList,
+		"castMembers":     castMembers,
 		"director":        nullStringToAny(director),
 		"images":          images,
 		"tmdbId":          nullIntToAny(tmdbID),
@@ -3755,6 +3803,13 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Cache-Control", "public, max-age=604800") // 7 days
 		http.ServeFile(w, r, cachedPath)
+		return
+	}
+
+	// FR-150: cast photos. The id is castImageID(personID); the photo comes through the same
+	// cache as posters, so the client never talks to TMDb and eviction (FR-150) covers it.
+	if personID, isCast := parseCastImageID(imageID); isCast {
+		s.serveCastImage(w, r, personID)
 		return
 	}
 
@@ -7617,6 +7672,10 @@ func (s *Server) handleAdminMetadataRefresh(w http.ResponseWriter, r *http.Reque
 	}
 
 	scope := r.URL.Query().Get("scope")
+	if scope == "cast" { // FR-150: by tmdb_id, never re-matches by title (cast_backfill.go)
+		s.startCastBackfill(w, r)
+		return
+	}
 	var query string
 	switch scope {
 	case "all":
@@ -8556,6 +8615,7 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM item_companies WHERE item_id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx, `DELETE FROM item_keywords WHERE item_id = ?`, sid)
+					_, _ = staleTx.ExecContext(ctx, `DELETE FROM item_cast WHERE item_id = ?`, sid)
 					_, _ = staleTx.ExecContext(ctx,
 						`INSERT INTO deleted_items(item_id, change_seq, deleted_at) VALUES(?,?,?)`,
 						sid, seq, now)
@@ -8753,6 +8813,9 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 		})
 	}
 	if err == nil {
+		err = replaceItemCast(ctx, tx.Tx, itemID, meta.CastMembers)
+	}
+	if err == nil {
 		err = tx.Commit()
 	}
 
@@ -8762,6 +8825,22 @@ func (s *Server) fetchAndStoreMetadataWithClient(ctx context.Context, itemID str
 		s.publishItemSeq(metaSeq)
 		log.Printf("Fetched metadata for: %s", meta.Title)
 	}
+}
+
+// imageCacheMaxBytes parses DSVIDEO_IMAGE_CACHE_MAX_MB. Empty or unparseable means the
+// default; "0" means no cap (an explicit choice, not an error); a negative or non-numeric
+// value falls back to the default rather than silently disabling eviction.
+func imageCacheMaxBytes(raw string) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return metadata.DefaultImageCacheMaxBytes
+	}
+	mb, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || mb < 0 {
+		log.Printf("config: DSVIDEO_IMAGE_CACHE_MAX_MB=%q is not a non-negative integer; using the default", raw)
+		return metadata.DefaultImageCacheMaxBytes
+	}
+	return mb << 20
 }
 
 func nullableInt(v int) sql.NullInt64 {
@@ -8963,16 +9042,8 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			genreNames[i] = g.Name
 		}
 		genres := strings.Join(genreNames, ",")
-		var castNames []string
-		if details.Credits != nil {
-			for i, c := range details.Credits.Cast {
-				if i >= 5 {
-					break
-				}
-				castNames = append(castNames, c.Name)
-			}
-		}
-		cast := strings.Join(castNames, ",")
+		castMembers := details.Credits.TopCast(metadata.StoredCastSize)
+		cast := strings.Join(metadata.CastNames(castMembers, metadata.LegacyCastNames), ",")
 
 		tx, txErr := sqltx.Begin(ctx, s.db)
 		if txErr != nil {
@@ -9013,6 +9084,10 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store tags for %s: %w", id, err))
 			return
 		}
+		if err := replaceItemCast(ctx, tx.Tx, id, castMembers); err != nil {
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store cast for %s: %w", id, err))
+			return
+		}
 		if err := tx.Commit(); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 			return
@@ -9032,15 +9107,10 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 			genreNames[i] = g.Name
 		}
 		genres := strings.Join(genreNames, ",")
-		var castNames []string
+		castMembers := details.Credits.TopCast(metadata.StoredCastSize)
+		cast := strings.Join(metadata.CastNames(castMembers, metadata.LegacyCastNames), ",")
 		var director string
 		if details.Credits != nil {
-			for i, c := range details.Credits.Cast {
-				if i >= 5 {
-					break
-				}
-				castNames = append(castNames, c.Name)
-			}
 			for _, c := range details.Credits.Crew {
 				if c.Job == "Director" {
 					director = c.Name
@@ -9048,7 +9118,6 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		cast := strings.Join(castNames, ",")
 
 		tx, txErr := sqltx.Begin(ctx, s.db)
 		if txErr != nil {
@@ -9091,6 +9160,10 @@ func (s *Server) handleItemTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := replaceItemTags(ctx, tx.Tx, id, details.Extras()); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store tags for %s: %w", id, err))
+			return
+		}
+		if err := replaceItemCast(ctx, tx.Tx, id, castMembers); err != nil {
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store cast for %s: %w", id, err))
 			return
 		}
 		if err := tx.Commit(); err != nil {
@@ -9255,16 +9328,8 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		genreNames[i] = g.Name
 	}
 	genres := strings.Join(genreNames, ",")
-	var castNames []string
-	if details.Credits != nil {
-		for i, c := range details.Credits.Cast {
-			if i >= 5 {
-				break
-			}
-			castNames = append(castNames, c.Name)
-		}
-	}
-	cast := strings.Join(castNames, ",")
+	castMembers := details.Credits.TopCast(metadata.StoredCastSize)
+	cast := strings.Join(metadata.CastNames(castMembers, metadata.LegacyCastNames), ",")
 	now := time.Now().UTC().Format(time.RFC3339)
 	// Every episode in the show takes the show's rating (TMDb rates shows, not episodes).
 	showExtras := details.Extras()
@@ -9344,6 +9409,10 @@ func (s *Server) handleTVShowTMDbFix(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := replaceItemTags(ctx, tx.Tx, id, showExtras); err != nil {
 			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store tags for %s: %w", id, err))
+			return
+		}
+		if err := replaceItemCast(ctx, tx.Tx, id, castMembers); err != nil {
+			writeFailure(w, r, http.StatusInternalServerError, "db_error", fmt.Errorf("tmdb-fix: store cast for %s: %w", id, err))
 			return
 		}
 	}
