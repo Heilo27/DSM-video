@@ -85,6 +85,30 @@ enum SeasonExpansionStore {
     return []
   }
 
+  /// The season the page should scroll to on arrival, or nil when nothing needs scrolling.
+  ///
+  /// A season that opens expanded but sits below the fold is invisible to the person who
+  /// asked for it (TASK-757). The target is the highlighted season when it is expanded, else
+  /// the lowest season the user left expanded. The FIRST season is never a target: it sits
+  /// directly under the header and resume button, and scrolling to it would only push those
+  /// off-screen.
+  static func initialScrollSeason(showID: String,
+                                  allSeasons: [Int],
+                                  highlightSeason: Int?) -> Int? {
+    guard let first = allSeasons.first else { return nil }
+    func expanded(_ season: Int) -> Bool {
+      isExpanded(season: season, showID: showID, allSeasons: allSeasons, highlightSeason: highlightSeason)
+    }
+    let target: Int?
+    if let highlight = highlightSeason, allSeasons.contains(highlight), expanded(highlight) {
+      target = highlight
+    } else {
+      target = allSeasons.first(where: expanded)
+    }
+    guard let target, target != first else { return nil }
+    return target
+  }
+
   /// Forgets a show's stored expansion. Used when signing out, so the next user does not
   /// inherit someone else's layout.
   static func clear(showID: String) {

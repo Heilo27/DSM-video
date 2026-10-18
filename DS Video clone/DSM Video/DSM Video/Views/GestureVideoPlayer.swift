@@ -79,6 +79,12 @@ struct GestureVideoPlayer: View {
     var blockDpadSeek: Bool = false
 
     @State private var player: AVPlayer?
+    #if os(iOS)
+    /// Id of the window scene this player is in (nil until the view has a window).
+    @State private var hostSceneID: String?
+    /// Landscape has been requested; applied to `hostSceneID` as soon as it is known.
+    @State private var wantsLandscape = false
+    #endif
     /// Built from `artworkURL` once its image loads; nil until then and when there is none.
     @State private var nowPlayingArtwork: MPMediaItemArtwork?
     #if os(iOS)
@@ -233,6 +239,11 @@ struct GestureVideoPlayer: View {
 
     var body: some View {
         playerContent
+            #if os(iOS)
+            // Which scene is this player in? The orientation lock must go to THAT scene, not
+            // whichever UIKit lists first (TASK-756).
+            .background(HostSceneReader { scene in hostSceneChanged(scene) })
+            #endif
             // Keyed on the URL so a new title (autoplay-next) drops the old picture and
             // loads its own (FR-058, TASK-965).
             .task(id: artworkURL) { await loadNowPlayingArtwork() }
@@ -251,7 +262,7 @@ struct GestureVideoPlayer: View {
                 // any path other than the explicit back button (e.g. system back
                 // gesture, app backgrounded mid-play).
                 #if os(iOS)
-                if AppDelegate.orientationLock != .portrait {
+                if AppDelegate.isLandscapeLocked(sceneID: hostSceneID) {
                     unlockOrientation()
                 }
                 #endif
@@ -363,8 +374,6 @@ struct GestureVideoPlayer: View {
                         player: player,
                         chapters: chapters,
                         subtitles: subtitles,
-                        itemTitle: itemTitle,
-                        itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
                         onSeekToChapter: { t in seek(to: t) }
                     )
@@ -378,8 +387,6 @@ struct GestureVideoPlayer: View {
                         player: player,
                         chapters: chapters,
                         subtitles: subtitles,
-                        itemTitle: itemTitle,
-                        itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
                         onSeekToChapter: { t in seek(to: t) }
                     )
@@ -393,8 +400,6 @@ struct GestureVideoPlayer: View {
                         player: player,
                         chapters: chapters,
                         subtitles: subtitles,
-                        itemTitle: itemTitle,
-                        itemYear: itemYear,
                         onOffsetChange: { offset in subtitleOffsetSeconds = offset; onSubtitleOffsetChange?(offset) },
                         onSeekToChapter: { t in seek(to: t) }
                     )
@@ -2462,14 +2467,31 @@ private extension GestureVideoPlayer {
     /// of gesture-gate timeouts and multi-minute touch freezes.
     private func lockLandscape() {
         orientLog.info("GestureVideoPlayer: locking landscape (onAppear)")
-        AppDelegate.setOrientation(.landscape)
+        wantsLandscape = true
+        // The host scene is reported by HostSceneReader once the view has a window. If that
+        // has not happened yet, hostSceneChanged applies the lock the moment it does.
+        guard let hostSceneID else { return }
+        AppDelegate.setOrientation(.landscape, sceneID: hostSceneID)
     }
 
     /// Restores portrait lock when the player dismisses.
     /// Called from: dismiss button tap, onDisappear safety catch.
     private func unlockOrientation() {
         orientLog.info("GestureVideoPlayer: restoring portrait (dismiss)")
-        AppDelegate.setOrientation(.portrait)
+        wantsLandscape = false
+        AppDelegate.setOrientation(.portrait, sceneID: hostSceneID)
+    }
+
+    /// The probe view moved into (or out of) a window. Remember the scene and, if landscape
+    /// was requested before it was known, apply it to the right scene now.
+    private func hostSceneChanged(_ scene: UIWindowScene?) {
+        guard let scene else { return }
+        let id = AppDelegate.sceneID(scene)
+        guard id != hostSceneID else { return }
+        hostSceneID = id
+        if wantsLandscape {
+            AppDelegate.setOrientation(.landscape, sceneID: id)
+        }
     }
 
     /// Returns the screen for the active window scene, avoiding the deprecated UIScreen.main.
@@ -2611,6 +2633,37 @@ extension GestureVideoPlayer {
         return nil
     }
 }
+
+// MARK: - Host scene probe
+
+#if os(iOS)
+/// An invisible view that reports the UIWindowScene it is installed in.
+private struct HostSceneReader: UIViewRepresentable {
+    let onScene: (UIWindowScene?) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        view.onScene = onScene
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        view.onScene = onScene
+    }
+
+    final class ProbeView: UIView {
+        var onScene: ((UIWindowScene?) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            let scene = window?.windowScene
+            // Not inside the layout pass: the callback mutates SwiftUI state.
+            Task { @MainActor [weak self] in self?.onScene?(scene) }
+        }
+    }
+}
+#endif
 
 // MARK: - Video Player Layer
 
@@ -2762,8 +2815,6 @@ private struct SubtitleAudioPickerView: View {
     // TASK-828: server subtitle semantics, used to split the list into Forced /
     // Full / (greyed) Image and to label the auto-enabled forced track.
     var subtitles: [Subtitle] = []
-    var itemTitle: String = ""
-    var itemYear: Int? = nil
     var onOffsetChange: ((Double) -> Void)? = nil
     var onSeekToChapter: ((Double) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
@@ -2773,11 +2824,6 @@ private struct SubtitleAudioPickerView: View {
     @State private var isLoading: Bool = true
     @State private var currentSelection: AVMediaSelection? = nil
     @State private var subtitleOffsetSeconds: Double = 0
-    @State private var showSubtitleDownload: Bool = false
-    @State private var subtitleSearchResults: [SubtitleResult] = []
-    @State private var isSearchingSubtitles: Bool = false
-    @State private var subtitleDownloadError: String? = nil
-    @State private var subtitleDownloadMessage: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -2809,18 +2855,6 @@ private struct SubtitleAudioPickerView: View {
             currentSelection = player.currentItem?.currentMediaSelection
             isLoading = false
         }
-        .sheet(isPresented: $showSubtitleDownload) {
-            SubtitleDownloadSheet(
-                itemTitle: itemTitle,
-                itemYear: itemYear,
-                results: subtitleSearchResults,
-                isSearching: isSearchingSubtitles,
-                error: subtitleDownloadError,
-                onDownload: { result in
-                    Task { await downloadSubtitle(result) }
-                }
-            )
-        }
     }
 
     // MARK: - Content View
@@ -2835,7 +2869,6 @@ private struct SubtitleAudioPickerView: View {
                 Section("Subtitles") {
                     subtitleSection
                     subtitleOffsetRow
-                    findSubtitlesButton
                 }
                 Section("Audio") {
                     audioSection
@@ -2912,11 +2945,6 @@ private struct SubtitleAudioPickerView: View {
             }
         } else {
             Text("No subtitle tracks available")
-                .foregroundStyle(.secondary)
-        }
-        if let msg = subtitleDownloadMessage {
-            Text(msg)
-                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -3003,20 +3031,6 @@ private struct SubtitleAudioPickerView: View {
     }
 
     @ViewBuilder
-    private var findSubtitlesButton: some View {
-        if !OpenSubtitlesAPIKey.isEmpty {
-            Button {
-                subtitleDownloadError = nil
-                subtitleSearchResults = []
-                showSubtitleDownload = true
-                Task { await searchSubtitles() }
-            } label: {
-                Label("Find Subtitles Online", systemImage: "magnifyingglass.circle")
-            }
-        }
-    }
-
-    @ViewBuilder
     private var audioSection: some View {
         if let group = audioGroup {
             ForEach(group.options, id: \.self) { option in
@@ -3093,113 +3107,6 @@ private struct SubtitleAudioPickerView: View {
         let s = total % 60
         if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
         return String(format: "%d:%02d", m, s)
-    }
-
-    private func searchSubtitles() async {
-        guard !itemTitle.isEmpty else { return }
-        isSearchingSubtitles = true
-        defer { isSearchingSubtitles = false }
-        do {
-            let client = OpenSubtitlesClient()
-            subtitleSearchResults = try await client.searchSubtitles(query: itemTitle, year: itemYear)
-        } catch {
-            subtitleDownloadError = error.localizedDescription
-        }
-    }
-
-    private func downloadSubtitle(_ result: SubtitleResult) async {
-        do {
-            let client = OpenSubtitlesClient()
-            let localURL = try await client.downloadSubtitle(fileId: result.id)
-            let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let subtitlesDir = docsURL.appendingPathComponent("Subtitles", isDirectory: true)
-            try? FileManager.default.createDirectory(at: subtitlesDir, withIntermediateDirectories: true)
-            let destURL = subtitlesDir.appendingPathComponent("\(itemTitle).srt")
-            try? FileManager.default.removeItem(at: destURL)
-            try FileManager.default.moveItem(at: localURL, to: destURL)
-            showSubtitleDownload = false
-            // Honest message. The .srt is written to Documents/Subtitles/ and NOTHING
-            // reads it — not on restart, not ever. The old copy ("restart playback to
-            // apply") promised behaviour the app does not implement, so a user would
-            // restart, see no subtitles, and conclude playback was broken.
-            //
-            // Rendering an external SRT needs a real side-loading path (AVMutableComposition
-            // with a text track, or a custom renderer); until that exists this only saves
-            // the file. The whole feature is inert in shipping builds anyway —
-            // OpenSubtitlesAPIKey is empty, so the entry point is hidden.
-            subtitleDownloadMessage = "Subtitle file saved. Loading external subtitles into the player isn't supported yet."
-        } catch {
-            subtitleDownloadError = "Download failed: \(error.localizedDescription)"
-        }
-    }
-}
-
-// MARK: - Subtitle Download Sheet
-
-private struct SubtitleDownloadSheet: View {
-    let itemTitle: String
-    let itemYear: Int?
-    let results: [SubtitleResult]
-    let isSearching: Bool
-    let error: String?
-    let onDownload: (SubtitleResult) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if isSearching {
-                    ProgressView("Searching OpenSubtitles…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let err = error {
-                    DSContentUnavailable(
-            title: "Search Failed",
-            systemImage: "exclamationmark.triangle",
-            description: err
-          )
-                } else if results.isEmpty {
-                    DSContentUnavailable(
-            title: "No Results",
-            systemImage: "captions.bubble",
-            description: "No subtitles found for \"\(itemTitle)\""
-          )
-                } else {
-                    List(results) { result in
-                        // focus-exempt: row in the subtitle-search results List; the List grants it focus
-                        Button {
-                            onDownload(result)
-                        } label: {
-                            VStack(alignment: .leading, spacing: .dsSpaceXXS) {
-                                Text(result.fileName)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.primary)
-                                HStack(spacing: .dsSpaceSM) {
-                                    Text(result.language.uppercased())
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(Color.dsAccent)
-                                    Text("\(result.downloadCount) downloads")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            .navigationTitle("Find Subtitles")
-            #if !os(tvOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-        }
-        #if os(iOS)
-        .presentationDetents([.medium, .large])
-        #endif
     }
 }
 

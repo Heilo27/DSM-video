@@ -1558,6 +1558,8 @@ struct SettingsView: View {
   // Theme selection (Classic / Nitrate). Shared key with the app entry.
   @AppStorage("dsReel.theme") private var themeIDRaw: String = ThemeID.classic.rawValue
   var isEmbedded: Bool = false
+  /// Set when Contact Support could not open a mail composer (TASK-757). Non-nil = alert up.
+  @State private var supportMailNotice: String?
 
   // A15: confirm destructive logout. A14: confirm Change Server (returns to onboarding).
   @State private var showLogoutConfirm = false
@@ -1786,8 +1788,13 @@ struct SettingsView: View {
 
       Section("Support") {
         Button {
-          if let url = URL(string: "mailto:heiloprojects@icloud.com") {
-            openURL(url)
+          if let url = SupportContact.mailURL {
+            openURL(url) { opened in
+              Task { @MainActor in
+                supportMailNotice = SupportContact.fallbackMessage(
+                  opened: opened, copy: SupportContact.copyToClipboard)
+              }
+            }
           }
         } label: {
           Label("Contact Support", systemImage: "envelope")
@@ -1840,10 +1847,25 @@ struct SettingsView: View {
       Text("This signs you out and returns to setup so you can connect to a different server.")
     }
 
-    if isEmbedded {
-      form
-    } else {
-      NavigationStack { form }
+    let content = Group {
+      if isEmbedded {
+        // The iPad detail column is wide; a bare Form stretches its rows edge to edge, which
+        // leaves labels and their controls far apart (TASK-756). Same readable width the
+        // profile editor uses, centred in the column.
+        form
+          .frame(maxWidth: 700)
+          .frame(maxWidth: .infinity)
+          .background(Color.dsBackground.ignoresSafeArea())
+      } else {
+        NavigationStack { form }
+      }
+    }
+    content.alert("Couldn't Open Mail",
+                  isPresented: Binding(get: { supportMailNotice != nil },
+                                       set: { if !$0 { supportMailNotice = nil } })) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(supportMailNotice ?? "")
     }
   }
 }

@@ -986,6 +986,8 @@ private struct TVShowDetailScrollView: View {
   @State private var resume: ResumeTarget?
   @State private var resumeNav: ResumeTarget?
   @State private var isResolvingResume = false
+  /// The arrival scroll to the highlighted season happens once per visit, not on every reload.
+  @State private var didInitialScroll = false
 
   /// A resolved resume point: the season's full episode list plus the index to open at.
   private struct ResumeTarget: Identifiable, Hashable {
@@ -1010,7 +1012,48 @@ private struct TVShowDetailScrollView: View {
     horizontalSizeClass == .regular ? 320 : 220
   }
 
+  /// Scroll anchor for the season at `index` in `seasons`. Position-keyed, like the ForEach
+  /// below, because two merged folders can both report a "Season 1".
+  private static func seasonAnchor(_ index: Int) -> String { "season-\(index)" }
+
+  /// Keyed on position — see the tvOS branch. Two merged folders can both report a "Season 1".
+  @ViewBuilder
+  private func seasonList(proxy: ScrollViewProxy) -> some View {
+    ForEach(seasons.identified) { seasonItem in
+      let anchor = Self.seasonAnchor(seasonItem.id)
+      // FIX-2: pass allSeasons so EpisodeDetailView can navigate cross-season
+      iOSSeasonSection(show: show, season: seasonItem.value, library: library,
+                       highlightEpisodeID: highlightEpisodeID,
+                       highlightSeason: highlightSeason,
+                       allSeasons: seasons,
+                       onExpand: { scrollTo(anchor, proxy: proxy) })
+        .id(anchor)
+    }
+  }
+
+  private func scrollTo(_ anchor: String, proxy: ScrollViewProxy) {
+    withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(anchor, anchor: .top) }
+  }
+
+  /// First arrival only: the decision of WHICH season is `SeasonExpansionStore.initialScrollSeason`.
+  private func scrollToInitialSeason(_ proxy: ScrollViewProxy, seasonCount: Int) {
+    guard seasonCount > 0, !didInitialScroll else { return }
+    didInitialScroll = true
+    let numbers = seasons.map(\.seasonNumber)
+    guard let target = SeasonExpansionStore.initialScrollSeason(
+            showID: show.id, allSeasons: numbers, highlightSeason: highlightSeason),
+          let index = numbers.firstIndex(of: target) else { return }
+    Task { @MainActor in
+      // One layout pass so the anchor exists before scrolling to it.
+      try? await Task.sleep(for: .milliseconds(150))
+      scrollTo(Self.seasonAnchor(index), proxy: proxy)
+    }
+  }
+
   var body: some View {
+    // TASK-757: the highlighted / user-expanded season is opened but sat wherever the list
+    // happened to put it, so on a show with many seasons it was off-screen below the fold.
+    ScrollViewReader { proxy in
     ScrollView {
       VStack(alignment: .leading, spacing: 0) {
         showHeader
@@ -1034,21 +1077,18 @@ private struct TVShowDetailScrollView: View {
             .padding(.top, .dsSpaceXXXL)
             .frame(maxWidth: .infinity)
           } else {
-            // Keyed on position — see the tvOS branch. Two merged folders can both
-            // report a "Season 1".
-            ForEach(seasons.identified) { seasonItem in
-              let season = seasonItem.value
-              // FIX-2: pass allSeasons so EpisodeDetailView can navigate cross-season
-              iOSSeasonSection(show: show, season: season, library: library,
-                               highlightEpisodeID: highlightEpisodeID,
-                               highlightSeason: highlightSeason,
-                               allSeasons: seasons)
-            }
+            seasonList(proxy: proxy)
           }
         }
         .frame(maxWidth: horizontalSizeClass == .regular ? 720 : .infinity)
         .frame(maxWidth: .infinity, alignment: .center)
       }
+    }
+    // Once the season list arrives, bring the highlighted season (or the one the user left
+    // expanded) into view.
+    .onChange(of: seasons.count) { _, count in
+      scrollToInitialSeason(proxy, seasonCount: count)
+    }
     }
     .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle(show.title)
@@ -1285,6 +1325,8 @@ private struct iOSSeasonSection: View {
   var highlightSeason: Int? = nil
   // FIX-2: pass full seasons list so EpisodeDetailView can navigate across seasons
   var allSeasons: [TVSeason] = []
+  /// Called when the USER expands this season, so the page can scroll it into view.
+  var onExpand: (() -> Void)? = nil
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
@@ -1294,13 +1336,14 @@ private struct iOSSeasonSection: View {
 
   init(show: TVShow, season: TVSeason, library: Library,
        highlightEpisodeID: String? = nil, highlightSeason: Int? = nil,
-       allSeasons: [TVSeason] = []) {
+       allSeasons: [TVSeason] = [], onExpand: (() -> Void)? = nil) {
     self.show = show
     self.season = season
     self.library = library
     self.highlightEpisodeID = highlightEpisodeID
     self.highlightSeason = highlightSeason
     self.allSeasons = allSeasons
+    self.onExpand = onExpand
     // Same shared rule as the tvOS section — see SeasonExpansionStore.
     //
     // This initialiser previously read `highlightSeason == nil || highlightSeason ==
@@ -1319,6 +1362,7 @@ private struct iOSSeasonSection: View {
     VStack(alignment: .leading, spacing: 0) {
       Button {
         withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+        if isExpanded { onExpand?() }
         // Persist the choice. An expansion the user made explicitly should outlive the
         // screen — previously every visit re-derived it, so watching season 6 meant
         // collapsing 1-5 and expanding 6 again on every single visit.
