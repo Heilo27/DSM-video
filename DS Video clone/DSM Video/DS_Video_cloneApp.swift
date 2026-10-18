@@ -136,6 +136,8 @@ struct DS_Video_cloneApp: App {
                     // Downloads that finished in a background relaunch, before these providers
                     // existed, left sessions to release and posters to fetch (TASK-994).
                     DownloadManager.shared.flushDeferredWork()
+                    // A local store that could not open is named at launch (TASK-1012).
+                    await state.checkLocalStoreHealth()
                 }
                 .onChange(of: themeIDRaw) { _, _ in
                     ThemeHolder.shared.current = activeTheme

@@ -122,3 +122,39 @@ struct TransientNoticeBanner: View {
     }
   }
 }
+
+/// This device's local store could not open, so watch history is not kept here (TASK-1012,
+/// FR-015). Shown for as long as that lasts; there is nothing to tap, so it never takes focus
+/// on tvOS. The text is LocalStore.unavailableReason, passed through AppState.
+struct LocalStoreBanner: View {
+  let message: String?
+
+  var body: some View {
+    ZStack {
+      if let message {
+        Label(message, systemImage: "externaldrive.badge.exclamationmark")
+          #if os(tvOS)
+          .font(.callout.weight(.semibold))
+          .padding(.horizontal, 24)
+          .padding(.vertical, 12)
+          .background(Capsule().fill(Color(white: 0.2)))
+          #else
+          .font(.footnote.weight(.semibold))
+          .padding(.horizontal, 16)
+          .padding(.vertical, 8)
+          .frame(maxWidth: .infinity)
+          .background(Color(white: 0.15))
+          #endif
+          .foregroundStyle(.white)
+          .multilineTextAlignment(.center)
+          .transition(.opacity)
+          .accessibilityElement(children: .combine)
+          .accessibilityIdentifier(A11y.Shared.localStoreBanner)
+          .onAppear { AccessibilityNotification.Announcement(message).post() }
+      }
+    }
+    .focusable(false)
+    .allowsHitTesting(false)
+    .animation(.easeInOut(duration: 0.3), value: message)
+  }
+}

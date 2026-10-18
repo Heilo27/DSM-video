@@ -138,11 +138,14 @@ actor LocalStore {
     setupFailure != nil || db == nil
   }
 
-  /// Human-readable reason the store is unavailable, for a user-facing banner.
+  /// Human-readable reason the store is unavailable, for LocalStoreBanner (TASK-1012).
+  ///
+  /// It must not promise a later sync: with no store there is no outbox, so a position the
+  /// NAS does not receive at once is gone (FR-005, FR-015).
   var unavailableReason: String? {
     guard isUnavailable else { return nil }
     return "Your watch history can't be saved on this device right now. Playback still works, "
-      + "and positions you set will sync to the server when it's reachable."
+      + "but where you stop is saved only while your NAS is reachable."
   }
 
   /// What to tell the user after a corruption recovery, or nil if none happened.

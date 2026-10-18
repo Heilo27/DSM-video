@@ -244,8 +244,9 @@ final class AppState {
   private var enteredBackgroundAt: Date?
 
   /// Set when the on-disk store could not be opened, so local persistence is dead and the
-  /// server write is the only copy of a watch position. Surfaced as a banner; nil when healthy.
-  var localStoreUnavailableMessage: String?
+  /// server write is the only copy of a watch position. Shown by LocalStoreBanner on iOS and
+  /// tvOS (FR-015, TASK-1012); nil when healthy. Only checkLocalStoreHealth() assigns it.
+  private(set) var localStoreUnavailableMessage: String?
   /// Warn once per launch, not once per progress tick.
   private var hasWarnedStoreUnavailable = false
   // FIX-16: Guard flag so concurrent reconnect() calls don't race.
@@ -2882,6 +2883,14 @@ final class AppState {
     applyRails(rails, startedAt: generation)
   }
 
+  /// Reads whether this device's local store opened, once its startup has finished, and
+  /// sets the banner message from it (TASK-1012). Called at launch, so a store that could not
+  /// open is reported before anything is played, not only after the first lost position.
+  func checkLocalStoreHealth() async {
+    await localStore.ensureReady()
+    localStoreUnavailableMessage = await localStore.unavailableReason
+  }
+
   /// Optimistic progress write: update the local store immediately (durability), mark it
   /// pending, then attempt the network write. On failure the row STAYS pending and is
   /// retried by `flushPendingProgress()`.
@@ -2921,7 +2930,7 @@ final class AppState {
     // state once rather than letting positions vanish while the UI looks healthy.
     if await localStore.isUnavailable, !hasWarnedStoreUnavailable {
       hasWarnedStoreUnavailable = true
-      localStoreUnavailableMessage = await localStore.unavailableReason
+      await checkLocalStoreHealth()
       homeLog.error("recordProgress: LocalStore unavailable — progress depends on the server write alone")
     }
 

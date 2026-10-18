@@ -117,6 +117,11 @@ so a wrong clock cannot pin a position forever. A device whose save loses re-fet
 stands, so it never keeps showing its own stale one.
 **FR-015 [INFERRED]** — A position recorded while the server is unreachable is retained locally and
 reconciled to the server when connectivity returns; it is never discarded.
+*Clarified 2026-10-18 (TASK-1012):* when this device cannot open its local store, nothing can be kept
+locally, so this promise cannot hold and the user is told (FR-005). From launch, and for as long as it
+lasts, a banner on iPhone, iPad and Apple TV says watch history can't be saved on this device and that
+where you stop is saved only while the NAS is reachable. It never promises a later sync. A store that
+opens shows no banner.
 **FR-016 [STATED]** — Continue Watching contains exactly the titles with progress strictly between zero
 and complete, ordered most-recently-watched first. *Derivation:* design-spec B2 data requirements.
 **Complete [DESIGN, 2026-10-17, TASK-962]** — "Complete" means one thing everywhere: the position is above

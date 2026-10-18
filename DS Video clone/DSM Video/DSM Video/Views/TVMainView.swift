@@ -42,9 +42,13 @@ struct TVMainView: View {
           // so it stays visible over pushed detail screens; top-centre sits in the header's
           // open space. Clears with the flags, so reconnecting needs no re-sign-in.
           .overlay(alignment: .top) {
-            ConnectionIndicator(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable,
-                                localNetworkDenied: appState.localNetworkDenied)
-              .padding(.top, 40)
+            VStack(spacing: 16) {
+              ConnectionIndicator(isOffline: appState.isOffline, serverUnreachable: appState.serverUnreachable,
+                                  localNetworkDenied: appState.localNetworkDenied)
+              // Watch history cannot be kept on this device (TASK-1012, FR-015).
+              LocalStoreBanner(message: appState.localStoreUnavailableMessage)
+            }
+            .padding(.top, 40)
           }
       }
     }
