@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"dsvideo/backend/internal/metadata"
 	"dsvideo/backend/internal/sqltx"
@@ -24,7 +25,8 @@ import (
 // shares the show's id and the show's cast. It uses the same pacing knob as the content-rating
 // backfill (contentRatingBackfillPace), holds a metaSemaphore slot per request like every
 // other TMDb caller, and stands down while a scan runs. It is resumable with no state of its
-// own: a title leaves the queue when it has item_cast rows.
+// own: a title leaves the queue when it has item_cast rows, or when TMDb has told us it has no
+// billed cast (cast_backfill_empty), so a cast-less title is asked about once, not every run.
 
 // castUnit is one TMDb lookup's worth of work: a movie, or one show covering all its episodes.
 type castUnit struct {
@@ -53,6 +55,7 @@ func (s *Server) pendingCastUnits(ctx context.Context) ([]castUnit, error) {
 		FROM items i
 		WHERE tmdb_id IS NOT NULL AND tmdb_id > 0
 		  AND NOT EXISTS (SELECT 1 FROM item_cast c WHERE c.item_id = i.id)
+		  AND NOT EXISTS (SELECT 1 FROM cast_backfill_empty e WHERE e.kind = `+itemKindSQL+` AND e.tmdb_id = i.tmdb_id)
 		GROUP BY kind, tmdb_id
 		ORDER BY kind, tmdb_id`)
 	if err != nil {
@@ -143,6 +146,15 @@ func (s *Server) storeCastChunk(ctx context.Context, ids []string, members []met
 	return nil
 }
 
+// markCastEmpty records that TMDb has no usable cast for u, so pendingCastUnits stops
+// re-queueing it. A failure only means it is asked about again next run.
+func (s *Server) markCastEmpty(ctx context.Context, u castUnit) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO cast_backfill_empty(kind, tmdb_id, checked_at) VALUES (?,?,?)`,
+		u.kind, u.tmdbID, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
 // runCastBackfill works through units one paced TMDb request at a time. A failed lookup is
 // logged and skipped (it stays queued for the next run), so one bad title cannot hold up the
 // rest. It stops early, with the counts so far, when ctx ends.
@@ -165,8 +177,11 @@ func (s *Server) runCastBackfill(ctx context.Context, client *metadata.TMDbClien
 		if err != nil {
 			res.Failed++
 			log.Printf("cast backfill: %s %d: %v", u.kind, u.tmdbID, err)
-		} else if len(members) == 0 {
+		} else if len(storableCast(members)) == 0 {
 			res.NoCast++
+			if merr := s.markCastEmpty(ctx, u); merr != nil {
+				log.Printf("cast backfill: %s %d: remember empty cast: %v", u.kind, u.tmdbID, merr)
+			}
 		} else if n, serr := s.storeCastFor(ctx, u, members); serr != nil {
 			res.Failed++
 			res.ItemsFilled += n

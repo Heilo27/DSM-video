@@ -277,7 +277,8 @@ Set in `start-stop-status` or via DSM config:
 | DSVIDEO_FFPROBE_PATH | (auto-detect) | Path to ffprobe binary |
 | DSVIDEO_TRANSCODE_DIR | var/transcode | HLS output directory |
 | DSVIDEO_TMDB_API_KEY | (none) | TMDb API key for metadata |
-| DSVIDEO_IMAGE_CACHE_DIR | var/images | Poster image cache |
+| DSVIDEO_IMAGE_CACHE_DIR | var/images | Poster, backdrop and cast-photo image cache |
+| DSVIDEO_IMAGE_CACHE_MAX_MB | 1024 | Size cap for the image cache, in MB. Over the cap, the least recently used images are evicted down to 90% of it; images fetched in the last 2 minutes are never evicted. `0` = unlimited. Empty, negative or unparseable = default. |
 
 ---
 

@@ -165,7 +165,11 @@ Response (movie example):
   "summary": null,
   "genres": [],
   "cast": [
-    { "id": "p_1", "name": "Actor Name", "role": "Role", "imageId": "img_actor_1" }
+    { "name": "Keanu Reeves" }
+  ],
+  "castMembers": [
+    { "personId": 6384, "name": "Keanu Reeves", "character": "Neo", "imageId": "cast-6384" },
+    { "personId": 530, "name": "Actor Without Photo", "character": null, "imageId": null }
   ],
   "images": {
     "poster": { "id": "img_p_1" },
@@ -180,6 +184,22 @@ populated for new scans and, over time, for existing libraries by a paced backgr
 `null` means **unrated**: TMDb has no US certification for the title, or it is a placeholder such
 as `NR`, `Not Rated` or `Unrated`. A `null` can also mean the backfill has not reached that
 title yet; clients should treat both as "no rating known" and must not infer an age level from it.
+
+`castMembers` (FR-150) is the cast in billing order. It is always present and is `[]` when the
+title has no cast; it is never `null`. Each entry has exactly these four keys:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `personId` | integer or `null` | TMDb person id. `null` only for names the server has not yet filled in. |
+| `name` | string | The actor's name. Never empty. |
+| `character` | string or `null` | The role played. `null` when unknown. |
+| `imageId` | string or `null` | `"cast-<personId>"` when the actor has a photo, else `null`. |
+
+`imageId` is passed straight to `GET /images/{id}` (below). `null` means "show the placeholder", and
+the client must not request a photo for it. Titles not yet filled in by the cast backfill return their
+old names as entries with `personId`, `character` and `imageId` all `null`, so a client shows names
+now and photos once the backfill has reached the title. The older `cast` array (names only) is kept for
+older clients and is unchanged.
 
 ### GET `/search`
 Query:
@@ -198,6 +218,21 @@ Query:
 - `fit` (optional): `cover` | `contain`
 
 Response: `image/*` bytes (with cache headers).
+
+**Cast photos.** An id of the form `cast-<tmdbPersonId>` (the `imageId` of a `castMembers` entry)
+returns that actor's photo at 185 px wide, as `image/jpeg` (or the type TMDb supplied), with
+`Cache-Control: public, max-age=604800`. `w`, `h` and `fit` are ignored for these ids. The image is
+fetched from TMDb on first request and kept in the server's image cache (capped by
+`DSVIDEO_IMAGE_CACHE_MAX_MB`, default 1024; `0` = unlimited). Errors:
+
+| Status | `error` | Cause |
+|--------|---------|-------|
+| 404 | `no_image_available` | The server knows no photo for that person. |
+| 404 | `image_not_found` | A malformed id (`cast-0`, `cast-abc`), or the photo could not be fetched. |
+| 503 | `image_cache_unavailable` | The server has no image cache configured. |
+| 500 | `db_error` | The server could not read its database. |
+
+Example: `GET /api/v1/images/cast-6384` returns the photo of person 6384.
 
 ## Playback
 
@@ -358,6 +393,25 @@ Response includes:
 
 ### POST `/admin/scan`
 Trigger a library re-scan (requires auth).
+
+### POST `/admin/metadata/refresh?scope=`
+Admin only. `scope=broken` (default) and `scope=all` clear the metadata fetched marker so the next
+scan re-queries TMDb; any other value is `400 invalid_scope`.
+
+`scope=cast` (FR-150) fills in cast photos and characters for titles scanned before they existed. It
+reads each title's stored TMDb id (it never re-matches by title), asks TMDb once per distinct show or
+movie, writes only the cast, and runs in the background at a gentle pace.
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 202 | `{"scope":"cast","started":true,"queued":N,"items":M}` | Started. `queued` TMDb lookups covering `items` library items. |
+| 202 | `{"scope":"cast","started":false,"reason":"cast_backfill_already_running"}` | A run is already in progress. |
+| 200 | `{"scope":"cast","started":false,"reason":"nothing_to_backfill","queued":0,"items":0}` | Every title already has cast, has no TMDb id, or was checked and has no cast listed. |
+| 400 | `{"error":"tmdb_not_configured"}` | No TMDb API key on the server. |
+| 403 | | Caller is not the administrator. |
+
+Safe to run repeatedly. Titles whose TMDb lookup failed stay queued for the next run; titles TMDb lists
+no usable cast for are remembered and not asked about again.
 
 ## Route inventory (generated)
 

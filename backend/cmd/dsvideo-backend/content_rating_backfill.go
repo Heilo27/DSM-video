@@ -438,18 +438,29 @@ func replaceItemCast(ctx context.Context, tx *sql.Tx, itemID string, members []m
 	if _, err := tx.ExecContext(ctx, `DELETE FROM item_cast WHERE item_id = ?`, itemID); err != nil {
 		return fmt.Errorf("clear cast: %w", err)
 	}
-	ordinal := 0
-	for _, m := range members {
-		name := strings.TrimSpace(m.Name)
-		if m.ID <= 0 || name == "" {
-			continue
-		}
+	for ordinal, m := range storableCast(members) {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO item_cast(item_id, ordinal, tmdb_person_id, name, character, profile_path) VALUES (?,?,?,?,?,?)`,
-			itemID, ordinal, m.ID, name, strings.TrimSpace(m.Character), strings.TrimSpace(m.ProfilePath)); err != nil {
+			itemID, ordinal, m.ID, m.Name, m.Character, m.ProfilePath); err != nil {
 			return fmt.Errorf("insert cast %d: %w", m.ID, err)
 		}
-		ordinal++
 	}
 	return nil
+}
+
+// storableCast is the members replaceItemCast would keep: positive person id and a name, text
+// trimmed, billing order preserved. The backfill uses it to tell "TMDb has no usable cast"
+// from "has cast".
+func storableCast(members []metadata.CastMember) []metadata.CastMember {
+	out := make([]metadata.CastMember, 0, len(members))
+	for _, m := range members {
+		m.Name = strings.TrimSpace(m.Name)
+		if m.ID <= 0 || m.Name == "" {
+			continue
+		}
+		m.Character = strings.TrimSpace(m.Character)
+		m.ProfilePath = strings.TrimSpace(m.ProfilePath)
+		out = append(out, m)
+	}
+	return out
 }

@@ -612,6 +612,28 @@ through third-party servers. Credentials are not transmitted in cleartext over a
 when a secure path was available.
 *Derivation:* "PRIVATE BY DESIGN" (stated); the cleartext clause is inferred from it.
 **FR-124 [INFERRED]** — Signing out on one device does not sign out another.
+**FR-150 [DESIGN, 2026-10-18, TASK-747]** — *A title's cast shows their photos, and the server remembers who they are.*
+On a title's detail page the cast list shows each actor's name, the character they play when it is known,
+and their photo. An actor without a photo shows their name with a plain placeholder, never a broken image.
+The server keeps each title's cast as an ordered list in billing order, taken from the same TMDb lookup
+that supplies the rest of the title's details, so a re-scan or a metadata fix replaces the list rather than
+adding to it. Cast from a title that is removed from the library is removed with it.
+*Existing libraries:* titles scanned before this change have names only. An administrator can ask the server
+to fill in the photos and characters for them (`POST /admin/metadata/refresh?scope=cast`). That run reads
+each title's own TMDb record, never searches by title again, so a title whose match was fixed by hand keeps
+its match. It asks TMDb once per show or movie, not once per episode, goes slowly so it never competes with
+playback or a scan, can be run again at any time, and changes nothing but the cast. A title for which TMDb
+lists no usable cast is checked once and then left alone, so repeat runs do not keep asking about it; a
+lookup that fails is retried on the next run. Until a title is filled in, its detail page shows the names it
+already had, without photos.
+*Photos:* a photo is fetched from TMDb by the server the first time someone views it and kept in the image
+cache, so the app never contacts anyone but the user's own NAS (S4, A2). The cache has a size limit so
+photos cannot fill the NAS disk: 1 GB by default, set with `DSVIDEO_IMAGE_CACHE_MAX_MB` (`0` means no
+limit). When the cache is over its limit the least recently viewed images are removed first, down to 90% of
+the limit, and an image fetched in the last two minutes is never removed. A removed image is simply fetched
+again when next viewed.
+*Derivation:* P1 (the cast list shows who is actually in the film, not just names). Ryan, 2026-10-18: show
+cast photos on the detail page. [TASK-747]
 **FR-149 [DESIGN, 2026-10-18, TASK-1055]** — *The app suggests updating a server that is older than the app
 expects.* Each app release names the newest server it is built for (the "recommended" server version, in
 the server package's `MAJOR.MINOR.PATCH-BUILD` form, e.g. 0.3.9-0002). After sign-in, and again each time

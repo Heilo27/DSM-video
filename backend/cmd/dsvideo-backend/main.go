@@ -1687,6 +1687,16 @@ CREATE TABLE IF NOT EXISTS item_cast (
   PRIMARY KEY (item_id, ordinal)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_item_cast_person ON item_cast(tmdb_person_id);
+
+-- The cast backfill's "TMDb answered, and has no billed cast for this title" memory, so such a
+-- title is asked about once, not on every run. Keyed by the TMDb lookup (kind + id), not by
+-- item, because every episode of a show shares one lookup.
+CREATE TABLE IF NOT EXISTS cast_backfill_empty (
+  kind       TEXT NOT NULL,
+  tmdb_id    INTEGER NOT NULL,
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY (kind, tmdb_id)
+) WITHOUT ROWID;
 `)
 	if err != nil {
 		return fmt.Errorf("create item_cast: %w", err)
@@ -7664,6 +7674,12 @@ func (s *Server) handleAdminScan(w http.ResponseWriter, r *http.Request) {
 // or a dangling "(" from a title sliced mid-parenthetical) or that have no artwork at all.
 // Rows that look correct today are left alone so they cannot regress. Pass scope=all to
 // re-query everything, which is slower and risks changing entries that are currently right.
+//
+// scope=cast (FR-150) is a different operation: it does not clear metadata_fetched_at or
+// re-match anything. It fills item_cast (cast photos and characters) for titles scanned before
+// the table existed, by each title's stored tmdb_id, one TMDb request per distinct show or movie,
+// in the background (cast_backfill.go). Responses: 202 started, 202 already running, 200
+// nothing_to_backfill, 400 tmdb_not_configured.
 //
 // Admin-only: a full re-query hits the TMDb API once per item and is rate-limited upstream.
 func (s *Server) handleAdminMetadataRefresh(w http.ResponseWriter, r *http.Request) {
