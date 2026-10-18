@@ -19,6 +19,10 @@ struct ItemDetailView: View {
 
   @State private var detail: ItemDetail?
 
+  /// The More Like This shelf's titles (FR-151). Empty means the shelf is not drawn at all: that
+  /// is the state before the request finishes, after an empty answer, and after any failure.
+  @State private var similar: [ItemSummary] = []
+
   /// The name this screen shows for the item, in one place.
   ///
   /// `shownTitle` was written out at seventeen call sites, so teaching
@@ -44,6 +48,9 @@ struct ItemDetailView: View {
   @State private var viewHeight: CGFloat = 852  // sensible default (iPhone 15 Pro)
   #if os(tvOS)
   @Namespace private var actionNamespace
+  /// Which More Like This poster has focus. Every poster the shelf draws is bound to its index
+  /// (the check_focus rule: a rendered tvOS cell the remote cannot reach is a bug).
+  @FocusState private var focusedSimilar: Int?
   #endif
 
   /// A download THIS profile may play (FR-262). A title above the active profile's ceiling
@@ -131,6 +138,7 @@ struct ItemDetailView: View {
     tvBody
       .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
+      .task(id: itemID) { await loadSimilar() }
       .onAppear {
         if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
@@ -189,6 +197,7 @@ struct ItemDetailView: View {
         activity.userInfo = [SpotlightPolicy.activityItemIDKey: itemID]
         activity.requiredUserInfoKeys = [SpotlightPolicy.activityItemIDKey]
       }
+      .task(id: itemID) { await loadSimilar() }
       .onAppear {
         if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
@@ -259,39 +268,51 @@ struct ItemDetailView: View {
   #if os(tvOS)
   private var tvBody: some View {
     GeometryReader { geo in
-      ZStack(alignment: .bottom) {
-        // Image fills the full geometry frame. Black is deliberate: it sits behind the
-        // backdrop artwork like a letterbox, not as a themed ground.
-        Color.black
-        backdropImage
-          .scaledToFill()
-          .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
-          .clipped()
-
-        // Panel anchored to bottom — capped so hero image always dominates the top
-        contentPanel
-          .background(.ultraThinMaterial)
-          .clipShape(RoundedRectangle(cornerRadius: theme.radiusLg, style: .continuous))
-          // Fade the very top edge of the panel into the hero image
-          .mask(
-            LinearGradient(
-              stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .black, location: 0.03)
-              ],
-              startPoint: .top,
-              endPoint: .bottom
-            )
-          )
-          .frame(width: geo.size.width, alignment: .bottom)
-          .frame(maxHeight: geo.size.height * 0.52, alignment: .bottom)
-          .clipped()
-          .padding(.bottom, .dsSpaceXL)
+      // The hero is exactly one screen tall; More Like This (FR-151) sits below it and the
+      // remote scrolls down to it by focus. When the shelf is hidden the stack is one screen
+      // tall, so there is nothing to scroll and the page looks as it did before the shelf.
+      ScrollView(showsIndicators: false) {
+        VStack(spacing: 0) {
+          tvHero(geo)
+          moreLikeThisShelf
+        }
       }
-      .frame(width: geo.size.width, height: geo.size.height)
     }
     .ignoresSafeArea(edges: .all)
     .privacySensitive()
+  }
+
+  private func tvHero(_ geo: GeometryProxy) -> some View {
+    ZStack(alignment: .bottom) {
+      // Image fills the full geometry frame. Black is deliberate: it sits behind the
+      // backdrop artwork like a letterbox, not as a themed ground.
+      Color.black
+      backdropImage
+        .scaledToFill()
+        .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+        .clipped()
+
+      // Panel anchored to bottom — capped so hero image always dominates the top
+      contentPanel
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radiusLg, style: .continuous))
+        // Fade the very top edge of the panel into the hero image
+        .mask(
+          LinearGradient(
+            stops: [
+              .init(color: .clear, location: 0),
+              .init(color: .black, location: 0.03)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+          )
+        )
+        .frame(width: geo.size.width, alignment: .bottom)
+        .frame(maxHeight: geo.size.height * 0.52, alignment: .bottom)
+        .clipped()
+        .padding(.bottom, .dsSpaceXL)
+    }
+    .frame(width: geo.size.width, height: geo.size.height)
   }
   #endif
 
@@ -745,9 +766,15 @@ struct ItemDetailView: View {
               #endif
           }
 
-          if let cast = detail?.cast, !cast.isEmpty {
+          if let cast = detail?.castList, !cast.isEmpty {
             castSection(cast: cast)
           }
+
+          #if !os(tvOS)
+          // iOS: the shelf is the last thing in the scrolling panel. On tvOS the panel is
+          // height-capped and clipped, so the shelf sits below the hero instead (tvBody).
+          moreLikeThisShelf
+          #endif
 
           #if !os(tvOS)
           Spacer(minLength: 32)
@@ -1136,17 +1163,21 @@ struct ItemDetailView: View {
     let nameFont: Font = .system(size: 22, weight: .medium)
     let roleFont: Font = .system(size: 18)
     let cellWidth: CGFloat = 150
+    let initialsFont: Font = .system(size: 40, weight: .semibold)
     #else
     let avatarSize: CGFloat = 64
     let nameFont: Font = .caption.weight(.medium)
     let roleFont: Font = .caption2
     let cellWidth: CGFloat = 84
+    let initialsFont: Font = .title3.weight(.semibold)
     #endif
     VStack(spacing: 6) {
       Group {
-        // 64pt avatar → 192px at 3x, which lands on the server's 342 rung.
-        if let imageId = person.imageId,
-           let url = appState.api.imageURL(id: imageId, width: 342, version: detail?.changeSeq) {
+        // A person with a photo id gets one request; a person without one gets none, only
+        // initials (FR-150). The server serves cast photos at one size (w185, about 3x of a
+        // 64pt avatar), so the width asked for here only names the cache entry.
+        if showsCastPhotos, let imageId = person.photoImageID,
+           let url = appState.api.imageURL(id: imageId, width: 185, version: detail?.changeSeq) {
           AuthenticatedImage(
             url: url,
             token: appState.sessionToken,
@@ -1155,11 +1186,18 @@ struct ItemDetailView: View {
           .scaledToFill()
         } else {
           Color.dsSurfaceHigh
-            .overlay(
-              Image(systemName: "person.fill")
-                .font(.title2)
-                .foregroundStyle(.white.opacity(0.4))
-            )
+            .overlay {
+              if person.initials.isEmpty {
+                Image(systemName: "person.fill")
+                  .font(.title2)
+                  .foregroundStyle(.white.opacity(0.4))
+              } else {
+                Text(person.initials)
+                  .font(initialsFont)
+                  .foregroundStyle(Color.dsTextSecondary)
+                  .accessibilityHidden(true)
+              }
+            }
         }
       }
       .frame(width: avatarSize, height: avatarSize)
@@ -1180,6 +1218,65 @@ struct ItemDetailView: View {
     .frame(width: cellWidth)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(person.role.flatMap { $0.isEmpty ? nil : "\(person.name), \($0)" } ?? person.name)
+  }
+
+  /// Photos are requested only against a server we can reach. Demo mode and an unreachable
+  /// server show the names with initials, the same as a person who has no photo.
+  private var showsCastPhotos: Bool { !appState.isDemoMode && !appState.isServerUnavailable }
+
+  // MARK: - More Like This
+
+  #if os(tvOS)
+  private let similarCellWidth: CGFloat = 220
+  #else
+  private let similarCellWidth: CGFloat = 110
+  #endif
+
+  /// More Like This (FR-151): a row of posters under the cast. Not drawn at all while `similar`
+  /// is empty, so a title with no matches, a restricted title and a failed request all leave the
+  /// page exactly as it was.
+  @ViewBuilder
+  private var moreLikeThisShelf: some View {
+    if !similar.isEmpty {
+      VStack(alignment: .leading, spacing: 10) {
+        Text("More Like This")
+          #if os(tvOS)
+          .font(.dsTVSectionTitle)
+          .padding(.horizontal, .dsSpaceTitleSafe)
+          #else
+          .font(.headline)
+          #endif
+          .foregroundStyle(.white)
+          .accessibilityAddTraits(.isHeader)
+
+        ScrollView(.horizontal, showsIndicators: false) {
+          LazyHStack(alignment: .top, spacing: .dsSpaceMD) {
+            ForEach(Array(similar.enumerated()), id: \.offset) { index, item in
+              ItemSummaryLink(item: item)
+                .frame(width: similarCellWidth)
+                #if os(tvOS)
+                .focused($focusedSimilar, equals: index)
+                #endif
+            }
+          }
+          #if os(tvOS)
+          .padding(.horizontal, .dsSpaceTitleSafe)
+          .padding(.vertical, .dsSpaceLG)
+          .focusSection()
+          #else
+          .padding(.vertical, .dsSpaceXXS)
+          #endif
+        }
+      }
+      #if os(tvOS)
+      .padding(.top, .dsSpaceXL)
+      .padding(.bottom, .dsSpaceXXL)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Color.dsBackground)
+      #else
+      .frame(maxWidth: .infinity, alignment: .leading)
+      #endif
+    }
   }
 
   // MARK: - Data
@@ -1210,6 +1307,33 @@ struct ItemDetailView: View {
       // load anything.
       appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Unknown error."
+    }
+  }
+
+  /// Loads the More Like This shelf for this title (FR-151). Optional by design: nothing is
+  /// requested in demo mode or while the server is unreachable, and every failure leaves the
+  /// shelf hidden. Only failures the server does not give on purpose (see
+  /// MoreLikeThis.isExpectedHide) are logged.
+  private func loadSimilar() async {
+    similar = []
+    guard !appState.isDemoMode, !appState.isServerUnavailable else { return }
+    let result: Result<ItemsResponse, Error>
+    do {
+      result = .success(try await appState.api.similar(id: itemID))
+    } catch {
+      result = .failure(error)
+    }
+    // The task is keyed on itemID: if the page moved on while this was in flight, its answer
+    // belongs to a title no longer shown.
+    guard !Task.isCancelled else { return }
+    switch MoreLikeThis.outcome(result) {
+    case .shelf(let items):
+      similar = items
+    case .hidden:
+      similar = []
+      if case .failure(let error) = result, !MoreLikeThis.isExpectedHide(error) {
+        dlog.warn(.network, "more like this for \(itemID) hidden — \(error.localizedDescription)")
+      }
     }
   }
 

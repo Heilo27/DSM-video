@@ -318,36 +318,8 @@ struct CollectionGridView: View {
     .task(id: collection.id) { await loadFirstPage() }
   }
 
-  @ViewBuilder private func cell(_ item: ItemSummary) -> some View {
-    // A show is one entry: an episode row whose showName names the show. It opens the show,
-    // the same way the Just Added rail opens one.
-    if item.type == "episode", let showName = item.showName, !showName.isEmpty,
-       let tvLibrary = appState.homeLibraries.first(where: { $0.id == item.libraryId })
-        ?? appState.homeFirstTVLibrary {
-      NavigationLink {
-        TVShowDetailView(
-          show: TVShow(id: item.showFolderId ?? showName, title: showName, year: item.year,
-                       seasonCount: nil, episodeCount: nil, posterImageId: item.posterImageId,
-                       lastWatchedAt: nil, addedAt: nil),
-          library: tvLibrary)
-      } label: {
-        ItemPosterCell(item: item)
-      }
-      .cellStyle()
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel(showName + (item.year.map { ", \($0)" } ?? ""))
-      .accessibilityHint("Opens TV show")
-    } else {
-      NavigationLink {
-        ItemDetailView(itemID: item.id, fallbackTitle: item.title)
-      } label: {
-        ItemPosterCell(item: item)
-      }
-      .cellStyle()
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel(item.title + (item.year.map { ", \($0)" } ?? ""))
-      .accessibilityHint("Opens video details")
-    }
+  private func cell(_ item: ItemSummary) -> some View {
+    ItemSummaryLink(item: item)
   }
 
   private func loadFirstPage() async {
@@ -394,15 +366,4 @@ struct CollectionGridView: View {
   private var gridSpacing: CGFloat { 12 }
   private var gridPadding: CGFloat { 12 }
   #endif
-}
-
-private extension View {
-  /// The grid cell style each platform's library grid already uses.
-  @ViewBuilder func cellStyle() -> some View {
-    #if os(tvOS)
-    self.buttonStyle(.card)
-    #else
-    self.dsPressable()
-    #endif
-  }
 }

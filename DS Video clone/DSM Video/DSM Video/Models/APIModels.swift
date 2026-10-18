@@ -213,6 +213,47 @@ struct ItemDetail: Decodable, Identifiable {
     let name: String
     let role: String?
     let imageId: String?
+
+    /// The image id to request for this person's photo, or nil when there is no photo and NO
+    /// request may be made (FR-150). A blank id counts as none.
+    var photoImageID: String? {
+      guard let imageId, !imageId.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+      return imageId
+    }
+
+    /// Up to two capital letters for the placeholder shown where there is no photo: the first
+    /// letters of the first and last words of the name. Empty when the name has no letters.
+    var initials: String {
+      let words = name.split(whereSeparator: { $0.isWhitespace })
+      guard let first = words.first else { return "" }
+      let ends = words.count > 1 ? [first, words[words.count - 1]] : [first]
+      return String(ends.compactMap { $0.first(where: { $0.isLetter || $0.isNumber }) }).uppercased()
+    }
+  }
+
+  /// One entry of the detail response's `castMembers` array (FR-150): billing order, with the
+  /// person's TMDb id, the character played and the photo's image id (`cast-<personId>`, null
+  /// when TMDb has no photo). Decoding is tolerant: a malformed entry must never stop the whole
+  /// title from opening over a cast photo (the TASK-783 rule).
+  struct CastMember: Decodable, Hashable, Sendable {
+    let personId: Int?
+    let name: String
+    let character: String?
+    let imageId: String?
+
+    private enum CodingKeys: String, CodingKey { case personId, name, character, imageId }
+
+    init(personId: Int? = nil, name: String, character: String? = nil, imageId: String? = nil) {
+      self.personId = personId; self.name = name; self.character = character; self.imageId = imageId
+    }
+
+    init(from decoder: Decoder) throws {
+      let c = try decoder.container(keyedBy: CodingKeys.self)
+      personId = (try? c.decodeIfPresent(Int.self, forKey: .personId)) ?? nil
+      name = ((try? c.decodeIfPresent(String.self, forKey: .name)) ?? nil) ?? ""
+      character = (try? c.decodeIfPresent(String.self, forKey: .character)) ?? nil
+      imageId = (try? c.decodeIfPresent(String.self, forKey: .imageId)) ?? nil
+    }
   }
 
   struct Images: Decodable {
@@ -246,6 +287,8 @@ struct ItemDetail: Decodable, Identifiable {
   let summary: String?
   let genres: [String]?
   let cast: [Person]?
+  /// FR-150. nil from an older server that does not send it.
+  let castMembers: [CastMember]?
   // TASK-783: optional so an item whose server response omits the `images`
   // envelope (freshly-scanned / not-yet-TMDb-matched item, or an older server)
   // still decodes and opens — the detail view falls back to placeholder art.
@@ -278,7 +321,8 @@ struct ItemDetail: Decodable, Identifiable {
   init(id: String, type: String, title: String, originalTitle: String? = nil,
        year: Int? = nil, durationSeconds: Int? = nil, contentRating: String? = nil,
        rating: Double? = nil, summary: String? = nil, genres: [String]? = nil,
-       cast: [Person]? = nil, images: Images? = nil, changeSeq: Int? = nil,
+       cast: [Person]? = nil, castMembers: [CastMember]? = nil,
+       images: Images? = nil, changeSeq: Int? = nil,
        videoCodec: String? = nil, audioCodec: String? = nil, container: String? = nil,
        width: Int? = nil, height: Int? = nil, audioChannels: Int? = nil,
        showName: String? = nil, seasonNumber: Int? = nil, episodeNumber: Int? = nil,
@@ -287,11 +331,26 @@ struct ItemDetail: Decodable, Identifiable {
     self.id = id; self.type = type; self.title = title; self.originalTitle = originalTitle
     self.year = year; self.durationSeconds = durationSeconds; self.contentRating = contentRating
     self.rating = rating; self.summary = summary; self.genres = genres
-    self.cast = cast; self.images = images; self.changeSeq = changeSeq
+    self.cast = cast; self.castMembers = castMembers
+    self.images = images; self.changeSeq = changeSeq
     self.videoCodec = videoCodec; self.audioCodec = audioCodec; self.container = container
     self.width = width; self.height = height; self.audioChannels = audioChannels
     self.showName = showName; self.seasonNumber = seasonNumber
     self.episodeNumber = episodeNumber; self.episodeTitle = episodeTitle
+  }
+
+  /// The people to show in Cast & Crew (FR-150): `castMembers` when the server sent any, else the
+  /// legacy `cast` array of an older server. Entries with no name are dropped.
+  var castList: [Person] {
+    if let members = castMembers, !members.isEmpty {
+      return members.compactMap { m in
+        let name = m.name.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return nil }
+        return Person(id: m.personId.map(String.init), name: name,
+                      role: m.character, imageId: m.imageId)
+      }
+    }
+    return cast ?? []
   }
 
   /// The name to show for this item.

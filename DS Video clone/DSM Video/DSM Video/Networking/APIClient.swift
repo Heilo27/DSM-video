@@ -274,6 +274,21 @@ struct APIClient {
     return try await requestWithRetry(path: "/api/v1/items/\(enc)", method: "GET", body: Optional<Int>.none, response: ItemDetail.self, timeoutInterval: 15)
   }
 
+  /// More Like This for a title (FR-151): up to `limit` titles in the /items element shape, with
+  /// episodes already collapsed to their show. One attempt, no retry: the shelf is optional and
+  /// loads after the page is up, so a failure is simply a hidden shelf (see MoreLikeThis).
+  func similar(id: String, limit: Int = MoreLikeThis.limit) async throws -> ItemsResponse {
+    let enc = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    guard var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/items/\(enc)/similar"),
+                                    resolvingAgainstBaseURL: false) else {
+      throw APIError.invalidURL
+    }
+    comps.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+    guard let url = comps.url else { throw APIError.invalidURL }
+    return try await request(url: url, method: "GET", body: Optional<Int>.none,
+                             response: ItemsResponse.self, timeoutInterval: 15)
+  }
+
   /// - Parameter startSeconds: where a TRANSCODE should begin in the source. Ignored by
   ///   the server for direct play and remux, which are byte-range seekable already. The
   ///   returned playlist's timeline still starts at 0, so add `PlaybackInfo.startSeconds`
