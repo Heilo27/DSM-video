@@ -107,12 +107,12 @@ theme like every other token: `Theme.tvType` supplies a `TVTypeScale`, and every
 | Role | Classic / Nitrate | Cinematic | Used for |
 |------|-------------------|-----------|----------|
 | `dsTVDisplay` | 72 bold | 72 heavy rounded | Sign-in wordmark |
-| `dsTVLargeTitle` | 48 bold | 48 heavy rounded | Show-detail title, pairing screen titles |
+| `dsTVLargeTitle` | 48 bold | 48 heavy rounded | Show-detail title, pairing screen titles, profile picker title, PIN-pad digits |
 | `dsTVTitle` | 36 bold | 36 heavy rounded | Sign-in heading, "Are you still watching?" |
-| `dsTVSectionTitle` | 28 semibold | 28 bold rounded | Shelf and library titles, collection titles, sort chips, search result titles |
+| `dsTVSectionTitle` | 28 semibold | 28 bold rounded | Shelf and library titles, collection titles, sort chips, search result titles, profile tile names |
 | `dsTVHeadline` | 22 semibold | same | Button labels, emphasised lines |
 | `dsTVLabel` | 20 medium | same | Inline action labels, episode titles |
-| `dsTVBodyLarge` | 24 regular | same | Tagline, empty states, countdown |
+| `dsTVBodyLarge` | 24 regular | same | Tagline, empty states, countdown, profile-screen body copy |
 | `dsTVBody` | 20 regular | same | Supporting copy, counts, years in search |
 | `dsTVCaption` | 17 regular | same | Years, durations, hints, server addresses |
 | `dsTVCaptionEmphasis` | 17 medium | same | Card titles under artwork, episode number badge, speed button |
@@ -122,9 +122,9 @@ theme like every other token: `Theme.tvType` supplies a `TVTypeScale`, and every
 Rules: SF Symbol glyph sizes (`Image(systemName:)` with `.font(.system(size:))`) are not text and
 stay at the call site. Two iOS sites are deliberately fixed and carry a comment: the 40pt
 monospaced pairing code (`MainView`) and the avatar initial, sized as a fraction of the avatar
-(`ProfileViews`). Sizes were collapsed onto the nearest role, so some TV text moved by 1 to 6 pt
+(`ProfileViews`). Sizes were collapsed onto the nearest role, so some TV text moved by 1 to 12 pt
 (for example 14/15/16/18/19 pt captions now 17 pt, 42 pt pairing titles now 48 pt, sort-chip and
-collection tile titles now 28 pt).
+collection tile titles now 28 pt, profile picker title 60 pt now 48 pt, PIN-pad digits 44 pt now 48 pt).
 
 ---
 

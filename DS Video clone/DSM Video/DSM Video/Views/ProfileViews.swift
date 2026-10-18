@@ -96,15 +96,20 @@ struct ProfileAvatarView: View {
 
 // MARK: - Platform metrics
 
+// tvOS type comes from the theme's TVTypeScale (TASK-1039), not hard-coded point sizes, so a
+// theme change reaches the profile screens. The profile screens ran 30/60/28/44 before; they
+// now sit on the nearest scale roles (28/48/24/48). Computed, not stored, so each read sees
+// the current theme.
+@MainActor
 private enum ProfileMetrics {
   #if os(tvOS)
   static let tile: CGFloat = 230
-  static let tileName: Font = .system(size: 30, weight: .semibold)
-  static let title: Font = .system(size: 60, weight: .bold)
-  static let body: Font = .system(size: 28, weight: .regular)
+  static var tileName: Font { .dsTVSectionTitle }
+  static var title: Font { .dsTVLargeTitle }
+  static var body: Font { .dsTVBodyLarge }
   static let spacing: CGFloat = 56
   static let key: CGFloat = 112
-  static let keyFont: Font = .system(size: 44, weight: .semibold, design: .rounded)
+  static var keyFont: Font { .dsTVLargeTitle }
   static let dot: CGFloat = 26
   #else
   static let tile: CGFloat = 112
