@@ -63,6 +63,10 @@ struct GestureVideoPlayer: View {
     /// Called when AVPlayer reports a fatal playback error. The caller can use
     /// this to reset state and re-fetch a fresh playback URL (e.g. stale session).
     var onPlaybackFailed: (() -> Void)?
+    /// Called whenever a playback error is put on screen, with whether it was a network
+    /// failure (TASK-1008, FR-052). The caller retries a network failure on its own once the
+    /// network returns; any other failure waits for the user's Retry.
+    var onPlaybackError: ((_ failedOnNetwork: Bool) -> Void)?
     /// Called when the current item plays to the end of its timeline.
     var onPlaybackFinished: (() -> Void)?
     /// Called when the user changes the subtitle offset. The caller should restart
@@ -1618,6 +1622,9 @@ struct GestureVideoPlayer: View {
                 isBuffering = false
                 playerError = underlying.map { Self.friendlyPlayerError($0, localNetworkDenied: localNetworkDenied) }
                     ?? "Lost connection to the server. Check that your NAS is reachable, then try again." 
+                // No underlying error is reported to the user as a lost connection, so it is
+                // treated as one here too.
+                onPlaybackError?(underlying.map(Self.isNetworkPlaybackFailure) ?? true)
             }
         }
 
@@ -1673,6 +1680,7 @@ struct GestureVideoPlayer: View {
                             GestureVideoPlayer.friendlyPlayerError($0, localNetworkDenied: localNetworkDenied)
                         } ?? "Unable to play this video."
                         isBuffering = false
+                        onPlaybackError?(failure.map(GestureVideoPlayer.isNetworkPlaybackFailure) ?? false)
                     }
                 } else if status == .readyToPlay, let item = playerItem {
                     // TASK-738: apply the user's remembered audio-track language so playback
@@ -2444,6 +2452,17 @@ extension GestureVideoPlayer {
             }
         }
         return error.localizedDescription
+    }
+
+    /// Whether a playback error is a network failure that the network returning can cure
+    /// (TASK-1008, FR-052): a URL-loading error anywhere in the chain that never reached the
+    /// server. The classification is APIError.transport's, the app's one home for it. A
+    /// cancellation is the app's own doing and is not a failure (as handleConnectionFailure).
+    nonisolated static func isNetworkPlaybackFailure(_ error: Error) -> Bool {
+        underlyingChain(of: error as NSError).contains { link in
+            guard link.domain == NSURLErrorDomain, link.code != NSURLErrorCancelled else { return false }
+            return !APIError.transport(URLError(_nsError: link)).serverReached
+        }
     }
 
     /// The error itself followed by each NSUnderlyingErrorKey beneath it. Bounded and

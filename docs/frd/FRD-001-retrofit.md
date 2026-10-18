@@ -250,6 +250,9 @@ retry — never an endless spinner. Retry resumes at the stall position.
 mid-video (M5), the video picks up again on the new address near where it was, with no tap. A video
 that failed to load for lack of network retries itself when the network returns. If the new address
 cannot play it either, the message names that failure, not the one that led to it.
+*Clarified 2026-10-17 (TASK-1008):* a video that stopped mid-playback because the network dropped
+also retries itself when the network returns at the same address, picking up near where it stopped.
+A video that stopped for any other reason waits for the user's Retry.
 **FR-053 [STATED]** — Transient buffering and permanent disconnection are distinguishable; recoverable
 buffering never raises the connection-lost error.
 *Derivation:* competitive research explicitly frames this distinction as the requirement.

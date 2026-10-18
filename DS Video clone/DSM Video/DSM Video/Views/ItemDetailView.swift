@@ -1452,6 +1452,9 @@ private struct PlayerSheet: View {
   @State private var streamResolvedThrough: URL?
   /// The last load failed on the network, so the next reconnect retries it (TASK-991).
   @State private var loadFailedOnConnection = false
+  /// The open stream stopped mid-playback on a network failure, so the network returning
+  /// retries it even at the same address (TASK-1008, FR-052).
+  @State private var playbackFailedOnConnection = false
   /// Server playback session backing `playbackURL`, so it can be released when the sheet
   /// closes or when a re-fetch supersedes it. Nothing released these before: each play,
   /// each retry, and every subtitle-offset nudge opened a fresh transcode that lived on
@@ -1627,6 +1630,9 @@ private struct PlayerSheet: View {
             playbackURL = nil
             Task { await start() }
           },
+          onPlaybackError: { failedOnNetwork in
+            playbackFailedOnConnection = failedOnNetwork
+          },
           onPlaybackFinished: {
             guard nextEpisode != nil, onPlayNextEpisode != nil else { return }
             showNextEpisodeOverlay = true
@@ -1703,15 +1709,13 @@ private struct PlayerSheet: View {
     // segments it can no longer reach. Re-resolve through the new address and resume in place.
     // A load that failed on the network is retried the same way once the network is back.
     .onReceive(NotificationCenter.default.publisher(for: .networkDidReconnect)) { _ in
-      guard StreamReresolution.isNeeded(playing: playbackURL,
-                                        resolvedThrough: streamResolvedThrough,
-                                        currentBase: appState.api.baseURL,
-                                        lastLoadFailedOnConnection: loadFailedOnConnection)
-      else { return }
-      snapshotResumePoint()
-      playbackURL = nil
-      error = nil
-      Task { await start() }
+      reresolveStreamIfNeeded()
+    }
+    // TASK-1008: the server coming back at the SAME address posts no networkDidReconnect (that
+    // fires on an address switch or the device going offline and back). The heartbeat or the
+    // background retry clears serverUnreachable instead, so that is the other "network is back".
+    .onChange(of: appState.serverUnreachable) { wasUnreachable, isUnreachable in
+      if wasUnreachable && !isUnreachable { reresolveStreamIfNeeded() }
     }
     .onDisappear {
       // FIX-12: Cancel countdown when player is dismissed via system back gesture or swipe-to-dismiss.
@@ -1861,6 +1865,7 @@ private struct PlayerSheet: View {
     isOffline = false
     streamResolvedThrough = nil
     loadFailedOnConnection = false
+    playbackFailedOnConnection = false
     playbackProfileID = await LocalStore.shared.activeScope.id
 
     // TASK-719: if a failure-recovery snapshot exists, seed the trackers so an
@@ -2001,6 +2006,24 @@ private struct PlayerSheet: View {
     playbackURL = url
   }
 
+  /// Rebuilds the stream when the network returns and StreamReresolution says the open one is
+  /// stranded or failed on the network (TASK-991, TASK-1008). Both flags drop before start()
+  /// runs so a second "network is back" signal in the same moment cannot start it twice.
+  private func reresolveStreamIfNeeded() {
+    guard StreamReresolution.isNeeded(playing: playbackURL,
+                                      resolvedThrough: streamResolvedThrough,
+                                      currentBase: appState.api.baseURL,
+                                      lastLoadFailedOnConnection: loadFailedOnConnection,
+                                      playbackFailedOnConnection: playbackFailedOnConnection)
+    else { return }
+    loadFailedOnConnection = false
+    playbackFailedOnConnection = false
+    snapshotResumePoint()
+    playbackURL = nil
+    error = nil
+    Task { await start() }
+  }
+
   /// Carries the position across a stream rebuild so playback resumes where the user was
   /// (TASK-719, TASK-722, TASK-991). The live tick, not only the throttled sync value,
   /// which can be 10s stale (TASK-838).
@@ -2020,10 +2043,17 @@ private struct PlayerSheet: View {
 /// a server with an operator-set public URL hands out a stream host that never equals the
 /// client's address, and comparing hosts would rebuild the stream on every reconnect.
 enum StreamReresolution {
+  ///
+  /// `playbackFailedOnConnection` (TASK-1008): the open stream stopped mid-playback on a
+  /// network failure. It is retried on any reconnect, the same address included; a local file
+  /// never is.
   nonisolated static func isNeeded(playing: URL?, resolvedThrough: URL?, currentBase: URL,
-                                   lastLoadFailedOnConnection: Bool) -> Bool {
+                                   lastLoadFailedOnConnection: Bool,
+                                   playbackFailedOnConnection: Bool = false) -> Bool {
     guard let playing else { return lastLoadFailedOnConnection }
-    guard !playing.isFileURL, let resolvedThrough else { return false }
+    guard !playing.isFileURL else { return false }
+    if playbackFailedOnConnection { return true }
+    guard let resolvedThrough else { return false }
     return resolvedThrough.absoluteString != currentBase.absoluteString
   }
 }
