@@ -1899,6 +1899,19 @@ func (s *Server) webAPITVShowList(w http.ResponseWriter, r *http.Request, sessio
 	})
 }
 
+// webAPIShowMatch is the WHERE fragment (parenthesised, library not included) selecting every
+// episode of the show that webAPITVShowList filed under folderName.
+//
+// The list stores ONE folder per show: whichever of a split show's folders the unordered
+// SELECT returned first. Reading just that folder made the episode list depend on database
+// row order and drop the other folder's episodes (TASK-995). resolveShowFolders expands the
+// folder to the whole group over the rows v may see, which is what the list grouped (FR-250)
+// and what the native /tv routes already do; there is deliberately no second copy of that
+// rule here (Rule 9).
+func (s *Server) webAPIShowMatch(v viewer, folderName, tvRoot string) (string, []any) {
+	return showFolderWhere(s.resolveShowFolders(v, folderName, tvRoot), tvRoot)
+}
+
 func (s *Server) webAPITVShowGetInfo(w http.ResponseWriter, r *http.Request, session *WebAPISession) {
 	idStr := r.URL.Query().Get("id")
 	if idStr == "" {
@@ -1912,22 +1925,22 @@ func (s *Server) webAPITVShowGetInfo(w http.ResponseWriter, r *http.Request, ses
 	}
 
 	tvRoot := filepath.Clean(s.cfg.TVPath) + "/"
-	// escapeLike + ESCAPE, which this plane omitted entirely: a folder name holding a
-	// literal '_' or '%' matched sibling folders and reported their episodes as this show's.
-	folderPrefix := tvRoot + escapeLike(folderName) + "/"
 
 	v, ok := s.webAPIViewer(w, r, session)
 	if !ok {
 		return
 	}
+	// Every folder of the show, escaped (a folder holding a literal '_' or '%' must not match
+	// siblings) and grouped as the list grouped it. See webAPIShowMatch.
+	matchWhere, matchArgs := s.webAPIShowMatch(v, folderName, tvRoot)
 	// FR-250 "refused if above" for a hidden show: it has episodes, none of them visible.
 	vis, visArgs := v.andVisibleFrag("content_rating")
 	if vis != "" {
 		var all, visible int
 		if err := s.db.QueryRow(`
 			SELECT COUNT(*), COALESCE(SUM(CASE WHEN 1=1`+vis+` THEN 1 ELSE 0 END), 0)
-			FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`,
-			append(visArgs, folderPrefix+"%", folderName)...).Scan(&all, &visible); err != nil {
+			FROM items WHERE `+matchWhere+` AND library_id = 'lib_tv'`,
+			append(append([]any{}, visArgs...), matchArgs...)...).Scan(&all, &visible); err != nil {
 			log.Printf("[WebAPI] TVShow getinfo ceiling %q: %v", folderName, err)
 			writeWebAPIError(w, 100)
 			return
@@ -1944,8 +1957,8 @@ func (s *Server) webAPITVShowGetInfo(w http.ResponseWriter, r *http.Request, ses
 	var overview, genres, showNameDB sql.NullString
 	s.db.QueryRow(`
 		SELECT MAX(year), MAX(rating), MAX(overview), MAX(genres), MAX(show_name)
-		FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`+vis,
-		append([]any{folderPrefix + "%", folderName}, visArgs...)...).Scan(&year, &ratingVal, &overview, &genres, &showNameDB)
+		FROM items WHERE `+matchWhere+` AND library_id = 'lib_tv'`+vis,
+		append(append([]any{}, matchArgs...), visArgs...)...).Scan(&year, &ratingVal, &overview, &genres, &showNameDB)
 
 	displayName := folderName
 	if showNameDB.Valid && showNameDB.String != "" {
@@ -2031,16 +2044,20 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 
 	var rows *sql.Rows
 	var err error
+	// One match for the rows and the COUNT below: a COUNT that disagrees with the rows it
+	// describes is its own bug. Resolved once, so both see the same folders.
+	var matchWhere string
+	var matchArgs []any
 	if folderName != "" {
-		folderPrefix := tvRoot + escapeLike(folderName) + "/"
+		matchWhere, matchArgs = s.webAPIShowMatch(v, folderName, tvRoot)
 		rows, err = s.db.Query(`
 			SELECT id, title, season_number, episode_number, episode_title,
 			       duration_seconds, year, rating, poster_path, show_name
 			FROM items
-			WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`+vis+`
-			ORDER BY COALESCE(season_number, 0), COALESCE(episode_number, 0)
+			WHERE `+matchWhere+` AND library_id = 'lib_tv'`+vis+`
+			ORDER BY COALESCE(season_number, 0), COALESCE(episode_number, 0), id
 			LIMIT ? OFFSET ?`,
-			append(append([]any{folderPrefix + "%", folderName}, visArgs...), limit, offset)...)
+			append(append(append([]any{}, matchArgs...), visArgs...), limit, offset)...)
 	} else {
 		rows, err = s.db.Query(`
 			SELECT id, title, season_number, episode_number, episode_title,
@@ -2136,11 +2153,8 @@ func (s *Server) webAPITVShowEpisodeList(w http.ResponseWriter, r *http.Request,
 	// Count total
 	var total int
 	if folderName != "" {
-		// Same escaping as the row query above — a COUNT that disagrees with the rows it is
-		// supposed to describe is its own bug.
-		folderPrefix := tvRoot + escapeLike(folderName) + "/"
-		s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE (path LIKE ? ESCAPE '\' OR show_name = ?) AND library_id = 'lib_tv'`+vis,
-			append([]any{folderPrefix + "%", folderName}, visArgs...)...).Scan(&total)
+		s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE `+matchWhere+` AND library_id = 'lib_tv'`+vis,
+			append(append([]any{}, matchArgs...), visArgs...)...).Scan(&total)
 	} else {
 		s.db.QueryRow("SELECT COUNT(*) FROM items WHERE library_id = 'lib_tv'"+vis, visArgs...).Scan(&total)
 	}

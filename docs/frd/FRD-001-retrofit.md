@@ -267,7 +267,8 @@ matching what the server reports.
 **FR-084 [INFERRED]** — A show whose episodes are split across multiple folders/paths on the NAS
 appears exactly once, with its episodes merged. On a restricted profile the merge is decided from the episodes that profile can
 see, in the show list and the show's seasons and episodes alike, so the detail lists the episodes the
-header counted (FRD-002 FR-250). [TASK-924]
+header counted (FRD-002 FR-250). [TASK-924] The DS Video web plane (`TVShow` / `TVShowEpisode`
+`list` and `getinfo`) follows the same rule, and its result never depends on database row order. [TASK-995]
 **FR-085 [STATED]** — The detail screen shows title, year, runtime, genre, rating, director, cast, and
 description. *Derivation:* design-spec B4 §4/§6/§7.
 **FR-086 [INFERRED]** — Missing optional metadata is omitted cleanly — never rendered as "null"/"nil" or
