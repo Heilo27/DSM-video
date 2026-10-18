@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -161,12 +162,14 @@ type HLSSession struct {
 	// not contain that time yet, and the player stalled. Passing it as an INPUT seek
 	// (-ss before -i) makes ffmpeg jump there almost instantly instead of decoding
 	// everything before it.
-	StartSeconds       float64
-	StartedAt          time.Time
-	CompletedAt        *time.Time
-	LastAccess         time.Time
-	Error              error
-	cmd                *exec.Cmd
+	StartSeconds float64
+	StartedAt    time.Time
+	CompletedAt  *time.Time
+	LastAccess   time.Time
+	Error        error
+	// cancel cancels the transcode's context. It is the ONLY handle other goroutines
+	// have on the running ffmpeg: the process itself is owned by the goroutine that
+	// started it (see runFFmpegOnce), and cancelling the context is what kills it.
 	cancel             context.CancelFunc
 	stopped            bool // true when StopSession has already decremented g.active
 	forceSoftware      bool // TASK-729: set on HW-failure retry to force the libx264 path
@@ -599,21 +602,14 @@ func (g *HLSGenerator) StopSession(sessionID string) error {
 		return nil
 	}
 
-	// Cancel the transcode
+	// Cancel the transcode. This is what kills ffmpeg: runFFmpegOnce runs it under this
+	// context with a Cancel hook that SIGKILLs the whole process group, and exec.Cmd.Start
+	// refuses to launch at all once the context is done, so a stop that lands before
+	// ffmpeg has started cannot leave an orphan either. StopSession deliberately never
+	// touches the *os.Process: that field is written by Start in the transcode goroutine,
+	// and reading it here was a data race (TASK-1024).
 	if session.cancel != nil {
 		session.cancel()
-	}
-
-	// Kill the whole process group (negative PID). ctx cancel only reaches the
-	// direct child; the `nice`-wrapped ffmpeg grandchild needs an explicit group
-	// kill or it leaks until the cleanup tick. SIGKILL because we're tearing down.
-	if session.cmd != nil && session.cmd.Process != nil {
-		if pgid, err := syscall.Getpgid(session.cmd.Process.Pid); err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		} else {
-			// Fall back to killing just the process if the group lookup failed.
-			_ = session.cmd.Process.Kill()
-		}
 	}
 
 	// If the goroutine hasn't finished yet (CompletedAt is nil), decrement
@@ -678,20 +674,23 @@ func (g *HLSGenerator) runFFmpegOnce(ctx context.Context, session *HLSSession, a
 		cmd = exec.CommandContext(ctx, g.config.FFmpegPath, args...)
 	}
 
-	// Run ffmpeg (and the `nice` wrapper, when used) in its own process group so
-	// StopSession can kill the entire group. exec.CommandContext only signals the
-	// direct child on ctx cancel — when wrapped in `nice`, ffmpeg is a grandchild
-	// and would otherwise survive as an orphan until the 5-minute cleanup tick.
+	// Ownership (TASK-1024): this goroutine owns the process from Start to Wait and no
+	// other goroutine ever reads cmd or cmd.Process. StopSession (the playSessions reaper,
+	// /playback/{id}/stop, supersede, reclaim) stops ffmpeg only by cancelling ctx; exec
+	// then calls cmd.Cancel below from its own context watcher, which it starts after
+	// Process is set, so the kill is synchronized with Start by exec itself. Publishing
+	// cmd under g.mu was not enough: Run's Start wrote cmd.Process with no lock held while
+	// StopSession read it under g.mu.
+	//
+	// Run ffmpeg (and the `nice` wrapper, when used) in its own process group and kill
+	// the whole group on cancel: the default CommandContext cancel signals only the
+	// direct child, and anything that child forked would survive until the cleanup tick.
+	// SIGKILL because we're tearing down.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// Publish session.cmd under g.mu: StopSession reads it under the same lock to kill
-	// the process group. The playSessions reaper and the /playback/{id}/stop endpoint
-	// (TASK-754) can now call StopSession at any time, so this write must be
-	// synchronized — an unguarded write here races the locked read in StopSession.
-	g.mu.Lock()
-	session.cmd = cmd
-	g.mu.Unlock()
-	cmd.Stdout = io.Discard
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
+	// Bound how long Wait can be held open by a wedged child after the kill.
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Stdout = nil // /dev/null, without the copy goroutine io.Discard would need
 
 	logPath := filepath.Join(session.OutputDir, "ffmpeg.log")
 	logFile, err := os.Create(logPath)
@@ -703,6 +702,24 @@ func (g *HLSGenerator) runFFmpegOnce(ctx context.Context, session *HLSSession, a
 	}
 
 	return cmd.Run()
+}
+
+// killProcessGroup SIGKILLs the process group led by p (Setpgid makes ffmpeg's pid its
+// pgid). If p has already been reaped it does nothing: exec can invoke Cancel after Wait
+// has reaped the child, and a reaped pid may already belong to an unrelated process.
+// os.Process tracks reaping, so signal 0 reports ErrProcessDone without touching the pid.
+func killProcessGroup(p *os.Process) error {
+	if p == nil {
+		return nil
+	}
+	if err := p.Signal(syscall.Signal(0)); errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	if pgid, err := syscall.Getpgid(p.Pid); err == nil && pgid == p.Pid {
+		return syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	// Group lookup failed (or the pid is not a group leader): kill just the process.
+	return p.Kill()
 }
 
 // runTranscode executes the FFmpeg command for transcoding, then converts any
