@@ -1048,6 +1048,9 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	// its init+segments → "Playback Failed: resource unavailable". The suffix
 	// routes are matched before the {variant}.m3u8 wildcard by chi.
 	r.Get("/playback/{sessionId}/init.mp4", s.handleHLSSegmentRoot)
+	// Per-rendition init segments of a multi-audio session (init_video.mp4,
+	// init_audio_0.mp4, ...; FR-061) and the ABR ladder's v0_init.mp4.
+	r.Get("/playback/{sessionId}/{name}.mp4", s.handleHLSSegmentRoot)
 	r.Get("/playback/{sessionId}/{name}.m4s", s.handleHLSSegmentRoot)
 	r.Get("/playback/{sessionId}/{name}.ts", s.handleHLSSegmentRoot)
 	r.Get("/playback/{sessionId}/{variant}.m3u8", s.handleHLSVariant)
@@ -5187,9 +5190,53 @@ func (s *Server) handleHLSFile(filename string) http.HandlerFunc {
 	}
 }
 
+// handleHLSVariant serves a media playlist the master references by name: a multi-audio
+// session's video.m3u8 and audio_N.m3u8 renditions (FR-061), a subtitle_N.m3u8 WebVTT
+// rendition, or an ABR vN.m3u8. Each is served as the file it names; a playlist that
+// does not exist yet is a 404, never the master in its place (serving the master for
+// every name handed AVPlayer the wrong playlist for each rendition).
+//
+// No wait loop: the master is only written once every playlist it lists exists, so a
+// client that read the master never asks for a playlist that is not on disk.
 func (s *Server) handleHLSVariant(w http.ResponseWriter, r *http.Request) {
-	// v1: single variant == master
-	s.handleHLSFile("master.m3u8")(w, r)
+	variant := chi.URLParam(r, "variant")
+	if !isHLSPlaylistName(variant) {
+		writeErr(w, http.StatusBadRequest, "invalid_playlist")
+		return
+	}
+	sessionID := chi.URLParam(r, "sessionId")
+	ps, ok := s.getSession(sessionID)
+	if !ok || ps.Kind != "hls" || ps.HLSDir == "" {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if !playSessionProfileAllowed(r, ps) {
+		writeContentRestricted(w)
+		return
+	}
+	fullPath := filepath.Join(ps.HLSDir, variant+".m3u8")
+	if _, err := os.Stat(fullPath); err != nil {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	http.ServeFile(w, r, fullPath)
+}
+
+// isHLSPlaylistName reports whether a playlist name (without .m3u8) is one the HLS
+// generator could have written: ASCII letters, digits, '_' and '-' only, so it can never
+// escape the session directory.
+func isHLSPlaylistName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {

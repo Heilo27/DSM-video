@@ -201,10 +201,42 @@ Response:
 Direct progressive streaming endpoint (supports `Range`).
 
 ### GET `/playback/{sessionId}/master.m3u8`
-HLS master playlist.
+HLS master playlist. It is written once every playlist it lists exists, so a client that has
+read it never asks for a playlist that is not on disk yet; until then this returns 404 while the
+session prepares.
+
+A source with **two or more audio tracks** gets every track as an alternate audio rendition
+(FR-061): one `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud"` line per track, and one
+`#EXT-X-STREAM-INF` whose `AUDIO="aud"` points at a video-only `video.m3u8`. Per track:
+`NAME` is the track title, else its language, else `Track N` (made unique); `LANGUAGE` is the
+source tag, omitted when untagged; exactly one track is `DEFAULT=YES` (the source's default, else
+the first); every track is `AUTOSELECT=YES`; `CHANNELS` is 2 for an encoded track, the source count
+for a copied one. The video is encoded once; each non-AAC track is encoded to stereo AAC and AAC
+tracks are copied. Example:
+
+```
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",LANGUAGE="eng",NAME="eng",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2",URI="audio_0.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",LANGUAGE="fra",NAME="Commentary",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="audio_1.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO="aud"
+video.m3u8
+```
+
+A single-audio (or silent) source is unchanged: one muxed media playlist, `init.mp4` and
+`segment_NNNNN.m4s`.
 
 ### GET `/playback/{sessionId}/{variant}.m3u8`
-HLS variant playlist.
+A media playlist the master names: `video.m3u8` and `audio_N.m3u8` for a multi-audio session,
+`subtitle_N.m3u8` for a WebVTT rendition. Serves exactly the named file; `404 not_found` if it
+does not exist (it never substitutes the master), `400 invalid_playlist` for a name that is not
+letters, digits, `_` or `-` (max 64). Same session-binding rule as every `/playback/{sessionId}/*`
+route.
+
+### GET `/playback/{sessionId}/{name}.mp4`
+Per-rendition fMP4 init segment of a multi-audio session (`init_video.mp4`, `init_audio_N.mp4`).
+Segments are `segment_<rendition>_NNNNN.m4s` on `/playback/{sessionId}/{name}.m4s`.
 
 ### GET `/playback/{sessionId}/segments/{name}`
 HLS segment bytes.
@@ -258,14 +290,14 @@ Trigger a library re-scan (requires auth).
 
 ## Route inventory (generated)
 
-The prose sections above document the **18 routes the iOS/tvOS clients actually call** —
+The prose sections above document the **19 routes the iOS/tvOS clients actually call** —
 the browsing, playback, progress and auth surface — with request/response shapes. That is the
 contract worth describing by hand, and it is deliberately not the whole route table.
 
 For completeness, every route the server registers is listed below, with ✅ marking the ones
 documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 
-**87 routes total: 76 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
+**88 routes total: 77 client-facing, 9 Synology WebAPI compatibility, 2 static/player.**
 
 ### Client-facing
 
@@ -304,6 +336,7 @@ documented above. Regenerate with `python3 scripts/gen-route-inventory.py`.
 | `/playback/{sessionId}/stop` | POST | — |
 | `/playback/{sessionId}/stream` | GET | ✅ |
 | `/playback/{sessionId}/{name}.m4s` | GET | — |
+| `/playback/{sessionId}/{name}.mp4` | GET | ✅ |
 | `/playback/{sessionId}/{name}.ts` | GET | — |
 | `/playback/{sessionId}/{variant}.m3u8` | GET | ✅ |
 | `/playlists` | GET, POST | — |
