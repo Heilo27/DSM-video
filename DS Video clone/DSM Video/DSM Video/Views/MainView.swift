@@ -12,6 +12,10 @@ struct MainView: View {
   /// Set when a dsvideo:// deep link arrives; drives the detail sheet.
   @State private var deepLinkItem: DeepLinkTarget?
 
+  /// Set when Siri asks to search ("Find X in DSM Video", or a "Play X" that matched nothing);
+  /// drives the search sheet (TASK-993, FRD-001 FR-147).
+  @State private var siriSearch: SiriSearchTarget?
+
   var body: some View {
     // TASK-884: the offline banner is an OVERLAY on the content, not a ZStack sibling.
     //
@@ -110,6 +114,20 @@ struct MainView: View {
         ItemDetailView(itemID: target.id, fallbackTitle: "Loading…")
       }
     }
+    // Siri search (FRD-001 FR-147). The intents set `pendingSearchTerm`; only TVMainView read it,
+    // so on iPhone/iPad "Find X" opened the app and did nothing. A sheet for the same reason as
+    // the deep link above: it lands correctly from any tab and from the iPad split view.
+    .sheet(item: $siriSearch) { target in
+      NavigationStack {
+        SearchView(isEmbedded: true, initialTerm: target.term)
+          .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+              Button("Done") { siriSearch = nil }
+            }
+          }
+      }
+    }
+    .onChange(of: appState.pendingSearchTerm) { _, _ in presentPendingSearch() }
     .onChange(of: appState.pendingDeepLinkItemID) { _, newID in
       guard let id = newID else { return }
       deepLinkItem = DeepLinkTarget(id: id)
@@ -123,7 +141,21 @@ struct MainView: View {
         deepLinkItem = DeepLinkTarget(id: id)
         appState.pendingDeepLinkItemID = nil
       }
+      presentPendingSearch()
     }
+  }
+
+  private func presentPendingSearch() {
+    guard appState.pendingSearchTerm != nil else { return }
+    if let term = appState.takePendingSearchTerm() {
+      siriSearch = SiriSearchTarget(term: term)
+    }
+  }
+
+  /// A fresh id per request so a second "Find X" while the sheet is up shows the new term.
+  private struct SiriSearchTarget: Identifiable {
+    let id = UUID()
+    let term: String
   }
 
   /// Identifiable wrapper so `.sheet(item:)` can drive presentation off the item id.
@@ -338,6 +370,11 @@ struct SearchView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   var isEmbedded: Bool = false
+  /// A term to look up as soon as the screen appears (Siri "Find X"). Runs as an explicit search
+  /// (so one character works) and is not saved to recent searches.
+  var initialTerm: String? = nil
+  /// The seeded term, so the change it causes in `searchText` does not also start a live search.
+  @State private var seededTerm: String?
   @State private var searchText: String = ""
   @State private var results: [ItemSummary] = []
   @State private var isSearching: Bool = false
@@ -471,6 +508,10 @@ struct SearchView: View {
       searchTask = Task { await search(explicit: true, record: true) }
     }
     .onChange(of: searchText) { _, newValue in
+      if let seeded = seededTerm {
+        seededTerm = nil
+        if newValue == seeded { return }
+      }
       if newValue.isEmpty {
         debounceTask?.cancel()
         searchTask?.cancel()
@@ -498,8 +539,17 @@ struct SearchView: View {
       // the navigation bar during this same layout pass, and setting focus before it
       // exists is a no-op that fails silently.
       #if !os(tvOS)
-      DispatchQueue.main.async { searchFocused = true }
+      if initialTerm == nil {
+        DispatchQueue.main.async { searchFocused = true }
+      }
       #endif
+    }
+    .task {
+      // Siri asked for this term: run it now, explicitly, without recording it as a recent search.
+      guard let term = SearchRules.siriTerm(initialTerm), searchText.isEmpty else { return }
+      seededTerm = term
+      searchText = term
+      await search(explicit: true)
     }
     .onChange(of: results) { _, newResults in
       guard hasSearched && !isSearching else { return }

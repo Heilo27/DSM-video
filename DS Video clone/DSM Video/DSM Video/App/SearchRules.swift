@@ -35,6 +35,13 @@ enum SearchRules {
     "Live results start at \(liveMinimumLength) characters. Press Search to look for \"\(raw.trimmingCharacters(in: .whitespacesAndNewlines))\" now."
   }
 
+  /// The term a Siri "Find X" (or a missed "Play X") asked for, trimmed; nil when blank.
+  static func siriTerm(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    let term = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return term.isEmpty ? nil : term
+  }
+
   /// Runs the search against the server. nil when the trigger does not search (see `queryToSend`).
   static func fetch(
     _ raw: String, explicit: Bool, api: APIClient, limit: Int = 100
@@ -45,5 +52,16 @@ enum SearchRules {
     } catch {
       return .failure(error)
     }
+  }
+}
+
+extension AppState {
+  /// Takes the search Siri asked for (`pendingSearchTerm`): returns the trimmed term and clears the
+  /// request so it fires once. A blank request is cleared and returns nil. The iPhone/iPad shell
+  /// reads this from both `.onChange` and `.task` (a cold launch sets it before any view exists).
+  func takePendingSearchTerm() -> String? {
+    let term = SearchRules.siriTerm(pendingSearchTerm)
+    pendingSearchTerm = nil
+    return term
   }
 }

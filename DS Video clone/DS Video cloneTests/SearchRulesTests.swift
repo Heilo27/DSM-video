@@ -76,3 +76,59 @@ struct SearchRulesTests {
     }
   }
 }
+
+// MARK: - TASK-993 · Siri "Find X" reaches the iPhone/iPad search (FRD-001 FR-147)
+
+@Suite("TASK-993 · Siri search on iOS", .serialized)
+@MainActor
+struct SiriSearchHandoffTests {
+
+  /// "Find M": the intent leaves a request, the shell takes it once (trimmed, one character
+  /// allowed), and the search it starts is explicit so the server is asked.
+  /// Red if the request is not consumable or is searched live (a one-character term sends nothing).
+  @Test func aSpokenTermIsTakenOnceAndSearchedExplicitly() async {
+    await ProfileStateGate.shared.run {
+      ProfileStubServer.reset(["GET /api/v1/search": .json(200, srHit)])
+      await withIsolatedAppState(stubHost: ProfileStubServer.host) { state in
+        AppStateHolder.register(state)
+        MediaIntentRouter.openSearch(term: "  M ")
+
+        let term = state.takePendingSearchTerm()
+        #expect(term == "M")
+        #expect(state.pendingSearchTerm == nil, "a request is acted on once")
+        #expect(state.takePendingSearchTerm() == nil)
+
+        let outcome = await SearchRules.fetch(term ?? "", explicit: true, api: state.api)
+        guard case .success(let items)? = outcome else {
+          Issue.record("expected the search to run, got \(String(describing: outcome))")
+          return
+        }
+        #expect(items.map(\.title) == ["M"])
+        #expect(ProfileStubServer.count("GET /api/v1/search") == 1)
+      }
+    }
+  }
+
+  @Test func aBlankRequestIsClearedAndOpensNothing() async {
+    await withIsolatedAppState { state in
+      state.pendingSearchTerm = "   "
+      #expect(state.takePendingSearchTerm() == nil)
+      #expect(state.pendingSearchTerm == nil)
+      #expect(SearchRules.siriTerm(nil) == nil)
+    }
+  }
+
+  /// The defect was an absent reader: only TVMainView consumed `pendingSearchTerm`. A view cannot be
+  /// rendered here, so this reads the iOS shell's source and fails if the reader is removed, or if the
+  /// search screen stops accepting the term.
+  @Test func theIOSShellReadsTheRequest() throws {
+    let views = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("DSM Video/DSM Video/Views", isDirectory: true)
+    let main = try String(contentsOf: views.appendingPathComponent("MainView.swift"), encoding: .utf8)
+    #expect(main.contains("appState.pendingSearchTerm"), "the iOS shell must observe the request")
+    #expect(main.contains("takePendingSearchTerm()"))
+    #expect(main.contains("SearchView(isEmbedded: true, initialTerm: target.term)"))
+    #expect(main.contains("var initialTerm: String?"))
+  }
+}

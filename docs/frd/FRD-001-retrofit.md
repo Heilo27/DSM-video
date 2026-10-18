@@ -353,7 +353,11 @@ profile, FRD-002 FR-264 narrows this. *Derivation:* 38c6cb5.
 **FR-147 [DESIGN, 2026-09-16, TASK-920]** — *Siri can find a title and open it.* App-scoped phrases
 resolve against the library. "Play <title> in DSM Video" opens the title's detail page, with Play already
 focused. If nothing matches, it opens search with the phrase filled in and says so, rather than failing silently.
-"Find <title> in DSM Video" opens search results for the phrase. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
+"Find <title> in DSM Video" opens search results for the phrase, on iPhone and iPad as well as Apple TV
+[DESIGN, 2026-10-17, TASK-993]: iPhone and iPad had no reader for the request, so the app opened and did
+nothing. They now show search, over whatever tab is open, with the phrase filled in and the search already run.
+The search is an explicit one, so a one-character title ("M") runs; it is not added to recent searches, which
+hold only what the viewer typed. A request is acted on once. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
 an Apple TV-app catalog partnership, not an API. Siri results obey the active profile's ceiling (FRD-002
 FR-264). *Derivation:* 542d543.
 
