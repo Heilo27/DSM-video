@@ -452,6 +452,14 @@ HLS segment bytes.
 
 ## Progress / “Continue Watching”
 
+Wherever a response carries a title's progress (the `progress` of a list element, the
+`/sync/items` feed, the TV episode lists, and the values of `/progress` and `/progress/all`) it
+is the same object, built by one function (`progressRecord.JSON`,
+`backend/cmd/dsvideo-backend/progress_record.go`): `{"positionSeconds": <int seconds>,
+"durationSeconds": <int seconds>, "updatedAt": "<RFC 3339>"}`, all three keys always present. A
+title with no progress row has no `progress` key (`null` in the TV season episode list). A test
+(`progress_shape_test.go`) asserts every site emits identical bytes for the same row.
+
 ### POST `/items/{id}/progress`
 Request:
 ```json
