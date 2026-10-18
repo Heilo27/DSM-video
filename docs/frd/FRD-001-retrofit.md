@@ -796,7 +796,7 @@ page without playing; AC-5 nothing indexed carries a URL or token; AC-6 this req
 *Derivation:* P1 (every title is findable, here from the phone's own search), S4 (nothing shared that
 could expose the account) and S5 (profiles keep their ceilings). TASK-743.
 
-**FR-154 [DESIGN, 2026-10-18, TASK-743]** — *A Continue Watching widget shows the active profile's
+**FR-154 [DESIGN, 2026-10-18, TASK-743] — SHELVED [RYAN, 2026-10-18]** — *Not shipped: Ryan shelved the widget. It stays built for Debug simulator only and is never embedded in Release; the Release App Group switch and the profile migration's on-device check are not done. Reinstating it needs Ryan.* *A Continue Watching widget shows the active profile's
 in-progress titles on the iPhone Home Screen, without ever contacting the server.* The widget lists at
 most **4** titles, in the same order as the app's Continue Watching rail (most recent first). Each shows
 the title (a show's name for an episode), a subtitle ("S2 · E4" for an episode, the year for a movie), how
