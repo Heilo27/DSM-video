@@ -132,7 +132,7 @@ private struct TVShowDetailSplitView: View {
       // Show title & meta overlaid bottom-left
       VStack(alignment: .leading, spacing: 8) {
         Text(show.title)
-          .font(.system(size: 48, weight: .bold))
+          .font(.dsTVLargeTitle)
           .foregroundStyle(.white)
           .lineLimit(2)
           .shadow(color: .black.opacity(0.6), radius: 4, x: 0, y: 2)
@@ -140,7 +140,7 @@ private struct TVShowDetailSplitView: View {
         HStack(spacing: 12) {
           if let year = show.year {
             Text(String(year))
-              .font(.system(size: 20))
+              .font(.dsTVBody)
               .foregroundStyle(Color.dsTextSecondary)
           }
           if show.year != nil {
@@ -151,7 +151,7 @@ private struct TVShowDetailSplitView: View {
           }
           if let sc = show.seasonCount {
             Text("\(sc) season\(sc == 1 ? "" : "s")")
-              .font(.system(size: 20))
+              .font(.dsTVBody)
               .foregroundStyle(Color.dsTextSecondary)
           }
         }
@@ -203,7 +203,7 @@ private struct TVShowDetailSplitView: View {
                 Task { await load() }
               } label: {
                 Label("Retry", systemImage: "arrow.clockwise")
-                  .font(.system(size: 20, weight: .medium))
+                  .font(.dsTVLabel)
               }
               .buttonStyle(.bordered)
 
@@ -211,7 +211,7 @@ private struct TVShowDetailSplitView: View {
                 showMetadataFixer = true
               } label: {
                 Label("Fix Metadata", systemImage: "magnifyingglass")
-                  .font(.system(size: 20, weight: .medium))
+                  .font(.dsTVLabel)
               }
               .buttonStyle(.bordered)
               .accessibilityHint("Search and correct this show's metadata")
@@ -236,7 +236,7 @@ private struct TVShowDetailSplitView: View {
             showMetadataFixer = true
           } label: {
             Label("Fix Metadata", systemImage: "magnifyingglass")
-              .font(.system(size: 20, weight: .medium))
+              .font(.dsTVLabel)
           }
           .buttonStyle(.bordered)
           .padding(.top, 32)
@@ -426,13 +426,13 @@ private struct TVSeasonSection: View {
       } label: {
         HStack(spacing: 12) {
           Text("Season \(season.seasonNumber)")
-            .font(.system(size: 22, weight: .semibold))
+            .font(.dsTVHeadline)
             .foregroundStyle(.white)
 
           Spacer()
 
           Text("\(season.episodeCount) ep\(season.episodeCount == 1 ? "" : "s")")
-            .font(.system(size: 17))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
 
           Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -473,11 +473,11 @@ private struct TVSeasonSection: View {
           if let error, episodes.isEmpty {
             HStack {
               Text(error)
-                .font(.system(size: 17))
+                .font(.dsTVCaption)
                 .foregroundStyle(Color.dsTextMuted)
               Spacer()
               Button("Retry") { Task { await load() } }
-                .font(.system(size: 17))
+                .font(.dsTVCaption)
                 .foregroundStyle(Color.dsAccent)
             }
             .padding(.horizontal, 0)
@@ -620,7 +620,7 @@ private struct TVEpisodeRow: View {
     HStack(spacing: 20) {
       // Episode number badge
       Text(ep.episodeNumber.map { "E\($0)" } ?? "–")
-        .font(.system(size: 17, weight: .semibold).monospacedDigit())
+        .font(.dsTVCaptionEmphasis.monospacedDigit())
         .foregroundStyle(Color.dsTextMuted)
         .frame(width: 40, alignment: .center)
         .accessibilityHidden(true)
@@ -657,7 +657,7 @@ private struct TVEpisodeRow: View {
       VStack(alignment: .leading, spacing: 6) {
         HStack(spacing: 8) {
           Text(ep.title)
-            .font(.system(size: 19, weight: .medium))
+            .font(.dsTVLabel)
             .foregroundStyle(.white)
             .lineLimit(2)
           if isHighlighted {
@@ -670,7 +670,7 @@ private struct TVEpisodeRow: View {
 
         if let dur = ep.durationSeconds, dur > 0 {
           Text(formatDuration(dur))
-            .font(.system(size: 15))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
@@ -911,10 +911,10 @@ private struct StillWatchingOverlay: View {
       VStack(spacing: 32) {
         VStack(spacing: 12) {
           Text("Are you still watching?")
-            .font(.system(size: 36, weight: .bold))
+            .font(.dsTVTitle)
             .foregroundStyle(.white)
           Text("Stopping in \(countdown)s")
-            .font(.system(size: 22))
+            .font(.dsTVBodyLarge)
             .foregroundStyle(Color.dsTextSecondary)
             .monospacedDigit()
         }
@@ -939,7 +939,7 @@ private struct StillWatchingOverlay: View {
     let isFocused = focused == button
     Button(action: action) {
       Label(label, systemImage: sfSymbol)
-        .font(.system(size: 22, weight: .semibold))
+        .font(.dsTVHeadline)
         .foregroundStyle(.white)
         .frame(width: 280, height: 60)
         .background(

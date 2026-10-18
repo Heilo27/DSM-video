@@ -1632,6 +1632,9 @@ struct SettingsView: View {
           if let code = appState.pairingCode {
             VStack(alignment: .leading, spacing: 8) {
               Text(code)
+                // Deliberately outside the theme type scale (TASK-951): a pairing code is read
+                // digit by digit, so it is fixed-size and monospaced on every theme. The tvOS
+                // counterpart is Font.dsTVCode.
                 .font(.system(size: 40, weight: .bold, design: .monospaced))
                 .tracking(6)
                 .frame(maxWidth: .infinity, alignment: .center)

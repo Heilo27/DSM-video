@@ -84,6 +84,8 @@ struct ProfileAvatarView: View {
             .foregroundStyle(.white.opacity(0.95))
         } else {
           Text(String(name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased())
+            // Deliberately outside the theme type scale (TASK-951): the initial is sized as a
+            // proportion of the avatar, so it scales with the avatar, not with a text role.
             .font(.system(size: size * 0.44, weight: .bold, design: .rounded))
             .foregroundStyle(.white.opacity(0.95))
         }

@@ -71,8 +71,8 @@ struct CollectionTile: View {
   }
 
   #if os(tvOS)
-  private var titleFont: Font { .system(size: 30, weight: .bold) }
-  private var countFont: Font { .system(size: 20) }
+  private var titleFont: Font { .dsTVSectionTitle }
+  private var countFont: Font { .dsTVBody }
   private var padding: CGFloat { 18 }
   #else
   private var titleFont: Font { .headline.weight(.bold) }
@@ -140,7 +140,7 @@ struct CollectionsRail: View {
   private var header: some View {
     Text("Collections")
       #if os(tvOS)
-      .font(.system(size: 28, weight: .semibold))
+      .font(.dsTVSectionTitle)
       .padding(.horizontal, 60)
       #else
       .font(.title3.weight(.bold))
@@ -171,14 +171,14 @@ struct CollectionsRail: View {
     VStack(alignment: .leading, spacing: 6) {
       Text(title)
         #if os(tvOS)
-        .font(.system(size: 26, weight: .semibold))
+        .font(.dsTVSectionTitle)
         #else
         .font(.headline)
         #endif
         .foregroundStyle(.white)
       Text(detail)
         #if os(tvOS)
-        .font(.system(size: 22))
+        .font(.dsTVBodyLarge)
         #else
         .font(.subheadline)
         #endif

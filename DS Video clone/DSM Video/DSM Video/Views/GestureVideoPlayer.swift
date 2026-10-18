@@ -778,7 +778,7 @@ struct GestureVideoPlayer: View {
                         setPlaybackRate(nextRate)
                     } label: {
                         Text(playbackRate == 1.0 ? "1×" : String(format: "%.2g×", playbackRate))
-                            .font(.system(size: 17, weight: .medium))
+                            .font(.dsTVCaptionEmphasis)
                             .foregroundStyle(.white)
                             .frame(width: 44, height: 44)
                     }

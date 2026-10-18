@@ -88,11 +88,11 @@ struct TVLoginView: View {
                     .offset(x: 3)
                 )
               Text(AppInfo.displayName)
-                .font(.system(size: 72, weight: .bold))
+                .font(.dsTVDisplay)
                 .foregroundStyle(.white)
                 .tracking(-1)
               Text("Your home video library.\nOn your TV.")
-                .font(.system(size: 24, weight: .regular))
+                .font(.dsTVBodyLarge)
                 .foregroundStyle(Color.dsTextSecondary)
                 .lineSpacing(4)
             }
@@ -107,7 +107,7 @@ struct TVLoginView: View {
             Spacer()
             VStack(alignment: .leading, spacing: 32) {
               Text("Sign In")
-                .font(.system(size: 36, weight: .semibold))
+                .font(.dsTVTitle)
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
 
@@ -121,7 +121,7 @@ struct TVLoginView: View {
                   .autocorrectionDisabled()
                   .frame(maxWidth: 480)
                 Text("Enter your NAS IP address or QuickConnect ID")
-                  .font(.system(size: 14))
+                  .font(.dsTVCaption)
                   .foregroundStyle(Color.dsTextMuted)
                   .frame(maxWidth: 480, alignment: .leading)
                 TextField("Username", text: $username)
@@ -161,7 +161,7 @@ struct TVLoginView: View {
                 if appState.isLoggingIn {
                   ProgressView().tint(.white).frame(maxWidth: 480)
                 } else {
-                  Text("Sign In").font(.system(size: 19, weight: .semibold)).frame(maxWidth: 480)
+                  Text("Sign In").font(.dsTVHeadline).frame(maxWidth: 480)
                 }
               }
               .buttonStyle(.borderedProminent)
@@ -223,7 +223,7 @@ private struct TVHomeView: View {
                   Task { await appState.homeLoad() }
                 } label: {
                   Label("Retry", systemImage: "arrow.clockwise")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.dsTVHeadline)
                     .padding(.horizontal, 48)
                     .padding(.vertical, 20)
                 }
@@ -234,7 +234,7 @@ private struct TVHomeView: View {
                   appState.logout()
                 } label: {
                   Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.dsTVHeadline)
                     .padding(.horizontal, 48)
                     .padding(.vertical, 20)
                 }
@@ -506,7 +506,7 @@ private struct TVLandscapeRail: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 24) {
       Text(title)
-        .font(.system(size: 28, weight: .semibold))
+        .font(.dsTVSectionTitle)
         .foregroundStyle(.white)
         .padding(.horizontal, 60)
         .accessibilityAddTraits(.isHeader)
@@ -610,7 +610,7 @@ private struct TVLibraryRail: View {
       } label: {
         HStack(spacing: 10) {
           Text(library.title)
-            .font(.system(size: 28, weight: .semibold))
+            .font(.dsTVSectionTitle)
             .foregroundStyle(.white)
           Image(systemName: "chevron.right")
             .font(.system(size: 20, weight: .semibold))
@@ -645,7 +645,7 @@ private struct TVLibraryRail: View {
             .padding(.horizontal, 60)
         } else {
           Text("No videos yet")
-            .font(.system(size: 22))
+            .font(.dsTVBodyLarge)
             .foregroundStyle(Color.dsTextMuted)
             .padding(.horizontal, 60)
             .padding(.vertical, 12)
@@ -823,14 +823,14 @@ private struct TVShowPortraitCard: View {
 
       VStack(alignment: .leading, spacing: 2) {
         Text(show.title)
-          .font(.system(size: 17, weight: .medium))
+          .font(.dsTVCaptionEmphasis)
           .foregroundStyle(.white)
           .lineLimit(2)
           .frame(width: cardWidth, alignment: .leading)
 
         if let year = show.year {
           Text(String(year))
-            .font(.system(size: 15))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
@@ -947,7 +947,7 @@ private struct TVLandscapeCard: View {
       // Title + year below card
       VStack(alignment: .leading, spacing: 2) {
         Text(item.title)
-          .font(.system(size: 17, weight: .medium))
+          .font(.dsTVCaptionEmphasis)
           .foregroundStyle(.white)
           // TASK-802: allow a second line + slight scale so long titles don't silently truncate.
           .lineLimit(2)
@@ -956,7 +956,7 @@ private struct TVLandscapeCard: View {
 
         if let year = item.year {
           Text(String(year))
-            .font(.system(size: 15))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
@@ -1049,14 +1049,14 @@ private struct TVPortraitCard: View {
 
       VStack(alignment: .leading, spacing: 2) {
         Text(item.title)
-          .font(.system(size: 17, weight: .medium))
+          .font(.dsTVCaptionEmphasis)
           .foregroundStyle(.white)
           .lineLimit(2)
           .frame(width: cardWidth, alignment: .leading)
 
         if let year = item.year {
           Text(String(year))
-            .font(.system(size: 15))
+            .font(.dsTVCaption)
             .foregroundStyle(Color.dsTextSecondary)
         }
       }
@@ -1220,7 +1220,7 @@ private struct TVSearchView: View {
         VStack(alignment: .leading, spacing: 40) {
           // Prominent search field — full-width, large text, auto-focuses keyboard
           TextField("Search movies and TV shows…", text: $searchText)
-            .font(.system(size: 36, weight: .regular))
+            .font(.dsTVField)
             .foregroundStyle(.white)
             .padding(.horizontal, 48)
             .padding(.vertical, 24)
@@ -1321,11 +1321,11 @@ private struct TVSearchView: View {
                         }
                         VStack(alignment: .leading, spacing: 4) {
                           Text(item.title)
-                            .font(.system(size: 28, weight: .medium))
+                            .font(.dsTVSectionTitle)
                             .foregroundStyle(.white)
                           if let year = item.year {
                             Text(String(year))
-                              .font(.system(size: 20))
+                              .font(.dsTVBody)
                               .foregroundStyle(Color.dsTextSecondary)
                           }
                         }
@@ -1350,10 +1350,10 @@ private struct TVSearchView: View {
                   .font(.system(size: 60))
                   .foregroundStyle(Color.dsTextMuted)
                 Text(SearchRules.shortQueryTitle)
-                  .font(.system(size: 28, weight: .semibold))
+                  .font(.dsTVSectionTitle)
                   .foregroundStyle(.white)
                 Text(SearchRules.shortQueryHint(for: searchText))
-                  .font(.system(size: 20))
+                  .font(.dsTVBody)
                   .foregroundStyle(Color.dsTextSecondary)
               }
               .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -1363,10 +1363,10 @@ private struct TVSearchView: View {
                   .font(.system(size: 60))
                   .foregroundStyle(Color.dsTextMuted)
                 Text("Search Your Library")
-                  .font(.system(size: 28, weight: .semibold))
+                  .font(.dsTVSectionTitle)
                   .foregroundStyle(.white)
                 Text("Enter a title to find movies and TV shows")
-                  .font(.system(size: 20))
+                  .font(.dsTVBody)
                   .foregroundStyle(Color.dsTextSecondary)
               }
               .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

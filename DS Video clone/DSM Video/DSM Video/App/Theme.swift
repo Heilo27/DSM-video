@@ -118,6 +118,10 @@ struct Theme: Equatable, Sendable {
     let fontDisplay: Font
     /// Uppercase technical eyebrow/metadata font (mono on cinematic).
     let fontEyebrow: Font
+
+    /// tvOS 10-foot text roles (TASK-951). Flat themes use `.standard`; Cinematic sets its
+    /// display, title and section roles in the rounded heavy face.
+    let tvType: TVTypeScale
 }
 
 // MARK: - Theme Shadow token
@@ -161,7 +165,8 @@ extension Theme {
         pressScale: CGFloat = 1.0,
         motionDuration: Double = 0.25,
         fontDisplay: Font? = nil,
-        fontEyebrow: Font? = nil
+        fontEyebrow: Font? = nil,
+        tvType: TVTypeScale = .standard
     ) {
         self.id = id
         self.background = background; self.surface = surface
@@ -187,6 +192,7 @@ extension Theme {
         // Display/eyebrow default to the existing large-title / caption fonts on flat themes.
         self.fontDisplay = fontDisplay ?? fontLargeTitle
         self.fontEyebrow = fontEyebrow ?? fontCaption2
+        self.tvType = tvType
     }
 }
 
@@ -334,6 +340,7 @@ extension Theme {
         pressScale: 0.96,
         motionDuration: 0.32,
         fontDisplay: Font.system(size: 46, weight: .heavy, design: .rounded),
-        fontEyebrow: Font.system(size: 11, weight: .bold).monospaced()
+        fontEyebrow: Font.system(size: 11, weight: .bold).monospaced(),
+        tvType: .cinematic
     )
 }

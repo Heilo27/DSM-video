@@ -29,7 +29,7 @@ struct SortChip: View {
     #if os(tvOS)
     Button(action: action) {
       Text(label)
-        .font(.system(size: 26, weight: .semibold))
+        .font(.dsTVSectionTitle)
         .foregroundStyle(isActive ? Color.dsAccentOn : (focused ? .black : Color.dsTextSecondary))
         .frame(minHeight: 56)
         .padding(.horizontal, 24)

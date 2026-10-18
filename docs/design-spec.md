@@ -98,6 +98,34 @@ extension Font {
 }
 ```
 
+#### tvOS type scale (`Font.dsTV*`, `App/TVTypeScale.swift`)
+
+tvOS has no Dynamic Type, so its text sizes are fixed 10-foot points, but they belong to the
+theme like every other token: `Theme.tvType` supplies a `TVTypeScale`, and every TV screen reads
+`Font.dsTV*` instead of `.font(.system(size:))`. A theme's typography therefore reaches the TV.
+
+| Role | Classic / Nitrate | Cinematic | Used for |
+|------|-------------------|-----------|----------|
+| `dsTVDisplay` | 72 bold | 72 heavy rounded | Sign-in wordmark |
+| `dsTVLargeTitle` | 48 bold | 48 heavy rounded | Show-detail title, pairing screen titles |
+| `dsTVTitle` | 36 bold | 36 heavy rounded | Sign-in heading, "Are you still watching?" |
+| `dsTVSectionTitle` | 28 semibold | 28 bold rounded | Shelf and library titles, collection titles, sort chips, search result titles |
+| `dsTVHeadline` | 22 semibold | same | Button labels, emphasised lines |
+| `dsTVLabel` | 20 medium | same | Inline action labels, episode titles |
+| `dsTVBodyLarge` | 24 regular | same | Tagline, empty states, countdown |
+| `dsTVBody` | 20 regular | same | Supporting copy, counts, years in search |
+| `dsTVCaption` | 17 regular | same | Years, durations, hints, server addresses |
+| `dsTVCaptionEmphasis` | 17 medium | same | Card titles under artwork, episode number badge, speed button |
+| `dsTVField` | 36 regular | same | Search field |
+| `dsTVCode` / `dsTVCodeField` | 80 / 56 bold monospaced | same | Pairing code, pairing-code entry |
+
+Rules: SF Symbol glyph sizes (`Image(systemName:)` with `.font(.system(size:))`) are not text and
+stay at the call site. Two iOS sites are deliberately fixed and carry a comment: the 40pt
+monospaced pairing code (`MainView`) and the avatar initial, sized as a fraction of the avatar
+(`ProfileViews`). Sizes were collapsed onto the nearest role, so some TV text moved by 1 to 6 pt
+(for example 14/15/16/18/19 pt captions now 17 pt, 42 pt pairing titles now 48 pt, sort-chip and
+collection tile titles now 28 pt).
+
 ---
 
 ## Per-Screen Implementation Notes
