@@ -65,10 +65,36 @@ struct ItemDetailView: View {
   /// showing content it could not deliver, then failing on tap. Downloaded titles play
   /// from disk and stay enabled.
   private var playUnavailableOffline: Bool {
+    Self.playUnavailableOffline(
+      serverUnreachable: appState.serverUnreachable,
+      isOffline: appState.isOffline,
+      isDownloaded: isDownloaded
+    )
+  }
+
+  /// The one rule for "Play can't work right now" (FR-071, FR-133). Shared by this
+  /// screen's Play buttons, its autoPlay entry, and the Home hero's Play.
+  static func playUnavailableOffline(serverUnreachable: Bool, isOffline: Bool, isDownloaded: Bool) -> Bool {
     // isOffline as well as serverUnreachable: in airplane mode before any request has
     // actually failed, only isOffline is set — so Play stayed enabled on a non-downloaded
     // item and dead-ended on the playback-failed panel instead of being disabled up front.
-    (appState.serverUnreachable || appState.isOffline) && !isDownloaded
+    (serverUnreachable || isOffline) && !isDownloaded
+  }
+
+  /// Whether an autoPlay entry (Home hero Play, Continue Watching card, episode
+  /// autoPlay) should open the player on appear. TASK-984: autoPlay bypassed the
+  /// disabled Play button entirely, so offline a non-downloaded title opened straight
+  /// into the playback-failed panel. When playback is unavailable the user lands on
+  /// this screen with Play disabled and its hint instead.
+  static func shouldAutoPlay(requested: Bool, playUnavailableOffline: Bool) -> Bool {
+    requested && !playUnavailableOffline
+  }
+
+  /// VoiceOver hint for a Play control disabled by `playUnavailableOffline`.
+  static let playUnavailableOfflineHint = "Unavailable — your NAS is unreachable and this video isn't downloaded"
+
+  private var autoPlayOnAppear: Bool {
+    Self.shouldAutoPlay(requested: autoPlay, playUnavailableOffline: playUnavailableOffline)
   }
 
   private var downloadProgress: Double {
@@ -81,7 +107,7 @@ struct ItemDetailView: View {
       .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        if autoPlay { showPlayer = true }
+        if autoPlayOnAppear { showPlayer = true }
       }
       // Put focus on Play EXPLICITLY, rather than trusting prefersDefaultFocus.
       //
@@ -97,7 +123,7 @@ struct ItemDetailView: View {
       // engine's own resolution, and `autoPlay` skips it entirely because the player is
       // about to cover this screen anyway.
       .task(id: itemID) {
-        guard !autoPlay else { return }
+        guard !autoPlayOnAppear else { return }
         try? await Task.sleep(for: .milliseconds(120))
         focusedAction = .play
       }
@@ -129,7 +155,7 @@ struct ItemDetailView: View {
       .toolbarColorScheme(.dark, for: .navigationBar)
       .task(id: itemID) { await load(); loadProgress() }
       .onAppear {
-        if autoPlay { showPlayer = true }
+        if autoPlayOnAppear { showPlayer = true }
       }
       .fullScreenCover(isPresented: $showPlayer, onDismiss: {
         playFromBeginning = false
@@ -344,7 +370,7 @@ struct ItemDetailView: View {
     // for "Play holds default focus" needs.
     .accessibilityIdentifier(A11y.Detail.playButton)
     .accessibilityLabel("Play \(shownTitle)")
-    .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
+    .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
   }
 
   private var tvStartOverButton: some View {
@@ -516,7 +542,7 @@ struct ItemDetailView: View {
             .opacity(playUnavailableOffline ? 0.4 : 1)
             .shadow(color: Color.dsAccent.opacity(0.5), radius: 8, x: 0, y: 4)
             .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
-            .accessibilityHint(playUnavailableOffline ? "Unavailable — your NAS is unreachable and this video isn't downloaded" : "")
+            .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
 
             if savedPositionSeconds > 0 {
               Button {

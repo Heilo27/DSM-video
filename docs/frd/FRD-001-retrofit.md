@@ -249,7 +249,9 @@ identity and records the finished episode as watched; the final episode of a sho
 leaves them unable to continue playing the title.
 **FR-070 [INFERRED]** — Double-triggering Play yields exactly one playback session.
 **FR-071 [STATED]** — With the NAS offline, Play on a non-downloaded title is unavailable up front rather
-than failing after the tap.
+than failing after the tap. This includes shortcuts that start playback directly (the Home hero's Play,
+a Continue Watching card, opening an episode to play): they land on the title's detail screen with Play
+unavailable instead of opening the player.
 
 ---
 
