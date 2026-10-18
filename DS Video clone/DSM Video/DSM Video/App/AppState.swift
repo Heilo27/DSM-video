@@ -373,6 +373,11 @@ final class AppState {
   /// Which servers have already had their first-connection moment (FR-152). Injected so tests
   /// use a throwaway suite.
   let firstConnectionRecord: FirstConnectionRecord
+  /// The system search index (FR-153). Injected so tests use a fake; tvOS gets a no-op.
+  @ObservationIgnored let spotlightIndexer: SpotlightIndexing
+  /// The tail of the serialized Spotlight work: clears and re-indexes run one after another, so a
+  /// re-index can never land after the clear that follows a profile switch or sign-out.
+  @ObservationIgnored private var spotlightTask: Task<Void, Never>?
 
   // Use custom REST API client (our backend)
   private(set) var api: APIClient
@@ -406,9 +411,11 @@ final class AppState {
 
   init(profileStore: ActiveProfileStore = .shared, localStore: LocalStore = .shared,
        serverUpdateDefaults: UserDefaults = .standard,
-       firstConnectionDefaults: UserDefaults = .standard) {
+       firstConnectionDefaults: UserDefaults = .standard,
+       spotlightIndexer: SpotlightIndexing = SpotlightIndexerFactory.make()) {
     self.profileStore = profileStore
     self.localStore = localStore
+    self.spotlightIndexer = spotlightIndexer
     self.serverUpdateDismissal = ServerUpdateDismissal(defaults: serverUpdateDefaults)
     self.firstConnectionRecord = FirstConnectionRecord(defaults: firstConnectionDefaults)
     #if DEBUG
@@ -2004,6 +2011,66 @@ final class AppState {
     // stale topshelf.json from the previous session would otherwise persist on disk. Delete
     // it directly, independent of the empty-write guard.
     deleteTopShelfSnapshot()
+    // FR-153: the system search index is profile-scoped state too. Emptied here, so sign-out and a
+    // profile change can never leave the previous profile's titles searchable; the next
+    // refreshSpotlightIndex() fills it back for whoever is active.
+    clearSpotlightIndex()
+  }
+
+  // MARK: - Spotlight (FR-153)
+
+  /// Empties the system search index. Queued behind any index pass in flight, which it cancels.
+  func clearSpotlightIndex() {
+    let indexer = spotlightIndexer
+    let previous = spotlightTask
+    previous?.cancel()
+    spotlightTask = Task {
+      await previous?.value
+      await indexer.clear()
+    }
+  }
+
+  /// Brings the system search index in line with what the ACTIVE profile may see. Safe to call
+  /// often: it diffs against what is already indexed and only touches the difference.
+  /// Not for demo mode, whose library is not the user's.
+  func refreshSpotlightIndex() {
+    guard !isDemoMode, sessionToken?.isEmpty == false else { return }
+    let indexer = spotlightIndexer
+    let store = localStore
+    let client = api
+    let previous = spotlightTask
+    previous?.cancel()
+    spotlightTask = Task {
+      await previous?.value
+      if Task.isCancelled { return }
+      // Scope first, then rows: rows are read under the store's CURRENT scope, so even if the
+      // profile changes between the two awaits the result is a subset of what that profile sees.
+      let scope = await store.activeScope
+      let items = await store.queryAllVisibleItems()
+      if Task.isCancelled { return }
+      let entries = SpotlightPolicy.entries(for: items, scope: scope)
+      await indexer.sync(entries: entries, artwork: { posterID in
+        await Self.spotlightThumbnail(posterID: posterID, client: client)
+      })
+    }
+  }
+
+  /// Waits for queued Spotlight work. For tests.
+  func waitForSpotlightIdle() async {
+    await spotlightTask?.value
+  }
+
+  private static func spotlightThumbnail(posterID: String, client: APIClient) async -> Data? {
+    #if os(iOS)
+    let width = APIClient.ladderWidth(forPointWidth: SpotlightArtwork.maxPixelWidth, scale: 1)
+    guard let url = client.imageURL(id: posterID, width: width),
+          let image = await AuthenticatedImageLoader.image(
+            url: url, token: client.token, usesTunnelCookie: client.usesTunnelCookie)
+    else { return nil }
+    return SpotlightArtwork.thumbnailData(from: image)
+    #else
+    return nil
+    #endif
   }
 
   /// Removes the persisted Top Shelf snapshot from the shared App Group container.
@@ -2901,6 +2968,7 @@ final class AppState {
       // Cursors and the store are account-wide and already committed above; only the
       // screen belongs to the profile, so a superseded pass stops here.
       guard applyRails(rails, startedAt: generation) else { return }
+      refreshSpotlightIndex()
       homeLog.info("runDeltaSync: done — CW=\(rails.continueWatching.count) JA=\(rails.justAdded.count) RW=\(rails.recentlyWatched.count)")
       // FR-152: after the sync, never before it, so the moment can never delay sign-in.
       await showFirstConnectionWelcomeIfPending()
@@ -3426,6 +3494,8 @@ final class AppState {
     }
     discardProfileScopedHomeState()
     await homeLoad()
+    // FR-153: also here, not only after a sync, so an offline switch re-indexes for the new profile.
+    refreshSpotlightIndex()
   }
 
   // MARK: - Watchlist

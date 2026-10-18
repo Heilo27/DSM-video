@@ -7,6 +7,9 @@
 
 import SwiftUI
 import os.log
+#if os(iOS)
+import CoreSpotlight
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -178,6 +181,19 @@ struct DS_Video_cloneApp: App {
                     let itemID = url.pathComponents.dropFirst().joined(separator: "/")
                     appState.pendingDeepLinkItemID = itemID
                 }
+                #if os(iOS)
+                // FR-153: a Spotlight result, or a Siri suggestion of a title the viewer opened,
+                // opens that title's detail page: the same destination as the deep link (FR-147),
+                // never autoplay. The id is only ever used to look a title up.
+                .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                    let id = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String
+                    if let id, !id.isEmpty { appState.pendingDeepLinkItemID = id }
+                }
+                .onContinueUserActivity(SpotlightPolicy.viewItemActivityType) { activity in
+                    let id = activity.userInfo?[SpotlightPolicy.activityItemIDKey] as? String
+                    if let id, !id.isEmpty { appState.pendingDeepLinkItemID = id }
+                }
+                #endif
         }
         .onChange(of: scenePhase) { _, newPhase in
             // TASK-738: refresh Continue Watching when returning to the foreground so it
