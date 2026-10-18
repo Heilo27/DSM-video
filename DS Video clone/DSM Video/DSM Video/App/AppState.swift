@@ -1875,6 +1875,11 @@ final class AppState {
   /// is now the authority. The local query survives only as the offline fallback: if the
   /// request fails, whatever applyRails already set stays on screen rather than the rail
   /// going blank.
+  ///
+  /// TASK-1020: a request that SUCCEEDS is the answer, even when it is empty. An empty rail is
+  /// the server's verdict (a profile ceiling that hides every new title, a library with nothing
+  /// added), and showing the local list instead would put titles on screen that the server just
+  /// said this profile may not see. Only a failed request keeps the local fallback.
   func loadJustAddedRail() async {
     guard !isDemoMode, sessionToken != nil else { return }
     let apiSnapshot = api
@@ -1882,10 +1887,6 @@ final class AppState {
     do {
       let resp = try await apiSnapshot.justAdded(limit: 16)
       guard homeResultIsCurrent(generation, "justAdded") else { return }
-      guard !resp.items.isEmpty else {
-        homeLog.info("justAdded: server returned an empty rail — keeping the local fallback")
-        return
-      }
       homeJustAdded = resp.items
       homeLog.info("justAdded: \(resp.items.count) item(s) from the server")
     } catch {
