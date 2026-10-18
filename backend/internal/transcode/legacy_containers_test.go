@@ -18,6 +18,16 @@ func TestLegacyContainersNeverDirectPlay(t *testing.T) {
 		{"flv", ".flv", "flv"},
 		{"3gp", ".3gp", "mov,mp4,m4a,3gp,3g2,mj2"},
 		{"3g2", ".3g2", "mov,mp4,m4a,3gp,3g2,mj2"},
+		// TASK-1002: the rest of the formats the bundled ffmpeg can decode. .f4v is
+		// ISO-BMFF, so ffprobe reports the same name as an .mp4; the extension is what
+		// keeps it off the direct-play path.
+		{"rm", ".rm", "rm"},
+		{"rmvb", ".rmvb", "rm"},
+		{"divx", ".divx", "avi"},
+		{"asf", ".asf", "asf"},
+		{"ogv", ".ogv", "ogg"},
+		{"ogm", ".ogm", "ogg"},
+		{"f4v", ".f4v", "mov,mp4,m4a,3gp,3g2,mj2"},
 	}
 	// The best case for direct play: the codecs the player likes best.
 	for _, c := range cases {

@@ -535,17 +535,18 @@ struct APIClient {
                       response: LoginResponse.self, timeoutInterval: 10)
   }
 
-  func generatePairingCode() async throws -> PairingCodeResponse {
-    try await request(path: "/api/v1/auth/pairing/generate", method: "POST", body: Optional<Int>.none, response: PairingCodeResponse.self)
+  /// `server` travels with the code to the device that redeems it (TASK-972).
+  func generatePairingCode(server: PairingServerInfo) async throws -> PairingCodeResponse {
+    try await request(path: "/api/v1/auth/pairing/generate", method: "POST", body: server, response: PairingCodeResponse.self)
   }
 
-  func exchangePairingCode(code: String, timeoutInterval: TimeInterval = Timeout.auth) async throws -> LoginResponse {
+  func exchangePairingCode(code: String, timeoutInterval: TimeInterval = Timeout.auth) async throws -> PairingExchangeResponse {
     let req = PairingCodeExchangeRequest(code: code)
     return try await request(
       path: "/api/v1/auth/pairing/exchange",
       method: "POST",
       body: req,
-      response: LoginResponse.self,
+      response: PairingExchangeResponse.self,
       authorized: false,
       timeoutInterval: timeoutInterval
     )
@@ -993,8 +994,10 @@ enum APIError: Error {
       // ── Pairing ───────────────────────────────────────────────────────────────
       case "invalid_or_expired_code":
         return "That pairing code is wrong or has expired. Generate a new one and try again."
+      case "pairing_busy":
+        return "The server couldn't issue a pairing code right now. Try again in a minute."
       case "missing_code":
-        return "Enter the pairing code shown on your Apple TV."
+        return "Enter the 6-digit pairing code from your signed-in device."
 
       // ── Playback ──────────────────────────────────────────────────────────────
       // The four most likely playback failures. These used to render as raw snake_case

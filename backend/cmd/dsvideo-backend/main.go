@@ -183,6 +183,8 @@ type Server struct {
 	// Pairing codes: code → pairingEntry (tvOS ↔ iOS device pairing)
 	pairingMu    sync.Mutex
 	pairingCodes map[string]pairingEntry
+	// Wrong codes since the last revocation, counted while a live code exists (pairing.go).
+	pairingFailures int
 
 	// Rate limiter for unauthenticated auth endpoints (login, pairing exchange).
 	// Keyed by remote IP; value is *authRateEntry. Each entry carries its own mutex —
@@ -232,6 +234,8 @@ type pairingEntry struct {
 	username  string
 	expiresAt time.Time
 	exchanged bool
+	// How the generating device reaches this server, returned on exchange (TASK-972).
+	server pairingServerInfo
 }
 
 type PlaySession struct {
@@ -662,6 +666,10 @@ func main() {
 				if now2.After(entry.expiresAt) {
 					delete(s.pairingCodes, code)
 				}
+			}
+			if len(s.pairingCodes) == 0 {
+				// Nothing left to guess at: stale wrong-code counts do not carry into the next code.
+				s.pairingFailures = 0
 			}
 			s.pairingMu.Unlock()
 
@@ -2449,8 +2457,10 @@ const (
 )
 
 // handlePairingGenerate — POST /api/v1/auth/pairing/generate
-// Requires authentication. Called by tvOS to obtain a short code that an iOS
-// device can type in to receive a session token for the same account.
+// Requires authentication. Called by a signed-in device (iOS or tvOS) to obtain a short code
+// another device types in to receive a session for the same account. The optional JSON body
+// carries how this device reaches the server (pairingServerInfo, TASK-972); the exchange
+// hands it to the new device.
 func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 	u := userFromCtx(r.Context())
 	if u.ID == "" {
@@ -2458,26 +2468,52 @@ func (s *Server) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a 6-digit numeric code using crypto/rand for uniform distribution.
-	codeBuf := make([]byte, 4)
-	if _, err := rand.Read(codeBuf); err != nil {
-		log.Printf("[pairing] crypto/rand failed: %v", err)
-		writeErr(w, http.StatusInternalServerError, "internal_error")
+	info, err := decodePairingGenerateBody(w, r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	// Map 4 random bytes to a number in [0, 1_000_000) then zero-pad to 6 digits.
-	n := (uint32(codeBuf[0])<<24 | uint32(codeBuf[1])<<16 | uint32(codeBuf[2])<<8 | uint32(codeBuf[3])) % 1_000_000
-	code := fmt.Sprintf("%06d", n)
+	info, dropped := info.sanitized()
+	if len(dropped) > 0 {
+		log.Printf("[pairing] ignored invalid connection field(s) %v from user=%s", dropped, u.Username)
+	}
 
 	entry := pairingEntry{
 		userID:    u.ID,
 		username:  u.Username,
 		expiresAt: time.Now().Add(pairingCodeTTL),
+		server:    info,
 	}
 
+	// Generate a 6-digit numeric code using crypto/rand for uniform distribution, never one
+	// that is already outstanding: overwriting another account's code would hand whoever
+	// redeems it THIS account's session.
+	var code string
 	s.pairingMu.Lock()
-	s.pairingCodes[code] = entry
+	for attempt := 0; attempt < 16 && code == ""; attempt++ {
+		codeBuf := make([]byte, 4)
+		if _, err := rand.Read(codeBuf); err != nil {
+			s.pairingMu.Unlock()
+			log.Printf("[pairing] crypto/rand failed: %v", err)
+			writeErr(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		// Map 4 random bytes to a number in [0, 1_000_000) then zero-pad to 6 digits.
+		n := (uint32(codeBuf[0])<<24 | uint32(codeBuf[1])<<16 | uint32(codeBuf[2])<<8 | uint32(codeBuf[3])) % 1_000_000
+		candidate := fmt.Sprintf("%06d", n)
+		if _, taken := s.pairingCodes[candidate]; !taken {
+			code = candidate
+		}
+	}
+	if code != "" {
+		s.pairingCodes[code] = entry
+	}
 	s.pairingMu.Unlock()
+	if code == "" {
+		log.Printf("[pairing] no free code after 16 draws")
+		writeErr(w, http.StatusServiceUnavailable, "pairing_busy")
+		return
+	}
 
 	log.Printf("[pairing] generated code for user=%s expires=%s", u.Username, entry.expiresAt.Format(time.RFC3339))
 
@@ -2507,10 +2543,12 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
+	revoked := -1
 	s.pairingMu.Lock()
 	entry, ok := s.pairingCodes[req.Code]
 	if ok {
-		if entry.exchanged || time.Now().After(entry.expiresAt) {
+		if entry.exchanged || now.After(entry.expiresAt) {
 			// Mark as consumed or detect expiry — either way, delete and deny.
 			delete(s.pairingCodes, req.Code)
 			ok = false
@@ -2519,9 +2557,15 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 			s.pairingCodes[req.Code] = entry
 		}
 	}
+	if !ok {
+		revoked = s.recordPairingFailureLocked(now)
+	}
 	s.pairingMu.Unlock()
 
 	if !ok {
+		if revoked >= 0 {
+			log.Printf("[pairing] %d wrong codes: revoked %d outstanding code(s)", pairingMaxFailures, revoked)
+		}
 		writeErr(w, http.StatusUnauthorized, "invalid_or_expired_code")
 		return
 	}
@@ -2537,14 +2581,20 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 
 	// Return the same shape as loginResponse so the iOS client can reuse its
 	// existing LoginResponse decoder (token + user object).
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"token": token,
 		"user": map[string]any{
 			"id":          entry.userID,
 			"username":    entry.username,
 			"displayName": entry.username,
 		},
-	})
+	}
+	// How the generating device reaches this server (TASK-972): the new device found us on
+	// its LAN, and needs these to keep working away from it.
+	if !entry.server.isEmpty() {
+		resp["server"] = entry.server
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // -------------------------
@@ -3966,6 +4016,41 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// livePlaybackProbe is the ONE full probe this request may run for what the response
+	// reports about the source's streams (its audio tracks, its chapters, and whether a
+	// web remux would drop audio). probeResult is nil on the cached-codec path, so this
+	// probes live then, at most once; a probe that already ran with audio streams is
+	// reused. nil when there is no prober or the probe failed.
+	var liveProbe *transcode.ProbeResult
+	liveProbeTried := false
+	livePlaybackProbe := func() *transcode.ProbeResult {
+		if probeResult != nil && len(probeResult.AudioStreams) > 0 {
+			return probeResult
+		}
+		if !liveProbeTried && s.prober != nil {
+			liveProbeTried = true
+			pctx, pcancel := context.WithTimeout(r.Context(), 8*time.Second)
+			defer pcancel()
+			if pr, perr := s.prober.Probe(pctx, path); perr == nil {
+				liveProbe = pr
+			}
+		}
+		return liveProbe
+	}
+
+	// TASK-1003: the realtime remux (handleRemuxStream) writes ONE fragmented MP4 with
+	// one audio stream, so a web title with a second language or a commentary track
+	// would lose it. Such a title goes to the HLS audio renditions (FR-061) instead,
+	// where every track is its own selectable rendition. A probe that cannot be read
+	// leaves the remux in place: playable, as before.
+	webRemuxWouldDropAudio := false
+	if isWebClient && playbackMode == transcode.RemuxOnly {
+		if pr := livePlaybackProbe(); pr != nil && len(pr.AudioStreams) >= 2 {
+			webRemuxWouldDropAudio = true
+			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of the single-audio remux", itemID, len(pr.AudioStreams))
+		}
+	}
+
 	sessionID := randID("sess_")
 
 	// Identifies this viewer + this title, so StartSession can supersede the SAME viewer's
@@ -4019,6 +4104,10 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	}
 	classifySubtitleTracks(subtitleTracks, runtimeSecs, audioLang)
 
+	// The audio tracks the response lists (TASK-1004): the HLS session's own list when it
+	// transcodes (the very tracks its renditions carry), else the probe's.
+	var audioStreams []transcode.AudioStream
+
 	ps := PlaySession{
 		ItemID:       itemID,
 		Path:         path,
@@ -4032,7 +4121,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Determine playback kind based on mode
 	if playbackMode == transcode.DirectPlay {
 		ps.Kind = "direct"
-	} else if isWebClient && playbackMode == transcode.RemuxOnly {
+	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webRemuxWouldDropAudio {
 		// For web clients needing remux (MKV+H264 or MP4+H264+AC3),
 		// stream a remuxed fragmented MP4 in real-time through ffmpeg.
 		// This is much faster than full HLS generation (just copies video stream).
@@ -4051,6 +4140,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			ps.HLSDir = hlsSession.OutputDir
+			audioStreams = hlsSession.AudioTracks
 		} else {
 			// No HLS generator - fall back to direct serving for web clients
 			// (browser may or may not handle the format, but it's better than nothing)
@@ -4105,17 +4195,18 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// For direct play, try a quick probe for chapters if we don't already have them
-	if chapterList == nil && (ps.Kind == "direct" || ps.Kind == "remux") && s.prober != nil {
-		ctx2, cancel2 := context.WithTimeout(r.Context(), 8*time.Second)
-		defer cancel2()
-		if pr, err := s.prober.Probe(ctx2, path); err == nil && len(pr.Chapters) > 0 {
-			for _, c := range pr.Chapters {
-				chapterList = append(chapterList, map[string]any{
-					"id":        c.ID,
-					"title":     c.Title,
-					"startSecs": c.StartSecs,
-					"endSecs":   c.EndSecs,
-				})
+	if ps.Kind == "direct" || ps.Kind == "remux" {
+		if pr := livePlaybackProbe(); pr != nil {
+			audioStreams = pr.AudioStreams
+			if chapterList == nil {
+				for _, c := range pr.Chapters {
+					chapterList = append(chapterList, map[string]any{
+						"id":        c.ID,
+						"title":     c.Title,
+						"startSecs": c.StartSecs,
+						"endSecs":   c.EndSecs,
+					})
+				}
 			}
 		}
 	}
@@ -4161,7 +4252,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 			"sessionId":             sessionID,
 			"streamUrl":             baseURL + "/api/v1/playback/" + sessionID + "/stream",
 			"subtitles":             subtitleInfo,
-			"audioTracks":           []any{},
+			"audioTracks":           playbackAudioTracks(audioStreams),
 			"resumePositionSeconds": resumePos,
 			"durationSeconds":       nullIntToAny(itemDuration),
 			"transcoding":           ps.Kind == "remux",
@@ -4181,7 +4272,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"startSeconds":          startSeconds,
 		"hlsMasterUrl":          baseURL + "/api/v1/playback/" + sessionID + "/master.m3u8",
 		"subtitles":             subtitleInfo,
-		"audioTracks":           []any{},
+		"audioTracks":           playbackAudioTracks(audioStreams),
 		"resumePositionSeconds": resumePos,
 		"durationSeconds":       nullIntToAny(itemDuration),
 		"transcoding":           true,
@@ -4189,6 +4280,28 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		"chapters":              chapterList,
 		"quality":               qualityOut,
 	})
+}
+
+// playbackAudioTracks renders the audioTracks array of the playback JSON (TASK-1004):
+// one entry per audio stream, in source order. label and default come from the same two
+// functions that build the HLS master playlist, so a client sees the names and the
+// preselected track the renditions carry. Never nil: a title without audio answers [].
+func playbackAudioTracks(tracks []transcode.AudioStream) []map[string]any {
+	out := make([]map[string]any, 0, len(tracks))
+	labels := transcode.AudioTrackLabels(tracks)
+	def := transcode.DefaultAudioTrack(tracks)
+	for i, t := range tracks {
+		out = append(out, map[string]any{
+			"id":       "a" + strconv.Itoa(i+1),
+			"label":    labels[i],
+			"language": t.Language,
+			"title":    t.Title,
+			"codec":    t.Codec,
+			"channels": t.Channels,
+			"default":  i == def,
+		})
+	}
+	return out
 }
 
 // findSubtitleFiles looks for subtitle files alongside videoPath and returns
@@ -4861,6 +4974,9 @@ func (t *tailBuffer) String() string { return strings.TrimSpace(t.buf.String()) 
 // This is used for web clients when the video codec is compatible (H.264)
 // but the container (MKV) or audio codec (AC3/DTS) isn't browser-compatible.
 // Much faster than full HLS transcode since video is stream-copied.
+// It carries ONE audio stream (no -map: ffmpeg picks the default one), so handlePlayback
+// only routes a title here when it has fewer than two audio tracks; a multi-audio title
+// goes to the HLS audio renditions instead (TASK-1003, FR-061).
 func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps PlaySession) {
 	ffmpegPath := s.cfg.FFmpegPath
 	if ffmpegPath == "" {
@@ -7814,8 +7930,18 @@ var scanVideoExt = map[string]bool{
 	".webm": true,
 	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
 	".vob": true, ".3gp": true,
-	".rm": false, ".rmvb": false, ".divx": false, ".asf": false, ".ogv": false,
-	".ogm": false, ".f4v": false, ".iso": false,
+	// TASK-1002: the bundled ffmpeg (6.1.1) has the demuxers and decoders for these, so
+	// they are indexed and always transcoded. .iso is a disc image, not a stream: it stays
+	// recognised-but-skipped and logged.
+	".rm": true, ".rmvb": true, ".divx": true, ".asf": true, ".ogv": true,
+	".ogm": true, ".f4v": true,
+	".iso": false,
+}
+
+// isDVDDiscFolder reports whether a directory name is a DVD disc's VIDEO_TS or AUDIO_TS
+// folder (any case: rips from Windows and macOS tools differ).
+func isDVDDiscFolder(name string) bool {
+	return strings.EqualFold(name, "VIDEO_TS") || strings.EqualFold(name, "AUDIO_TS")
 }
 
 // scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
@@ -8052,6 +8178,16 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 				return filepath.SkipDir
 			}
 			if d.Name() == "_dsvideo_originals" {
+				return filepath.SkipDir
+			}
+			// TASK-998 (FRD-000 M1): a DVD rip's VIDEO_TS/AUDIO_TS holds title FRAGMENTS
+			// (VTS_01_1.VOB ...) that only play as a sequence. Indexing each as a movie
+			// filled the library with unplayable rows, and joining them needs a concat pass
+			// too costly for NAS hardware. Skip the folder whole and say so, once.
+			if isDVDDiscFolder(d.Name()) {
+				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
+					log.Printf("scan: library %s: skipping DVD folder %q — its .VOB files are title fragments that do not play on their own; this server does not index disc rips", libraryID, path)
+				}
 				return filepath.SkipDir
 			}
 			return nil

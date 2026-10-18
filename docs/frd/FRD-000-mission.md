@@ -27,10 +27,29 @@ Discover movies and shows already on the NAS, on the user's own terms. The user 
 their files for this app; the app reads what is there.
 - A title the user can see in Synology's own file browser must be findable in this app.
   The scanner indexes .mp4 .m4v .mov .mkv .avi .ts .webm and the older camera, disc and web
-  formats .wmv .mpg .mpeg .m2ts .mts .flv .vob .3gp. Those older containers are never direct
-  played: they always go through the transcoder. A video format the server recognises but does
-  not index (.rm .rmvb .divx .asf .ogv .ogm .f4v .iso) is logged by path, once, so the gap is
-  visible. Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
+  formats .wmv .mpg .mpeg .m2ts .mts .flv .vob .3gp, plus .rm .rmvb .divx .asf .ogv .ogm .f4v
+  (the bundled ffmpeg has the demuxers and decoders for them). Those older containers are
+  never direct played: they always go through the transcoder. So is a .ts: whether a file plays direct or
+  is repackaged is decided by ONE rule (its container and probed codecs), the same whether or
+  not ffprobe could read it; a quick extension guess never overrules that rule. [TASK-997]
+  A video format the server recognises but does
+  not index (.iso, a disc image rather than a stream) is logged by path, once, so the gap is
+  visible. [TASK-1002] Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
+  A DVD rip is not indexed: a folder named VIDEO_TS or AUDIO_TS (any case) is skipped whole and
+  logged by path, once. Its .VOB files are fragments of one title (VTS_01_1.VOB, VTS_01_2.VOB ...)
+  that only play as a sequence; indexing each made unplayable rows, and joining them means a
+  concat pass this NAS hardware should not carry. A loose .vob outside those folders is still
+  indexed. Rows that an earlier scan made from files inside such a folder are removed by the
+  normal stale-row purge (and tombstoned, so the apps drop them too). [TASK-998]
+- The background normalize worker (which repackages or re-encodes non-direct-play files into
+  MP4 so they stop needing a transcode on every play) covers these older containers by the same
+  rule as any other file, with no special path, and the same limits: it works only while the
+  server is idle (no live transcode, no recent playback session), one file at a time; it takes
+  its ffmpeg slot from the same shared limiter live playback uses and yields when none is free;
+  it runs at the lowest CPU priority; it checks the converted file before touching the original;
+  and the original is only ever moved aside (never deleted by the worker) and reclaimed after
+  the retention window (default 7 days, at least the newest three kept). There is no
+  time-of-day schedule: idleness is the schedule. [TASK-1001]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.

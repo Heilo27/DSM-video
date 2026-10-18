@@ -284,7 +284,12 @@ Every audio track the source carries is offered, with no carve-out: a title with
 or a commentary track lists each one in the audio picker, labelled by its title, else its language,
 else "Track N", with the source's default track preselected. A single-audio title plays exactly as
 before and its picker shows one track. This holds in the iOS and tvOS apps whether they play the
-file directly or the server converts it to HLS.
+file directly or the server converts it to HLS. The playback response lists the same tracks in its
+`audioTracks` array, named and defaulted exactly as the HLS master playlist names them (one source,
+the probe), whatever way the title is served. [TASK-1004] The web player never loses a track
+either: the realtime remux it uses for a single-audio file in a non-browser container carries one
+audio stream, so a web request for a title with two or more audio tracks is served as the HLS
+audio renditions instead, and the picker offers every track. [TASK-1003]
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than
@@ -331,6 +336,10 @@ appears exactly once, with its episodes merged. On a restricted profile the merg
 see, in the show list and the show's seasons and episodes alike, so the detail lists the episodes the
 header counted (FRD-002 FR-250). [TASK-924] The DS Video web plane (`TVShow` / `TVShowEpisode`
 `list` and `getinfo`) follows the same rule, and its result never depends on database row order. [TASK-995]
+The inverse holds too: a folder is ONE show. When a folder holds episodes of more than one show, the
+folder takes the name most of its episodes carry, and all of its episodes list under that show, in the
+apps and on the web plane alike (one grouping path, `groupEpisodesByShow`); a sequel's own folder is its
+own show. Every episode appears in exactly one show. [TASK-999]
 **FR-085 [STATED]** — The detail screen shows title, year, runtime, genre, rating, director, cast, and
 description. *Derivation:* design-spec B4 §4/§6/§7.
 **FR-086 [INFERRED]** — Missing optional metadata is omitted cleanly — never rendered as "null"/"nil" or
@@ -420,8 +429,10 @@ player menu, next episode, filter chips, sidebar items): a pressed button visibl
 one draws a clear outline, a disabled one is dimmed with a not-allowed cursor and does not lift on hover.
 There is one primary-button look; the Play button is that button, only larger. The sign-in error tint
 follows the theme's danger colour in both light and dark. *Derivation:* TRUTHS S2 (every control works and
-can be reached). Which accent the web player carries (its blue, or the apps' brand red) is not decided
-here; it is open for Ryan under TASK-959.
+can be reached). The web player carries the apps' brand red, #D1262F, as its accent in both themes
+(decided by Friday for Ryan, 2026-10-17, replacing the earlier blue). The colour is defined once, as
+the page's `--brand-red` custom property; the accent tokens (normal, hover, tinted background) and the
+logo and avatar gradients all derive from it, so it cannot drift between themes. [TASK-1000, TASK-959 AC4]
 
 ---
 
@@ -463,6 +474,20 @@ product copy, and is flagged as such.
 **FR-117 [STATED]** — **Pairing:** a device signs in by entering a short on-screen code shown on an
 already-signed-in device; the account and server connection carry over with no password or server
 address re-entry. This works in both directions (iOS→tvOS and tvOS→iOS).
+*Clarified 2026-10-17 (TASK-972):* the code works on a device that has never connected to any server.
+The signed-in device's ways to reach the server (its home address, its away address, its QuickConnect
+ID) travel with the code. The new device finds the server on its own local network, redeems the code
+there, and keeps both the address that answered and the addresses that came with the code, so it can
+reach the server away from home afterwards. First-time pairing therefore needs the new device on the
+same network as the server; away from home, a never-connected device signs in with the server address
+instead. A device that already has an address uses that address and does not search, so a mistyped
+address fails as a mistyped address. If no server is found, the message says so; if Local Network
+access is off, it says that (FR-115, TASK-949). A wrong code is reported as a wrong code, never as an
+invalid server address (FR-118). On iPhone and iPad the code from a signed-in Apple TV is entered on the
+sign-in screen under "Have a code from your Apple TV?"; on Apple TV the code from a signed-in phone is
+entered on its sign-in screen. A code is single-use and short-lived, and once 20 wrong codes have been
+tried from any devices while codes are outstanding, every outstanding code stops working and a new one must be generated. Codes and
+session tokens never appear in logs (FR-144).
 **FR-118 [INFERRED]** — A wrong, expired, or already-used code is rejected with a message naming the
 code, leaves the device unpaired, creates no partial session, and allows a retry with a fresh code.
 **FR-119 [INFERRED]** — A session established by sign-in or pairing survives relaunch; the user is not

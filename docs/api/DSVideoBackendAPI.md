@@ -50,35 +50,48 @@ Response:
 Invalidate the app token (and, if held, the DSM session).
 
 ### POST `/auth/pairing/generate`
-Generate a 6-digit pairing code for tvOS authentication. **Requires authentication** (user must be logged in).
+Generate a 6-digit pairing code for another device (FR-117). **Requires authentication** (user must be logged in). Either platform can generate; the signed-out device redeems.
+
+Request (optional; an empty body or `null` is accepted from older clients): how this signed-in device reaches the server, handed to the device that redeems the code [TASK-972]. Every field is optional. A field that is not a plain address (credentials, query, fragment, whitespace, non-ASCII, over 255 bytes) or not a QuickConnect ID shape is dropped, and the code is still issued.
+```json
+{
+  "quickConnectId": "ryans-nas",
+  "lanAddress": "http://192.168.50.148:8090",
+  "wanAddress": "nas.example.org:8091"
+}
+```
 
 Response:
 ```json
 {
   "code": "123456",
-  "expiresInSeconds": 600
+  "expires_in_seconds": 600
 }
 ```
 
+Errors: `missing_token` (401), `invalid_json` (400, malformed body), `pairing_busy` (503, no free code could be drawn).
+
 ### POST `/auth/pairing/exchange`
-Exchange a pairing code for a session token. **Public endpoint** (no auth required).
+Exchange a pairing code for a session token. **Public endpoint** (no auth required). Per-IP auth rate limit applies (10/min). Codes are single-use and expire after 10 minutes. Once 20 wrong codes (from any address) have been tried while codes are outstanding, every outstanding code is revoked and the count starts again [TASK-972].
 
 Request:
 ```json
 { "code": "123456" }
 ```
 
-Response:
+Response (`server` is present only when the generating device sent connection details):
 ```json
 {
   "token": "<jwt>",
-  "user": { "id": "u_123", "username": "admin", "displayName": "admin" }
+  "user": { "id": "u_123", "username": "admin", "displayName": "admin" },
+  "server": { "quickConnectId": "ryans-nas", "lanAddress": "http://192.168.50.148:8090", "wanAddress": "nas.example.org:8091" }
 }
 ```
 
 Errors:
-- `invalid_pairing_code` - code format invalid (must be 6 digits)
-- `invalid_or_expired_pairing_code` - code not found or expired
+- `invalid_json` (400)
+- `missing_code` (400)
+- `invalid_or_expired_code` (401) - code not found, expired, already used, or revoked
 
 ## Libraries & browsing
 
@@ -191,11 +204,27 @@ Response:
     { "id": "sub_1", "label": "English", "format": "vtt", "url": "https://<host>/api/v1/playback/sess_123/sub_1.vtt" }
   ],
   "audioTracks": [
-    { "id": "a1", "label": "Stereo", "language": "en" }
+    { "id": "a1", "label": "Main", "language": "eng", "title": "Main", "codec": "ac3", "channels": 6, "default": true },
+    { "id": "a2", "label": "fre", "language": "fre", "title": "", "codec": "aac", "channels": 2, "default": false }
   ],
   "resumePositionSeconds": 20
 }
 ```
+
+`audioTracks` lists every audio stream of the source, in source order, for every `kind` (direct,
+remux and HLS alike); a title with no audio answers `[]`, never `null`. It comes from the same
+probe the HLS audio renditions are built from, so it matches the master playlist track for track
+(TASK-1004). Per entry: `id` is `a` plus the 1-based position; `label` is the track title, else
+its language, else `Track N` (made unique), the same `NAME` the master playlist carries;
+`language` is the source tag lowercased (`""` when untagged or `und`); `title` is the source
+title tag (`""` when absent); `codec` and `channels` are the source stream's; exactly one entry
+has `default: true` (the source's default, else the first). A client may ignore the field: the
+apps read the tracks from the HLS manifest.
+
+With `?client=web`, a title that would otherwise be served by the realtime remux (`kind: "direct"`,
+`transcoding: true`, one fragmented MP4 with ONE audio stream) and carries two or more audio tracks
+is answered `kind: "hls"` instead, so the web player gets every track as an audio rendition
+(TASK-1003). A single-audio title keeps the remux.
 
 ### GET `/playback/{sessionId}/stream`
 Direct progressive streaming endpoint (supports `Range`).
