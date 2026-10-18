@@ -7757,6 +7757,24 @@ const tombstoneRetention = 90 * 24 * time.Hour
 // is still there. The scan guards cover the failures they can detect; this covers the ones
 // they cannot, such as a nested mount point that reads as an ordinary empty folder.
 //
+// scanVideoExt is the ONE list of file extensions the scanner knows as video (FRD-000 M1,
+// TASK-990). true = indexed. false = recognised as video but deliberately not indexed:
+// the file is logged by path (once per process) so the gap is visible instead of silent.
+// Containers the Apple player cannot open natively (everything past .webm) are never direct
+// played: transcode/decision.go routes them through a transcode.
+var scanVideoExt = map[string]bool{
+	".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".avi": true, ".ts": true,
+	".webm": true,
+	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
+	".vob": true, ".3gp": true,
+	".rm": false, ".rmvb": false, ".divx": false, ".asf": false, ".ogv": false,
+	".ogm": false, ".f4v": false, ".iso": false,
+}
+
+// scanSkippedVideoLogged remembers which unsupported video paths were already reported, so
+// the 5-minute scan does not repeat the same line forever.
+var scanSkippedVideoLogged sync.Map
+
 // 30 days: long enough for a drive left unplugged over a holiday, short enough that the
 // stale rows the purge exists to clear (renames, real deletions) still go within a month.
 // It MUST stay below tombstoneRetention: the grace is measured from the tombstone, and
@@ -7831,11 +7849,6 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		return fmt.Errorf("scan: library root %q unavailable (skipping to protect existing rows): %w", root, err)
 	} else if !fi.IsDir() {
 		return fmt.Errorf("scan: library root %q is not a directory (skipping to protect existing rows)", root)
-	}
-
-	videoExt := map[string]bool{
-		".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".avi": true, ".ts": true,
-		".webm": true,
 	}
 
 	// Pre-query all existing items for this library so we can skip per-file DB reads.
@@ -8053,7 +8066,12 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if !videoExt[ext] {
+		if indexed, known := scanVideoExt[ext]; !indexed {
+			if known {
+				if _, seen := scanSkippedVideoLogged.LoadOrStore(path, struct{}{}); !seen {
+					log.Printf("scan: library %s: skipping %q — %s is a video format this server does not index", libraryID, path, ext)
+				}
+			}
 			return nil
 		}
 

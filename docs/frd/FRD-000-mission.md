@@ -26,6 +26,11 @@ is scope to question.
 Discover movies and shows already on the NAS, on the user's own terms. The user does not reorganise
 their files for this app; the app reads what is there.
 - A title the user can see in Synology's own file browser must be findable in this app.
+  The scanner indexes .mp4 .m4v .mov .mkv .avi .ts .webm and the older camera, disc and web
+  formats .wmv .mpg .mpeg .m2ts .mts .flv .vob .3gp. Those older containers are never direct
+  played: they always go through the transcoder. A video format the server recognises but does
+  not index (.rm .rmvb .divx .asf .ogv .ogm .f4v .iso) is logged by path, once, so the gap is
+  visible. Any other file type (.txt, .nfo, .srt) is ignored silently. [TASK-990]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.
