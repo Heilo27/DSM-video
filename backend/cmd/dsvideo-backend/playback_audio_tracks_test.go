@@ -176,6 +176,21 @@ func TestPlaybackAudioTracks_NoAudioIsAnEmptyArray(t *testing.T) {
 	}
 }
 
+// TASK-1003: a multi-audio MKV (H.264 video, AC-3 audio) used to go to the single-stream
+// realtime remux and lose every track after the first. It now goes to HLS renditions.
+func TestWebRemux_MultiAudioTitleGoesToHLSRenditions(t *testing.T) {
+	w := newPlaybackAudioWorld(t, "film.mkv", "matroska,webm", "h264", "ac3", "mkv",
+		probeVideoH264, probeAudioEngAC3, probeAudioFreAAC)
+	resp := w.playback(t, "?client=web")
+	if resp["kind"] != "hls" {
+		t.Fatalf("web multi-audio kind = %v, want hls (the remux keeps one audio track)", resp["kind"])
+	}
+	if resp["hlsMasterUrl"] == nil || resp["hlsMasterUrl"] == "" {
+		t.Errorf("hlsMasterUrl missing: %v", resp)
+	}
+	assertTwoTracks(t, audioTracksOf(t, resp))
+}
+
 // The cheap realtime remux stays the path for a single-audio title.
 func TestWebRemux_SingleAudioTitleStaysOnTheRemux(t *testing.T) {
 	w := newPlaybackAudioWorld(t, "film.mkv", "matroska,webm", "h264", "ac3", "mkv",

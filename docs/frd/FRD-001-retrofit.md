@@ -235,7 +235,10 @@ else "Track N", with the source's default track preselected. A single-audio titl
 before and its picker shows one track. This holds in the iOS and tvOS apps whether they play the
 file directly or the server converts it to HLS. The playback response lists the same tracks in its
 `audioTracks` array, named and defaulted exactly as the HLS master playlist names them (one source,
-the probe), whatever way the title is served. [TASK-1004]
+the probe), whatever way the title is served. [TASK-1004] The web player never loses a track
+either: the realtime remux it uses for a single-audio file in a non-browser container carries one
+audio stream, so a web request for a title with two or more audio tracks is served as the HLS
+audio renditions instead, and the picker offers every track. [TASK-1003]
 *Derivation:* design-spec B5 §2/§6 (captions button + picker); competitive research P03; forced/full
 split corroborated in scope by TASK-827/828 titles.
 **FR-062 [INFERRED]** — A title with no subtitle tracks says so (or disables the control) rather than

@@ -3988,6 +3988,19 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		return liveProbe
 	}
 
+	// TASK-1003: the realtime remux (handleRemuxStream) writes ONE fragmented MP4 with
+	// one audio stream, so a web title with a second language or a commentary track
+	// would lose it. Such a title goes to the HLS audio renditions (FR-061) instead,
+	// where every track is its own selectable rendition. A probe that cannot be read
+	// leaves the remux in place: playable, as before.
+	webRemuxWouldDropAudio := false
+	if isWebClient && playbackMode == transcode.RemuxOnly {
+		if pr := livePlaybackProbe(); pr != nil && len(pr.AudioStreams) >= 2 {
+			webRemuxWouldDropAudio = true
+			log.Printf("[Playback] web client: %s has %d audio tracks, HLS renditions instead of the single-audio remux", itemID, len(pr.AudioStreams))
+		}
+	}
+
 	sessionID := randID("sess_")
 
 	// Identifies this viewer + this title, so StartSession can supersede the SAME viewer's
@@ -4058,7 +4071,7 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Determine playback kind based on mode
 	if playbackMode == transcode.DirectPlay {
 		ps.Kind = "direct"
-	} else if isWebClient && playbackMode == transcode.RemuxOnly {
+	} else if isWebClient && playbackMode == transcode.RemuxOnly && !webRemuxWouldDropAudio {
 		// For web clients needing remux (MKV+H264 or MP4+H264+AC3),
 		// stream a remuxed fragmented MP4 in real-time through ffmpeg.
 		// This is much faster than full HLS generation (just copies video stream).
@@ -4911,6 +4924,9 @@ func (t *tailBuffer) String() string { return strings.TrimSpace(t.buf.String()) 
 // This is used for web clients when the video codec is compatible (H.264)
 // but the container (MKV) or audio codec (AC3/DTS) isn't browser-compatible.
 // Much faster than full HLS transcode since video is stream-copied.
+// It carries ONE audio stream (no -map: ffmpeg picks the default one), so handlePlayback
+// only routes a title here when it has fewer than two audio tracks; a multi-audio title
+// goes to the HLS audio renditions instead (TASK-1003, FR-061).
 func (s *Server) handleRemuxStream(w http.ResponseWriter, r *http.Request, ps PlaySession) {
 	ffmpegPath := s.cfg.FFmpegPath
 	if ffmpegPath == "" {

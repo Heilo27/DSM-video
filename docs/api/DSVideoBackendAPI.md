@@ -208,6 +208,11 @@ title tag (`""` when absent); `codec` and `channels` are the source stream's; ex
 has `default: true` (the source's default, else the first). A client may ignore the field: the
 apps read the tracks from the HLS manifest.
 
+With `?client=web`, a title that would otherwise be served by the realtime remux (`kind: "direct"`,
+`transcoding: true`, one fragmented MP4 with ONE audio stream) and carries two or more audio tracks
+is answered `kind: "hls"` instead, so the web player gets every track as an audio rendition
+(TASK-1003). A single-audio title keeps the remux.
+
 ### GET `/playback/{sessionId}/stream`
 Direct progressive streaming endpoint (supports `Range`).
 
