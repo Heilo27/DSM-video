@@ -422,6 +422,9 @@ and leaves no entry claiming to be playable. A transfer interrupted by connectiv
 interrupted state, never completed.
 **FR-141 [INFERRED]** — Every surface reports the offline condition consistently; no screen shows a
 success-looking or blank state while another reports offline.
+*Clarified 2026-10-17 (TASK-988):* Apple TV shows the same indicator, in the same words as iPhone, over
+the top of every screen including detail screens. It never takes focus, and it clears when the server
+answers again with no re-sign-in.
 **FR-142 [STATED]** — The offline error screen on tvOS is focus-navigable; its retry control can be
 reached and activated (instance of FR-006).
 
