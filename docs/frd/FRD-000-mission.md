@@ -41,6 +41,15 @@ their files for this app; the app reads what is there.
   concat pass this NAS hardware should not carry. A loose .vob outside those folders is still
   indexed. Rows that an earlier scan made from files inside such a folder are removed by the
   normal stale-row purge (and tombstoned, so the apps drop them too). [TASK-998]
+- The background normalize worker (which repackages or re-encodes non-direct-play files into
+  MP4 so they stop needing a transcode on every play) covers these older containers by the same
+  rule as any other file, with no special path, and the same limits: it works only while the
+  server is idle (no live transcode, no recent playback session), one file at a time; it takes
+  its ffmpeg slot from the same shared limiter live playback uses and yields when none is free;
+  it runs at the lowest CPU priority; it checks the converted file before touching the original;
+  and the original is only ever moved aside (never deleted by the worker) and reclaimed after
+  the retention window (default 7 days, at least the newest three kept). There is no
+  time-of-day schedule: idleness is the schedule. [TASK-1001]
 - A show whose episodes span more than one folder is ONE show. (This is a recurring defect area —
   see FRD-001 §6 and TASK-900.)
 - Accepting the library must not require the user to re-tag, rename, or move anything.
