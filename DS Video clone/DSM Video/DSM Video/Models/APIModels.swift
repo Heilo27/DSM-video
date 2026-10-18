@@ -268,6 +268,28 @@ struct ItemDetail: Decodable, Identifiable {
     return title
   }
 
+  /// The name a DOWNLOAD carries (FR-042, TASK-980). An episode's own title is not an identity
+  /// ("Pilot" exists in every show), so an episode reads "Show · S1 · E2 · Title". Parts the
+  /// server did not supply are left out rather than guessed, and a title that merely repeats the
+  /// show name (or is blank) is not shown twice. Anything that is not an episode is `displayTitle`.
+  var downloadTitle: String {
+    guard type == "episode" else { return displayTitle }
+    func clean(_ text: String?) -> String? {
+      let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    let show = clean(showName)
+    var parts: [String] = []
+    if let show { parts.append(show) }
+    if let seasonNumber { parts.append("S\(seasonNumber)") }
+    if let episodeNumber { parts.append("E\(episodeNumber)") }
+    // A blank episode title falls back to the raw (filename-derived) title only when there is no
+    // show name to identify the episode by; otherwise the show and S/E are the label.
+    let name = clean(episodeTitle) ?? (show == nil ? clean(title) : nil)
+    if let name, name.caseInsensitiveCompare(show ?? "") != .orderedSame { parts.append(name) }
+    return parts.isEmpty ? displayTitle : parts.joined(separator: " \u{00B7} ")
+  }
+
   // MARK: - Derived format badges
 
   /// Short, capitalised quality/format badges for display, e.g. ["4K", "HDR-ready", "5.1"].

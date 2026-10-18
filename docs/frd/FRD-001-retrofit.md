@@ -148,6 +148,9 @@ touches no progress causes no progress refetch.
 
 **FR-030 [STATED]** — A title can be downloaded for offline viewing; the Downloads surface lists each
 download with its state: completed, downloading (with progress and size), queued, or paused.
+An in-flight row reads "Queued" until the first bytes arrive, then percent plus bytes received of the
+total ("42% · 310 MB of 1.2 GB", bytes alone when the total is unknown); a paused row reads "Paused".
+Queued never renders like downloading. *(TASK-979)*
 *Derivation:* design-spec B7 §2.
 **FR-031 [STATED]** — **"Downloaded" means playable offline.** A title reported as completed must play
 from local storage with the server unreachable. A transfer that did not fully complete must never be
@@ -157,7 +160,8 @@ your NAS is offline"; this is only meaningful if the converse holds.
 **FR-032 [STATED]** — A download failure is surfaced to the user. A failing download must not silently
 vanish from the list. A transfer that finishes but whose file cannot be kept on the device leaves
 Downloading for a retryable Failed row naming storage as the cause, leaves no orphaned bytes behind, and
-never sits at 100% (TASK-971).
+never sits at 100% (TASK-971). A Failed row stays on the Downloads screen, across a relaunch, until the
+user retries or dismisses it; every Failed row offers both, none is Dismiss-only (TASK-994).
 *Derivation:* FR-005 plus the stated commitment to clear messages; corroborated as in-scope by ticket
 TASK-782's title.
 **FR-033 [INFERRED]** — A download failure message names the real cause (server unreachable, storage
@@ -175,11 +179,23 @@ as used storage and never yields a completed state.
 *Derivation:* design-spec B7 §1.
 **FR-039 [INFERRED]** — The reported storage figure corresponds to the actual bytes of the listed
 downloads and changes by the deleted item's size after a deletion.
-**FR-040 [INFERRED]** — A title already downloaded, or already downloading, cannot be enqueued twice;
-exactly one entry per title identity exists.
+**FR-040 [INFERRED]** — A title already downloaded, already downloading, or paused (or failed and
+awaiting retry), cannot be enqueued twice; exactly one entry per title identity exists. A request for
+such a title opens no second transfer and hands back the playback session opened for the request. The
+title page offers Resume (not Download) for a paused download.
 **FR-041 [STATED]** — Downloaded titles are distinguishable in the library from non-downloaded ones, and
 with the server offline, Play on a non-downloaded title is presented as unavailable **before** the tap.
+A downloaded title carries a small "downloaded" mark in the top-left corner of its poster card (library
+grid, home rails, collections, search results wide enough to hold it) and an inline mark in its episode
+row; the mark is also spoken ("Downloaded"). With the server unreachable, a card for a title that is not
+downloaded is dimmed (and spoken as "Not available offline") while its page still opens. The mark follows
+the playable download (FR-043, FR-262: on disk and allowed for the active profile) and disappears the
+moment the download is deleted, without a relaunch. iOS only: the Downloads surface does not exist on
+tvOS, so tvOS cards carry no mark and are never dimmed for this.
 **FR-042 [INFERRED]** — A download entry for an episode identifies the specific episode, not just the show.
+An episode's download reads "Show · S1 · E2 · Episode title"; a missing part is left out (never an empty
+segment or a repeat), so two "Pilot"s of different shows, and two episodes of one show, are told apart,
+and the show name appears once. A blank episode title leaves "Show · S1 · E2". *(TASK-980)*
 **FR-043 [INFERRED]** — A completed download whose file has been removed outside the app stops claiming
 to be playable.
 **FR-044 [INFERRED, DESTRUCTIVE]** — Sign-out handles downloaded media in one consistent, stated way;
@@ -196,6 +212,13 @@ transfer continues in the background (TASK-947):
   continues from where it stopped. If the server no longer holds the session it was cut from, it starts
   over on a fresh one rather than failing. A stop with nothing to continue shows as Failed, naming why
   (connection, storage, app closed, Background App Refresh off, system stopped it).
+- A download that completes in a background relaunch, before the app can sign in to the server, is kept
+  at once; releasing its playback session and fetching its poster wait for the app to be running with a
+  session, and are not lost if the app closes in between (TASK-994).
+- A pause that races a transfer finishing never drops the finished file.
+- *Accepted limit:* a transfer resumed from saved data and cut again by a relaunch restarts on a fresh
+  session only once the app is running with a server session; until then its Failed row says to start
+  it again.
 - An unfinished download whose transfer was lost with the app shows as Failed ("interrupted") and can be
   started again.
 
@@ -414,6 +437,7 @@ indicator rather than presented as a freshly confirmed live list.
 functional on downloaded ones.
 **FR-134 [INFERRED]** — Downloaded titles are visually distinguishable offline so the user can see what is
 playable now.
+(Realised by the FR-041 mark and dimming; one rule, `DownloadManager.badgeState`, drives every card.)
 **FR-135 [INFERRED]** — The Downloads list is truthful offline — it does not require the server to render,
 and zero downloads reads as "nothing downloaded", not as a server failure.
 **FR-136 [STATED]** — Search offline is a connection error with retry, not "no results".

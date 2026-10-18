@@ -146,7 +146,8 @@ struct DownloadRelaunchTests {
     let failure = try #require(manager.failedDownloads["mv-4"])
     #expect(failure.message.contains("storage"))
     #expect(!failure.message.contains("connection"))
-    #expect(!failure.isPermanent, "freeing space fixes it, so it can be retried")
+    #expect(DownloadManager(containerForTesting: container).failedDownloads["mv-4"] != nil,
+            "freeing space fixes it, so the row stays to be retried, even across a relaunch")
     #expect(failure.title == "Big Film")
     #expect(manager.activeDownloads["mv-4"] == nil, "the row leaves Downloading")
     #expect(manager.downloadProgress["mv-4"] == nil)

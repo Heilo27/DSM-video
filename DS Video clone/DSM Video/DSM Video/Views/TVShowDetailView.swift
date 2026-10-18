@@ -1546,6 +1546,9 @@ private struct iOSEpisodeRow: View {
 
       Spacer()
 
+      // TASK-983 · FR-041: a downloaded episode says so in its row.
+      DownloadedRowGlyph(itemID: ep.id)
+
       if let prog = ep.progress, prog.durationSeconds > 0 {
         let frac = min(1.0, Double(prog.positionSeconds) / Double(prog.durationSeconds))
         if frac >= PlaybackProgress.watchedThreshold {
@@ -1570,6 +1573,7 @@ private struct iOSEpisodeRow: View {
     .accessibilityElement(children: .combine)
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
+    .downloadStatus(itemID: ep.id, showsBadge: false)
   }
 }
 #endif  // !os(tvOS)
