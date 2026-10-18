@@ -409,10 +409,10 @@ struct SearchView: View {
   #if !os(tvOS)
   @FocusState private var searchFocused: Bool
   #endif
-  @AppStorage("dsReel.recentSearches") private var recentSearchesRaw: String = ""
+  @AppStorage(RecentSearches.defaultsKey) private var recentSearchesRaw: String = ""
 
   private var recentSearches: [String] {
-    recentSearchesRaw.isEmpty ? [] : recentSearchesRaw.components(separatedBy: "\u{001F}").filter { !$0.isEmpty }
+    RecentSearches(raw: recentSearchesRaw).items
   }
 
   private var columns: [GridItem] {
@@ -434,7 +434,7 @@ struct SearchView: View {
               Task { await search(explicit: true, record: true) }
             },
             onRemove: { query in removeRecentSearch(query) },
-            onClearAll: { recentSearchesRaw = "" }
+            onClearAll: { clearRecentSearches() }
           )
           .padding(.top, .dsSpaceLG)
         }
@@ -554,7 +554,7 @@ struct SearchView: View {
     .onAppear {
       // Seed demo recent searches once if list is empty
       if appState.isDemoMode && recentSearchesRaw.isEmpty {
-        recentSearchesRaw = ["Action movies", "The Signal", "2024"].joined(separator: "\u{001F}")
+        recentSearchesRaw = RecentSearches(items: ["Action movies", "The Signal", "2024"]).raw
       }
       // Raise the keyboard. Deferred one runloop turn: the search field is installed by
       // the navigation bar during this same layout pass, and setting focus before it
@@ -640,17 +640,21 @@ struct SearchView: View {
   }
 
   private func saveRecentSearch(_ query: String) {
-    var current = recentSearches
-    current.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
-    current.insert(query, at: 0)
-    if current.count > 10 { current = Array(current.prefix(10)) }
-    recentSearchesRaw = current.joined(separator: "\u{001F}")
+    var recents = RecentSearches(raw: recentSearchesRaw)
+    recents.add(query)
+    recentSearchesRaw = recents.raw
   }
 
   private func removeRecentSearch(_ query: String) {
-    var current = recentSearches
-    current.removeAll { $0 == query }
-    recentSearchesRaw = current.joined(separator: "\u{001F}")
+    var recents = RecentSearches(raw: recentSearchesRaw)
+    recents.remove(query)
+    recentSearchesRaw = recents.raw
+  }
+
+  private func clearRecentSearches() {
+    var recents = RecentSearches(raw: recentSearchesRaw)
+    recents.clear()
+    recentSearchesRaw = recents.raw
   }
 }
 
@@ -879,6 +883,7 @@ struct WatchlistView: View {
 struct DownloadsView: View {
   @Environment(AppState.self) private var appState
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  @Environment(\.scenePhase) private var scenePhase
   var isEmbedded: Bool = false
   @State private var downloads: [DownloadedItem] = []
   @State private var totalBytes: Int64 = 0
@@ -993,6 +998,15 @@ struct DownloadsView: View {
     .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle("Downloads")
     .onAppear {
+      // A file removed outside the app while it ran is only noticed here and on foreground
+      // (OC-1054, FR-043); the list read itself never touches the disk.
+      downloadManager.revalidateDownloadedItems()
+      loadDownloads()
+      loadStorageInfo()
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      guard newPhase == .active else { return }
+      downloadManager.revalidateDownloadedItems()
       loadDownloads()
       loadStorageInfo()
     }
@@ -1102,7 +1116,7 @@ struct DownloadsView: View {
           .font(.headline)
           .foregroundStyle(Color.dsTextPrimary)
         Spacer()
-        Text("\(formatBytes(usedByAppBytes)) used")
+        Text(DownloadStorageFigure.usedText(usedBytes: usedByAppBytes))
           .font(.caption)
           .foregroundStyle(Color.dsTextSecondary)
       }
@@ -1114,15 +1128,14 @@ struct DownloadsView: View {
           RoundedRectangle(cornerRadius: 5)  // literal: storage-bar fill, matches the track
             .fill(Color.dsAccent)
             .frame(
-              width: totalBytes > 0
-                ? geo.size.width * CGFloat(Double(usedByAppBytes) / Double(totalBytes))
-                : 0,
+              width: geo.size.width * CGFloat(
+                DownloadStorageFigure.fillFraction(usedBytes: usedByAppBytes, totalBytes: totalBytes)),
               height: 10
             )
         }
       }
       .frame(height: 10)
-      Text("\(formatBytes(availableBytes)) of \(formatBytes(totalBytes)) available")
+      Text(DownloadStorageFigure.availableText(availableBytes: availableBytes, totalBytes: totalBytes))
         .font(.caption)
         .foregroundStyle(Color.dsTextSecondary)
     }
@@ -1132,7 +1145,8 @@ struct DownloadsView: View {
     .padding(.horizontal)
     .padding(.top, .dsSpaceSM)
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("Storage: \(formatBytes(usedByAppBytes)) used by downloads, \(formatBytes(availableBytes)) of \(formatBytes(totalBytes)) available")
+    .accessibilityLabel(DownloadStorageFigure.accessibilityLabel(
+      usedBytes: usedByAppBytes, availableBytes: availableBytes, totalBytes: totalBytes))
   }
 
   // MARK: - Active Downloads Section
@@ -1310,12 +1324,6 @@ struct DownloadsView: View {
       return sum + size
     }
     return (total, available, used)
-  }
-
-  private func formatBytes(_ bytes: Int64) -> String {
-    let formatter = ByteCountFormatter()
-    formatter.countStyle = .file
-    return formatter.string(fromByteCount: bytes)
   }
 }
 
@@ -1524,9 +1532,7 @@ private struct DownloadedItemCell: View {
   }
 
   private func formatFileSize(_ bytes: Int64) -> String {
-    let formatter = ByteCountFormatter()
-    formatter.countStyle = .file
-    return formatter.string(fromByteCount: bytes)
+    DownloadStorageFigure.size(bytes)
   }
 }
 

@@ -186,4 +186,33 @@ struct DownloadListOracleTests {
     #expect(reopened.playableDownloadedItem(itemId: "mv-a")?.id == "mv-a", "neighbours still play")
     #expect(reopened.playableDownloadedItem(itemId: "mv-c")?.id == "mv-c")
   }
+
+  /// OC-1054 · TASK-1046 · given a LIVE manager whose list was already read (so it is cached),
+  /// when a downloaded file is removed outside the app and the Downloads screen next appears
+  /// (revalidate, then read), then that title is gone from the list and not playable, and its
+  /// neighbours remain listed and playable.
+  /// Red if: the cached list is served after the file is gone (the title stays listed until
+  /// relaunch), or revalidation drops a neighbour whose file is still there.
+  @Test func aFileRemovedWhileTheAppRunsLeavesTheListOnNextAppear() async throws {
+    let container = try makeContainer("livegone")
+    defer { try? FileManager.default.removeItem(at: container) }
+    let manager = DownloadManager(containerForTesting: container)
+    for id in ["mv-a", "mv-gone", "mv-c"] { try await finish(manager, id, in: container) }
+    #expect(manager.getDownloadedItems().map(\.id).sorted() == ["mv-a", "mv-c", "mv-gone"],
+            "precondition: all three listed, and the list is now cached")
+    let path = try #require(manager.getDownloadedItem(itemId: "mv-gone")?.videoPath)
+    try FileManager.default.removeItem(atPath: path)
+
+    #expect(manager.getDownloadedItems().count == 3,
+            "a list read does not stat the disk (large libraries): the cache still answers")
+    #expect(manager.revalidateDownloadedItems(), "the missing file is noticed")
+
+    #expect(manager.getDownloadedItems().map(\.id).sorted() == ["mv-a", "mv-c"])
+    #expect(manager.visibleDownloadedItems().map(\.id).sorted() == ["mv-a", "mv-c"])
+    #expect(!manager.isDownloaded(itemId: "mv-gone"))
+    #expect(manager.playableDownloadedItem(itemId: "mv-gone") == nil)
+    #expect(manager.playableDownloadedItem(itemId: "mv-a")?.id == "mv-a", "neighbours still play")
+    #expect(manager.playableDownloadedItem(itemId: "mv-c")?.id == "mv-c")
+    #expect(!manager.revalidateDownloadedItems(), "nothing further changed")
+  }
 }

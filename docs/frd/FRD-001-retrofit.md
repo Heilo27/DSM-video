@@ -242,7 +242,11 @@ An episode's download reads "Show · S1 · E2 · Episode title"; a missing part 
 segment or a repeat), so two "Pilot"s of different shows, and two episodes of one show, are told apart,
 and the show name appears once. A blank episode title leaves "Show · S1 · E2". *(TASK-980)*
 **FR-043 [INFERRED]** — A completed download whose file has been removed outside the app stops claiming
-to be playable.
+to be playable. *(OC-1054)* [DESIGN, 2026-10-18, TASK-1046]: this holds while the app is running, not
+only after a relaunch. When the Downloads screen appears, and when the app returns to the foreground, the
+list is checked against the files on disk and a title whose file is gone leaves it, with its neighbours
+untouched. Reading the list does not itself check the disk (large libraries), so a file removed while
+another screen is open is noticed at the next of those two moments.
 **FR-044 [INFERRED, DESTRUCTIVE]** — Sign-out handles downloaded media in one consistent, stated way;
 partial removal leaving orphaned bytes or entries pointing at missing files is a defect.
 Unfinished downloads (in flight, paused or failed) and their records go with sign-out too; none comes back
@@ -484,7 +488,10 @@ focused. If nothing matches, it opens search with the phrase filled in and says 
 [DESIGN, 2026-10-17, TASK-993]: iPhone and iPad had no reader for the request, so the app opened and did
 nothing. They now show search, over whatever tab is open, with the phrase filled in and the search already run.
 The search is an explicit one, so a one-character title ("M") runs; it is not added to recent searches, which
-hold only what the viewer typed. A request is acted on once. Neither phrase starts playback. A bare "play <title>" without the app name is out of reach: that is
+hold only what the viewer typed. A request is acted on once. Neither phrase starts playback [DESIGN, 2026-10-18, TASK-1045, OC-2184]:
+Ryan decided a Siri request takes the viewer to the title's detail page and leaves Play to them (resuming from a
+voice command, with no position on screen, loses the viewer's place); earlier wording that Siri "plays or resumes"
+the title is withdrawn. A bare "play <title>" without the app name is out of reach: that is
 an Apple TV-app catalog partnership, not an API. Siri results obey the active profile's ceiling (FRD-002
 FR-264). *Derivation:* 542d543.
 **FR-148 [DESIGN, 2026-10-17, TASK-959]** — *Every control in the /web player shows when it is pressed,

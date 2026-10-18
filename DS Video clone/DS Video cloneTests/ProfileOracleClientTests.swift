@@ -1,3 +1,4 @@
+import AppIntents
 import Testing
 import Foundation
 @testable import DSM_Video
@@ -478,6 +479,36 @@ struct IntentsActForTheActiveProfileTests {
       _ = try? await intent.perform()
       #expect(state.pendingDeepLinkItemID == "kid-1")
       #expect(state.pendingSearchTerm == nil)
+    }
+  }
+
+  /// OC-2184 · TASK-1045 (Ryan's decision) · given a spoken title that resolves, when Siri's play
+  /// intent runs, then the app is routed to that title's DETAIL page and playback is not started:
+  /// the only server traffic is the search, no playback session is requested, and the search
+  /// screen is not opened. The find intent opens search with the term and opens no title.
+  /// Red if: the play intent starts a playback session (or requests a stream) instead of
+  /// handing the item to the detail deep link, or the find intent opens a title.
+  @Test func sirisIntentsOpenTheDetailPageAndNeverStartPlayback() async {
+    await ocAccount(cached: [owner, kid], active: kid, routes: [
+      searchPath: .json(200, #"{"items":[{"id":"kid-1","type":"movie","title":"Kid Movie","addedAt":"2026-01-01T00:00:00Z","ageLevel":1}],"total":1}"#)
+    ]) { state in
+      AppStateHolder.register(state)
+      let play = PlayItemIntent()
+      play.term = "Kid Movie"
+      _ = try? await play.perform()
+
+      #expect(state.pendingDeepLinkItemID == "kid-1", "routed to the title's detail page")
+      #expect(state.pendingSearchTerm == nil)
+      let traffic = ProfileStubServer.requests.map { "\($0.method) \($0.path)" }
+      #expect(traffic == [searchPath], "only the search ran: no playback session was requested")
+      #expect(!traffic.contains { $0.contains("/playback") })
+
+      state.pendingDeepLinkItemID = nil
+      let find = FindItemIntent()
+      find.criteria = StringSearchCriteria(term: "Kid Movie")
+      _ = try? await find.perform()
+      #expect(state.pendingSearchTerm == "Kid Movie", "find opens the search screen with the term")
+      #expect(state.pendingDeepLinkItemID == nil, "find opens no title")
     }
   }
 

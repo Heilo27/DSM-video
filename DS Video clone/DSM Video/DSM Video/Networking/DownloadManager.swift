@@ -152,17 +152,50 @@ enum DownloadRowState: Equatable, Sendable {
     case .paused(let percent):
       return "\(percent)%"
     case .downloading(let percent, let bytes):
-      let size = ByteCountFormatter()
-      size.countStyle = .file
       if bytes.expected > 0 {
-        return "\(percent)% \u{00B7} \(size.string(fromByteCount: bytes.written)) of \(size.string(fromByteCount: bytes.expected))"
+        return "\(percent)% \u{00B7} \(DownloadStorageFigure.size(bytes.written)) of \(DownloadStorageFigure.size(bytes.expected))"
       }
-      return size.string(fromByteCount: bytes.written)
+      return DownloadStorageFigure.size(bytes.written)
     }
   }
 
   var isQueued: Bool { self == .queued }
   var isPaused: Bool { if case .paused = self { return true } else { return false } }
+}
+
+/// OC-1050 (FR-030..043): the Downloads screen's storage figure, as pure functions so the
+/// numbers and words a viewer reads are testable without launching UI. The view supplies the
+/// measured byte counts; every string and ratio the figure shows is made here.
+///
+/// `size(_:)` is also the one formatter for any file size a download surface shows (in-flight
+/// rows, the cell's size line), so a size never reads one way in a row and another in the figure.
+enum DownloadStorageFigure {
+  /// A byte count as the system's file-size text ("Zero KB", "1 byte", "4.5 GB").
+  static func size(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: bytes)
+  }
+
+  /// The header's right-hand text: what the downloads occupy.
+  static func usedText(usedBytes: Int64) -> String {
+    "\(size(usedBytes)) used"
+  }
+
+  /// The caption under the bar: what is free of what the device holds.
+  static func availableText(availableBytes: Int64, totalBytes: Int64) -> String {
+    "\(size(availableBytes)) of \(size(totalBytes)) available"
+  }
+
+  /// The spoken summary of the whole figure.
+  static func accessibilityLabel(usedBytes: Int64, availableBytes: Int64, totalBytes: Int64) -> String {
+    "Storage: \(size(usedBytes)) used by downloads, \(availableText(availableBytes: availableBytes, totalBytes: totalBytes))"
+  }
+
+  /// How much of the bar the downloads fill: used over total, 0 when the total is unknown.
+  static func fillFraction(usedBytes: Int64, totalBytes: Int64) -> Double {
+    totalBytes > 0 ? Double(usedBytes) / Double(totalBytes) : 0
+  }
 }
 
 /// The three states the downloads manifest can be in, kept distinct on purpose.
@@ -984,6 +1017,24 @@ final class DownloadManager: NSObject {
     }
     cachedDownloadedItems = resolved
     return resolved
+  }
+
+  /// Drop the cached list when a listed file has been removed outside the app while it runs
+  /// (OC-1054, FR-043, TASK-1046). The cache answers every read without touching disk, so
+  /// without this a title whose file is gone keeps being listed until relaunch.
+  ///
+  /// This is the ONE place the cache is checked against the disk: it costs a stat per listed
+  /// file, so it runs when the Downloads screen appears and when the app returns to the
+  /// foreground, never on a list read. A clean cache is left alone; a stale one is dropped and
+  /// the next read rebuilds it through the same file-exists filter a cold open uses.
+  /// Returns whether the list changed, so a caller can skip a redundant refresh.
+  @discardableResult
+  func revalidateDownloadedItems() -> Bool {
+    guard let cached = cachedDownloadedItems else { return false }
+    let fm = FileManager.default
+    guard cached.contains(where: { !fm.fileExists(atPath: $0.videoPath) }) else { return false }
+    cachedDownloadedItems = nil
+    return true
   }
 
   /// The account's download for `itemId`, whoever is watching. Bookkeeping only (delete,
