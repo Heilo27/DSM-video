@@ -257,13 +257,16 @@ final class AppState {
     ageLevel(level)?.label
   }
 
-  /// The certifications an age level covers, as the server's ladder lists them
-  /// ("PG · TV-Y7, TV-Y7-FV, TV-PG"), plus "Unrated" on the level unrated titles count as
-  /// (FR-242). Same source and fallback as `ageLevelLabel`; nil when no ladder has ever arrived.
+  /// A level's subtitle: the ages first, then the certifications it covers as the server's ladder
+  /// lists them ("Under 8 · G · TV-Y, TV-G"; "8–12 · PG · TV-Y7, TV-Y7-FV, TV-PG"), plus
+  /// "Unrated" on the level unrated titles count as (FR-242). Same source and fallback as
+  /// `ageLevelLabel`; nil when no ladder has ever arrived. Every surface that shows a tier's
+  /// subtitle reads this one function.
   func ageLevelRatings(_ level: Int) -> String? {
     guard let tier = ageLevel(level) else { return nil }
     var parts = [tier.movie, tier.tv].map { $0.joined(separator: ", ") }.filter { !$0.isEmpty }
     if level == profileStore.unratedLevel { parts.append("Unrated") }
+    if let ages = tier.ageRange { parts.insert(ages, at: 0) }
     return parts.isEmpty ? nil : parts.joined(separator: " · ")
   }
 

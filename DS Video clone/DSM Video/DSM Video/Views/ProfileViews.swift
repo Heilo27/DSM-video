@@ -1274,7 +1274,7 @@ struct ProfileEditorView: View {
     // Four capsules fit across a TV, their certifications don't: name the ratings of the
     // level under focus (else the chosen one) on one line below the row.
     if let ratings = appState.ageLevelRatings(focusedLevel ?? level) {
-      Text(ratings)
+      Text(ratings.unbreakableRatings)
         .font(ProfileMetrics.body)
         .foregroundStyle(Color.dsTextSecondary)
     }
@@ -1290,7 +1290,7 @@ struct ProfileEditorView: View {
               Text(appState.ageLevelLabel(value) ?? "Level \(value)")
                 .font(ProfileMetrics.body.weight(.semibold))
               if let ratings = appState.ageLevelRatings(value) {
-                Text(ratings)
+                Text(ratings.unbreakableRatings)
                   .font(.footnote)
                   .foregroundStyle(selected ? Color.black.opacity(0.6) : Color.dsTextSecondary)
               }
@@ -1551,3 +1551,14 @@ struct ProfileScreenPreviewHost: View {
   }
 }
 #endif
+
+extension String {
+  /// Display only: keeps "TV-Y7" and "8\u{2013}12" in one piece when a large Dynamic Type size
+  /// wraps an age-rating subtitle, so it breaks between the " · " / ", " separated tokens and
+  /// never inside one (TASK-1066). The model string itself (`AppState.ageLevelRatings`) is
+  /// untouched: tests, accessibility and the server mapping read that.
+  var unbreakableRatings: String {
+    replacingOccurrences(of: "-", with: "\u{2011}")
+      .replacingOccurrences(of: "\u{2013}", with: "\u{2060}\u{2013}\u{2060}")
+  }
+}
