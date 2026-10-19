@@ -240,6 +240,16 @@ When the profile editor offers a level, it names the level by its label and list
 allows (plus "Unrated" on the unrated level, FR-242), all taken from `GET /profiles/age-levels`. A level
 shown without its label is not a choice a parent can make. [2026-10-17]
 
+**[RYAN, 2026-10-18]** Each tier also carries an age range, shown first in its subtitle so a parent can
+choose by their child's age: Little Kids **Under 8**, Older Kids **8–12**, Teens **13–16**, Adult **17+**
+(en dash). The subtitle reads "Under 8 · G · TV-Y, TV-G", "8–12 · PG · TV-Y7, TV-Y7-FV, TV-PG",
+"13–16 · PG-13 · TV-14" and "17+ · R, NC-17 · TV-MA · Unrated". The age range is a display label only: it
+never changes which certification maps to which level, which is the table above. The apps keep it with the
+tier, in one place (`AgeLevelsResponse.Level.ageRange`, keyed by the tier's `key`), and every surface that
+shows a tier's subtitle (the iOS list, the tvOS line under the level row) reads it from there. A tier whose
+key the app does not know shows its certifications with no age, never a guessed one. At the largest
+accessibility text sizes the subtitle wraps between words.
+
 **FR-242 [RYAN] The unrated rule.** A title whose certification is `NULL` (FR-240 stores every "not rated"
 spelling as `NULL`), or **any string not in the table above**, is **unrated**. Its age level is **4**: hidden on every restricted profile, visible on
 Adult profiles. Unknown strings fail closed. The server sends unrated titles as `ageLevel: 4` with

@@ -103,10 +103,10 @@ struct CeilingEmptyCopyTests {
     ]) { state in
       #expect(state.ageLevelRatings(1) == nil, "precondition: no ladder yet")
       await state.loadAgeLevelsIfNeeded()
-      #expect(state.ageLevelRatings(1) == "G · TV-Y, TV-G")
-      #expect(state.ageLevelRatings(2) == "PG · TV-Y7, TV-PG")
-      #expect(state.ageLevelRatings(3) == "PG-13 · TV-14")
-      #expect(state.ageLevelRatings(4) == "R, NC-17 · TV-MA · Unrated")
+      #expect(state.ageLevelRatings(1) == "Under 8 · G · TV-Y, TV-G")
+      #expect(state.ageLevelRatings(2) == "8\u{2013}12 · PG · TV-Y7, TV-PG")
+      #expect(state.ageLevelRatings(3) == "13\u{2013}16 · PG-13 · TV-14")
+      #expect(state.ageLevelRatings(4) == "17+ · R, NC-17 · TV-MA · Unrated")
     }
   }
 
