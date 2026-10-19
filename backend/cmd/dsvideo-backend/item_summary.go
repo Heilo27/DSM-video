@@ -42,7 +42,7 @@ func itemSummary(r itemSummaryRow) map[string]any {
 		"posterImageId":   nil,
 		"backdropImageId": nil,
 	}
-	putRating(item, r.ContentRating)
+	putRating(item, r.ContentRating, r.Type, r.Year)
 
 	if r.PosterPath.Valid && r.PosterPath.String != "" {
 		item["posterImageId"] = r.ID

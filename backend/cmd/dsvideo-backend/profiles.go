@@ -46,8 +46,27 @@ type viewer struct {
 
 // VisibleClause is the WHERE fragment (and args) that keeps only titles this viewer may see;
 // ("", nil) when the profile is unrestricted.
+//
+// col is the qualified content_rating column; its type and year siblings must be in scope
+// too, because a title's level depends on them (FR-241a, rating.ItemCols).
 func (v viewer) VisibleClause(col string) (string, []any) {
-	return rating.Visible(col, v.MaxAgeLevel)
+	return rating.VisibleItems(col, v.MaxAgeLevel)
+}
+
+// itemLevel is the age level of a stored title: the NULL-aware adapter over rating.ItemLevel
+// that every Go-side reader of an items row uses (wire payloads, the sync feed, the detail
+// gate), so none of them can apply the ladder without the title's type and year (FR-241a).
+func itemLevel(cert sql.NullString, itemType string, year sql.NullInt64) int {
+	var c *string
+	if cert.Valid {
+		c = &cert.String
+	}
+	var y *int
+	if year.Valid {
+		v := int(year.Int64)
+		y = &v
+	}
+	return rating.ItemLevel(c, itemType, y)
 }
 
 func viewerFromCtx(ctx context.Context) (viewer, bool) {
@@ -397,27 +416,26 @@ func (s *Server) itemAboveCeiling(ctx context.Context, v viewer, itemID string) 
 		return false, nil
 	}
 	var cert sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT content_rating FROM items WHERE id = ?`, itemID).Scan(&cert)
+	var itemType string
+	var year sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT content_rating, type, year FROM items WHERE id = ?`, itemID).
+		Scan(&cert, &itemType, &year)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return v.above(cert), nil
+	return v.above(cert, itemType, year), nil
 }
 
-// above reports whether a title with stored certification cert is above v's ceiling. For
-// handlers that already selected content_rating, so the gate costs no extra query.
-func (v viewer) above(cert sql.NullString) bool {
+// above reports whether a title with this stored certification, type and year is above v's
+// ceiling. For handlers that already selected those columns, so the gate costs no extra query.
+func (v viewer) above(cert sql.NullString, itemType string, year sql.NullInt64) bool {
 	if !rating.Restricted(v.MaxAgeLevel) {
 		return false
 	}
-	var p *string
-	if cert.Valid {
-		p = &cert.String
-	}
-	return rating.LevelPtr(p) > v.MaxAgeLevel
+	return itemLevel(cert, itemType, year) > v.MaxAgeLevel
 }
 
 // andVisible appends v's ceiling on column col to where, which is "" or starts with "WHERE".

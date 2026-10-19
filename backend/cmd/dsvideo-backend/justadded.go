@@ -185,7 +185,7 @@ func (s *Server) queryJustAdded(libraryID string, maxLevel int) ([]map[string]an
 		args = append(args, libraryID)
 	}
 	// In the WHERE, before the over-fetch LIMIT and the dedup, never after (see justAddedCache).
-	if clause, cargs := agerating.Visible("i.content_rating", maxLevel); clause != "" {
+	if clause, cargs := agerating.VisibleItems("i.content_rating", maxLevel); clause != "" {
 		where += " AND " + clause
 		args = append(args, cargs...)
 	}

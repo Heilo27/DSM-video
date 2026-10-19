@@ -132,7 +132,7 @@ func (s *Server) handleItemSimilar(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
-	if v.above(seedRating) { // FR-250: refused, naming the real cause (as GET /items/{id})
+	if v.above(seedRating, seedType, seedYear) { // FR-250: refused, naming the real cause (as GET /items/{id})
 		writeContentRestricted(w)
 		return
 	}

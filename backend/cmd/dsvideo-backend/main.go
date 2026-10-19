@@ -37,8 +37,6 @@ import (
 	"dsvideo/backend/internal/metadata"
 	"dsvideo/backend/internal/normalize"
 	"dsvideo/backend/internal/sqltx"
-	// Aliased: main.go uses `rating` as a local name for the TMDb score in many handlers.
-	agerating "dsvideo/backend/internal/rating"
 	"dsvideo/backend/internal/transcode"
 
 	"github.com/go-chi/chi/v5"
@@ -2884,13 +2882,15 @@ func (s *Server) handleLibrariesSummary(w http.ResponseWriter, r *http.Request) 
 // putRating stamps the FRD-002 item fields (FR-240/241/242) on an item payload: the stored
 // US certification (null when unrated) and the server-computed age level (unrated is 4).
 // The one place a list or detail handler turns a content_rating column into the wire pair.
-func putRating(item map[string]any, contentRating sql.NullString) {
+// The level depends on the title's type and year too (FR-241a), so callers pass them; a show
+// or episode passes "episode" and its year, which no era rule matches.
+func putRating(item map[string]any, contentRating sql.NullString, itemType string, year sql.NullInt64) {
 	var cr *string
 	if contentRating.Valid {
 		cr = &contentRating.String
 	}
 	item["contentRating"] = cr
-	item["ageLevel"] = agerating.LevelPtr(cr)
+	item["ageLevel"] = itemLevel(contentRating, itemType, year)
 }
 
 func (s *Server) handleItems(w http.ResponseWriter, r *http.Request) {
@@ -3269,7 +3269,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, r, http.StatusInternalServerError, "db_error", err)
 		return
 	}
-	if v.above(contentRating) { // FR-250: refused, naming the real cause
+	if v.above(contentRating, typ, year) { // FR-250: refused, naming the real cause
 		writeContentRestricted(w)
 		return
 	}
@@ -3333,7 +3333,7 @@ func (s *Server) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 		"height":        nullIntToAny(videoHeight),
 		"audioChannels": nullIntToAny(audioChannels),
 	}
-	putRating(resp, contentRating)
+	putRating(resp, contentRating, typ, year)
 
 	// Add TV-specific fields
 	if typ == "episode" {
@@ -3527,7 +3527,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 			"watched":         watched,
 			"progress":        p,
 		}
-		putRating(ep, pe.rating)
+		putRating(ep, pe.rating, "episode", sql.NullInt64{})
 
 		episodes = append(episodes, episode{data: ep, season: pe.season})
 	}
@@ -3636,7 +3636,7 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 		"images":   images,
 		"seasons":  seasons,
 	}
-	putRating(resp, showRating)
+	putRating(resp, showRating, "episode", sql.NullInt64{})
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -6381,7 +6381,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 			cr := contentRating.String
 			item.ContentRating = &cr
 		}
-		item.AgeLevel = agerating.LevelPtr(item.ContentRating)
+		item.AgeLevel = itemLevel(contentRating, item.Type, year)
 		if year.Valid {
 			v := int(year.Int64)
 			item.Year = &v
@@ -9752,7 +9752,7 @@ func (s *Server) handleTVShowsList(w http.ResponseWriter, r *http.Request) {
 			"addedAt":         nil,
 			"metadataVersion": info.maxChangeSeq,
 		}
-		putRating(show, info.contentRating)
+		putRating(show, info.contentRating, "episode", sql.NullInt64{})
 		if info.firstID != "" {
 			show["posterImageId"] = info.firstID
 		}

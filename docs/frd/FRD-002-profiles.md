@@ -240,6 +240,22 @@ When the profile editor offers a level, it names the level by its label and list
 allows (plus "Unrated" on the unrated level, FR-242), all taken from `GET /profiles/age-levels`. A level
 shown without its label is not a choice a parent can make. [2026-10-17]
 
+**FR-241a [RYAN] Pre-PG-13 films gate at Teens.** A **movie** rated **PG** whose release year is **1984 or
+earlier** has age level **3** (Teens), not 2. PG-13 only arrived in August 1984, so an older PG film carries
+content the ladder now rates PG-13 (Jaws, Raiders of the Lost Ark, the Connery and Moore Bonds). Ryan,
+2026-10-18. The rule is exactly this and no wider:
+- It reads the title's own release year (`year`). A PG movie with **no year** keeps level 2: the server
+  does not guess a year, and an unknown year never matches the rule.
+- It applies to movies only. TV ratings, and every episode and show (whose rating is a TV rating on its
+  episodes), are unaffected; so are G, PG-13, R, NC-17 and every unrated title.
+- It is part of the ladder (FR-241): one server home, one function decides every level (a title's stored
+  rating, type and year in, a level out), and the SQL expression the read filters use is generated from
+  the same rule. The detail, playback, list, search, rail and sync paths therefore agree, and the sync feed
+  sends the level the server gates on. Clients keep reading `ageLevel` and never derive it.
+- **Display:** the Older Kids card in the profile editor keeps its copy and still lists "PG" (it is the
+  ladder row, FR-241). A parent should know that PG films from 1984 or earlier gate at Teens; the editor
+  does not repeat that per title. [2026-10-18, TASK-1068]
+
 **FR-242 [RYAN] The unrated rule.** A title whose certification is `NULL` (FR-240 stores every "not rated"
 spelling as `NULL`), or **any string not in the table above**, is **unrated**. Its age level is **4**: hidden on every restricted profile, visible on
 Adult profiles. Unknown strings fail closed. The server sends unrated titles as `ageLevel: 4` with
@@ -263,7 +279,7 @@ change sequence, so the next sync re-sends exactly those titles with their new l
 level did not move are not re-sent, and a ladder change that moves no title re-sends nothing. If the
 server cannot tell which ladder it served before, it re-sends every title once. A server upgrading
 from a release that recorded no ladder treats its current ladder as the one devices hold (the ladder
-has not changed since levels first shipped). [2026-10-17, TASK-939]
+has not changed since levels first shipped). The pre-PG-13 rule (FR-241a) is part of what the server remembers: shipping it is such a change, so the first start of the release that adds it gives every pre-1985 PG movie a new change sequence, once, and no other title. A database whose recorded ladder predates the rule is treated as having served the ladder without it, including a database with no record at all. This runs independently of the FR-246 heal (each keeps its own record, so each runs once); on a first start where both run, the heal goes first and this follows, giving only the moved titles a sequence above the heal's, so a stale device ends with the new levels. [2026-10-17, TASK-939; 2026-10-18, TASK-1068]
 
 **FR-245 [DESIGN]** The delta feed delivers every changed title, whatever page size the device asks
 for. A page's cursor describes only the titles on that page: the next request resumes immediately
@@ -525,7 +541,7 @@ All JSON errors use the server's existing `{"error": "<code>"}` shape. None is 4
 | FR-230, 231, 233 per-profile data | S5 | S1, S3 | none | KEEP |
 | FR-232 migration envelope | S3 (data survives) | — | none | KEEP (required if the feature ships) |
 | FR-240 certification storage | P1 (enriched detail: the existing FR-085 "rating" field gets a real value) | S1 | none | KEEP |
-| FR-241, 242, 244 ladder, unrated rule | S5 | S1 (one server home) | none | KEEP |
+| FR-241, 241a, 242, 244 ladder, pre-1985 PG rule, unrated rule | S5 | S1 (one server home) | none | KEEP |
 | FR-250–252 enforcement | S5 | S2 (`content_restricted` names the cause) | none | KEEP |
 | FR-260–266, FR-268 apps | S5 | S2 | none | KEEP |
 | FR-267 both platforms | FRD-000 standard 3 | S1 | none | KEEP (if the feature ships) |
@@ -603,4 +619,5 @@ Collections (TASK-918)
 - **AC-002-68** Given every profile object the server returns (list, create, update), it carries a boolean `offersCollections`: true for kids and Teens, false for Adult, and true exactly when `/collections` can list anything for that profile. Given the app and a profile whose `offersCollections` is false, no collections row is shown on Home or elsewhere, even if the server sent collections (an older server). Given a server that omits the flag, kids' profiles still show collections and no other profile does. (FR-274)
 - **AC-002-69** Given a kids' profile, then collections replace the genre filter and no genre filter appears on Home, in any library grid, or in search, on iOS or tvOS. Given a Teens profile, then it has the genre filter and a collections row. Given an Adult profile, then it has the genre filter and no collections row. (FR-270, FR-274)
 - **AC-002-70** Given a library of titles each with its own change sequence, when a device walks `/sync/items` from `since=0` in pages of any size (1, 2, 3, 200, 500, more than the library), then every title is delivered and the walk ends. Given titles sharing one change sequence, including a run longer than a page and a run that straddles a page boundary, then every title is still delivered and the walk ends. (FR-245, FR-244)
-
+- **AC-002-72** Given a movie rated PG released in 1984, then `ageLevel` is 3 on the sync feed, the detail answer and every list, and an Older Kids profile cannot list or open it while a Teens profile can. Given a movie rated PG released in 1985, or rated PG with no year, then `ageLevel` is 2. Given G, PG-13, R and unrated titles of any year, TV-PG and every episode, then `ageLevel` is unchanged. (FR-241a)
+- **AC-002-73** Given a server upgraded to the release that adds FR-241a, then on its first start exactly the PG movies released in 1984 or earlier get a new change sequence (one value, published), so a device at its previous cursor receives them with `ageLevel` 3 and nothing else; a second start changes no sequence. Given the FR-246 heal also runs on that first start, then both complete once and a stale device ends with the new levels. (FR-244, FR-246)

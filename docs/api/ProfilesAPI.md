@@ -41,7 +41,7 @@ Every object that represents a title (`/items` in every mode, `/items/{id}`, `/s
 
 - `contentRating`: the stored US certification string, or `null` for unrated (FR-240). Display only.
   Clients never derive anything from it.
-- `ageLevel`: integer 1–4 computed by the server (FR-241). **Unrated titles are `4`** (FR-242). A client's
+- `ageLevel`: integer 1–4 computed by the server (FR-241). **Unrated titles are `4`** (FR-242). A movie rated PG released in 1984 or earlier is `3`, not 2 (FR-241a); a PG movie with no year stays `2`. A client's
   entire visibility check is `item.ageLevel <= activeProfile.maxAgeLevel`.
 - A **show** object (`/shows`, `/tv/shows`, the show itself in `/shows/{showName}`) carries the rating of its
   representative episode, the first with a poster, the same episode that supplies its artwork. Its episodes
