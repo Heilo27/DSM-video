@@ -353,6 +353,13 @@ known level is treated as unrated until the device learns its level. Switching p
 download. Devices upgraded from before age levels fill in levels for titles they already hold without any
 action from the user. [2026-10-17, TASK-927, TASK-935]
 
+Changing the **active** profile's age ceiling (on this device or from another) applies at once, with no
+profile switch and no relaunch: home rails, library and collection grids, search results, the watchlist and
+the Spotlight index are rebuilt for the new ceiling, a title the new ceiling no longer allows leaves the
+screen immediately (it is never kept on screen because a reload failed), and a title the new ceiling newly
+allows appears. An open title page rechecks and offers no Play or Start Over for a title above the ceiling.
+[2026-10-18, TASK-1065]
+
 A **new** download takes its level from the server's title details when the server sent one, since that is
 the freshest answer and the device's catalog may not have synced the title yet or may predate a re-rating.
 Without one it takes the on-device catalog's level, and if neither knows it, the level is unknown, which is
@@ -582,7 +589,7 @@ tvOS (TASK-917)
 - **AC-002-40b** Given an account with only its owner profile, on iOS/iPadOS and tvOS, Settings offers "Manage Profiles", which asks for the owner's PIN (or to set one) and then offers "Add Profile"; home shows no picker and no profile badge. Once a second profile exists, the picker appears at the next picker moment and Settings also offers "Switch Profile". (FR-205, FR-212, FR-266, FR-268)
 - **AC-002-41** Given a PIN-protected profile, entering it requires a PIN the server accepts. A wrong PIN says so, a lockout shows the time remaining, and an unreachable NAS is named as the cause. (FR-213, FR-266)
 - **AC-002-42** Given a switch from profile A to profile B, no rail, grid or watchlist entry from A is visible at any point after the switch. (FR-261)
-- **AC-002-43** Given a restricted profile offline, no local read shows a title above its level. Given a PIN-protected profile offline, it cannot be entered, and the picker explains why. (FR-262, FR-263)
+- **AC-002-43** Given a restricted profile offline, no local read shows a title above its level. Given a PIN-protected profile offline, it cannot be entered, and the picker explains why. (FR-262, FR-263) Given the active profile's ceiling is lowered while its screens are open, then a title above the new ceiling is gone from every rail, grid, search result and the watchlist without a switch or relaunch, and Spotlight no longer indexes it. Given the ceiling is raised, then newly allowed titles appear without a switch or relaunch. Given the ceiling is unchanged by a refresh, the screens are left alone. (FR-262)
 - **AC-002-44** Given an active profile, every request from the app, the Top Shelf extension and App Intents carries its `X-DSVideo-Profile`, and Top Shelf shows no title above its level. (FR-220, FR-264)
 - **AC-002-45** Given a device upgraded with stored positions, those positions appear under the owner profile, and local progress written later is kept per profile. (FR-233)
 - **AC-002-45a** Given an upgraded device in a family account holding unsent positions, launched offline, or whose profile list fails to load, or which syncs before the list loads: no position is lost and none appears under a restricted profile; they appear under the owner once the list loads. (FR-233, FR-221)

@@ -70,6 +70,7 @@ struct TVShowsView: View {
 
   @State private var shows: [TVShow] = []
   @State private var isLoading = false
+  @State private var reloadRequested = false
   @State private var error: String?
   @State private var sortOption: TVShowSortOption = {
     let raw = UserDefaults.standard.string(forKey: "dsReel.tvSortOption") ?? ""
@@ -248,6 +249,16 @@ struct TVShowsView: View {
     // Same defect class as TVMainView's homeLoad (0d240c8), which shipped to a real Apple TV
     // and left the home rails permanently empty, and PlayerSheet (TASK-838).
     .task(id: library.id) { await load() }
+    // FR-262, AC-002-43: the active profile's age ceiling moved while this grid stayed open.
+    // Shows fetched under the old ceiling go at once (a failed reload keeps what is on screen,
+    // so they would otherwise stay), and the server is asked again. Unstructured on purpose, see
+    // ItemsGridView: `load()` queues the request behind a load already running.
+    .onChange(of: appState.profileContentVersion) {
+      shows = []
+      sortedShows = []
+      error = nil
+      Task { await load() }
+    }
     #if !os(tvOS)
     // Search is a magnifying-glass button in the nav bar that presents a search
     // sheet, now that the dedicated Search tab is gone.
@@ -329,14 +340,23 @@ struct TVShowsView: View {
   }
 
   private func load() async {
-    guard !isLoading else { return }
+    // A request that arrives while one runs (the ceiling moved mid-load) is remembered and run
+    // again, not dropped: the running one was sent under the previous profile header.
+    if isLoading { reloadRequested = true; return }
+    isLoading = true
+    defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested
+  }
+
+  private func loadOnce() async {
     if appState.isDemoMode {
       shows = DemoData.tvShows
       return
     }
     tvLog.info("TVShowsView.load: libraryId=\(library.id) baseURL=[server]")
-    isLoading = true
-    defer { isLoading = false }
     do {
       let response = try await appState.api.tvShows(libraryId: library.id)
       tvLog.info("TVShowsView.load: success — \(response.shows.count) shows")

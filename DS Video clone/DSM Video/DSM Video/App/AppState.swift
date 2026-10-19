@@ -1920,6 +1920,11 @@ final class AppState {
   var homeLibraries: [Library] = []
   /// Bumped on homeForceRefresh so TVLibraryRail's .task(id:) re-triggers a fresh fetch.
   var libraryRailsVersion: UUID = UUID()
+  /// Bumped when the ACTIVE profile's age ceiling changes under screens that stay open
+  /// (FR-262, AC-002-43). A profile switch rebuilds the screens; a same-profile ceiling edit
+  /// does not, so every screen holding fetched titles in `@State` keys its load on this value
+  /// and reloads under the new ceiling when it moves.
+  private(set) var profileContentVersion: UUID = UUID()
   /// Both rails write the Top Shelf snapshot, because the shelf prefers Continue Watching
   /// and falls back to Just Added. Hooking only one meant the shelf went stale exactly when
   /// it mattered — finishing an episode changes Continue Watching, and without this didSet
@@ -3556,12 +3561,14 @@ final class AppState {
       } else if let remembered = profileStore.activeProfileID,
                 let fresh = resp.profiles.first(where: { $0.id == remembered }),
                 fresh.maxAgeLevel != profileStore.activeScope.maxAgeLevel {
-        // The active profile's age level was changed (here or on another device). The local
-        // fallback must filter by the NEW ceiling from now on (FR-262); the next home load
-        // re-reads under it. Same profile, so nothing else is discarded.
+        // The active profile's age level was changed (here or on another device). Unlike a
+        // switch, no picker appears, so every screen already open keeps what it fetched under
+        // the OLD ceiling: rails, grids, search results, a title's detail. Fail closed and
+        // reload under the new one (FR-262, AC-002-43).
         homeLog.info("refreshProfiles: active profile's level is now \(fresh.maxAgeLevel)")
         profileStore.setActive(fresh)
         await localStore.setActiveProfile(ProfileScope(profile: fresh))
+        await reloadScreensForNewCeiling()
       }
       if profileStore.activeProfileID == nil, resp.profiles.count == 1,
          let only = resp.profiles.first {
@@ -3586,6 +3593,31 @@ final class AppState {
       profileSupport = ProfileGate.support(afterProfilesError: error)
       homeLog.warning("refreshProfiles: failed — \(error.localizedDescription); support=\(String(describing: self.profileSupport))")
     }
+  }
+
+  /// The active profile's ceiling moved while its screens stayed open (FR-262, AC-002-43).
+  ///
+  /// Empties and fences everything profile-scoped (as a switch does, so an in-flight result
+  /// fetched under the old ceiling can never land), tells open screens to reload through
+  /// `profileContentVersion`, then refills the rails from the local catalog, which the caller
+  /// has already re-scoped, and re-indexes Spotlight. Reads the store directly instead of going
+  /// through `homeLoad`: this runs inside `runDeltaSync`, whose state `homeLoad` would turn away
+  /// as busy, and re-entering the sync from here is the loop to avoid. The server's own answers
+  /// (Just Added, Suggested, collections) follow through `applyRails`, as on a cold start.
+  private func reloadScreensForNewCeiling() async {
+    discardProfileScopedHomeState()
+    profileContentVersion = UUID()
+    // Behind the picker nothing is shown; choosing a profile loads home.
+    guard !needsProfilePicker else { return }
+    let generation = homeStateGeneration
+    let localStore = self.localStore
+    let rails = await Task.detached(priority: .userInitiated) {
+      await localStore.queryRails()
+    }.value
+    if applyRails(rails, startedAt: generation) { refreshSpotlightIndex() }
+    // The discard emptied the watchlist, and the sync pass that called us stops at its (now
+    // stale) rail apply before reaching its own watchlist step, so refetch it here.
+    await loadWatchlist()
   }
 
   /// Fetches the age ladder once per session (GET /profiles/age-levels): the display labels,
