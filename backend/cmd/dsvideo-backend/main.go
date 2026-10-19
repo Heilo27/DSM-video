@@ -6292,57 +6292,37 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 
 	// Select the right query variant based on since/afterRowid:
 	//   since=0 → use >= so pre-scan rows with change_seq=0 are included
-	//   afterRowid > 0 → add rowid page filter to avoid re-fetching rows at the same seq
-	const queryGTWithRowid = `
-		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
-		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
-		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
-		WHERE i.change_seq > ? AND i.rowid > ?
-		ORDER BY i.change_seq ASC, i.rowid ASC
-		LIMIT ?`
-	const queryGT = `
-		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
-		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
-		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
-		WHERE i.change_seq > ?
-		ORDER BY i.change_seq ASC, i.rowid ASC
-		LIMIT ?`
-	const queryGTEWithRowid = `
-		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
-		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
-		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
-		WHERE i.change_seq >= ? AND i.rowid > ?
-		ORDER BY i.change_seq ASC, i.rowid ASC
-		LIMIT ?`
-	const queryGTE = `
-		SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
-		       i.added_at, i.rating, i.poster_path, i.backdrop_path,
-		       i.show_name, i.season_number, i.episode_number, i.change_seq,
-		       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
-		FROM items i
-		LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?
-		WHERE i.change_seq >= ?
-		ORDER BY i.change_seq ASC, i.rowid ASC
-		LIMIT ?`
+	//   afterRowid > 0 → keyset page: the client has already received every row at
+	//   change_seq=since up to and including that rowid, so resume inside that seq
+	//   (rows sharing one change_seq — a ladder bump stamps every moved title with the
+	//   same value, FR-244 — can straddle a page boundary or outnumber a page).
+	const selectCols = `
+			SELECT i.rowid, i.id, i.library_id, i.type, i.title, i.year, i.duration_seconds,
+			       i.added_at, i.rating, i.poster_path, i.backdrop_path,
+			       i.show_name, i.season_number, i.episode_number, i.change_seq,
+			       p.position_seconds, p.duration_seconds, p.updated_at, i.show_folder_id, i.content_rating
+			FROM items i
+			LEFT JOIN progress p ON p.item_id = i.id AND p.profile_id = ?`
+	const queryKeyset = selectCols + `
+			WHERE (i.change_seq > ? OR (i.change_seq = ? AND i.rowid > ?))
+			ORDER BY i.change_seq ASC, i.rowid ASC
+			LIMIT ?`
+	const queryGT = selectCols + `
+			WHERE i.change_seq > ?
+			ORDER BY i.change_seq ASC, i.rowid ASC
+			LIMIT ?`
+	const queryGTE = selectCols + `
+			WHERE i.change_seq >= ?
+			ORDER BY i.change_seq ASC, i.rowid ASC
+			LIMIT ?`
 
 	var rows *sql.Rows
 	var err error
 	switch {
-	case since == 0 && afterRowid > 0:
-		rows, err = s.db.Query(queryGTEWithRowid, v.ProfileID, since, afterRowid, limit+1)
+	case afterRowid > 0:
+		rows, err = s.db.Query(queryKeyset, v.ProfileID, since, since, afterRowid, limit+1)
 	case since == 0:
 		rows, err = s.db.Query(queryGTE, v.ProfileID, since, limit+1)
-	case afterRowid > 0:
-		rows, err = s.db.Query(queryGTWithRowid, v.ProfileID, since, afterRowid, limit+1)
 	default:
 		rows, err = s.db.Query(queryGT, v.ProfileID, since, limit+1)
 	}
@@ -6379,7 +6359,7 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := make([]syncItem, 0, limit)
-	var maxSeq, maxRowid int64
+	var rowids []int64
 	for rows.Next() {
 		var item syncItem
 		var rowid int64
@@ -6402,9 +6382,6 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 			item.ContentRating = &cr
 		}
 		item.AgeLevel = agerating.LevelPtr(item.ContentRating)
-		if rowid > maxRowid {
-			maxRowid = rowid
-		}
 		if year.Valid {
 			v := int(year.Int64)
 			item.Year = &v
@@ -6440,15 +6417,24 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		if rec, ok := progressFromNull(posSeconds, durSeconds, progUpdatedAt); ok {
 			item.Progress = rec.JSON()
 		}
-		if item.ChangeSeq > maxSeq {
-			maxSeq = item.ChangeSeq
-		}
 		items = append(items, item)
+		rowids = append(rowids, rowid)
 	}
 
+	// The query asked for limit+1 rows; the extra one only proves there is more. The cursor
+	// below is taken from the rows actually on this page. It used to be the maximum over all
+	// limit+1 rows, so nextSeq landed ON the look-ahead row, the next `change_seq > since`
+	// skipped it, and every page boundary silently dropped one row.
 	hasMore := len(items) > limit
+	var splitsSeq bool // the look-ahead row shares the last delivered row's change_seq
 	if hasMore {
+		splitsSeq = items[limit].ChangeSeq == items[limit-1].ChangeSeq
 		items = items[:limit]
+		rowids = rowids[:limit]
+	}
+	var maxSeq, maxRowid int64
+	if n := len(items); n > 0 {
+		maxSeq, maxRowid = items[n-1].ChangeSeq, rowids[n-1] // ordered by (change_seq, rowid)
 	}
 
 	// For TV episodes that have no poster_path of their own, fall back to the poster
@@ -6506,15 +6492,16 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// nextAfterRowid: when hasMore and the seq cursor can't advance (all items
-	// share the same change_seq), the client must page by rowid instead.
-	// It should pass afterRowid=<this value> on the next request.
+	// nextAfterRowid: when the next page starts inside the last delivered change_seq (the
+	// look-ahead row shares it, e.g. every title a ladder bump moved), the client must
+	// resume by (seq, rowid) instead. It should pass afterRowid=<this value> on the next
+	// request, together with nextSeq as `since`.
 	resp := map[string]any{
 		"items":   items,
 		"nextSeq": nextSeq,
 		"hasMore": hasMore,
 	}
-	if hasMore && maxSeq <= since {
+	if hasMore && splitsSeq {
 		resp["nextAfterRowid"] = maxRowid
 	}
 

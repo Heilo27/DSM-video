@@ -265,6 +265,14 @@ server cannot tell which ladder it served before, it re-sends every title once. 
 from a release that recorded no ladder treats its current ladder as the one devices hold (the ladder
 has not changed since levels first shipped). [2026-10-17, TASK-939]
 
+**FR-245 [DESIGN]** The delta feed delivers every changed title, whatever page size the device asks
+for. A page's cursor describes only the titles on that page: the next request resumes immediately
+after the last title delivered, so no title is skipped at a page boundary, and titles that share one
+change sequence (a ladder change gives every moved title the same value, FR-244) are never split
+across pages or lost when they outnumber a page. A device that misses a re-rated title keeps its old
+level, which for a title raised to a higher level is the one case where a restricted profile could be
+shown a title above its ceiling. [2026-10-18, TASK-1065]
+
 **Known consequence [RYAN rule, flagged]:** home videos, and anything TMDb has no US certification for, are
 hidden on restricted profiles. Until a manual rating override exists (deferred, §13), a family's own home
 videos are invisible to the kids.
@@ -594,4 +602,5 @@ Collections (TASK-918)
 - **AC-002-67** Given a new download of a title the server rates 4 and the device's catalog has no row for, then the download is stored at level 4 and is neither listed nor playable on a level-1 profile offline. Given the server sends no level, then the catalog's level is used, else unknown (hidden on restricted profiles). Given a refresh of stored levels, then a known level is never replaced by "unknown" and a newer catalog level replaces it. (FR-262, FR-242)
 - **AC-002-68** Given every profile object the server returns (list, create, update), it carries a boolean `offersCollections`: true for kids and Teens, false for Adult, and true exactly when `/collections` can list anything for that profile. Given the app and a profile whose `offersCollections` is false, no collections row is shown on Home or elsewhere, even if the server sent collections (an older server). Given a server that omits the flag, kids' profiles still show collections and no other profile does. (FR-274)
 - **AC-002-69** Given a kids' profile, then collections replace the genre filter and no genre filter appears on Home, in any library grid, or in search, on iOS or tvOS. Given a Teens profile, then it has the genre filter and a collections row. Given an Adult profile, then it has the genre filter and no collections row. (FR-270, FR-274)
+- **AC-002-70** Given a library of titles each with its own change sequence, when a device walks `/sync/items` from `since=0` in pages of any size (1, 2, 3, 200, 500, more than the library), then every title is delivered and the walk ends. Given titles sharing one change sequence, including a run longer than a page and a run that straddles a page boundary, then every title is still delivered and the walk ends. (FR-245, FR-244)
 
