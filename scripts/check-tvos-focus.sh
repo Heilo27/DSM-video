@@ -63,14 +63,18 @@ SOURCES="$ROOT/DS Video clone/DSM Video/DSM Video"
 VIEWS="$SOURCES/Views"
 PLAYER="$VIEWS/GestureVideoPlayer.swift"
 
-# Each entry: <file>|<enum name>|<@FocusState property>
+# Each entry: <file>|<enum name>|<@FocusState property>[|<bind file>|<bind property>]
 # Add a row whenever a tvOS-facing view grows its own focus enum.
+# The optional last two fields name a SECOND file whose buttons also bind cases of the enum, through
+# a FocusState.Binding parameter of that name (TASK-1066: ProfileEditorActions.swift draws the
+# editor's Save/Cancel/Delete/PIN buttons and binds them with `.focused(focus, equals: .save)`).
+# A case counts as bound if EITHER file binds it; an unbound case still fails.
 TARGETS=(
   "$PLAYER|TVFocusField|focusedControl"
   "$VIEWS/ItemDetailView.swift|ActionButton|focusedAction"
   "$VIEWS/ItemDetailView.swift|OverlayButton|focused"
   "$VIEWS/ProfileViews.swift|PinPadKey|focusedKey"
-  "$VIEWS/ProfileViews.swift|EditorControl|focusedControl"
+  "$VIEWS/ProfileViews.swift|EditorControl|focusedControl|$VIEWS/ProfileEditorActions.swift|focus"
   "$VIEWS/ProfileViews.swift|OwnerPinResetControl|focusedField"
   "$VIEWS/CollectionViews.swift|CollectionControl|focusedControl"
   "$VIEWS/ProfileViews.swift|PickerControl|focusedControl"
@@ -108,7 +112,20 @@ for entry in "${TARGETS[@]}"; do
   FILE="${entry%%|*}"
   REST="${entry#*|}"
   ENUM="${REST%%|*}"
-  PROP="${REST#*|}"
+  REST="${REST#*|}"
+  PROP="${REST%%|*}"
+  BIND_FILE=""
+  BIND_PROP=""
+  if [[ "$REST" == *"|"* ]]; then
+    REST="${REST#*|}"
+    BIND_FILE="${REST%%|*}"
+    BIND_PROP="${REST#*|}"
+    if [[ ! -f "$BIND_FILE" ]]; then
+      echo "FAIL: $(basename "$BIND_FILE") not found at $BIND_FILE — has it moved?"
+      FAILED=1
+      continue
+    fi
+  fi
   SHORT="$(basename "$FILE")"
 
   if [[ ! -f "$FILE" ]]; then
@@ -133,7 +150,8 @@ for entry in "${TARGETS[@]}"; do
       continue
     fi
 
-    if ! grep -q "focused(\$$PROP, equals: \.$c)" "$FILE"; then
+    if ! grep -q "focused(\$$PROP, equals: \.$c)" "$FILE" \
+      && ! { [[ -n "$BIND_FILE" ]] && grep -q "focused($BIND_PROP, equals: \.$c)" "$BIND_FILE"; }; then
       echo "FAIL: $SHORT — .$c is declared in $ENUM but never bound with .focused(\$$PROP, equals: .$c)"
       echo "      A button using it renders on tvOS and cannot be focused with the remote."
       FAILED=1
