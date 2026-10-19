@@ -128,6 +128,22 @@ nonisolated struct AgeLevelsResponse: Codable, Sendable {
     let label: String
     let movie: [String]
     let tv: [String]
+
+    /// The ages a tier is meant for, shown first in the editor's subtitle ("Under 8", "8–12").
+    /// ONE home for these strings (FR-241, 2026-10-18): every surface reads the tier's subtitle
+    /// through `AppState.ageLevelRatings`, which reads this. Display only; it never decides what
+    /// a profile may see (the certification mapping is the server's). Keyed by the server's
+    /// stable `key`, so a tier this build does not know shows its ratings with no age rather
+    /// than a guessed one.
+    var ageRange: String? {
+      switch key {
+      case "littleKids": return "Under 8"
+      case "olderKids": return "8\u{2013}12"
+      case "teens": return "13\u{2013}16"
+      case "adult": return "17+"
+      default: return nil
+      }
+    }
   }
   /// The level a title with no level counts as (FR-242). Not the ladder's top: that is
   /// `ProfilesResponse.unrestrictedLevel`, a different question. Persisted in

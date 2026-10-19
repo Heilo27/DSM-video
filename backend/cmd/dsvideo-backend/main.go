@@ -729,6 +729,11 @@ func main() {
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
 
+	// FRD-002 FR-246: devices that lost rows to the pre-FR-245 page-boundary skip hold a cursor
+	// at item_seq and would never re-fetch them. Re-stamp the library once, before the first
+	// scan and the HTTP server, so every device receives it again. Logged, never fatal.
+	s.startupHealStaleItemCursors(bgCtx)
+
 	// FRD-002 FR-244: if this release changed the age-rating ladder, re-sequence every
 	// item whose level moved so devices re-sync it. Before the first scan, so it reads
 	// content_rating while nothing else is writing items. Logged, never fatal.

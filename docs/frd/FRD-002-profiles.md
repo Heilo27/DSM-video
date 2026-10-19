@@ -240,6 +240,16 @@ When the profile editor offers a level, it names the level by its label and list
 allows (plus "Unrated" on the unrated level, FR-242), all taken from `GET /profiles/age-levels`. A level
 shown without its label is not a choice a parent can make. [2026-10-17]
 
+**[RYAN, 2026-10-18]** Each tier also carries an age range, shown first in its subtitle so a parent can
+choose by their child's age: Little Kids **Under 8**, Older Kids **8–12**, Teens **13–16**, Adult **17+**
+(en dash). The subtitle reads "Under 8 · G · TV-Y, TV-G", "8–12 · PG · TV-Y7, TV-Y7-FV, TV-PG",
+"13–16 · PG-13 · TV-14" and "17+ · R, NC-17 · TV-MA · Unrated". The age range is a display label only: it
+never changes which certification maps to which level, which is the table above. The apps keep it with the
+tier, in one place (`AgeLevelsResponse.Level.ageRange`, keyed by the tier's `key`), and every surface that
+shows a tier's subtitle (the iOS list, the tvOS line under the level row) reads it from there. A tier whose
+key the app does not know shows its certifications with no age, never a guessed one. At the largest
+accessibility text sizes the subtitle wraps between words.
+
 **FR-241a [RYAN] Pre-PG-13 films gate at Teens.** A **movie** rated **PG** whose release year is **1984 or
 earlier** has age level **3** (Teens), not 2. PG-13 only arrived in August 1984, so an older PG film carries
 content the ladder now rates PG-13 (Jaws, Raiders of the Lost Ark, the Connery and Moore Bonds). Ryan,
@@ -288,6 +298,15 @@ change sequence (a ladder change gives every moved title the same value, FR-244)
 across pages or lost when they outnumber a page. A device that misses a re-rated title keeps its old
 level, which for a title raised to a higher level is the one case where a restricted profile could be
 shown a title above its ceiling. [2026-10-18, TASK-1065]
+
+**FR-246 [DESIGN]** A device that already lost titles to the FR-245 skip recovers on its own once
+the server is upgraded: the first start of the upgraded server marks every title as changed, so each
+device receives the whole library once, with no app update and no action from the user. The pass is
+recorded, so it happens once; a later restart changes nothing, and titles added afterwards are not
+re-sent. It changes only the order in which titles are announced. Watch progress, watchlists,
+profiles, PINs, ratings, deletions and every other piece of user data are untouched. The cost is one
+full library download per device, after which the device is in step. If the pass is interrupted it
+leaves nothing half-applied and runs again from the start at the next server start. [2026-10-18, TASK-1067]
 
 **Known consequence [RYAN rule, flagged]:** home videos, and anything TMDb has no US certification for, are
 hidden on restricted profiles. Until a manual rating override exists (deferred, §13), a family's own home
@@ -619,5 +638,6 @@ Collections (TASK-918)
 - **AC-002-68** Given every profile object the server returns (list, create, update), it carries a boolean `offersCollections`: true for kids and Teens, false for Adult, and true exactly when `/collections` can list anything for that profile. Given the app and a profile whose `offersCollections` is false, no collections row is shown on Home or elsewhere, even if the server sent collections (an older server). Given a server that omits the flag, kids' profiles still show collections and no other profile does. (FR-274)
 - **AC-002-69** Given a kids' profile, then collections replace the genre filter and no genre filter appears on Home, in any library grid, or in search, on iOS or tvOS. Given a Teens profile, then it has the genre filter and a collections row. Given an Adult profile, then it has the genre filter and no collections row. (FR-270, FR-274)
 - **AC-002-70** Given a library of titles each with its own change sequence, when a device walks `/sync/items` from `since=0` in pages of any size (1, 2, 3, 200, 500, more than the library), then every title is delivered and the walk ends. Given titles sharing one change sequence, including a run longer than a page and a run that straddles a page boundary, then every title is still delivered and the walk ends. (FR-245, FR-244)
+- **AC-002-71** Given a device whose sync position equals the server's, and which is missing titles the server holds, when the upgraded server starts for the first time, then the device's next sync reports the server ahead and delivers every title, at any page size, including from a device that does not send `afterRowid`. Given a second start, then no title's change sequence and no sync position moves. Given a title added after the pass, then a later start does not re-send it. Given a pass that fails part way, then the sync position and the record are unchanged and the next start completes it. Given progress, watchlist, profile and deletion records, then they are identical before and after. (FR-246)
 - **AC-002-72** Given a movie rated PG released in 1984, then `ageLevel` is 3 on the sync feed, the detail answer and every list, and an Older Kids profile cannot list or open it while a Teens profile can. Given a movie rated PG released in 1985, or rated PG with no year, then `ageLevel` is 2. Given G, PG-13, R and unrated titles of any year, TV-PG and every episode, then `ageLevel` is unchanged. (FR-241a)
 - **AC-002-73** Given a server upgraded to the release that adds FR-241a, then on its first start exactly the PG movies released in 1984 or earlier get a new change sequence (one value, published), so a device at its previous cursor receives them with `ageLevel` 3 and nothing else; a second start changes no sequence. Given the FR-246 heal also runs on that first start, then both complete once and a stale device ends with the new levels. (FR-244, FR-246)
