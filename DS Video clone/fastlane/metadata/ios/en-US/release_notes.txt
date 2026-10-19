@@ -2,10 +2,21 @@ Profiles: everyone in the house gets their own, and the kids only see what's rig
 
 PROFILES
 • Up to four profiles per account, each with its own Continue Watching, watchlist and history.
-• Give each profile an age rating limit. Titles above it are hidden everywhere: Home, libraries, search, Just Added and downloads. Unrated titles are hidden on every limited profile.
+• Give each profile an age rating limit: Under 8, 8–12, 13–16 or 17+. Titles above it are hidden everywhere: Home, libraries, search, Just Added and downloads. Unrated titles are hidden on every limited profile.
+• Change a profile's age rating and it takes effect at once on every screen. Titles above the new limit can't be played.
+• PG films from 1984 or earlier count as 13–16, because PG-13 didn't exist yet.
 • Kids' profiles browse by collections like Disney, Pixar and DreamWorks instead of genres. Teen profiles get collections alongside genres, and Adult profiles browse by genre.
 • Optional PIN on any profile. Managing profiles always asks for the owner's PIN, and if the owner forgets it, "Forgot PIN" resets it with the DSM password.
 • Your iPhone remembers which profile you picked.
+
+NEW
+• Find your movies and shows from Spotlight search on iPhone and iPad, and get Siri suggestions for titles you open. Only what the active profile is allowed to watch ever appears.
+• Cast photos and a More Like This shelf on every title's page.
+• Easier first setup: a step-by-step server install guide in Help, a clear message when the address you entered isn't a DSVideo server, and a short welcome showing how many libraries and videos were found.
+
+PLAYBACK
+• If your network drops mid-movie, playback now reconnects right away and picks up where you were. If it can't within 20 seconds, it shows the problem with a Retry button.
+• Streaming over QuickConnect now uses the address you connected through.
 
 APPLE TV
 • Sign in without typing your password: on a signed-in Apple TV choose Pair iOS Device, then enter the 6-digit code it shows on your iPhone.
@@ -22,6 +33,12 @@ FIXES
 • Connection fixes: signing in with a host name such as localhost, and QuickConnect failures, now work or explain why.
 • If the offline library has to be rebuilt, the app tells you.
 • Watching on two devices: an older position saved offline no longer overwrites a newer one, or un-watches a title you finished.
+• Catching up: a phone that was missing a few titles or showing out-of-date ratings now fixes itself with a one-time refresh.
 • You can create a second profile when your account only has one.
+• PIN errors, such as codes that don't match or a PIN that couldn't be saved, now stay on screen instead of disappearing.
+• The show page scrolls to the season you were on, and to a season when you expand it.
+• The profile editor's Save, Cancel and Delete buttons and PIN rows now fit properly on iPhone.
+• Settings on iPad keep a readable width.
+• Contact Support copies the support address and tells you when no Mail app is set up.
 
-Profiles need DSVideo Server 0.3.9 or later on your NAS (free download).
+Profiles need DSVideo Server 0.3.9 or later on your NAS. The newest fixes (old PG films, sync catch-up) need server 0.3.9-0005. Cast photos, More Like This and QuickConnect streaming need the latest server update (free download).
