@@ -609,6 +609,8 @@ private struct TVLibraryRail: View {
   @State private var items: [ItemSummary] = []
   @State private var shows: [TVShow] = []
   @State private var isLoading: Bool = false
+  /// A load asked for while one was running (the ceiling moved mid-load): run again afterwards.
+  @State private var reloadRequested: Bool = false
   @State private var error: String?
 
   private var isTVLibrary: Bool { library.kind == "tv" }
@@ -705,16 +707,37 @@ private struct TVLibraryRail: View {
     // TASK-432: stagger per-rail fetches to avoid N concurrent requests on home load.
     // TASK-442: re-trigger fetch when homeForceRefresh bumps libraryRailsVersion.
     .task(id: appState.libraryRailsVersion) { await load() }
+    // FR-262, AC-002-43: the active profile's age ceiling moved while home stayed open. What the
+    // rail holds was fetched under the old ceiling, so it goes at once and the server is asked
+    // again. Unstructured on purpose, see ItemsGridView: `load()` queues the request behind a
+    // load already running instead of cancelling it.
+    .onChange(of: appState.profileContentVersion) {
+      items = []
+      shows = []
+      error = nil
+      Task { await load() }
+    }
   }
 
   private func load() async {
     // TASK-844: the reentrancy guard has to come BEFORE the stagger sleep. Behind it, two
     // loads started inside the same stagger window both cleared the guard (it was still
     // false while the first was suspended in Task.sleep) and ran concurrently.
-    guard !isLoading else { return }
+    // A request that arrives while one runs is remembered and run again, not dropped: the
+    // running one may have been sent under the previous profile header.
+    if isLoading { reloadRequested = true; return }
     isLoading = true
     defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested && !Task.isCancelled
+  }
 
+  private func loadOnce() async {
+    // FR-262: an answer fetched under an earlier ceiling is dropped, not shown until the repeat
+    // replaces it.
+    let version = appState.profileContentVersion
     // TASK-432: stagger fetches based on rail index to spread concurrent network load.
     if index > 0 {
       try? await Task.sleep(for: .milliseconds(index * 150))
@@ -733,6 +756,7 @@ private struct TVLibraryRail: View {
     do {
       if isTVLibrary {
         let response = try await appState.api.tvShows(libraryId: library.id)
+        guard version == appState.profileContentVersion else { return }
         var seen = Set<String>()
         shows = response.shows.filter { seen.insert($0.id).inserted }
       } else {
@@ -743,11 +767,12 @@ private struct TVLibraryRail: View {
         // no recovery short of Settings > Force Refresh. The TV branch above always hits the
         // network; the two paths in this same function behaved oppositely.
         let cached = await LocalStore.shared.fetchItems(forLibraryId: library.id, limit: 50)
-        if !cached.isEmpty {
+        if !cached.isEmpty, version == appState.profileContentVersion {
           items = cached
           error = nil
         }
         let fresh = try await appState.api.items(libraryId: library.id, limit: 50, offset: 0).items
+        guard version == appState.profileContentVersion else { return }
         items = fresh
       }
       error = nil
@@ -1231,6 +1256,9 @@ private struct TVSearchView: View {
   @State private var hasSearched: Bool = false
   @State private var searchError: String?
   @State private var debounceTask: Task<Void, Never>?
+  /// Bumped when the active profile's age ceiling moves (FR-262). A search that started under an
+  /// earlier value was sent with the old profile header, so its answer is dropped on arrival.
+  @State private var searchEpoch = 0
   @FocusState private var searchFieldFocused: Bool
 
   var body: some View {
@@ -1415,6 +1443,18 @@ private struct TVSearchView: View {
         }
       }
       .onDisappear { debounceTask?.cancel() }
+      // FR-262, AC-002-43: the active profile's age ceiling moved while Search stayed open.
+      // Results fetched under the old ceiling go at once, an answer still in flight is fenced
+      // off by `searchEpoch`, and a search already run is asked again under the new header.
+      .onChange(of: appState.profileContentVersion) {
+        searchEpoch += 1
+        debounceTask?.cancel()
+        results = []
+        searchError = nil
+        isSearching = false
+        guard hasSearched else { return }
+        debounceTask = Task { await search(explicit: true) }
+      }
     }
   }
 
@@ -1422,9 +1462,11 @@ private struct TVSearchView: View {
   private func search(explicit: Bool) async {
     guard let query = SearchRules.queryToSend(searchText, explicit: explicit) else { return }
 
+    let epoch = searchEpoch
     isSearching = true
     hasSearched = true
-    defer { isSearching = false }
+    // A fenced (stale) search leaves the flag to the search that replaced it.
+    defer { if epoch == searchEpoch { isSearching = false } }
 
     guard !appState.isDemoMode else {
       let allDemoItems = DemoData.movieItems + DemoData.tvItems
@@ -1433,7 +1475,11 @@ private struct TVSearchView: View {
       return
     }
 
-    switch await SearchRules.fetch(query, explicit: explicit, api: appState.api) {
+    let outcome = await SearchRules.fetch(query, explicit: explicit, api: appState.api)
+    // FR-262: the ceiling moved while this was in flight, so the answer was filtered for the old
+    // one and must not be shown.
+    guard epoch == searchEpoch else { return }
+    switch outcome {
     case .success(let found)?:
       results = found
       searchError = nil

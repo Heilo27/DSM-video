@@ -1221,6 +1221,18 @@ extension APIError {
     return nil
   }
 
+  /// The server refused the title itself because it is above the active profile's age ceiling
+  /// (FR-262): the structured `content_restricted`, or a bare 403 with no body, which is the
+  /// same refusal from a layer that did not add one. Callers that gate playback on it must fail
+  /// closed, so any 403 on a title read counts.
+  var isContentRestricted: Bool {
+    switch self {
+    case .server(let code, let status, _): return code == "content_restricted" || status == 403
+    case .http(let status): return status == 403
+    default: return false
+    }
+  }
+
   nonisolated static func incorrectPinMessage(attemptsRemaining: Int?) -> String {
     guard let left = attemptsRemaining else { return "Incorrect PIN." }
     switch left {
