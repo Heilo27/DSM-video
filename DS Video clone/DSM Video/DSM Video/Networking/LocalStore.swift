@@ -323,10 +323,23 @@ actor LocalStore {
     return Self.defaultDatabaseURL()
   }
 
+  /// Documents on iOS. Caches on tvOS: a tvOS app has no writable Documents directory on
+  /// real hardware (Apple's tvOS storage rule; the simulator allows it, which is why every
+  /// test passed), so opening the database there failed on every launch and the Apple TV ran
+  /// with no local store at all. Caches is purgeable, which is acceptable: this store
+  /// refills from the server by delta sync, and progress writes go to the NAS directly.
+  nonisolated static var storageDirectory: FileManager.SearchPathDirectory {
+    #if os(tvOS)
+    return .cachesDirectory
+    #else
+    return .documentDirectory
+    #endif
+  }
+
   /// `<Documents>/dsreel.db`: the production location, nonisolated so the DEBUG reset can find
   /// the file before the actor exists. The one definition of that path.
   nonisolated static func defaultDatabaseURL() -> URL {
-    guard let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+    guard let d = FileManager.default.urls(for: storageDirectory, in: .userDomainMask).first else {
       return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("dsreel.db")
     }
     return d.appendingPathComponent("dsreel.db")
@@ -345,7 +358,7 @@ actor LocalStore {
 
   private func openDatabase() throws {
     if databaseURLOverride == nil,
-       FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first == nil {
+       FileManager.default.urls(for: Self.storageDirectory, in: .userDomainMask).first == nil {
       throw LocalStoreError.cannotLocateDocuments
     }
     let dbURL = resolvedDatabaseURL()
