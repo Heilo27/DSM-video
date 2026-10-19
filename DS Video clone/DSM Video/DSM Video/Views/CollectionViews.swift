@@ -254,6 +254,7 @@ struct CollectionGridView: View {
   @State private var items: [ItemSummary] = []
   @State private var total: Int?
   @State private var isLoading = false
+  @State private var reloadRequested = false
   @State private var error: String?
   #if os(tvOS)
   @FocusState private var focusedCell: Int?
@@ -316,6 +317,15 @@ struct CollectionGridView: View {
     .refreshable { await loadFirstPage() }
     #endif
     .task(id: collection.id) { await loadFirstPage() }
+    // FR-262, AC-002-43: the active profile's age ceiling moved while this grid stayed open.
+    // Titles paged in under the old ceiling go at once and the first page is asked for again.
+    // Unstructured on purpose: `loadFirstPage` queues behind a page already in flight.
+    .onChange(of: appState.profileContentVersion) {
+      items = []
+      total = nil
+      error = nil
+      Task { await loadFirstPage() }
+    }
   }
 
   private func cell(_ item: ItemSummary) -> some View {
@@ -323,12 +333,30 @@ struct CollectionGridView: View {
   }
 
   private func loadFirstPage() async {
-    guard !isLoading else { return }
+    // Asked again while a page is in flight (the ceiling moved): the running request went out
+    // under the previous profile header, so remember the ask and repeat it, never drop it.
+    if isLoading { reloadRequested = true; return }
     isLoading = true
     defer { isLoading = false }
+    reloadRequested = false
+    await loadFirstPageOnce()
+    await repeatFirstPageWhileAsked()
+  }
+
+  /// Runs the first-page load again for every ask that arrived while a request was in flight.
+  private func repeatFirstPageWhileAsked() async {
+    while reloadRequested {
+      reloadRequested = false
+      await loadFirstPageOnce()
+    }
+  }
+
+  private func loadFirstPageOnce() async {
     do {
       let resp = try await appState.api.collectionItems(
         id: collection.id, limit: Self.pageSize, offset: 0)
+      // A newer ask is queued: this answer belongs to the previous ceiling.
+      guard !reloadRequested else { return }
       items = resp.items
       total = resp.effectiveTotal
       error = nil
@@ -343,9 +371,16 @@ struct CollectionGridView: View {
     guard !isLoading, hasMore else { return }
     isLoading = true
     defer { isLoading = false }
+    await loadNextPageOnce()
+    // The ceiling moved while this page was in flight: its rows were dropped, start over.
+    await repeatFirstPageWhileAsked()
+  }
+
+  private func loadNextPageOnce() async {
     do {
       let resp = try await appState.api.collectionItems(
         id: collection.id, limit: Self.pageSize, offset: items.count)
+      guard !reloadRequested else { return }
       items += resp.items
       total = resp.effectiveTotal
       // A short page means the server has no more, whatever total said.

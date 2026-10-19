@@ -761,4 +761,82 @@ struct ProfileScopeFixTests {
       await store.deleteProfileData(profileID: "pf_t935_cleanup")
     }
   }
+
+  // MARK: TASK-1065 part 3 · a ceiling edited on the ACTIVE profile reaches what is on screen
+
+  /// Seeds the local catalog with a level-1 and a level-3 title and puts `shown` on screen,
+  /// the way a session that loaded home under the old ceiling looks.
+  private func seedHome(_ state: AppState, shown: [ItemSummary]) async {
+    await state.localStore.ensureReady()
+    await state.localStore.upsertItems([titleItem("t1065-kids", level: 1, seq: 1),
+                                        titleItem("t1065-teen", level: 3, seq: 2)])
+    state.homeJustAdded = shown
+    state.homeContinueWatching = shown
+  }
+
+  /// OC: TASK-1065 / FR-262 / AC-002-43 · given Leo (ceiling 3) is active with rails showing a
+  /// level-3 title, when the refreshed list says his ceiling is now 2 (edited here or on another
+  /// device), then the rails and watchlist hold only titles at or under 2, the local store reads under 2, and
+  /// the content version moved so open grids, search and detail screens reload.
+  /// Red if: the same-profile branch of refreshProfiles only swaps the stored profile and the
+  /// store's scope (the level-3 title stays in the in-memory rails, and the version never moves).
+  @Test func loweringTheActiveProfilesCeilingEmptiesTheOverLimitTitlesFromScreen() async {
+    let leo = prof("pf_leo", level: 3)
+    await host.withAccount(
+      cached: [prof("pf_ryan", level: 4, owner: true), leo], active: leo,
+      routes: [
+        "GET /api/v1/profiles": profilesReply([ryanJSON, plainProfile("pf_leo", level: 2)]),
+        // The server answers the watchlist under the new ceiling: only the level-1 title.
+        "GET /api/v1/watchlist": .json(200, #"{"items":[{"id":"t1065-kids","type":"movie","title":"t1065-kids","addedAt":"2026-01-01T00:00:00Z"}]}"#),
+      ]
+    ) { state in
+      await seedHome(state, shown: [titleItem("t1065-kids", level: 1), titleItem("t1065-teen", level: 3)])
+      state.watchlistItems = [titleItem("t1065-teen", level: 3)]
+      let before = state.profileContentVersion
+
+      await state.refreshProfiles()
+
+      #expect(await state.localStore.activeScope.maxAgeLevel == 2, "precondition: the new ceiling is in force")
+      #expect(state.homeJustAdded.map(\.id) == ["t1065-kids"], "Just Added still shows the level-3 title")
+      #expect(state.homeContinueWatching.map(\.id).contains("t1065-teen") == false, "Continue Watching still shows it")
+      #expect(state.profileContentVersion != before, "open screens were not told to reload")
+      #expect(state.watchlistItems.map(\.id) == ["t1065-kids"], "the watchlist keeps the level-3 title or stays empty")
+    }
+  }
+
+  /// OC: TASK-1065 / FR-262 · given Leo (ceiling 2) is active and sees only the level-1 title,
+  /// when his ceiling is raised to 3, then the level-3 title appears without a restart.
+  /// Red if: the branch fails closed but never reloads (rails stay empty or at the old set).
+  @Test func raisingTheActiveProfilesCeilingBringsTheNewlyAllowedTitlesOnScreen() async {
+    let leo = prof("pf_leo", level: 2)
+    await host.withAccount(
+      cached: [prof("pf_ryan", level: 4, owner: true), leo], active: leo,
+      routes: ["GET /api/v1/profiles": profilesReply([ryanJSON, plainProfile("pf_leo", level: 3)])]
+    ) { state in
+      await seedHome(state, shown: [titleItem("t1065-kids", level: 1)])
+
+      await state.refreshProfiles()
+
+      #expect(Set(state.homeJustAdded.map(\.id)) == ["t1065-kids", "t1065-teen"])
+    }
+  }
+
+  /// OC: TASK-1065 · given a list refresh that changes no ceiling, then screens are left alone
+  /// (no discard or reload churn on every 30 s heartbeat).
+  /// Red if: the content version moves, or the rails are rebuilt, on a refresh that changed nothing.
+  @Test func anUnchangedCeilingLeavesTheScreensAlone() async {
+    let leo = prof("pf_leo", level: 3)
+    await host.withAccount(
+      cached: [prof("pf_ryan", level: 4, owner: true), leo], active: leo,
+      routes: ["GET /api/v1/profiles": profilesReply([ryanJSON, plainProfile("pf_leo", level: 3)])]
+    ) { state in
+      await seedHome(state, shown: [titleItem("t1065-teen", level: 3)])
+      let before = state.profileContentVersion
+
+      await state.refreshProfiles()
+
+      #expect(state.profileContentVersion == before)
+      #expect(state.homeJustAdded.map(\.id) == ["t1065-teen"])
+    }
+  }
 }

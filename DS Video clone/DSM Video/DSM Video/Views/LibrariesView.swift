@@ -311,6 +311,15 @@ private struct LibraryCard: View {
     .hoverEffect(.lift)
     #endif
     .task { await loadArtwork() }
+    // FR-262: the poster collage and the count were read under the previous ceiling, so a
+    // title above the new one would stay on the card. Clear them and read again.
+    .onChange(of: appState.profileContentVersion) {
+      posterIDs = []
+      demoAssets = []
+      itemCount = nil
+      didLoad = false
+      Task { await loadArtwork() }
+    }
   }
 
   // MARK: Collage
@@ -390,6 +399,7 @@ private struct LibraryCard: View {
     didLoad = true
     // A retry must not keep showing the failed state while it is in flight.
     loadFailed = false
+    let version = appState.profileContentVersion
 
     if appState.isDemoMode {
       let items = library.kind == "tv" ? DemoData.tvItems : DemoData.movieItems
@@ -403,11 +413,14 @@ private struct LibraryCard: View {
         // TV: the shows endpoint gives one entry per show — an accurate show count
         // (not episodes) and clean per-show posters, so no episode-dedup needed.
         let resp = try await appState.api.tvShows(libraryId: library.id)
+        // Read under an earlier ceiling: dropped. The reload the change started replaces it.
+        guard version == appState.profileContentVersion else { return }
         posterIDs = resp.shows.compactMap { $0.posterImageId }.prefix(4).map { $0 }
         itemCount = resp.shows.count
       } else {
         // Movies: one entry per film. Dedup by item id defensively and take four.
         let resp = try await appState.api.items(libraryId: library.id, limit: 40)
+        guard version == appState.profileContentVersion else { return }
         var seen = Set<String>()
         var unique: [String] = []
         for item in resp.items where seen.insert(item.id).inserted {

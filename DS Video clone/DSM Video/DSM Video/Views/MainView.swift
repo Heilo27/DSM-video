@@ -408,6 +408,9 @@ struct SearchView: View {
   @State private var searchError: String?
   @State private var debounceTask: Task<Void, Never>?
   @State private var searchTask: Task<Void, Never>?
+  /// Bumped when the active profile's age ceiling moves (FR-262). A search that started under an
+  /// earlier value was sent with the old profile header, so its answer is dropped on arrival.
+  @State private var searchEpoch = 0
   /// Drives the keyboard up on appear. Tapping Search is an unambiguous statement of
   /// intent to type, so making the user tap a second time is pure friction.
   /// iOS only — .searchFocused does not exist on tvOS.
@@ -577,6 +580,30 @@ struct SearchView: View {
       searchText = term
       await search(explicit: true)
     }
+    // FR-262, AC-002-43: the active profile's age ceiling moved while Search stayed open (a
+    // same-profile edit does not rebuild the view). Results fetched under the old ceiling go at
+    // once, an answer still in flight is fenced off by `searchEpoch`, and a search the user had
+    // already run is asked again under the new profile header.
+    .onChange(of: appState.profileContentVersion) {
+      searchEpoch += 1
+      debounceTask?.cancel()
+      searchTask?.cancel()
+      results = []
+      searchError = nil
+      guard hasSearched else { return }
+      let previous = searchTask
+      searchTask = Task {
+        await previous?.value
+        // A search not tracked in `searchTask` (a recent-search tap, Siri) may still be running;
+        // `search` turns away a second one, so wait for it to finish (its answer is fenced).
+        while isSearching {
+          try? await Task.sleep(for: .milliseconds(50))
+          if Task.isCancelled { return }
+        }
+        guard !Task.isCancelled else { return }
+        await search(explicit: true)
+      }
+    }
     .onChange(of: results) { _, newResults in
       guard hasSearched && !isSearching else { return }
       let message = newResults.isEmpty
@@ -603,6 +630,7 @@ struct SearchView: View {
     // search() calls racing the same result state. Bail if one is already in flight.
     guard !isSearching else { return }
 
+    let epoch = searchEpoch
     isSearching = true
     hasSearched = true
     defer { isSearching = false }
@@ -618,7 +646,11 @@ struct SearchView: View {
       return
     }
 
-    switch await SearchRules.fetch(query, explicit: explicit, api: appState.api) {
+    let outcome = await SearchRules.fetch(query, explicit: explicit, api: appState.api)
+    // FR-262: the ceiling moved while this was in flight, so the answer was filtered for the old
+    // one and must not be shown.
+    guard epoch == searchEpoch else { return }
+    switch outcome {
     case .success(let found)?:
       results = found
       searchError = nil

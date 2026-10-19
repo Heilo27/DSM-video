@@ -206,6 +206,21 @@ struct ItemsGridView: View {
       // a moment later is fine, an empty grid waiting on a secondary request is not.
       if showsGenres { await loadGenres() }
     }
+    // FR-262, AC-002-43: the active profile's age ceiling moved while this grid stayed open
+    // (the picker does not show for a same-profile edit, so the view is not rebuilt). What it
+    // holds was fetched under the old ceiling, so it goes at once and the server is asked again.
+    // An unstructured Task on purpose: `.task(id:)` would cancel a load already in flight and the
+    // cancelled loop could not run the reload; `load()` remembers the request (reloadRequested)
+    // and the running loop repeats under the new profile header.
+    .onChange(of: appState.profileContentVersion) {
+      content = LibraryGridContent()
+      sortedItems = []
+      availableGenres = []
+      Task {
+        await load()
+        if showsGenres { await loadGenres() }
+      }
+    }
     #if !os(tvOS)
     // Search is a magnifying-glass button in the nav bar that presents a search
     // sheet, now that the dedicated Search tab is gone.

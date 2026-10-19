@@ -123,6 +123,8 @@ private struct TVShowDetailSplitView: View {
 
   @State private var seasons: [TVSeason] = []
   @State private var isLoading = false
+  /// A load asked for while one was running (the ceiling moved mid-load): run again afterwards.
+  @State private var reloadRequested = false
   @State private var error: String?
   // TASK-716: surface the metadata fixer on tvOS (the sheet already existed but was
   // only reachable from the iOS toolbar).
@@ -162,6 +164,7 @@ private struct TVShowDetailSplitView: View {
     }
     .focusScope(pageNamespace)
     .task { await load() }
+    .onChange(of: appState.profileContentVersion) { reloadForNewCeiling() }
     .navigationDestination(item: $resumeNav) { target in
       TVEpisodeDetailView(
         episodes: target.episodes,
@@ -402,6 +405,20 @@ private struct TVShowDetailSplitView: View {
     }
   }
 
+  /// The active profile's age ceiling moved while this page stayed open (FR-262, AC-002-43).
+  /// The seasons, the episode counts and the resume target were all read under the old ceiling.
+  /// They go at once and are asked for again; the season sections below are rebuilt from the new
+  /// list and fetch their own episodes. Not left to the show-level 403: a show that is still
+  /// allowed can hold episodes that are not.
+  private func reloadForNewCeiling() {
+    seasons = []
+    resume = nil
+    resolvedHighlightEpisodeID = nil
+    resolvedHighlightSeason = nil
+    error = nil
+    if isLoading { reloadRequested = true } else { Task { await load() } }
+  }
+
   private func load() async {
     guard !isLoading else { return }
     if appState.isDemoMode {
@@ -411,12 +428,24 @@ private struct TVShowDetailSplitView: View {
     }
     isLoading = true
     defer { isLoading = false }
+    // A ceiling change during the fetch means its answer was read under the previous profile
+    // header: it is dropped and the fetch runs again.
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested && !Task.isCancelled
+  }
+
+  private func loadOnce() async {
+    let version = appState.profileContentVersion
     do {
       let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       seasons = resp.seasons
       error = nil
       await resolveResumePoint()
     } catch {
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       // Classify the failure so session/offline state stays accurate (see ItemDetailView.load).
       appState.handleConnectionFailure(error)
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
@@ -429,8 +458,11 @@ private struct TVShowDetailSplitView: View {
   // live in PlaybackProgress). The scan runs even when a highlight was passed in, because the
   // button needs the target's episode list; the passed-in highlight still wins for the list.
   private func resolveResumePoint() async {
+    let version = appState.profileContentVersion
     guard let target = await ShowResumeResolver.resolve(
         show: show, library: library, seasons: seasons, appState: appState) else { return }
+    // The scan read episodes under the previous ceiling; the reload that follows replaces it.
+    guard version == appState.profileContentVersion else { return }
     resume = target
     if highlightEpisodeID == nil, highlightSeason == nil {
       resolvedHighlightEpisodeID = target.episodes[target.index].id
@@ -454,6 +486,8 @@ private struct TVSeasonSection: View {
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
+  /// A load asked for while one was running (the ceiling moved mid-load): run again afterwards.
+  @State private var reloadRequested = false
   /// Drives the season header's focus highlight — `dsPlainButton()` provides none.
   @FocusState private var isHeaderFocused: Bool
   /// Set once the user has focused an episode inside this section. Latches deliberately:
@@ -590,6 +624,12 @@ private struct TVSeasonSection: View {
     }
     .focusSection()
     .task { await load() }
+    // FR-262: the episodes were read under the previous ceiling.
+    .onChange(of: appState.profileContentVersion) {
+      episodes = []
+      error = nil
+      if isLoading { reloadRequested = true } else { Task { await load() } }
+    }
     // TASK-704: fetch episodes the moment a section expands (the .task load() above
     // no-ops while collapsed). Covers both user taps and the resume-season auto-expand.
     .onChange(of: isExpanded) { _, expanded in
@@ -643,15 +683,26 @@ private struct TVSeasonSection: View {
     error = nil
     isLoading = true
     defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested && !Task.isCancelled
+  }
+
+  private func loadOnce() async {
+    // An answer read under an earlier ceiling is dropped; the repeat replaces it.
+    let version = appState.profileContentVersion
     do {
       let resp = try await appState.api.tvShowEpisodes(
         showId: show.id, season: season.seasonNumber, libraryId: library.id)
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       episodes = resp.items
     } catch is CancellationError {
       self.error = nil
     } catch {
       let nsErr = error as NSError
       if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled { return }
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }
@@ -1053,6 +1104,8 @@ private struct TVShowDetailScrollView: View {
 
   @State private var seasons: [TVSeason] = []
   @State private var isLoading = false
+  /// A load asked for while one was running (the ceiling moved mid-load): run again afterwards.
+  @State private var reloadRequested = false
   @State private var error: String?
   @State private var showMetadataFixer = false
   @State private var metadataFixApplied = false
@@ -1152,6 +1205,7 @@ private struct TVShowDetailScrollView: View {
     .background(Color.dsBackground.ignoresSafeArea())
     .navigationTitle(show.title)
     .task { await load() }
+    .onChange(of: appState.profileContentVersion) { reloadForNewCeiling() }
     .navigationDestination(item: $resumeNav) { target in
       EpisodeDetailView(
         episodes: target.episodes,
@@ -1285,6 +1339,15 @@ private struct TVShowDetailScrollView: View {
     }
   }
 
+  /// The active profile's age ceiling moved while this page stayed open (FR-262, AC-002-43).
+  /// See the tvOS page: seasons, counts and the resume target are re-read, not trusted.
+  private func reloadForNewCeiling() {
+    seasons = []
+    resume = nil
+    error = nil
+    if isLoading { reloadRequested = true } else { Task { await load() } }
+  }
+
   private func load() async {
     guard !isLoading else { return }
     if appState.isDemoMode {
@@ -1294,14 +1357,24 @@ private struct TVShowDetailScrollView: View {
     }
     isLoading = true
     defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested && !Task.isCancelled
+  }
+
+  private func loadOnce() async {
+    let version = appState.profileContentVersion
     do {
       showLog.info("load: showId=\(show.id, privacy: .public) libraryId=\(library.id, privacy: .public)")
       let resp = try await appState.api.tvShowSeasons(showId: show.id, libraryId: library.id)
       showLog.info("load: got \(resp.seasons.count) seasons")
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       seasons = resp.seasons
       error = nil
       await resolveResume()
     } catch {
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       appState.handleConnectionFailure(error)
       let msg = (error as? APIError)?.userMessage ?? "Unknown error."
       showLog.error("load: failed — \(msg, privacy: .public)")
@@ -1314,11 +1387,14 @@ private struct TVShowDetailScrollView: View {
   private func resolveResume() async {
     guard !seasons.isEmpty, !isResolvingResume else { return }
     isResolvingResume = true
-    defer { isResolvingResume = false }
-    if let target = await ShowResumeResolver.resolve(
-        show: show, library: library, seasons: seasons, appState: appState) {
-      resume = target
-    }
+    let version = appState.profileContentVersion
+    let target = await ShowResumeResolver.resolve(
+        show: show, library: library, seasons: seasons, appState: appState)
+    isResolvingResume = false
+    // The scan read episodes under the previous ceiling. Scan again for the current one (a
+    // second call made while this one ran returned early on `isResolvingResume`).
+    guard version == appState.profileContentVersion else { await resolveResume(); return }
+    if let target { resume = target }
   }
 }
 #endif  // !os(tvOS)
@@ -1340,6 +1416,8 @@ private struct iOSSeasonSection: View {
 
   @State private var episodes: [ItemSummary] = []
   @State private var isLoading = false
+  /// A load asked for while one was running (the ceiling moved mid-load): run again afterwards.
+  @State private var reloadRequested = false
   @State private var isExpanded: Bool
   @State private var error: String?
   @State private var episodeLoadTask: Task<Void, Never>?
@@ -1454,6 +1532,12 @@ private struct iOSSeasonSection: View {
       }
     }
     .task { await load() }
+    // FR-262: the episodes were read under the previous ceiling.
+    .onChange(of: appState.profileContentVersion) {
+      episodes = []
+      error = nil
+      if isLoading { reloadRequested = true } else { Task { await load() } }
+    }
     // TASK-704: load episodes when a collapsed section is expanded (the .task load()
     // no-ops while collapsed, so this drives the deferred fetch).
     .onChange(of: isExpanded) { _, expanded in
@@ -1475,13 +1559,24 @@ private struct iOSSeasonSection: View {
     error = nil
     isLoading = true
     defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested && !Task.isCancelled
+  }
+
+  private func loadOnce() async {
+    // An answer read under an earlier ceiling is dropped; the repeat replaces it.
+    let version = appState.profileContentVersion
     do {
       let resp = try await appState.api.tvShowEpisodes(
         showId: show.id, season: season.seasonNumber, libraryId: library.id)
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       episodes = resp.items
     } catch is CancellationError {
       self.error = nil
     } catch {
+      guard version == appState.profileContentVersion else { reloadRequested = true; return }
       appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Failed to load episodes."
     }

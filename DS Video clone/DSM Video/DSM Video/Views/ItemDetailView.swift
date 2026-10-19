@@ -32,7 +32,12 @@ struct ItemDetailView: View {
   private var shownTitle: String { detail?.displayTitle ?? fallbackTitle }
 
   @State private var isLoading: Bool = false
+  /// A load asked for while one was running (the ceiling moved mid-load): run again afterwards.
+  @State private var reloadRequested: Bool = false
   @State private var error: String?
+  /// The detail request was refused as above the active profile's age ceiling (FR-262). Set from
+  /// the error the server gave, cleared by every new load.
+  @State private var loadWasRestricted: Bool = false
   @State private var downloadError: String?
 
   @State private var showPlayer: Bool = false
@@ -102,6 +107,55 @@ struct ItemDetailView: View {
     requested && !playUnavailableOffline
   }
 
+  /// What this screen knows about the title it is showing, as far as Play is concerned.
+  enum DetailLoadState: Equatable {
+    /// The request has not answered yet.
+    case loading
+    /// Loaded; `ageLevel` is the title's level as the server stated it (nil = unrated).
+    case loaded(ageLevel: Int?)
+    /// The request failed for a reason that says nothing about the title's level.
+    case failed
+    /// The server refused the title as above the active profile's ceiling.
+    case restricted
+  }
+
+  /// The one rule for "this profile may not start this title from here" (FR-262, AC-002-43).
+  /// Play and Start Over are withheld when it holds.
+  ///
+  /// - loaded: the title's level against the active ceiling, the same rule the lists use
+  ///   (`ProfileScope.allows`). A screen opened before the ceiling was lowered, or reached by a
+  ///   link, still shows a title the profile may not see until this says no.
+  /// - restricted: the server said so; the server wins even for a file on disk.
+  /// - failed: nothing is known about the title, so only a file already on disk (its own level
+  ///   was checked against the ceiling by `isDownloaded`) may play. Offline a downloaded title
+  ///   has no detail at all, which is why this is not "no detail means no Play".
+  /// - loading: not restricted. The answer is a moment away, and hiding Play until it arrives
+  ///   would flash the primary action on every open; the server refuses the stream regardless.
+  static func playRestricted(_ load: DetailLoadState, isDownloaded: Bool, scope: ProfileScope) -> Bool {
+    switch load {
+    case .loading: return false
+    case .loaded(let ageLevel): return !scope.allows(ageLevel: ageLevel)
+    case .failed: return !isDownloaded
+    case .restricted: return true
+    }
+  }
+
+  private var detailLoadState: DetailLoadState {
+    if loadWasRestricted { return .restricted }
+    if let detail { return .loaded(ageLevel: detail.ageLevel) }
+    return error == nil ? .loading : .failed
+  }
+
+  /// `playRestricted` for what this screen holds right now. Reads `profileContentVersion` so the
+  /// buttons re-evaluate the moment the ceiling moves, before the reload has answered.
+  private var playIsRestricted: Bool {
+    _ = appState.profileContentVersion
+    return Self.playRestricted(detailLoadState, isDownloaded: isDownloaded,
+                               scope: appState.profileStore.activeScope)
+  }
+
+  private var showsStartOver: Bool { savedPositionSeconds > 0 && !playIsRestricted }
+
   /// VoiceOver hint for a Play control disabled by `playUnavailableOffline`.
   static let playUnavailableOfflineHint = "Unavailable — your NAS is unreachable and this video isn't downloaded"
 
@@ -139,6 +193,8 @@ struct ItemDetailView: View {
       .navigationTitle("")
       .task(id: itemID) { await load(); loadProgress() }
       .task(id: itemID) { await loadSimilar() }
+      .onChange(of: appState.profileContentVersion) { reloadForNewCeiling() }
+      .onChange(of: playIsRestricted) { if playIsRestricted { showPlayer = false } }
       .onAppear {
         if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
@@ -198,6 +254,8 @@ struct ItemDetailView: View {
         activity.requiredUserInfoKeys = [SpotlightPolicy.activityItemIDKey]
       }
       .task(id: itemID) { await loadSimilar() }
+      .onChange(of: appState.profileContentVersion) { reloadForNewCeiling() }
+      .onChange(of: playIsRestricted) { if playIsRestricted { showPlayer = false } }
       .onAppear {
         if autoPlayLatch.shouldOpen(eligible: autoPlayOnAppear) { showPlayer = true }
       }
@@ -412,7 +470,12 @@ struct ItemDetailView: View {
     .focusEffectDisabled()
     .focused($focusedAction, equals: .play)
     .prefersDefaultFocus(in: actionNamespace)
-    .disabled(playUnavailableOffline)
+    .disabled(playUnavailableOffline || playIsRestricted)
+    // FR-262: withheld, not removed. The button stays in the layout and keeps its focus binding
+    // (an unbound tvOS button is unreachable), like Start Over's no-saved-position state.
+    .opacity(playIsRestricted ? 0 : 1)
+    .allowsHitTesting(!playIsRestricted)
+    .accessibilityHidden(playIsRestricted)
     // A11y.Detail.playButton existed in the registry and was applied to nothing, so the
     // primary action could not be addressed by identifier — which is exactly what a test
     // for "Play holds default focus" needs.
@@ -544,10 +607,10 @@ struct ItemDetailView: View {
             HStack(spacing: .dsSpaceMD) {
               tvPlayButton
               tvStartOverButton
-                .opacity(savedPositionSeconds > 0 ? 1 : 0)
-                .disabled(savedPositionSeconds == 0)
-                .allowsHitTesting(savedPositionSeconds > 0)
-                .accessibilityHidden(savedPositionSeconds == 0)
+                .opacity(showsStartOver ? 1 : 0)
+                .disabled(!showsStartOver)
+                .allowsHitTesting(showsStartOver)
+                .accessibilityHidden(!showsStartOver)
               tvWatchlistButton
               tvWatchedButton
             }
@@ -557,6 +620,8 @@ struct ItemDetailView: View {
           // width (was fixed 200pt each, which overflowed the panel); the icon
           // buttons stay fixed-size.
           HStack(spacing: .dsSpaceMD) {
+            // FR-262: no Play and no Start Over for a title this profile may not start.
+            if !playIsRestricted {
             Button {
               guard !showPlayer else { return }  // TASK-796
               playFromBeginning = false
@@ -582,8 +647,9 @@ struct ItemDetailView: View {
             .accessibilityIdentifier(A11y.Detail.playButton)
             .accessibilityLabel(isDownloaded ? "Play \(shownTitle), downloaded" : "Play \(shownTitle)")
             .accessibilityHint(playUnavailableOffline ? Self.playUnavailableOfflineHint : "")
+            }
 
-            if savedPositionSeconds > 0 {
+            if showsStartOver {
               Button {
                 guard !showPlayer else { return }  // TASK-796
                 playFromBeginning = true
@@ -1286,8 +1352,24 @@ struct ItemDetailView: View {
     Task { savedPositionSeconds = await LocalStore.shared.getProgressSeconds(itemId: itemID) }
   }
 
+  /// The active profile's age ceiling moved while this page stayed open (FR-262, AC-002-43).
+  /// What it holds was fetched under the old ceiling: the detail, and the shelf of similar
+  /// titles. Both go at once and are asked for again under the new profile header. Unstructured
+  /// on purpose, like the grids: `.task(id:)` would cancel a load already in flight; `load()`
+  /// queues behind a running one instead.
+  private func reloadForNewCeiling() {
+    detail = nil
+    similar = []
+    error = nil
+    loadWasRestricted = false
+    Task { await load(); loadProgress() }
+    Task { await loadSimilar() }
+  }
+
   private func load() async {
-    guard !isLoading else { return }
+    // A request that arrives while one runs (the ceiling moved mid-load) is remembered and run
+    // again, not dropped: the running one was sent under the previous profile header.
+    if isLoading { reloadRequested = true; return }
     // Clear detail only after confirming we will actually start a load — avoids
     // a blank header flash when the guard exits early (TASK-425).
     detail = nil
@@ -1296,18 +1378,31 @@ struct ItemDetailView: View {
       return
     }
     error = nil
+    loadWasRestricted = false
     isLoading = true
     defer { isLoading = false }
+    repeat {
+      reloadRequested = false
+      await loadOnce()
+    } while reloadRequested && !Task.isCancelled
+  }
 
+  private func loadOnce() async {
+    // An answer fetched under an earlier ceiling is dropped; the repeat replaces it.
+    let version = appState.profileContentVersion
     do {
-      detail = try await appState.api.itemDetail(id: itemID)
+      let loaded = try await appState.api.itemDetail(id: itemID)
+      guard version == appState.profileContentVersion else { return }
+      detail = loaded
     } catch {
+      guard version == appState.profileContentVersion else { return }
       // Classify the failure like every sibling load path does. Without this a 401 here
       // never cleared the session and never set serverUnreachable, so the offline banner
       // stayed hidden and the user sat on an authenticated-looking screen that could not
       // load anything.
       appState.handleConnectionFailure(error)
       self.error = (error as? APIError)?.userMessage ?? "Unknown error."
+      loadWasRestricted = (error as? APIError)?.isContentRestricted ?? false
     }
   }
 
