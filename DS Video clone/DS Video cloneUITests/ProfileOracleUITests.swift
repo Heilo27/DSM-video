@@ -254,10 +254,61 @@ final class ProfileOracleUITests: XCTestCase {
     XCTAssertTrue(play.exists, "The detail page's Play button is gone: something replaced the page (a player?).")
   }
 
-  // NOT AUTOMATED: ProfileText.saveNeedsNAS via the owner's first-PIN pad (OC-2111).
-  // NewPinView sets `first = nil` inside its submit closure before returning `.reject`, which
-  // flips `.id(first == nil ? "first" : "confirm")` and rebuilds PinPadView, discarding the
-  // `error` @State the reject was about to set. The pad ends on "Choose 4 digits." and neither
-  // the save-failure copy nor "Those PINs didn't match" is ever visible. App bug, reported on
-  // TASK-969; a test for it would fail until the app is fixed.
+  // MARK: - Setting the owner's first PIN: errors survive the step reset (TASK-1063, FR-212 / FR-266)
+
+  /// Opens Manage Profiles on an account whose owner (Dana) has no PIN yet, which lands on the
+  /// "Set a PIN for Dana" pad (FR-212).
+  private func openOwnerFirstPinPad() throws -> XCUIApplication {
+    server = try StubServer.withProfiles([
+      StubProfile(id: "p-owner", name: "Dana", isOwner: true),
+      StubProfile(id: "p-casey", name: "Casey"),
+    ])
+    let app = UITest.launchAgainst(server)
+    requireExists(app.buttons[UIID.Profile.Picker.manageButton], "the picker's Manage button",
+                  timeout: UITest.launchTimeout)
+    app.buttons[UIID.Profile.Picker.manageButton].tap()
+    XCTAssertEqual(pinMessage(app, becomes: "Choose 4 digits."), "Choose 4 digits.",
+                   "The first-PIN pad did not open on its first step.")
+    return app
+  }
+
+  /// OC-2111 / FR-212 / TASK-1063. Given the owner's first-PIN pad, when the NAS stops answering
+  /// after the PIN is entered the second time, then the pad says nothing was changed and the NAS
+  /// must be reachable, and it is back on the first step to try again.
+  /// Red if: NewPinFlow stops carrying the save failure to the rebuilt pad (the bug: the reset
+  /// rebuilt the pad and the message was lost), or ProfileText.saveNeedsNAS changes its wording
+  /// or stops being used for an unreachable NAS.
+  func testFirstPinSaveWithTheNASUnreachableSaysNothingWasChanged() throws {
+    let app = try openOwnerFirstPinPad()
+    tapPin(app, "1234")
+    XCTAssertEqual(pinMessage(app, becomes: "To make sure it's right."), "To make sure it's right.",
+                   "The pad did not move to the confirm step.")
+    server.stop()
+    tapPin(app, "1234")
+
+    let expected = "Couldn't reach your NAS, so nothing was changed. Check your connection and try again."
+    let shown = pinMessage(app, becomes: expected)
+    XCTAssertEqual(shown, expected, "The pad did not tell the owner the PIN save failed.")
+    assertMessage(shown, avoids: ["match", "Incorrect"], context: "first-PIN save failure message")
+  }
+
+  /// OC-2111 / FR-212 / TASK-1063 negative control. Given the same pad and a NAS that is fine, when
+  /// the two entries differ, then the pad says they did not match and no save was attempted (the
+  /// two causes stay distinct, and a mismatch is never reported as a NAS problem).
+  /// Red if: the mismatch notice is lost on the step reset, ProfileText.pinMismatch changes, or the
+  /// flow saves a PIN whose confirmation differs.
+  func testFirstPinEntriesThatDifferSayTheyDidNotMatchAndSaveNothing() throws {
+    let app = try openOwnerFirstPinPad()
+    tapPin(app, "1234")
+    XCTAssertEqual(pinMessage(app, becomes: "To make sure it's right."), "To make sure it's right.",
+                   "The pad did not move to the confirm step.")
+    tapPin(app, "5678")
+
+    let expected = "Those PINs didn't match. Choose a PIN again."
+    let shown = pinMessage(app, becomes: expected)
+    XCTAssertEqual(shown, expected, "The pad did not say the two PINs differed.")
+    assertMessage(shown, avoids: ["NAS"], context: "mismatch message")
+    XCTAssertTrue(server.requests.filter { $0.path.hasPrefix("/api/v1/profiles") && $0.method != "GET" }.isEmpty,
+                  "A PIN was sent to the server although the two entries differed.")
+  }
 }

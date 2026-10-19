@@ -51,6 +51,9 @@ xcodebuild test -destination 'platform=iOS Simulator,id=<udid>' ...
 |---|---|
 | `DSM Video/App/AccessibilityIDs.swift` | The identifier registry, in the **app** target |
 | `DS Video cloneUITests/UITestSupport.swift` | Launch helpers, failing assertions, the `UIID` mirror |
+| `DS Video cloneUITests/StubServer.swift` | Loopback HTTP server with canned routes and a request log; `stop()` simulates an unreachable NAS |
+| `DS Video cloneUITests/ProfileOracleUITests.swift` | Profile picker, PIN copy, first-PIN save errors, restricted empty state, Siri/deep link opens detail and never plays |
+| `DS Video cloneUITests/SuggestedRailUITests.swift` | The Suggested rail renders with its genre, and is absent when the server has no suggestion |
 | `DS Video cloneUITests/DSReelUITests.swift` | Behaviour: launch, login, dead-control sweeps, a11y |
 | `DS Video cloneUITests/DSReelVisualTests.swift` | Layout, text sizes, rotation, reading order, screenshots |
 | `DS Video cloneUITests/DS_Video_cloneUITests.swift` | Cold-launch budget + launch metric |
@@ -72,9 +75,9 @@ build, which is what catches drift.
 |---|---|
 | `-UITestDemoMode` | Signs in with deterministic demo content, no network |
 | `-UITestResetState` | Clears `dsReel.`-prefixed defaults, the two Keychain entries, the app-group profile state (`ActiveProfileStore.clearAll`) and the `dsreel.db`, `-wal`, `-shm` files |
-| `-QALiveToken` / `-QALiveServer` | Boots into a real session against a live NAS |
+| `-QALiveToken` / `-QALiveServer` | Boots into a real session against a server. Tests point it at the loopback `StubServer` (`UITest.launchAgainst`), never at a real NAS |
 
-Tests use demo mode. **Never make a test depend on the live NAS** — its reachability would make
+Tests use demo mode or the loopback `StubServer`. **Never make a test depend on the live NAS** — its reachability would make
 the suite flaky, and a flaky suite gets disabled, at which point it protects nothing.
 
 ## The rules
@@ -112,6 +115,18 @@ catching a regression and rediscovering an opinion.
 A test here must fail for a reason a designer would agree is a defect. "This spacing is 12pt and
 I prefer 16pt" is not a test — it is a design decision, and encoding it makes the suite an
 obstacle to design work instead of a safety net for it.
+
+## Not automatable (and why)
+
+Each row is a deliberate decision, not a backlog item. A row leaves this table only when the
+reason stops being true.
+
+| Area | Criteria | Why it is not a UI test |
+|---|---|---|
+| tvOS-only behaviour | OC-2059, OC-2162 to 2164, OC-2170 | The simulator cannot reproduce Siri Remote focus movement reliably; `scripts/check-tvos-focus.sh` guards the focus enums statically instead |
+| Player | OC-1056 to OC-1078 | Needs decoded video, real audio sessions, AirPlay/PiP and background audio; the simulator cannot judge any of them. Covered by unit tests of the playback logic and by device checks |
+| Live network | OC-0008, OC-0010 to OC-0013, OC-0126 | These are about a real NAS, QuickConnect relay and WAN latency. A stub proves nothing about them, and a live dependency would make the suite flaky (see launch hooks) |
+| Play resume | position survives exit and reopen | **Deferred, not refused.** The stub has no Range / binary support, so a player cannot open a stream from it. Unblock by teaching `StubServer` a ranged binary response |
 
 ## Coverage gaps — honest list
 
