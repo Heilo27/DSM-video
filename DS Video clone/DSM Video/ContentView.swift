@@ -99,6 +99,13 @@ struct RootView: View {
         }
         #if DEBUG
         .dsShotScreen()  // -DSShotScreen <name>: design-evidence screenshots (DSShotScreen.swift)
+        // -UITestProfileScreen picker|pin|editor: the profile screens on fixture data, no NAS
+        // (ProfileScreenPreview; the same hook TVMainView honours on tvOS). TASK-1066 evidence.
+        .overlay {
+            if let screen = ProfileScreenPreview.requested {
+                ProfileScreenPreviewHost(screen: screen)
+            }
+        }
         #endif
         .preferredColorScheme(.dark)
     }

@@ -101,7 +101,7 @@ struct ProfileAvatarView: View {
 // now sit on the nearest scale roles (28/48/24/48). Computed, not stored, so each read sees
 // the current theme.
 @MainActor
-private enum ProfileMetrics {
+enum ProfileMetrics {
   #if os(tvOS)
   static let tile: CGFloat = 230
   static var tileName: Font { .dsTVSectionTitle }
@@ -1050,6 +1050,18 @@ struct ProfileEditorView: View {
   let close: () -> Void
 
   enum EditorControl: Hashable { case name, pinSet, pinRemove, save, delete, cancel }
+  private static let bottomAnchor = "profileEditor.bottom"
+
+  /// The form's side inset. 80pt is a 10-foot margin; on a 402pt phone it left the form 242pt,
+  /// too narrow for Save and Cancel to share a row (TASK-1066), so a phone gets the screen-edge
+  /// gutter. Read by ProfileEditorLayoutTests, which sizes the action rows to the width it leaves.
+  static var sideInset: CGFloat {
+    #if os(tvOS)
+    .dsSpaceColossal
+    #else
+    .dsSpaceGutter
+    #endif
+  }
 
   @State private var name = ""
   @State private var avatar = ProfileAvatar.cat.rawValue
@@ -1084,6 +1096,7 @@ struct ProfileEditorView: View {
   var body: some View {
     ZStack {
       ProfileBackdrop()
+      ScrollViewReader { proxy in
       ScrollView {
         VStack(alignment: .leading, spacing: ProfileMetrics.spacing * 0.7) {
           Text(existing == nil ? "Add Profile" : "Edit Profile")
@@ -1140,40 +1153,27 @@ struct ProfileEditorView: View {
               .accessibilityIdentifier(A11y.Profile.Editor.error)
           }
 
-          HStack(spacing: 28) {
-            Button {
-              Task { await save() }
-            } label: {
-              Text(saving ? "Saving…" : "Save")
-            }
-            .dsPrimaryButton(.card, minWidth: 160)
-            .disabled(!nameValid || saving)
-            .focused($focusedControl, equals: .save)
-            .accessibilityIdentifier(A11y.Profile.Editor.saveButton)
-
-            Button("Cancel", action: close)
-              .buttonStyle(.bordered)
-              .focused($focusedControl, equals: .cancel)
-              .accessibilityIdentifier(A11y.Profile.Editor.cancelButton)
-
-            Spacer()
-
-            if let existing, !existing.isOwner {
-              Button(role: .destructive) { confirmingDelete = true } label: {
-                Label("Delete Profile", systemImage: "trash")
-              }
-              .buttonStyle(.bordered)
-              .focused($focusedControl, equals: .delete)
-              .accessibilityIdentifier(A11y.Profile.Editor.deleteButton)
-            }
-          }
-          .font(ProfileMetrics.body.weight(.semibold))
-          #if os(tvOS)
-          .focusSection()
-          #endif
+          ProfileEditorActions(
+            saveTitle: saving ? "Saving…" : "Save",
+            canSave: nameValid && !saving,
+            showsDelete: existing.map { !$0.isOwner } ?? false,
+            focus: $focusedControl,
+            onSave: { Task { await save() } },
+            onCancel: close,
+            onDelete: { confirmingDelete = true })
+          Color.clear.frame(height: 1).id(Self.bottomAnchor)
         }
-        .padding(.horizontal, .dsSpaceColossal)
+        .padding(.horizontal, Self.sideInset)
         .padding(.vertical, .dsSpaceTitleSafe)
+      }
+      #if DEBUG
+      // QA hook (-UITestProfileEditorScroll bottom): the bottom of the form, for screenshots.
+      .task {
+        guard ProfileScreenPreview.editorScrollsToBottom else { return }
+        try? await Task.sleep(for: .milliseconds(600))
+        proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+      }
+      #endif
       }
     }
     .onAppear(perform: load)
@@ -1319,23 +1319,12 @@ struct ProfileEditorView: View {
   @ViewBuilder
   private var pinControls: some View {
     let ownerKeepsPin = isOwner && appState.profiles.count > 1
-    HStack(spacing: .dsSpaceXXL) {
-      Text(willHavePin ? "On" : "Off")
-        .font(ProfileMetrics.body)
-        .foregroundStyle(.white)
-        .frame(minWidth: 80, alignment: .leading)
-      Button(willHavePin ? "Change PIN" : "Set PIN") { choosingPin = true }
-        .buttonStyle(.bordered)
-        .focused($focusedControl, equals: .pinSet)
-        .accessibilityIdentifier(A11y.Profile.Editor.pinSet)
-      if willHavePin && !ownerKeepsPin {
-        Button("Remove PIN") { pinChange = existing?.hasPin == true ? .clear : nil }
-          .buttonStyle(.bordered)
-          .focused($focusedControl, equals: .pinRemove)
-          .accessibilityIdentifier(A11y.Profile.Editor.pinRemove)
-      }
-    }
-    .font(ProfileMetrics.body.weight(.semibold))
+    ProfilePinRow(
+      hasPin: willHavePin,
+      showsRemove: willHavePin && !ownerKeepsPin,
+      focus: $focusedControl,
+      onSetOrChange: { choosingPin = true },
+      onRemove: { pinChange = existing?.hasPin == true ? .clear : nil })
     if ownerKeepsPin {
       Text("The owner's PIN protects profile changes, so it stays while other profiles exist.")
         .font(ProfileMetrics.body).foregroundStyle(Color.dsTextTertiary)
@@ -1514,6 +1503,14 @@ enum ProfileScreenPreview: String {
     guard let flag = args.firstIndex(of: "-UITestProfileScreen"),
           args.index(after: flag) < args.endIndex else { return nil }
     return ProfileScreenPreview(rawValue: args[args.index(after: flag)])
+  }
+
+  /// `-UITestProfileEditorScroll bottom`: opens the editor scrolled to its action row.
+  static var editorScrollsToBottom: Bool {
+    let args = ProcessInfo.processInfo.arguments
+    guard let flag = args.firstIndex(of: "-UITestProfileEditorScroll"),
+          args.index(after: flag) < args.endIndex else { return false }
+    return args[args.index(after: flag)] == "bottom"
   }
 
   static let fixtures: [Profile] = [
