@@ -41,7 +41,13 @@ func (e *qaEnv) seedSeqs(seqs []int) []string {
 // server supplied one. It returns every id delivered and fails if the walk does not end.
 func (e *qaEnv) crawlSync(owner string, limit int) map[string]bool {
 	e.t.Helper()
-	since, after := int64(0), int64(0)
+	return e.crawlSyncFrom(owner, 0, limit)
+}
+
+// crawlSyncFrom is crawlSync for a device whose stored cursor is since.
+func (e *qaEnv) crawlSyncFrom(owner string, since int64, limit int) map[string]bool {
+	e.t.Helper()
+	after := int64(0)
 	seen := map[string]bool{}
 	for page := 0; page < 200; page++ {
 		path := fmt.Sprintf("/sync/items?since=%d&limit=%d", since, limit)
