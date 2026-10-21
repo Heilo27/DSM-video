@@ -14,7 +14,7 @@ nonisolated enum RecommendedServer {
   /// The SPK version (`MAJOR.MINOR.PATCH-BUILD`) of the newest server this app is built for.
   /// RAISE THIS whenever `version` in spk/DSVideoServer/INFO is raised; `ServerUpdateNoticeTests`
   /// fails when the two differ, so a release cannot ship with the notice pointing at an old build.
-  static let version = "0.3.9-0005"
+  static let version = "0.3.9-0006"
 
   /// The product page that carries the download. Not a GitHub release URL: those change with
   /// every release, the page does not.
