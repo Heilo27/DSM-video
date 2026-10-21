@@ -1275,8 +1275,8 @@ func loadConfig() Config {
 		}(),
 
 		// Metadata settings
-		TMDbAPIKey:    get("DSVIDEO_TMDB_API_KEY", ""),
-		ImageCacheDir: get("DSVIDEO_IMAGE_CACHE_DIR", filepath.Join(os.TempDir(), "dsvideo_images")),
+		TMDbAPIKey:         get("DSVIDEO_TMDB_API_KEY", ""),
+		ImageCacheDir:      get("DSVIDEO_IMAGE_CACHE_DIR", filepath.Join(os.TempDir(), "dsvideo_images")),
 		ImageCacheMaxBytes: imageCacheMaxBytes(get("DSVIDEO_IMAGE_CACHE_MAX_MB", "")),
 
 		// TASK-791/811: admin/owner for server-global mutations. Empty = first-user-wins.
@@ -2089,6 +2089,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusForbidden, "permission_denied")
 			return
 		}
+		// DSM never answered: the password was not checked, so it must not be blamed.
+		if isDSMUnavailable(err) {
+			writeFailure(w, r, http.StatusServiceUnavailable, "dsm_unavailable", err)
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials")
 		return
 	}
@@ -2154,6 +2159,14 @@ func (e *dsmPermissionError) Error() string { return "permission_denied" }
 // authenticateDSM validates credentials against Synology DSM WebAPI.
 // Uses auth.cgi (DSM legacy endpoint) instead of entry.cgi to avoid a
 // forwarding loop — our nginx intercepts entry.cgi but not auth.cgi.
+// dsmAuthTimeout bounds one auth.cgi call. See authenticateDSM for why it is 7s.
+const dsmAuthTimeout = 7 * time.Second
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, did string) (*dsmUserInfo, error) {
 	// Use auth.cgi (not entry.cgi) so the call doesn't loop back through our
 	// nginx location block. DSM 7 still supports auth.cgi for SYNO.API.Auth.
@@ -2202,42 +2215,37 @@ func (s *Server) authenticateDSM(ctx context.Context, username, password, otp, d
 		return http.ErrUseLastResponse
 	}
 
+	// DSM's first sign-in after a quiet spell is slow: 4.4s measured on the live NAS, then
+	// 0.4s warm. At 5s, remote sign-ins hit the limit and were reported as a wrong password
+	// (2026-10-21). 7s still answers inside the app's 8s per-address budget.
 	client := &http.Client{
-		Timeout:       5 * time.Second,
+		Timeout:       dsmAuthTimeout,
 		CheckRedirect: noRedirect,
 	}
 	resp, err := client.Do(req)
-	if err != nil {
+	// Fall back to 5001 only when port 5000 refused us. A timeout means DSM is slow, not that
+	// the port is closed, and retrying elsewhere only spends the client's remaining budget.
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !isTimeout(err) {
 		// If localhost:5000 fails, try 5001 (HTTPS) — also via auth.cgi
 		dsmURL = "https://localhost:5001/webapi/auth.cgi"
 		req, _ = http.NewRequestWithContext(ctx, http.MethodPost, dsmURL, strings.NewReader(formData))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-		// For localhost DSM HTTPS, accept self-signed certs by checking host only.
-		// We don't skip verification globally — we verify that the server name is
-		// localhost/127.0.0.1, which is the expected DSM address in this context.
+		// DSM's certificate names the NAS's public hostname, never localhost, so standard
+		// verification of this loopback call always failed (VerifyConnection runs only AFTER
+		// chain and hostname checks pass; it could not relax them). The URL is a hard-coded
+		// loopback address, so skipping verification exposes nothing off the box.
 		client = &http.Client{
-			Timeout:       5 * time.Second,
+			Timeout:       dsmAuthTimeout,
 			CheckRedirect: noRedirect,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: false,
-					VerifyConnection: func(cs tls.ConnectionState) error {
-						// Only bypass cert chain validation for the loopback address.
-						// Any other hostname will still fail standard verification.
-						host := cs.ServerName
-						if host == "localhost" || host == "127.0.0.1" || host == "" {
-							return nil
-						}
-						return fmt.Errorf("tls: non-localhost host %q not allowed in localhost-only DSM fallback", host)
-					},
-				},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // loopback only, see above
 			},
 		}
 		resp, err = client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("dsm request failed: %w", err)
-		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dsm request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -3654,8 +3662,8 @@ func (s *Server) handleShowDetail(w http.ResponseWriter, r *http.Request) {
 // a torso. Every tvOS rail card was doing exactly that.
 //
 // Empty strings matter here. The callers read these out of sql.NullString, whose .Valid
-// is true for '', so a bare validity check accepted backdrop_path='' and then asked TMDb
-// for the empty path — which fails as image_not_found. Treating '' as absent lets
+// is true for ”, so a bare validity check accepted backdrop_path=” and then asked TMDb
+// for the empty path — which fails as image_not_found. Treating ” as absent lets
 // type=backdrop fall back to the poster for items TMDb has no backdrop for, rather than
 // 404ing a card that has perfectly good poster art.
 //
@@ -6341,22 +6349,22 @@ func (s *Server) handleSyncItems(w http.ResponseWriter, r *http.Request) {
 	// carries changeSeq and libraryId, is unfiltered by the age ceiling, and is a different
 	// wire contract from the list endpoints), not the list element.
 	type syncItem struct {
-		ID              string          `json:"id"`
-		LibraryID       string          `json:"libraryId"`
-		Type            string          `json:"type"`
-		Title           string          `json:"title"`
-		Year            *int            `json:"year,omitempty"`
-		DurationSeconds *int            `json:"durationSeconds,omitempty"`
-		AddedAt         string          `json:"addedAt"`
-		Rating          *float64        `json:"rating,omitempty"`
-		PosterImageID   *string         `json:"posterImageId,omitempty"`
-		BackdropImageID *string         `json:"backdropImageId,omitempty"`
-		ShowName        *string         `json:"showName,omitempty"`
-		ShowFolderID    *string         `json:"showFolderId,omitempty"`
-		SeasonNumber    *int            `json:"seasonNumber,omitempty"`
-		EpisodeNumber   *int            `json:"episodeNumber,omitempty"`
-		ChangeSeq       int64           `json:"changeSeq"`
-		Progress        map[string]any  `json:"progress,omitempty"`
+		ID              string         `json:"id"`
+		LibraryID       string         `json:"libraryId"`
+		Type            string         `json:"type"`
+		Title           string         `json:"title"`
+		Year            *int           `json:"year,omitempty"`
+		DurationSeconds *int           `json:"durationSeconds,omitempty"`
+		AddedAt         string         `json:"addedAt"`
+		Rating          *float64       `json:"rating,omitempty"`
+		PosterImageID   *string        `json:"posterImageId,omitempty"`
+		BackdropImageID *string        `json:"backdropImageId,omitempty"`
+		ShowName        *string        `json:"showName,omitempty"`
+		ShowFolderID    *string        `json:"showFolderId,omitempty"`
+		SeasonNumber    *int           `json:"seasonNumber,omitempty"`
+		EpisodeNumber   *int           `json:"episodeNumber,omitempty"`
+		ChangeSeq       int64          `json:"changeSeq"`
+		Progress        map[string]any `json:"progress,omitempty"`
 		// FRD-002 FR-240/241, ADR-001 §4: sync is account-scoped and unfiltered; every item
 		// carries its level so the device filters each local read. Unrated → null / 4.
 		ContentRating *string `json:"contentRating"`
@@ -7828,7 +7836,7 @@ var errNothingPurged = errors.New("no orphaned progress to purge")
 var scanVideoExt = map[string]bool{
 	".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".avi": true, ".ts": true,
 	".webm": true,
-	".wmv": true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
+	".wmv":  true, ".mpg": true, ".mpeg": true, ".m2ts": true, ".mts": true, ".flv": true,
 	".vob": true, ".3gp": true,
 	// TASK-1002: the bundled ffmpeg (6.1.1) has the demuxers and decoders for these, so
 	// they are indexed and always transcoded. .iso is a disc image, not a stream: it stays
