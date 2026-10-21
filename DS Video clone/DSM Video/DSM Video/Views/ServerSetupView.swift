@@ -711,6 +711,10 @@ struct SetupConnectScreen: View {
   /// Prefer APIError.userMessage over this function — the typed error carries the real reason.
   /// This exists only for paths that have already flattened the error to a String.
   private func friendlyError(_ raw: String) -> String {
+    // AppState's multi-line message already names every candidate and how it failed. Matching
+    // substrings in it collapsed that list into one guess: a single "TLS handshake failed" line
+    // among several turned a remote sign-in failure into "Secure connection failed".
+    if raw.contains("\n") { return raw }
     let lower = raw.lowercased()
 
     // --- Transport failures first: the server was never reached. ---

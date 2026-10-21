@@ -106,7 +106,10 @@ enum QuickConnectResolver {
     var httpsPort: Int?
     var httpPort: Int?
     if let service = json["service"] as? [String: Any] {
-      httpsPort = intValue(service["https_ext_port"]) ?? intValue(service["https_port"])
+      // service.https_port is NOT the NAS's HTTPS port: it pairs with service.https_ip, which is
+      // the relay's address (live answer for primeaunas: https_ip 89.187.185.92, https_port 443).
+      // Reading it built https://<ddns>:443, which nothing answers, so WAN-direct never worked.
+      httpsPort = intValue(service["https_ext_port"])
       httpPort  = intValue(service["ext_port"]) ?? intValue(service["port"])
     }
     if httpsPort == nil, let portVal = ext["https"] { httpsPort = intArray(portVal).first }
@@ -208,11 +211,17 @@ enum QuickConnectResolver {
   }
 
   /// The real `Serv.php` round trip.
+  ///
+  /// The relay is asked for the HTTPS portal (`dsm_portal_https`) because resolveRelay() speaks
+  /// https:// to it: a `dsm_portal` tunnel forwards to DSM's plain-HTTP port, so TLS to it fails
+  /// the handshake and the remote sign-in ended on "Secure connection failed". Server info stays
+  /// on `dsm_portal`, whose port is the HTTP one the LAN candidates use.
   static let liveQuery: Query = { command, serverID in
-    try await queryCommand(command, id: serverID)
+    try await queryCommand(command, id: serverID,
+                           service: command == "request_tunnel" ? "dsm_portal_https" : "dsm_portal")
   }
 
-  private static func queryCommand(_ command: String, id: String) async throws -> [String: Any] {
+  private static func queryCommand(_ command: String, id: String, service: String) async throws -> [String: Any] {
     let url = URL(string: "https://global.quickconnect.to/Serv.php")!
     var request = URLRequest(url: url, timeoutInterval: 12)
     request.httpMethod = "POST"
@@ -222,7 +231,7 @@ enum QuickConnectResolver {
       "command": command,
       "stop_when_error": false,
       "stop_when_success": false,
-      "id": "dsm_portal",
+      "id": service,
       "serverID": id,
     ])
     let (data, _) = try await URLSession.shared.data(for: request)
