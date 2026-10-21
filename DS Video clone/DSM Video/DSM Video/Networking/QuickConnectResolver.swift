@@ -217,8 +217,11 @@ enum QuickConnectResolver {
   /// the handshake and the remote sign-in ended on "Secure connection failed". Server info stays
   /// on `dsm_portal`, whose port is the HTTP one the LAN candidates use.
   static let liveQuery: Query = { command, serverID in
-    try await queryCommand(command, id: serverID,
-                           service: command == "request_tunnel" ? "dsm_portal_https" : "dsm_portal")
+    try await queryCommand(command, id: serverID, service: portalService(for: command))
+  }
+
+  static func portalService(for command: String) -> String {
+    command == "request_tunnel" ? "dsm_portal_https" : "dsm_portal"
   }
 
   private static func queryCommand(_ command: String, id: String, service: String) async throws -> [String: Any] {
