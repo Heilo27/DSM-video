@@ -31,11 +31,11 @@ func TestCopiedStreamTag(t *testing.T) {
 }
 
 func TestMkvHevcRemuxIsRelabelledAndH264IsNot(t *testing.T) {
-	hevc := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionRemux, 1080, copiedStreamTag("hevc", "[0][0][0][0]")), " ")
+	hevc := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionRemux, 1080, copiedStreamTag("hevc", "[0][0][0][0]"), nil), " ")
 	if !strings.Contains(hevc, "-tag:v hvc1") {
 		t.Errorf("MKV HEVC remux must carry -tag:v hvc1; got: %s", hevc)
 	}
-	h264 := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionRemux, 1080, copiedStreamTag("h264", "[0][0][0][0]")), " ")
+	h264 := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionRemux, 1080, copiedStreamTag("h264", "[0][0][0][0]"), nil), " ")
 	if strings.Contains(h264, "-tag:v") {
 		t.Errorf("MKV h264 remux must not be relabelled; got: %s", h264)
 	}

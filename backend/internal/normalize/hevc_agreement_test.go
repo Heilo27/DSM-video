@@ -102,7 +102,7 @@ func TestNormalizeAgreesWithPlaybackDecision(t *testing.T) {
 // point. A full round-trip through ffmpeg is covered by running the real server; this
 // keeps the invariant pinned without one.
 func TestRemuxRelabelsHev1SoItConverges(t *testing.T) {
-	args := buildFFmpegArgs("/m/in.mkv", "/m/.in.converting.mp4", ActionRemux, 1080, "hev1")
+	args := buildFFmpegArgs("/m/in.mkv", "/m/.in.converting.mp4", ActionRemux, 1080, "hev1", nil)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-tag:v hvc1") {
@@ -119,7 +119,7 @@ func TestRemuxRelabelsHev1SoItConverges(t *testing.T) {
 // invalid sample entry.
 func TestRemuxDoesNotRelabelNonHev1(t *testing.T) {
 	for _, tag := range []string{"avc1", "hvc1", "", "[0][0][0][0]"} {
-		joined := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionRemux, 1080, tag), " ")
+		joined := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionRemux, 1080, tag, nil), " ")
 		if strings.Contains(joined, "-tag:v") {
 			t.Errorf("tag %q must not be relabelled; got: %s", tag, joined)
 		}
@@ -129,7 +129,7 @@ func TestRemuxDoesNotRelabelNonHev1(t *testing.T) {
 // A full re-encode emits h264/avc1 regardless of the source tag, so it must never carry
 // the HEVC relabel.
 func TestEncodeNeverCarriesTheHevcTag(t *testing.T) {
-	joined := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionEncode, 1080, "hev1"), " ")
+	joined := strings.Join(buildFFmpegArgs("/m/in.mkv", "/m/out.mp4", ActionEncode, 1080, "hev1", nil), " ")
 	if strings.Contains(joined, "hvc1") {
 		t.Errorf("a libx264 re-encode must not carry an HEVC tag; got: %s", joined)
 	}

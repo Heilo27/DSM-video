@@ -370,6 +370,12 @@ than restarting.
 Library normalization never costs a title an audio track: a converted file keeps every audio track
 of the original, each with its language and title, and a conversion that would drop one is
 rejected and the original kept.
+Library normalization never costs a title a text subtitle track either [TASK-1070]: a converted file
+keeps every text subtitle track of the original (SRT, ASS/SSA, WebVTT, mov_text), as mov_text with its
+language and title, and a conversion that would drop one is rejected and the original kept. MP4 cannot
+hold image subtitles (PGS, VobSub), so a file that has any is never converted: it is left as it is,
+original untouched, and keeps playing through the on-demand path with its tracks listed. The text
+versus image split is the player's (the probe's), not a second list.
 **FR-064 [STATED]** — Every player control — skip to start, back 15, play/pause, forward 15, skip to end —
 is reachable and activatable with the tvOS remote.
 **FR-065 [INFERRED]** — Back 15 / Forward 15 move the position by approximately 15 seconds and clamp

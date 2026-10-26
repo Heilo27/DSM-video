@@ -265,7 +265,12 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 				if l := strings.ToLower(stream.Tags["language"]); l != "" {
 					sub.Language = l
 				}
+				// Same "title" vs "name" split as the audio branch: ffmpeg's MP4 muxer
+				// reports the track title as "name", so a normalized file keeps it there.
 				sub.Title = stream.Tags["title"]
+				if sub.Title == "" {
+					sub.Title = stream.Tags["name"]
+				}
 				result.EmbeddedSubs = append(result.EmbeddedSubs, sub)
 			}
 		}

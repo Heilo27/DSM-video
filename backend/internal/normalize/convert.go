@@ -77,14 +77,28 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 	// on the next scan, forever. Observed live: the same title remuxed three times in one
 	// session, input path identical to output path. Probe failure is not fatal; it just
 	// means no relabel, which is the old behaviour.
+	//
+	// The same probe supplies the subtitle streams to carry over (TASK-1070). Unlike the
+	// tag, a failed probe here is FATAL: with no list of text subtitle streams the args
+	// would map none, and the worker deletes the original after the swap, so the file
+	// would silently lose every subtitle track. Fail the conversion, keep the original.
 	srcTag := ""
+	var textSubs []int
 	if ffprobePath != "" {
-		if pr, perr := transcode.NewProber(ffprobePath).Probe(ctx, src); perr == nil && pr != nil {
-			srcTag = copiedStreamTag(pr.VideoCodec, pr.VideoCodecTag)
+		pr, perr := transcode.NewProber(ffprobePath).Probe(ctx, src)
+		if perr != nil || pr == nil {
+			return "", fmt.Errorf("normalize: cannot probe %s to list its subtitle streams, refusing to convert without them: %v", src, perr)
 		}
+		if hasImageSubtitles(pr) {
+			// MP4 cannot hold PGS/VobSub. Decide() skips these files, so reaching here
+			// means a direct caller bypassed it; refuse rather than drop the tracks.
+			return "", fmt.Errorf("normalize: %s has image subtitle tracks that MP4 cannot hold, refusing to convert", src)
+		}
+		srcTag = copiedStreamTag(pr.VideoCodec, pr.VideoCodecTag)
+		textSubs = textSubtitleIndices(pr)
 	}
 
-	args := buildFFmpegArgs(src, tmp, action, maxHeight, srcTag)
+	args := buildFFmpegArgs(src, tmp, action, maxHeight, srcTag, textSubs)
 
 	// nice -n 19 <ffmpeg> <args...> — background priority, identical wrapping to
 	// transcode/hls.go so the two ffmpeg paths schedule consistently.
@@ -167,7 +181,12 @@ func copiedStreamTag(codec, tag string) string {
 
 // buildFFmpegArgs assembles the ffmpeg argument list (excluding the binary itself)
 // for the given action. Ported directly from convert-library.sh convert_one.
-func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag string) []string {
+//
+// textSubs are the source's text subtitle stream indices (textSubtitleIndices). Each is
+// mapped explicitly and written as mov_text with its language and title (TASK-1070): the
+// old args mapped video and audio only, so every subtitle track was dropped and the
+// original was then deleted.
+func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag string, textSubs []int) []string {
 	if action == ActionRemux {
 		// Copy video, transcode audio to AAC, repackage to MP4. +igndts on top of
 		// +genpts repairs the broken DTS some MKVs carry. -map 0:a? keeps EVERY audio
@@ -179,8 +198,9 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 			"-fflags", "+genpts+igndts",
 			"-i", src,
 			"-map", "0:v:0", "-map", "0:a?",
-			"-c:v", "copy",
 		}
+		out = append(out, subtitleMapArgs(textSubs)...)
+		out = append(out, "-c:v", "copy")
 		// Relabel hev1 -> hvc1 on the copied stream.
 		//
 		// Apple will not initialise an HEVC decoder from an hev1 sample entry: audio plays
@@ -205,11 +225,14 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 	// the proven NAS tradeoff from the script. Audio maps as in the remux branch: every
 	// track, each to AAC.
 	scale := fmt.Sprintf("scale=-2:min(ih\\,%d)", maxHeight)
-	return []string{
+	out := []string{
 		"-nostdin", "-y",
 		"-fflags", "+genpts",
 		"-i", src,
 		"-map", "0:v:0", "-map", "0:a?",
+	}
+	out = append(out, subtitleMapArgs(textSubs)...)
+	return append(out,
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
 		"-vf", scale,
 		"-pix_fmt", "yuv420p",
@@ -217,12 +240,51 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 		"-movflags", "+faststart",
 		"-avoid_negative_ts", "make_zero",
 		tmp,
+	)
+}
+
+// subtitleMapArgs maps each text subtitle stream by its absolute index and encodes them
+// as mov_text, the only text subtitle codec MP4 carries. ffmpeg copies each stream's
+// language and title tags across by default. No streams, no args: a file without
+// subtitles converts exactly as before.
+func subtitleMapArgs(textSubs []int) []string {
+	if len(textSubs) == 0 {
+		return nil
 	}
+	args := make([]string, 0, 2*len(textSubs)+2)
+	for _, idx := range textSubs {
+		args = append(args, "-map", fmt.Sprintf("0:%d", idx))
+	}
+	return append(args, "-c:s", "mov_text")
+}
+
+// textSubtitleIndices lists the stream indices of the source's text subtitles. The
+// text/image split is the probe's (transcode.EmbeddedSubtitle.IsImage); this does not
+// keep a codec list of its own.
+func textSubtitleIndices(pr *transcode.ProbeResult) []int {
+	var idx []int
+	for _, sub := range pr.EmbeddedSubs {
+		if !sub.IsImage {
+			idx = append(idx, sub.Index)
+		}
+	}
+	return idx
+}
+
+// hasImageSubtitles reports whether the source carries any image-based subtitle (PGS,
+// VobSub, ...) per the probe's classification.
+func hasImageSubtitles(pr *transcode.ProbeResult) bool {
+	for _, sub := range pr.EmbeddedSubs {
+		if sub.IsImage {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyOutput re-probes the produced file and confirms it is a sane, playable MP4:
 // non-empty, a valid H.264/HEVC video stream, a duration within durationTolerance of
-// the source, and as many audio tracks as the source (the swap deletes the original,
+// the source, and as many audio tracks and text subtitle tracks as the source (the swap deletes the original,
 // so a dropped track would be gone for good; FR-063). Returns nil only when all checks
 // pass. (Port of verify_out.)
 func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
@@ -249,6 +311,13 @@ func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
 	// fall back to the "duration > 0" check we already passed rather than rejecting a
 	// good output for a transient probe miss on the original.
 	srcProbe, srcErr := prober.Probe(ctx, src)
+	if srcErr == nil {
+		// Same rule for subtitles (TASK-1070): the swap deletes the original, so an output
+		// with fewer text subtitle tracks than the source is rejected.
+		if want, got := len(textSubtitleIndices(srcProbe)), len(textSubtitleIndices(outProbe)); got < want {
+			return fmt.Errorf("output has %d text subtitle track(s), source has %d", got, want)
+		}
+	}
 	if srcErr == nil && len(outProbe.AudioStreams) != len(srcProbe.AudioStreams) {
 		return fmt.Errorf("output has %d audio track(s), source has %d",
 			len(outProbe.AudioStreams), len(srcProbe.AudioStreams))

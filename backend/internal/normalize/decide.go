@@ -79,6 +79,13 @@ func Decide(probe *transcode.ProbeResult, ext string) Action {
 		return ActionSkip
 	}
 
+	// A file with image subtitles (PGS/VobSub) is left alone (TASK-1070). MP4 cannot hold
+	// them, so a conversion would drop the tracks and the worker then deletes the original.
+	// The file stays as it is and keeps playing through the on-demand path.
+	if hasImageSubtitles(probe) {
+		return ActionSkip
+	}
+
 	container := probe.Container
 	if container == "" {
 		// Fall back to the extension when the probe didn't yield a container name.

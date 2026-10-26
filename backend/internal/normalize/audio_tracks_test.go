@@ -46,7 +46,7 @@ func twoAudioMKV(t *testing.T, ffmpeg string) string {
 
 func TestNormalizeArgsMapEveryAudioTrack(t *testing.T) {
 	for _, action := range []Action{ActionRemux, ActionEncode} {
-		args := strings.Join(buildFFmpegArgs("in.mkv", "out.mp4", action, 1080, ""), " ")
+		args := strings.Join(buildFFmpegArgs("in.mkv", "out.mp4", action, 1080, "", nil), " ")
 		if !strings.Contains(args, "-map 0:a?") {
 			t.Errorf("%s: args do not map every audio track: %s", action, args)
 		}
