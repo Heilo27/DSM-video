@@ -468,3 +468,58 @@ func ExtractEmbeddedSubtitle(ctx context.Context, ffmpegPath, videoPath string, 
 	}
 	return nil
 }
+
+// SubtitleExtraction names one text subtitle stream to pull out and where to put it.
+type SubtitleExtraction struct {
+	StreamIndex int
+	DestPath    string
+}
+
+// ExtractEmbeddedSubtitles extracts every requested text subtitle stream from one
+// container in a SINGLE ffmpeg pass (one input read, one -map/output pair per stream).
+// ExtractEmbeddedSubtitle reads the whole file once per stream, so an MKV with 15 ASS
+// tracks cost 15 full reads over the NAS; this costs one.
+//
+// Each output is written as "<DestPath>.part" and renamed to DestPath only after ffmpeg
+// exits cleanly, so a reader that lists the cache dir mid-pass never sees a truncated
+// .srt. On any failure every .part and any already-renamed output is removed and the
+// error returned (the caller may fall back to per-stream extraction). Callers own the
+// timeout via ctx; this adds none, because the right ceiling depends on file size.
+func ExtractEmbeddedSubtitles(ctx context.Context, ffmpegPath, videoPath string, streams []SubtitleExtraction) error {
+	if ffmpegPath == "" {
+		return fmt.Errorf("ffmpeg not found")
+	}
+	if len(streams) == 0 {
+		return nil
+	}
+	for _, st := range streams {
+		if err := os.MkdirAll(filepath.Dir(st.DestPath), 0o755); err != nil {
+			return fmt.Errorf("create subtitle cache dir: %w", err)
+		}
+	}
+
+	args := []string{"-v", "error", "-y", "-nostdin", "-i", videoPath}
+	for _, st := range streams {
+		// -f srt is explicit because the ".part" suffix gives ffmpeg nothing to infer from.
+		args = append(args, "-map", fmt.Sprintf("0:%d", st.StreamIndex), "-c:s", "srt", "-f", "srt", st.DestPath+".part")
+	}
+	cleanup := func() {
+		for _, st := range streams {
+			_ = os.Remove(st.DestPath + ".part")
+		}
+	}
+	if out, err := exec.CommandContext(ctx, ffmpegPath, args...).CombinedOutput(); err != nil {
+		cleanup()
+		return fmt.Errorf("ffmpeg subtitle extract (%d streams): %w: %s", len(streams), err, strings.TrimSpace(string(out)))
+	}
+	for i, st := range streams {
+		if err := os.Rename(st.DestPath+".part", st.DestPath); err != nil {
+			cleanup()
+			for _, done := range streams[:i] {
+				_ = os.Remove(done.DestPath)
+			}
+			return fmt.Errorf("publish extracted subtitle stream %d: %w", st.StreamIndex, err)
+		}
+	}
+	return nil
+}
