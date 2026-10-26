@@ -376,6 +376,17 @@ language and title, and a conversion that would drop one is rejected and the ori
 hold image subtitles (PGS, VobSub), so a file that has any is never converted: it is left as it is,
 original untouched, and keeps playing through the on-demand path with its tracks listed. The text
 versus image split is the player's (the probe's), not a second list.
+
+Embedded text subtitles are ready before the first play [TASK-1071]. When a file is first scanned,
+and again after library normalization swaps it, the server extracts all of its embedded text
+subtitle tracks (SRT, ASS, mov_text) in the background in one pass over the file, through the
+same ffmpeg admission budget as playback, so the first play already lists them. Each cached track
+keeps its language and title exactly as the source declares them (never a generic "Subtitles"). A
+file with no text subtitles is recorded as done and not re-examined each scan. The cache follows
+the file: when a file is replaced or converted, tracks from the old version are never served and
+are regenerated. Playing never waits on extraction: a title played before its extraction finishes
+lists the image-based tracks and whatever text tracks are already ready, and the rest appear on
+the next play; the play request itself is never held beyond its existing budget.
 **FR-064 [STATED]** — Every player control — skip to start, back 15, play/pause, forward 15, skip to end —
 is reachable and activatable with the tvOS remote.
 **FR-065 [INFERRED]** — Back 15 / Forward 15 move the position by approximately 15 seconds and clamp

@@ -169,7 +169,12 @@ type Server struct {
 	// double-extract the same stream, so collapse them with a per-(itemID:streamIndex)
 	// singleflight guard, mirroring trickplayInFlight above. Key = itemID + ":" + index.
 	subExtractMu       sync.Mutex
-	subExtractInFlight map[string]chan struct{} // "itemID:streamIndex" → closed when its job finishes
+	subExtractInFlight map[string]chan struct{} // "ingest:itemID" → closed when its job finishes (TASK-1071)
+
+	// Ingest-time embedded-subtitle extraction (TASK-1071, embedded_subs.go): one serial
+	// background worker, started lazily on first use, fed by scan / normalize / playback.
+	subIngestOnce sync.Once
+	subIngestQ    chan subIngestJob
 
 	// ffmpegLimiter is the single, process-wide ffmpeg admission budget shared by HLS
 	// transcode, trickplay, and subtitle conversion (TASK-752). The HLSGenerator also
@@ -518,6 +523,9 @@ func main() {
 				defer pcancel()
 				if pr, perr := s.prober.Probe(pctx, newPath); perr == nil {
 					s.updateCodecInfoRepath(itemID, newPath, pr)
+					// TASK-1071: the swap changed the file (and usually the item id), so
+					// the subtitle cache keyed to the old file is orphaned. Re-extract.
+					s.refreshEmbeddedSubsAfterSwap(itemID, newPath, pr)
 				} else {
 					log.Printf("[normalize] post-convert re-probe failed for %s: %v", itemID, perr)
 				}
@@ -4561,223 +4569,6 @@ func embeddedSubName(sub transcode.EmbeddedSubtitle) string {
 	return name
 }
 
-// collectEmbeddedSubtitles returns SubtitleTrack entries for text subtitle streams
-// embedded in the container (e.g. MKV internal SRT/ASS), for the HLS pipeline to
-// consume. Cached across calls under TranscodeDir/embedded_subs/<id>/stream_N.srt.
-//
-// /playback non-blocking subs fix (follow-up to TASK-752): this function NEVER runs
-// ffmpeg on the request path. The original extractEmbeddedSubtitles re-probed inside
-// the request AND extracted each missing stream synchronously — on the 4-core NAS that
-// blocked /playback for 15s+ (or got ffmpeg OOM-killed), so clients timed out (-1001)
-// and playback never started. It also bypassed the shared ffmpegLimiter, re-
-// oversubscribing ffmpeg and undoing TASK-752.
-//
-// New behavior:
-//   - Embedded-sub enumeration comes from the probe the caller ALREADY ran (probeResult);
-//     no second ffprobe here. If probeResult is nil (codec came from the DB, no live probe
-//     this request) we return nil and let a later play that does probe populate them.
-//   - A track whose .srt is already cached is returned immediately.
-//   - A missing track is scheduled for limiter-gated background extraction and OMITTED
-//     from this response (it appears on the next play — the agreed UX).
-func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float64, probeResult *transcode.ProbeResult) []transcode.SubtitleTrack {
-	if s.cfg.FFmpegPath == "" {
-		return nil
-	}
-	// TASK-800: never hand a path outside a media root to ffmpeg (probe or extraction).
-	// Playback's own guard already covers the /playback path, but this method is the
-	// funnel for every embedded-subtitle ffmpeg invocation — enforce it here too so the
-	// asymmetry can't be reintroduced by a future caller.
-	if !s.pathWithinMediaRoot(videoPath) {
-		log.Printf("[subtitles] SECURITY: path %q for item %s not within any media root — skipping ffmpeg", filepath.Clean(videoPath), itemID)
-		return nil
-	}
-
-	// Smoke-test follow-up: the original /playback non-blocking fix returned early
-	// whenever probeResult was nil — but probeResult is nil on the common path
-	// (codec info already cached in the DB, so handlePlayback never live-probes).
-	// That silently disabled embedded-subtitle extraction for nearly every play.
-	//
-	// When we have no probe, schedule a one-shot background probe-and-extract instead
-	// of doing it inline: a probe is cheap, but it still must NOT sit on the request
-	// path (that's the timeout this whole change avoids). The background worker probes
-	// for embedded sub streams and extracts any that aren't cached; they become
-	// selectable on a later play. We return whatever is ALREADY cached right now.
-	if probeResult == nil || len(probeResult.EmbeddedSubs) == 0 {
-		if probeResult == nil && s.prober != nil {
-			s.scheduleEmbeddedSubProbe(itemID, videoPath, offset)
-		}
-		return s.cachedEmbeddedSubtitles(itemID, offset)
-	}
-
-	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", cacheKey(itemID))
-	var tracks []transcode.SubtitleTrack
-	for _, sub := range probeResult.EmbeddedSubs {
-		// Image-based subs (PGS/VobSub) are out of scope: surface them so the client
-		// can list them, but NEVER extract/OCR. No Path, no cue-density.
-		if sub.IsImage {
-			tracks = append(tracks, transcode.SubtitleTrack{
-				Language:   sub.Language,
-				Name:       embeddedSubName(sub),
-				Offset:     offset,
-				Type:       "image",
-				Forced:     false,
-				Default:    false,
-				AutoEnable: false,
-			})
-			continue
-		}
-		destPath := filepath.Join(cacheDir, fmt.Sprintf("stream_%d.srt", sub.Index))
-		if _, statErr := os.Stat(destPath); statErr == nil {
-			// Already cached — include it now.
-			tracks = append(tracks, transcode.SubtitleTrack{
-				Language: sub.Language,
-				Name:     embeddedSubName(sub),
-				Path:     destPath,
-				Offset:   offset,
-				Forced:   sub.Forced,
-				Default:  sub.Default,
-				Type:     subTypeFromForced(sub.Forced),
-			})
-			continue
-		}
-		// Not cached — extract off the request path. Track is omitted this play and
-		// becomes selectable on the next one.
-		s.scheduleEmbeddedSubExtract(itemID, videoPath, sub.Index, destPath)
-	}
-	return tracks
-}
-
-// cachedEmbeddedSubtitles returns SubtitleTracks for any embedded subs already
-// extracted to this item's cache dir, without probing or extracting. Used on the
-// common play where no live probe ran — we serve what's on disk now and let a
-// background probe populate the rest for next time.
-func (s *Server) cachedEmbeddedSubtitles(itemID string, offset float64) []transcode.SubtitleTrack {
-	cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", cacheKey(itemID))
-	entries, err := os.ReadDir(cacheDir)
-	if err != nil {
-		return nil
-	}
-	var tracks []transcode.SubtitleTrack
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".srt") {
-			continue
-		}
-		// The language/forced metadata isn't on disk; the cached file is keyed by
-		// stream index only. Name it generically — a later play that does live-probe
-		// will surface the richer name via the probeResult path above.
-		tracks = append(tracks, transcode.SubtitleTrack{
-			Language: "und",
-			Name:     "Subtitles",
-			Path:     filepath.Join(cacheDir, e.Name()),
-			Offset:   offset,
-		})
-	}
-	return tracks
-}
-
-// scheduleEmbeddedSubProbe runs a background probe for an item whose codec info came
-// from the DB (so handlePlayback didn't live-probe). It enumerates embedded text sub
-// streams and schedules extraction of any not yet cached. Singleflight-guarded per
-// item so repeated plays don't spawn duplicate probes. The probe + extraction run off
-// the request path — they MUST NOT block playback (the reason /playback stopped doing
-// this inline). Best-effort: any failure just means embedded subs stay absent.
-func (s *Server) scheduleEmbeddedSubProbe(itemID, videoPath string, offset float64) {
-	key := "probe:" + itemID
-
-	s.subExtractMu.Lock()
-	if _, inflight := s.subExtractInFlight[key]; inflight {
-		s.subExtractMu.Unlock()
-		return
-	}
-	done := make(chan struct{})
-	s.subExtractInFlight[key] = done
-	s.subExtractMu.Unlock()
-
-	go func() {
-		defer func() {
-			s.subExtractMu.Lock()
-			delete(s.subExtractInFlight, key)
-			s.subExtractMu.Unlock()
-			close(done)
-		}()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		probe, err := s.prober.Probe(ctx, videoPath)
-		if err != nil || probe == nil || len(probe.EmbeddedSubs) == 0 {
-			return
-		}
-		cacheDir := filepath.Join(s.cfg.TranscodeDir, "embedded_subs", cacheKey(itemID))
-		for _, sub := range probe.EmbeddedSubs {
-			destPath := filepath.Join(cacheDir, fmt.Sprintf("stream_%d.srt", sub.Index))
-			if _, statErr := os.Stat(destPath); statErr == nil {
-				continue
-			}
-			// scheduleEmbeddedSubExtract is itself singleflight-guarded + limiter-gated.
-			s.scheduleEmbeddedSubExtract(itemID, videoPath, sub.Index, destPath)
-		}
-	}()
-}
-
-// scheduleEmbeddedSubExtract kicks off a background ffmpeg extraction of one embedded
-// subtitle stream. /playback non-blocking subs fix (follow-up to TASK-752).
-//
-//   - Singleflight per (itemID:streamIndex) via subExtractInFlight so concurrent plays
-//     of the same title don't double-extract the same stream (mirrors trickplayInFlight).
-//   - Runs on context.Background() (NOT the request context — the request returns
-//     immediately and would otherwise cancel the worker), with a 3-minute cap so a wedged
-//     ffmpeg can't leak forever.
-//   - Acquires the shared ffmpegLimiter (blocking Acquire — correct off the request path,
-//     unlike trickplay's TryAcquire) so extraction shares the ONE process-wide ffmpeg
-//     budget instead of re-oversubscribing it.
-func (s *Server) scheduleEmbeddedSubExtract(itemID, videoPath string, streamIndex int, destPath string) {
-	key := itemID + ":" + strconv.Itoa(streamIndex)
-
-	s.subExtractMu.Lock()
-	if _, inflight := s.subExtractInFlight[key]; inflight {
-		// Another worker is already extracting this exact stream — let it finish.
-		s.subExtractMu.Unlock()
-		return
-	}
-	done := make(chan struct{})
-	s.subExtractInFlight[key] = done
-	s.subExtractMu.Unlock()
-
-	go func() {
-		defer func() {
-			s.subExtractMu.Lock()
-			delete(s.subExtractInFlight, key)
-			s.subExtractMu.Unlock()
-			close(done)
-		}()
-
-		// Detached from the request: a 3-minute ceiling bounds a stuck ffmpeg.
-		workerCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer cancel()
-
-		// Draw from the shared ffmpeg budget. Blocking Acquire is correct here — this is
-		// off the request path, so waiting for a slot costs nothing user-visible and keeps
-		// us within the TASK-752 concurrency cap.
-		if err := s.ffmpegLimiter.Acquire(workerCtx); err != nil {
-			log.Printf("[subs] embedded extract aborted for %s stream %d: %v", itemID, streamIndex, err)
-			return
-		}
-		defer s.ffmpegLimiter.Release()
-
-		// Re-check the cache after acquiring: a prior worker may have produced it while we
-		// waited for a limiter slot.
-		if _, statErr := os.Stat(destPath); statErr == nil {
-			return
-		}
-
-		if exErr := transcode.ExtractEmbeddedSubtitle(workerCtx, s.cfg.FFmpegPath, videoPath, streamIndex, destPath); exErr != nil {
-			log.Printf("[subs] embedded extract failed for %s stream %d: %v", itemID, streamIndex, exErr)
-			return
-		}
-		log.Printf("[subs] embedded extract done for %s stream %d (available next play)", itemID, streamIndex)
-	}()
-}
-
 // updateCodecInfo updates the codec info for an item in the database, bumping
 // change_seq so delta-sync (WHERE change_seq > since) tells clients the file's codec
 // changed. Worf P1-3 (TASK-755): the prior version omitted change_seq, so an item that
@@ -8248,11 +8039,15 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 			probesSkipped++
 		}
 
+		var scanProbe *transcode.ProbeResult // this pass's probe, reused for embedded-subtitle ingest
 		if !unchanged && s.prober != nil {
 			probesRun++
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			probe, probeErr := s.prober.Probe(probeCtx, path)
 			cancel()
+			if probeErr == nil {
+				scanProbe = probe
+			}
 			// Stamp on any completed probe ATTEMPT, not on a successful field read. A
 			// damaged file that ffprobe opens but cannot report dimensions for has still
 			// been probed — re-probing it next pass would read the whole file again and
@@ -8305,6 +8100,11 @@ func (s *Server) scanLibraryWithClient(ctx context.Context, libraryID, kind, roo
 		if s.normalizeWorker != nil && needsTranscode.Valid && needsTranscode.Bool {
 			s.normalizeWorker.Enqueue(id, path, root)
 		}
+
+		// TASK-1071: extract embedded text subtitles NOW, in the background, so the first
+		// play already lists them. Non-blocking and a no-op for any file whose cache is
+		// current, so calling it on every scan also backfills an existing library.
+		s.ensureEmbeddedSubs(id, path, scanProbe)
 
 		var year sql.NullInt64
 		if parsed.Year > 0 {
