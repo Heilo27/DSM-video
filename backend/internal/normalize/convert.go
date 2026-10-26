@@ -22,13 +22,22 @@ import (
 // transcode/hls.go. (TASK-755)
 const niceLevel = 19
 
-// durationTolerance is the fraction by which the converted output's duration may
-// differ from the source before we reject it as truncated. ~2% catches a stream
+// durationTolerance is the fraction by which the converted output's programme duration
+// (longest video/audio stream) may differ from the source's before we reject it as truncated. ~2% catches a stream
 // that ffmpeg cut short (the classic failure mode: a broken-DTS MKV where the
 // remux copy stops early) while tolerating the sub-second container-overhead
 // differences that are normal between formats. Mirrors convert-library.sh's
 // verify step, tightened from "duration > 0" to a proportional check. (TASK-755)
 const durationTolerance = 0.02
+
+// VerifyError is returned (wrapped) by Convert when ffmpeg exited 0 but the file it wrote
+// failed verifyOutput: truncated, wrong codec, a dropped audio or subtitle track. The
+// same source run through the same recipe fails the same way, so the worker retires the
+// item on this type instead of rebuilding it on every scan (TASK-1073). Cancellation and
+// ffmpeg crashes are not VerifyErrors and stay retryable.
+type VerifyError struct{ Reason string }
+
+func (e *VerifyError) Error() string { return e.Reason }
 
 // Convert produces a DirectPlay MP4 from src according to action, writing to a
 // sibling temp file, verifying it with ffprobe, and — only on verify success —
@@ -84,6 +93,7 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 	// would silently lose every subtitle track. Fail the conversion, keep the original.
 	srcTag := ""
 	var textSubs []int
+	var titleArgs []string
 	if ffprobePath != "" {
 		pr, perr := transcode.NewProber(ffprobePath).Probe(ctx, src)
 		if perr != nil || pr == nil {
@@ -96,9 +106,10 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 		}
 		srcTag = copiedStreamTag(pr.VideoCodec, pr.VideoCodecTag)
 		textSubs = textSubtitleIndices(pr)
+		titleArgs = titleMetadataArgs(pr)
 	}
 
-	args := buildFFmpegArgs(src, tmp, action, maxHeight, srcTag, textSubs)
+	args := buildFFmpegArgs(src, tmp, action, maxHeight, srcTag, textSubs, titleArgs...)
 
 	// nice -n 19 <ffmpeg> <args...> — background priority, identical wrapping to
 	// transcode/hls.go so the two ffmpeg paths schedule consistently.
@@ -143,7 +154,7 @@ func Convert(ctx context.Context, ffmpegPath, ffprobePath, src string, action Ac
 	// duration is within tolerance of the source. On reject, delete the temp.
 	if verr := verifyOutput(ctx, ffprobePath, src, tmp); verr != nil {
 		_ = os.Remove(tmp)
-		return "", fmt.Errorf("normalize: verify failed for %s: %w", src, verr)
+		return "", fmt.Errorf("normalize: verify failed for %s: %w", src, &VerifyError{Reason: verr.Error()})
 	}
 
 	// Success. Return the verified temp path; the WORKER performs the move+swap
@@ -186,7 +197,10 @@ func copiedStreamTag(codec, tag string) string {
 // mapped explicitly and written as mov_text with its language and title (TASK-1070): the
 // old args mapped video and audio only, so every subtitle track was dropped and the
 // original was then deleted.
-func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag string, textSubs []int) []string {
+//
+// titleArgs (titleMetadataArgs) are per-stream metadata options added before the output
+// path; nil for none.
+func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag string, textSubs []int, titleArgs ...string) []string {
 	if action == ActionRemux {
 		// Copy video, transcode audio to AAC, repackage to MP4. +igndts on top of
 		// +genpts repairs the broken DTS some MKVs carry. -map 0:a? keeps EVERY audio
@@ -215,9 +229,9 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 			"-c:a", "aac", "-b:a", "192k", "-ac", "2",
 			"-movflags", "+faststart",
 			"-avoid_negative_ts", "make_zero",
-			tmp,
 		)
-		return out
+		out = append(out, titleArgs...)
+		return append(out, tmp)
 	}
 
 	// ActionEncode: full re-encode to H.264, capped at maxHeight, never upscaling
@@ -232,15 +246,49 @@ func buildFFmpegArgs(src, tmp string, action Action, maxHeight int, srcVideoTag 
 		"-map", "0:v:0", "-map", "0:a?",
 	}
 	out = append(out, subtitleMapArgs(textSubs)...)
-	return append(out,
+	out = append(out,
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
 		"-vf", scale,
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-b:a", "192k", "-ac", "2",
 		"-movflags", "+faststart",
 		"-avoid_negative_ts", "make_zero",
-		tmp,
 	)
+	out = append(out, titleArgs...)
+	return append(out, tmp)
+}
+
+// titleMetadataArgs writes each carried audio and text subtitle track's title into the
+// output explicitly, as both "title" and "handler_name" (TASK-1073). ffmpeg copies the
+// language tag on its own but not reliably the title: the ffmpeg 6.1 bundled with the NAS
+// package writes only the media handler name into an MP4 track, so "Latin_America_CR" and
+// "CR" (both Spanish) came out as two identical "SubtitleHandler" tracks and the viewer
+// could not tell them apart. Setting handler_name to the title is what survives there;
+// "title" is kept for muxers that honour it. Output stream numbers follow the maps in
+// buildFFmpegArgs: every source audio track in order, then the text subtitles in order.
+// A track with no title adds nothing.
+func titleMetadataArgs(pr *transcode.ProbeResult) []string {
+	var args []string
+	add := func(spec string, n int, title string) {
+		if title == "" {
+			return
+		}
+		args = append(args,
+			fmt.Sprintf("-metadata:s:%s:%d", spec, n), "title="+title,
+			fmt.Sprintf("-metadata:s:%s:%d", spec, n), "handler_name="+title)
+	}
+	for i, a := range pr.AudioStreams {
+		add("a", i, a.Title)
+	}
+	n := 0
+	for _, sub := range pr.EmbeddedSubs {
+		if sub.IsImage {
+			continue
+		}
+		add("s", n, sub.Title)
+		n++
+	}
+	return args
 }
 
 // subtitleMapArgs maps each text subtitle stream by its absolute index and encodes them
@@ -283,8 +331,8 @@ func hasImageSubtitles(pr *transcode.ProbeResult) bool {
 }
 
 // verifyOutput re-probes the produced file and confirms it is a sane, playable MP4:
-// non-empty, a valid H.264/HEVC video stream, a duration within durationTolerance of
-// the source, and as many audio tracks and text subtitle tracks as the source (the swap deletes the original,
+// non-empty, a valid H.264/HEVC video stream, a video/audio duration within
+// durationTolerance of the source's (not the container's; see ProbeResult.AVDurationSecs), and as many audio tracks and text subtitle tracks as the source (the swap deletes the original,
 // so a dropped track would be gone for good; FR-063). Returns nil only when all checks
 // pass. (Port of verify_out.)
 func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
@@ -303,7 +351,7 @@ func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
 	default:
 		return fmt.Errorf("output video codec %q is not H.264/HEVC", outProbe.VideoCodec)
 	}
-	if outProbe.DurationSecs <= 0 {
+	if outProbe.AVDurationSecs <= 0 {
 		return fmt.Errorf("output duration is zero")
 	}
 
@@ -322,11 +370,15 @@ func verifyOutput(ctx context.Context, ffprobePath, src, out string) error {
 		return fmt.Errorf("output has %d audio track(s), source has %d",
 			len(outProbe.AudioStreams), len(srcProbe.AudioStreams))
 	}
-	if srcErr == nil && srcProbe.DurationSecs > 0 {
-		diff := math.Abs(outProbe.DurationSecs-srcProbe.DurationSecs) / srcProbe.DurationSecs
+	if srcErr == nil && srcProbe.AVDurationSecs > 0 {
+		// Compare programme length to programme length: the longest video/audio stream on
+		// each side, never the container, which a subtitle track that outlasts the video
+		// stretches (TASK-1073). AVDurationSecs falls back to the container duration when
+		// the streams report none.
+		diff := math.Abs(outProbe.AVDurationSecs-srcProbe.AVDurationSecs) / srcProbe.AVDurationSecs
 		if diff > durationTolerance {
 			return fmt.Errorf("output duration %.1fs differs from source %.1fs by %.1f%% (>%.0f%% — truncated)",
-				outProbe.DurationSecs, srcProbe.DurationSecs, diff*100, durationTolerance*100)
+				outProbe.AVDurationSecs, srcProbe.AVDurationSecs, diff*100, durationTolerance*100)
 		}
 	}
 	return nil

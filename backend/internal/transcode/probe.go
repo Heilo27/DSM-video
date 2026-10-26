@@ -30,6 +30,12 @@ type ProbeResult struct {
 	AudioCodec     string    // e.g., "aac", "ac3", "dts", "eac3", "flac", "opus"
 	AudioLang      string    // BCP-47-ish tag of the PRIMARY audio stream (e.g. "en"), or "" if untagged
 	DurationSecs   float64   // Duration in seconds
+	// AVDurationSecs is the length of the longest video or audio stream: the length of the
+	// picture and sound a viewer actually plays. DurationSecs is the container's, which is
+	// the longest of EVERY stream and so is inflated by a subtitle or attachment track that
+	// outlasts the programme (TASK-1073). Falls back to DurationSecs when no video or audio
+	// stream reports its own duration.
+	AVDurationSecs float64
 	Width          int       // Video width
 	Height         int       // Video height
 	AudioChannels  int       // Channel count of the primary audio stream (e.g. 2, 6, 8)
@@ -83,6 +89,7 @@ type ffprobeOutput struct {
 		CodecType  string            `json:"codec_type"`
 		CodecName  string            `json:"codec_name"`
 		CodecTag   string            `json:"codec_tag_string"`
+		Duration   string            `json:"duration,omitempty"`
 		Width      int               `json:"width,omitempty"`
 		Height     int               `json:"height,omitempty"`
 		Channels   int               `json:"channels,omitempty"`
@@ -91,6 +98,8 @@ type ffprobeOutput struct {
 		Disposition struct {
 			Default int `json:"default"`
 			Forced  int `json:"forced"`
+			// AttachedPic marks cover art carried as a video stream; it is not programme.
+			AttachedPic int `json:"attached_pic"`
 		} `json:"disposition,omitempty"`
 	} `json:"streams"`
 	Chapters []struct {
@@ -203,6 +212,11 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 
 	// Find video and audio streams
 	for _, stream := range probeData.Streams {
+		if (stream.CodecType == "video" || stream.CodecType == "audio") && stream.Disposition.AttachedPic == 0 {
+			if d := streamDurationSecs(stream.Duration, stream.Tags); d > result.AVDurationSecs {
+				result.AVDurationSecs = d
+			}
+		}
 		switch stream.CodecType {
 		case "video":
 			if result.VideoCodec == "" { // Take first video stream
@@ -224,13 +238,7 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 			if lang == "und" {
 				lang = ""
 			}
-			// MKV carries a track title as "title"; ffmpeg's MP4 muxer stores it in the
-			// track's udta "name" box, which ffprobe reports as "name". A normalized
-			// MKV->MP4 file therefore keeps its title only under the second key.
-			title := stream.Tags["title"]
-			if title == "" {
-				title = stream.Tags["name"]
-			}
+			title := streamTitle(stream.Tags)
 			result.AudioStreams = append(result.AudioStreams, AudioStream{
 				Index:    stream.Index,
 				Codec:    normalizeAudioCodec(stream.CodecName),
@@ -265,15 +273,14 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 				if l := strings.ToLower(stream.Tags["language"]); l != "" {
 					sub.Language = l
 				}
-				// Same "title" vs "name" split as the audio branch: ffmpeg's MP4 muxer
-				// reports the track title as "name", so a normalized file keeps it there.
-				sub.Title = stream.Tags["title"]
-				if sub.Title == "" {
-					sub.Title = stream.Tags["name"]
-				}
+				sub.Title = streamTitle(stream.Tags)
 				result.EmbeddedSubs = append(result.EmbeddedSubs, sub)
 			}
 		}
+	}
+
+	if result.AVDurationSecs <= 0 {
+		result.AVDurationSecs = result.DurationSecs
 	}
 
 	// Parse chapters
@@ -293,6 +300,53 @@ func (p *Prober) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 	result.NeedsTranscode = needsTranscode(result)
 
 	return result, nil
+}
+
+// streamTitle returns a stream's human title from its tags, "" when it has none.
+//
+// MKV carries it as "title". An MP4 keeps it in one of two places depending on the muxer:
+// the track's udta "name" box (ffprobe: "name"; newer ffmpeg) or only the media handler
+// name ("handler_name"; the ffmpeg 6.1 bundled on the NAS drops "title" and keeps the
+// handler name, TASK-1073), so that is the last resort. Muxers fill handler_name with a
+// generic label when nothing was set ("SubtitleHandler", "SoundHandler", "Apple Sound
+// Media Handler", "Core Media Audio", ...); those are not titles and are skipped.
+func streamTitle(tags map[string]string) string {
+	for _, key := range []string{"title", "name"} {
+		if v := strings.TrimSpace(tags[key]); v != "" {
+			return v
+		}
+	}
+	h := strings.TrimSpace(tags["handler_name"])
+	if lower := strings.ToLower(h); strings.HasSuffix(lower, "handler") || strings.HasPrefix(lower, "core media") {
+		return ""
+	}
+	return h
+}
+
+// streamDurationSecs reads one stream's own duration: ffprobe's "duration" field when it
+// has one (MP4), else the "DURATION" statistics tag that MKV muxers write as
+// "HH:MM:SS.fffffffff" (a language suffix, "DURATION-eng", is also seen). 0 when neither
+// is present or parseable.
+func streamDurationSecs(field string, tags map[string]string) float64 {
+	var secs float64
+	if field != "" {
+		if _, err := fmt.Sscanf(field, "%f", &secs); err == nil && secs > 0 {
+			return secs
+		}
+	}
+	for k, v := range tags {
+		if !strings.HasPrefix(strings.ToUpper(k), "DURATION") {
+			continue
+		}
+		var h, m int
+		var s float64
+		if _, err := fmt.Sscanf(v, "%d:%d:%f", &h, &m, &s); err == nil {
+			if d := float64(h)*3600 + float64(m)*60 + s; d > secs {
+				secs = d
+			}
+		}
+	}
+	return secs
 }
 
 // ProbeQuick performs a quick probe using file extension heuristics.

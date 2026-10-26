@@ -376,6 +376,24 @@ language and title, and a conversion that would drop one is rejected and the ori
 hold image subtitles (PGS, VobSub), so a file that has any is never converted: it is left as it is,
 original untouched, and keeps playing through the on-demand path with its tracks listed. The text
 versus image split is the player's (the probe's), not a second list.
+Track titles survive normalization too [TASK-1073]: every audio track and text subtitle track of a
+converted file keeps its title next to its language, so two tracks in one language (two Spanish
+subtitle tracks, two Chinese ones, a commentary beside the main audio) stay tell-apart-able. The NAS's
+bundled ffmpeg writes MP4 tracks without their title unless it is also set as the track's handler
+name, so the conversion sets both, and the probe reads a track's title from the title, then the name,
+then the handler name, ignoring the generic labels muxers write when no title was set ("SubtitleHandler",
+"SoundHandler").
+
+Normalization judges a converted file by its picture and sound, not by its container [TASK-1073]. The
+converted file's length must match the original's within 2%, where "length" is the longest video or
+audio stream on each side. A subtitle track that runs past the end of the programme (a fansub release
+whose last sign outlasts the episode) stretches the original's container, so measuring the container
+rejected complete conversions as "truncated"; when no video or audio stream states its own length, the
+container's is used. A conversion that really is cut short is still rejected and the original kept.
+A converted file that fails this check (or any other check on the finished file) is not retried on later
+library scans: the title is left as it is, with the reason recorded, until the server restarts. Retrying
+is pointless, since the same source fails the same way, and each attempt costs a full conversion on the
+NAS. A cancelled or crashed conversion is not a failed check and is retried.
 
 Embedded text subtitles are ready before the first play [TASK-1071]. When a file is first scanned,
 and again after library normalization swaps it, the server extracts all of its embedded text

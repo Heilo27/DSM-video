@@ -258,6 +258,14 @@ func (w *NormalizeWorker) process(ctx context.Context, item queueItem) {
 	if err != nil {
 		// Data-safety: original is untouched on any failure. Log and move on.
 		log.Printf("[normalize] convert %s failed for %s — original left in place: %v", action, item.path, err)
+		// A file ffmpeg wrote but verify rejected (truncated, dropped track) fails the same
+		// way on every rerun, and each rerun is a full remux/encode on the NAS. Retire it.
+		// Cancellation and ffmpeg crashes are not VerifyErrors, so they stay retryable.
+		var verr *VerifyError
+		if errors.As(err, &verr) {
+			log.Printf("[normalize] %s failed verification — giving up (will retry after a server restart)", item.itemID)
+			w.markPermaFailed(item.itemID, "converted file failed verification: "+verr.Reason)
+		}
 		return
 	}
 
