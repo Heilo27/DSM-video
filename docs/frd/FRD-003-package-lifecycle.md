@@ -2,7 +2,8 @@
 
 **Status:** Specified and implemented 2026-11-03 (TASK-1080).
 **Authority:** TASK-1080 (Friday's dispatch). Design calls made to carry it out are tagged **[DESIGN]** and can be
-revised without going back to Ryan. One call that narrows a stated safety setting is tagged **[FLAG]** (FR-305).
+revised without going back to Ryan. The one call that narrows a stated safety setting (FR-305, process umask) was
+decided by Ryan on 2026-11-03.
 **Truths:** `docs/TRUTHS.md` (draft). **Mission:** `docs/frd/FRD-000-mission.md`.
 **Code:** `spk/DSVideoServer/scripts/start-stop-status`, `backend/cmd/dsvideo-backend/healthz.go`,
 `spk/build-spk-macos.sh`, `spk/verify-spk-clean.py`. **Harness:** `spk/tests/test-start-stop-status.sh`.
@@ -28,8 +29,9 @@ revised without going back to Ryan. One call that narrows a stated safety settin
 |---|---|
 | **Package user** | The DSM-created service user the package runs as (uid 1026 on the reference NAS). |
 | **Port holder** | Whatever process is LISTENing on the backend port (default 8090). |
-| **Ours** | A process of the package user's uid whose identity is `dsvideo-backend`. |
+| **Ours** | A process of the package user's uid whose identity is `dsvideo-backend`. Identity and uid are separate tests and both must pass. |
 | **Foreign holder** | Any other process on the port: another uid (root included), or the package user's uid running something else. |
+| **Signal choke point** | The single place in the script that sends a signal. It refuses any process whose uid is not the package user's (FR-301). |
 | **Health gate** | `start` does not report success until the new process proves, over loopback, that it is the right one. |
 | **Manifest** | `MANIFEST.sha256`, a list of sha256 sums of every binary the package ships. |
 
@@ -45,14 +47,22 @@ pid through `/proc/<pid>/fd`. It does not depend on `netstat`, `ss` or `lsof`.
 - **Foreign**: start **never kills it**, whether it is root's, another user's, or an unrelated process of the
   package user. It writes the holder's uid, pid and command line to the package log and **fails the start
   loudly** (non-zero exit). `stop` applies the same rule: it will not kill a foreign holder either.
-- [DESIGN] Process identity tolerates emulation layers. Under Rosetta (Docker Desktop on Apple Silicon running an
-  amd64 image) `/proc/<pid>/exe` points at the emulator, not the binary. Identity is therefore "the exe is
-  `dsvideo-backend`, or, when it is not, the process name (`comm`) is". A foreign program is still rejected
-  because both must disagree before a process is judged not ours. Found by the amd64 end-to-end run: the
-  earlier exe-only check rejected the live backend and orphaned it. Real DSM reports the real exe; this only
-  widens nothing there.
+- **Never signal a process whose uid is not the package user's.** This holds for every path that can name a
+  process: the port table, the pidfile, the watchdog pidfile, the child sweep and the start-failure cleanup. All
+  signals go through one choke point, which checks the process's real and effective uid and refuses (logging the
+  refusal) when either is not the package user's or cannot be read. A root-owned `dsvideo-backend`, or a pidfile
+  that names one, is therefore logged and left alone, whatever identified it.
+- **Ownership by executable.** A process is ours when its executable (`/proc/<pid>/exe`) is `dsvideo-backend`
+  (an upgraded-in-place binary shows as `dsvideo-backend (deleted)` and still counts). If the executable is
+  readable and names anything else, the process is **not ours**, even when its name looks the same: a
+  `dsvideo-backend-old` or `dsvideo-backend.bak` has the same 15-character process name.
+- **Fallback only when the executable cannot tell us.** The process name (`comm`) must be `dsvideo-backend` **and**
+  the program name in the command line (argv[0]) must be `dsvideo-backend`, but only if the executable is
+  unreadable, or is an emulator (Rosetta, qemu-user: how the lifecycle is exercised on a Mac, where the
+  executable is the emulator and the real program is argv[1]). A process that is neither executable-verifiable nor
+  name-verifiable is **not ours**: nothing is signalled on a guess.
 - Why: the previous script compared against `0x2392` (9106), so it never matched port 8090 and never found
-  any holder.
+  any holder; and a looser name-only identity could signal a same-uid look-alike.
 
 ### FR-302 Health gate
 The backend serves `GET /api/v1/healthz` and has a `--healthcheck` mode (flags `--expect-pid`, `--expect-uid`,
@@ -65,6 +75,13 @@ The backend serves `GET /api/v1/healthz` and has a `--healthcheck` mode (flags `
   `DSVIDEO_START_TIMEOUT`). A different process answering on the port, an older version answering, or a child
   that exits during startup all fail the start with the reason in the log, leave no pidfile and leave no
   backend running.
+- The backend is launched in **its own process group**. When the gate fails, the **whole group** is ended (TERM,
+  5 seconds, then KILL), and the child counts as alive from the moment it is forked, including the instant before
+  it becomes the backend, so a child that is about to bind the port is not missed and left running with no
+  pidfile. A child is judged dead only if it is gone or a zombie on two looks a second apart.
+- The start timeout is **wall-clock**: time spent inside a probe that hangs counts against it, so the total never
+  exceeds the timeout by more than a probe's own limit. A non-numeric or zero `DSVIDEO_START_TIMEOUT` falls back
+  to 30 s.
 - `status` (what DSM shows) uses the same probe, not just "the pid exists".
 - The library scan runs in the background after the server is listening (first scan about 5 s after boot), so
   it is not on the gate's critical path. Database migrations and the profiles migration run before the server
@@ -90,26 +107,26 @@ The backend serves `GET /api/v1/healthz` and has a `--healthcheck` mode (flags `
 The build writes `MANIFEST.sha256` covering `backend/dsvideo-backend` and, when bundled, `bin/ffmpeg` and
 `bin/ffprobe`, and verifies it once before archiving. `start` runs `sha256sum -c` against it first. Any
 mismatch or missing listed file stops the start, with the offending file named in the log, before the backend
-runs.
+runs. **A manifest that does not list the backend binary is refused** (the check only covers files it names, so
+it would otherwise "pass" a damaged or swapped backend); the log tells the user to rebuild and reinstall.
 - Threat model, stated plainly: this catches **accidents** (a truncated copy, a half-applied upgrade, a binary
   swapped by hand). It does not stop an attacker who can write to the package directory, who can rewrite the
   manifest too. It is not a signature.
 - A package without a manifest (a build made before this change) logs a warning and starts, so an upgrade from
   an older SPK is not blocked. [DESIGN]
 
-### FR-305 File modes **[FLAG]**
+### FR-305 File modes
 The database, its `-wal` and `-shm` files, the pre-migration backup copies, the log and rotated log, the JWT
-secret and the pidfile are mode `0600`, owned by the package user. They are created that way (not created open
-and tightened later) and any existing ones are tightened at every start. A file the script cannot change (left
-behind by root) is reported in the log, not ignored.
+secret, the backend pidfile and the watchdog pidfile are mode `0600`, owned by the package user. They are created
+that way (not created open and tightened later), a rotated log is `0600` from the moment it is created (including
+when the watchdog rotates it), and any existing ones are tightened at every start. A file the script cannot change
+(left behind by root) is reported in the log, not ignored.
 - SQLite creates `-wal`/`-shm` with the main file's mode, so creating the database `0600` covers them.
-- **Decision for Ryan:** the task asked for "umask 077 for the backend". The backend process runs at **022**
-  instead, and only the package-private files above are forced to `0600`. Reason: the backend also writes into
-  the user's media shares (normalised and converted copies, moved or backed-up originals). A process-wide 077
-  would make those `0600`, unreadable to other DSM users and to Plex-style apps reading the same share, which
-  breaks P1 and the "adapt to the folders that exist" posture (A1). The sensitive files lose nothing; the media
-  outputs keep working. This is a deliberate narrowing of the literal wording and is flagged here rather than
-  made silently.
+- **Decided 2026-11-03: media-share outputs must stay readable by other DSM users.** The backend process
+  therefore runs at umask **022**, not 077, and only the package-private files above are forced to `0600`. The
+  backend also writes into the user's media shares (normalised and converted copies, moved or backed-up
+  originals); a process-wide 077 would make those `0600`, unreadable to other DSM users and to Plex-style apps
+  reading the same share, which breaks P1 and the "adapt to the folders that exist" posture (A1).
 - Package-internal caches (transcode segments, trickplay, image cache) stay at the default modes; they hold no
   credentials and live inside the package's own data directory.
 
@@ -125,7 +142,7 @@ checks that `MANIFEST.sha256` is present and lists every shipped binary. A dirty
 
 | FR | Truth served | Anti-truth check |
 |---|---|---|
-| FR-301 | P1 (start must reach a working server), S2 (names the holder) | Not killing foreign holders protects other software on the NAS: no A-conflict |
+| FR-301 | P1 (start must reach a working server), S2 (names the holder) | Never signalling another uid's process protects other software on the NAS: no A-conflict |
 | FR-302 | S2 (status is real health), P1 | A2: no `curl` dependency. A4: the endpoint grants nothing |
 | FR-303 | S3 (clean DB close), P1 | none |
 | FR-304 | S2 (loud failure), S4 | A2: `sha256sum` ships with DSM. Not a signature, stated |
@@ -136,8 +153,6 @@ checks that `MANIFEST.sha256` is present and lists every shipped binary. A dirty
 
 - Gate timeout on the real 5.5k-item library is unmeasured (FR-302). First install on the NAS should read the
   log line "launched pid N; waiting up to 30s" against the time `healthz` first answers.
-- If a start fails after launching, a misidentified child could be left running. Identity checking (FR-301)
-  reduces this to the emulation case; a process-group kill on failure would close it. Not done here.
 - Manifest signing (a key the package does not carry) is out of scope; the threat model is accidents.
 - Release SPK build, version bump and NAS install are explicitly not part of this change.
 
@@ -146,22 +161,27 @@ checks that `MANIFEST.sha256` is present and lists every shipped binary. A dirty
 - **AC-1 (FR-301).** With the port held by the package's own stale backend, `start` ends it and succeeds. With
   it held by a root-owned process, or by another program of the package user, `start` and `stop` kill nothing,
   the log has the holder's uid, pid and command line, and `start` exits non-zero. Port detection matches
-  `1F9A`, reads IPv4 and IPv6 tables and reports the owner uid.
+  `1F9A`, reads IPv4 and IPv6 tables and reports the owner uid. A same-uid look-alike
+  (`dsvideo-backend-old`) is not ours. A pidfile naming a process of another uid is ignored and that process is
+  never signalled by any path (single choke point).
 - **AC-2 (FR-302).** `GET /api/v1/healthz` returns pid, uid, version and db status to a direct loopback caller
   and only ok and version to others, and 503 when the database probe fails. `start` succeeds only after
   `--healthcheck` confirms the launched pid, the package user's uid and the packaged version within the
-  timeout; a wrong version fails the start and leaves no backend and no pidfile. `status` uses the probe.
+  timeout; a wrong version fails the start and leaves no backend and no pidfile, including a child that had not
+  yet become the backend when the gate gave up (its whole process group is ended). The timeout is wall-clock.
+  `status` uses the probe.
 - **AC-3 (FR-303).** `stop` sends TERM, waits 10 s, sends KILL if needed, ends the watchdog loop, sweeps
   ffmpeg/ffprobe children and the pidfile, and verifies the port is free. Nothing else is killed.
 - **AC-4 (FR-304).** The build generates `MANIFEST.sha256`; `start` verifies it and refuses to run on a
-  mismatch, naming the file.
-- **AC-5 (FR-305).** After a start, the DB, WAL, SHM, log, pre-migration copy, JWT secret and pidfile are
-  `0600`. The backend process umask is `022`, so files it writes outside the package directories are not
-  forced private. (Narrowing of the original wording, flagged above.)
+  mismatch, naming the file, and refuses a manifest that does not list the backend binary.
+- **AC-5 (FR-305).** After a start, the DB, WAL, SHM, log, rotated log (however rotated), pre-migration copy, JWT
+  secret, backend pidfile and watchdog pidfile are `0600`. The backend process umask is `022`, so files it writes
+  outside the package directories are not forced private (decided 2026-11-03).
 - **AC-6 (FR-306).** The SPK built by `build-spk-macos.sh` contains zero `._` entries and zero PAX xattr
   headers, verified by Python `tarfile`; the verifier is part of the build.
 - **AC-7.** This FRD exists and is in the same commit as the code it specifies.
 
-Verification: `sh spk/tests/test-start-stop-status.sh` (fake `/proc`, 32 checks) plus a Docker end-to-end run on
+Verification: `sh spk/tests/test-start-stop-status.sh` (fake `/proc`; run under the host shell, busybox as the
+package user and as root, dash and bash), `python3 -I spk/tests/test_verify_spk_clean.py` (the SPK verifier), plus a Docker end-to-end run on
 amd64 and arm64 covering clean start, own-stale replacement, root-owned foreign holder, manifest tamper and
 version mismatch.
