@@ -22,6 +22,12 @@ TEMP_SPK_DIR="$BUILD_DIR/spk-temp"
 # Ensure Go is in PATH
 export PATH="$PATH:/usr/local/go/bin"
 
+# macOS tar turns every extended attribute (quarantine, provenance, Finder info) into an
+# AppleDouble "._name" entry. DSM extracts those next to the real files, where they pollute
+# the install and break anything that globs the package dir. COPYFILE_DISABLE stops tar
+# creating them; the strip + verify steps below guarantee none got through anyway (TASK-1080).
+export COPYFILE_DISABLE=1
+
 # Detect architecture from argument, or read from INFO file
 INFO_ARCH_DEFAULT=$(grep '^arch=' "$SPK_DIR/INFO" | cut -d'"' -f2)
 case "$INFO_ARCH_DEFAULT" in
@@ -168,6 +174,38 @@ if [ -d "$SPK_DIR/nginx" ]; then
     echo "✅ nginx/ added to package contents (DSM proxy config)"
 fi
 
+# Remove AppleDouble files and extended attributes from everything about to be archived.
+# cp on macOS can carry xattrs across, and a "._x" file may already sit in the source tree.
+sanitize_tree() {
+    find "$1" -name '._*' -exec rm -rf {} + 2>/dev/null || true
+    find "$1" -name '.DS_Store' -delete 2>/dev/null || true
+    xattr -cr "$1" 2>/dev/null || true
+}
+sanitize_tree "$PACKAGE_DIR"
+
+# TASK-1080: integrity manifest. start-stop-status runs `sha256sum -c MANIFEST.sha256` from
+# the package target/ dir before launching and refuses to start on a mismatch, so a
+# half-written upgrade or a binary swapped by accident fails loudly instead of running.
+# Paths are relative to target/ (the package.tgz root). It guards against accidents, not
+# attackers: whoever can rewrite a binary in target/ can rewrite this file too.
+echo "🔏 Writing MANIFEST.sha256..."
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA256_CMD="sha256sum"
+else
+    SHA256_CMD="shasum -a 256"
+fi
+(
+    cd "$PACKAGE_DIR"
+    MANIFEST_FILES="backend/dsvideo-backend"
+    [ -f bin/ffmpeg ] && MANIFEST_FILES="$MANIFEST_FILES bin/ffmpeg"
+    [ -f bin/ffprobe ] && MANIFEST_FILES="$MANIFEST_FILES bin/ffprobe"
+    # shellcheck disable=SC2086
+    $SHA256_CMD $MANIFEST_FILES > MANIFEST.sha256
+    # Prove the manifest verifies before shipping it.
+    $SHA256_CMD -c MANIFEST.sha256 >/dev/null
+)
+echo "✅ MANIFEST.sha256: $(wc -l < "$PACKAGE_DIR/MANIFEST.sha256" | tr -d ' ') files"
+
 # Create package.tgz (the actual package contents - WITHOUT scripts)
 # NOTE: DSM 7 creates symlink /var/packages/PKG/target -> /volume1/@appstore/PKG
 # So package.tgz contents extract to @appstore, and target/ symlink points there
@@ -180,8 +218,20 @@ PKG_CONTENTS="backend/ var/"
 [ -d "ui" ] && PKG_CONTENTS="$PKG_CONTENTS ui/"
 [ -d "webapi" ] && PKG_CONTENTS="$PKG_CONTENTS webapi/"
 [ -d "nginx" ] && PKG_CONTENTS="$PKG_CONTENTS nginx/"
+PKG_CONTENTS="$PKG_CONTENTS MANIFEST.sha256"
+
+# bsdtar (macOS) records xattrs as PAX headers unless told not to; GNU tar does not and
+# rejects the flag. Probe rather than assume which tar this machine has.
+TAR_CMD="tar"
+command -v gtar >/dev/null 2>&1 && TAR_CMD="gtar"
+TAR_XATTR_FLAGS=""
+if "$TAR_CMD" --no-xattrs -cf /dev/null --files-from /dev/null 2>/dev/null; then
+    TAR_XATTR_FLAGS="--no-xattrs"
+fi
+
 # Create tar.gz (macOS tar may not support --owner/--group, but that's OK)
-tar -czf "$TEMP_SPK_DIR/package.tgz" $PKG_CONTENTS
+# shellcheck disable=SC2086
+$TAR_CMD $TAR_XATTR_FLAGS -czf "$TEMP_SPK_DIR/package.tgz" $PKG_CONTENTS
 
 # Copy INFO, scripts, and conf to temp directory (these go at SPK root, not in package.tgz)
 cp "$PACKAGE_DIR/INFO" "$TEMP_SPK_DIR/"
@@ -242,25 +292,30 @@ cd "$TEMP_SPK_DIR"
 # Use ustar format for maximum compatibility
 # Ensure INFO is the first file (Synology reads this first)
 echo "📦 Creating .spk file (plain tar, not gzipped)..."
-if command -v gtar &> /dev/null; then
-    TAR_CMD="gtar"
-else
-    TAR_CMD="tar"
-fi
+sanitize_tree "$TEMP_SPK_DIR"
 
 # Build the list of files to include
 SPK_FILES="INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG package.tgz scripts/"
 [ -d "conf" ] && SPK_FILES="$SPK_FILES conf/"
 [ -d "ui" ] && SPK_FILES="$SPK_FILES ui/"
 
-$TAR_CMD --format=ustar -cf "$BUILD_DIR/$SPK_FILENAME" $SPK_FILES 2>/dev/null || \
-$TAR_CMD -cf "$BUILD_DIR/$SPK_FILENAME" $SPK_FILES
+# The xattr flag is kept on the ustar-less fallback too: dropping it there would reintroduce
+# the PAX xattr headers this step exists to prevent.
+# shellcheck disable=SC2086
+$TAR_CMD $TAR_XATTR_FLAGS --format=ustar -cf "$BUILD_DIR/$SPK_FILENAME" $SPK_FILES 2>/dev/null || \
+$TAR_CMD $TAR_XATTR_FLAGS -cf "$BUILD_DIR/$SPK_FILENAME" $SPK_FILES
 
 # Verify SPK file
 if [ ! -f "$BUILD_DIR/$SPK_FILENAME" ]; then
     echo "❌ Failed to create SPK file"
     exit 1
 fi
+
+# TASK-1080: prove the archive is clean. Fails the build if the SPK, or the package.tgz
+# inside it, holds any AppleDouble "._" entry or PAX extended-attribute header, and checks
+# the manifest shipped inside package.tgz names every binary it should.
+echo "🔎 Verifying archive is free of AppleDouble/xattr entries..."
+python3 -I "$SCRIPT_DIR/verify-spk-clean.py" "$BUILD_DIR/$SPK_FILENAME"
 
 SPK_SIZE=$(ls -lh "$BUILD_DIR/$SPK_FILENAME" | awk '{print $5}')
 

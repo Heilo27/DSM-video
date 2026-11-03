@@ -1,11 +1,42 @@
 #!/bin/sh
+# DSM package lifecycle: start | stop | status.  Specified in docs/frd/FRD-003-package-lifecycle.md.
+#
+# Rules this script lives by (each one is an incident, see the FRD):
+#   - "Started" means the NEW process answers /api/v1/healthz as this build and this user.
+#     A live pid or a bound port proves neither.
+#   - We only ever kill OUR OWN stale backend. A foreign process on the port is diagnosed
+#     loudly and left alone; start then fails instead of pretending.
+#   - The package user cannot see other users' sockets under /proc/*/fd, so the holder is
+#     identified from /proc/net/tcp (world-readable: it carries the uid and the socket inode).
 set -eu
 
 PACKAGE="DSVideoServer"
-BASE="/var/packages/${PACKAGE}"
+# DSVIDEO_PKG_BASE and DSVIDEO_PROC_ROOT exist only so spk/tests can point the script at a
+# fixture tree. DSM never sets them.
+BASE="${DSVIDEO_PKG_BASE:-/var/packages/${PACKAGE}}"
+PROC_ROOT="${DSVIDEO_PROC_ROOT:-/proc}"
 VAR="${BASE}/var"
 LOG="${VAR}/${PACKAGE}.log"
 PIDFILE="${VAR}/server.pid"
+WATCHDOG_PIDFILE="${VAR}/watchdog.pid"
+MANIFEST_NAME="MANIFEST.sha256"
+
+SELF_UID="$(id -u)"
+PORT="${DSVIDEO_PORT:-8090}"
+# Exported for every command, not just start: status and stop run "dsvideo-backend
+# --healthcheck", which reads DSVIDEO_PORT from its environment (default 8080 when unset).
+export DSVIDEO_PORT="${PORT}"
+# How long start waits for healthz to confirm the new process. The server opens and
+# migrates its database before it listens, so this must outlast a slow NAS disk.
+START_TIMEOUT="${DSVIDEO_START_TIMEOUT:-30}"
+
+# The build stamps INFO's version into the binary (-X main.BuildVersion), so healthz must
+# report exactly this string. Empty (INFO unreadable) skips the version check, with a warning.
+VERSION="$(sed -n 's/^version="\(.*\)"/\1/p' "${BASE}/INFO" 2>/dev/null | head -1 || true)"
+
+log() {
+  { echo "$(date '+%Y-%m-%dT%H:%M:%S') [${PACKAGE}] $*" >> "${LOG}"; } 2>/dev/null || true
+}
 
 find_go_binary() {
   # DSM 7 creates symlink: target/ -> /volume1/@appstore/PKG
@@ -28,32 +59,273 @@ find_go_binary() {
 
 pid_alive() {
   # Use /proc instead of kill -0 to avoid EPERM when caller != process owner.
+  # An empty or non-numeric pid (empty pidfile) is never alive: "/proc/" is a directory.
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
   # TASK-814: existence of /proc/$1 is NOT enough — after a crash the OS can
   # recycle that PID onto an unrelated process, which would report the package
   # as healthy while the server is dead (and block restart with "already
   # running"). Verify the PID actually belongs to our binary.
-  [ -d "/proc/${1}" ] || return 1
+  [ -d "${PROC_ROOT}/${1}" ] || return 1
+  # A zombie (exited, not yet reaped) still has /proc/$1 and a readable comm. Our own
+  # start waits on a child it launched, so a child that died must read as dead here.
+  _state="$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "${PROC_ROOT}/${1}/status" 2>/dev/null || true)"
+  [ "${_state}" = "Z" ] && return 1
   # Preferred: readlink /proc/$1/exe basename == dsvideo-backend. This is exact
   # (not truncated) but can EPERM when caller != process owner.
-  _exe="$(readlink "/proc/${1}/exe" 2>/dev/null || true)"
+  _exe="$(readlink "${PROC_ROOT}/${1}/exe" 2>/dev/null || true)"
   if [ -n "${_exe}" ]; then
     # basename is normally "dsvideo-backend"; after an in-place upgrade the
     # kernel appends " (deleted)" to the exe link, so match that too.
     case "${_exe##*/}" in
       dsvideo-backend|"dsvideo-backend (deleted)") return 0 ;;
-      *) return 1 ;;
     esac
+    # exe names something else. On a real DSM kernel that means a different program, but
+    # under an emulation layer (Rosetta, qemu-user: how the lifecycle is tested on a Mac)
+    # exe is the emulator and the real program is only visible in comm. So a non-matching
+    # exe is decided by comm below, not rejected outright.
   fi
-  # Fallback (readlink denied): /proc/$1/comm. Kernel truncates comm to 15
+  # Fallback: /proc/$1/comm. Kernel truncates comm to 15
   # chars; "dsvideo-backend" is exactly 15 so it survives intact.
-  if [ -r "/proc/${1}/comm" ]; then
-    _comm="$(cat "/proc/${1}/comm" 2>/dev/null || true)"
+  if [ -r "${PROC_ROOT}/${1}/comm" ]; then
+    _comm="$(cat "${PROC_ROOT}/${1}/comm" 2>/dev/null || true)"
     [ "${_comm}" = "dsvideo-backend" ] && return 0
     return 1
   fi
+  # exe named another program and comm is unreadable: not ours.
+  [ -z "${_exe}" ] || return 1
   # Neither exe nor comm readable: fall back to bare existence rather than
   # reporting a live server dead on a permission quirk.
   return 0
+}
+
+# ---------------------------------------------------------------------------------------
+# Port holder detection
+# ---------------------------------------------------------------------------------------
+
+# Prints "<uid> <inode>" for every socket LISTENing on ${PORT}, IPv4 and IPv6.
+#
+# /proc/net/tcp columns: sl local_address rem_address st tx:rx tr:tm retrnsmt uid timeout inode.
+# The port is the hex after the last colon of local_address and st 0A is LISTEN. The hex
+# is computed, never hard-coded: 8090 is 0x1F9A. (The previous version carried 0x2392,
+# which is 9106, so it never matched anything and the orphan killer was dead code.)
+port_listeners() {
+  case "${PORT}" in ''|*[!0-9]*) log "ERROR: DSVIDEO_PORT='${PORT}' is not a number"; return 2 ;; esac
+  _hex="$(printf '%04X' "${PORT}")"
+  for _f in "${PROC_ROOT}/net/tcp" "${PROC_ROOT}/net/tcp6"; do
+    [ -r "${_f}" ] || continue
+    awk -v hex="${_hex}" '$4 == "0A" { n = split($2, a, ":"); if (toupper(a[n]) == hex) print $8, $10 }' "${_f}"
+  done
+}
+
+# Socket inode -> pid. Only finds processes whose /proc/PID/fd we may read (our own uid);
+# a root-owned holder is invisible to the package user, which is why the uid comes from
+# /proc/net/tcp instead. One ls over every fd: a readlink per fd would fork thousands of times.
+holder_pid_for_inode() {
+  ls -l "${PROC_ROOT}"/[0-9]*/fd/* 2>/dev/null | grep -F -- "socket:[$1]" | head -1 \
+    | sed 's#.*/\([0-9][0-9]*\)/fd/[0-9]*.*#\1#' || true
+}
+
+# Classifies whatever is listening on ${PORT}. Sets:
+#   HOLDER_STATE  free     nothing listening
+#                 ours     our uid AND the process is our dsvideo-backend: safe to terminate
+#                 foreign  anything else. NEVER killed: another uid, or our uid but not our
+#                          backend, or our uid but the process cannot be identified
+#   HOLDER_UID / HOLDER_INODE / HOLDER_PID (may be empty) / HOLDER_CMD (may be empty)
+classify_port_holder() {
+  HOLDER_STATE="free"; HOLDER_UID=""; HOLDER_INODE=""; HOLDER_PID=""; HOLDER_CMD=""
+  _list="$(port_listeners)" || return 1
+  [ -n "${_list}" ] || return 0
+
+  HOLDER_STATE="ours"
+  while read -r _uid _inode; do
+    if [ -z "${HOLDER_UID}" ]; then HOLDER_UID="${_uid}"; HOLDER_INODE="${_inode}"; fi
+    if [ "${_uid}" != "${SELF_UID}" ]; then
+      HOLDER_STATE="foreign"; HOLDER_UID="${_uid}"; HOLDER_INODE="${_inode}"
+      break
+    fi
+  done <<EOF
+${_list}
+EOF
+
+  HOLDER_PID="$(holder_pid_for_inode "${HOLDER_INODE}")"
+  if [ -n "${HOLDER_PID}" ]; then
+    HOLDER_CMD="$(tr '\0' ' ' < "${PROC_ROOT}/${HOLDER_PID}/cmdline" 2>/dev/null || true)"
+  fi
+  if [ "${HOLDER_STATE}" = "ours" ]; then
+    # Same uid is not enough: the package user could run something else on this port.
+    if [ -z "${HOLDER_PID}" ] || ! pid_alive "${HOLDER_PID}"; then
+      HOLDER_STATE="foreign"
+    fi
+  fi
+  return 0
+}
+
+describe_holder() {
+  echo "uid=${HOLDER_UID} pid=${HOLDER_PID:-unknown (not visible to uid ${SELF_UID})} socket-inode=${HOLDER_INODE} cmdline='${HOLDER_CMD:-unknown}'"
+}
+
+# When the holder's pid is hidden from us, list every process that merely looks like our
+# backend so the log says where to look. "[d]svideo" keeps grep from matching itself.
+log_backend_candidates() {
+  for _c in $(grep -la '[d]svideo-backend' "${PROC_ROOT}"/[0-9]*/cmdline 2>/dev/null \
+      | sed 's#.*/\([0-9][0-9]*\)/cmdline#\1#' || true); do
+    _cuid="$(awk '/^Uid:/ {print $2; exit}' "${PROC_ROOT}/${_c}/status" 2>/dev/null || true)"
+    log "  candidate: pid ${_c} uid ${_cuid:-?} cmdline='$(tr '\0' ' ' < "${PROC_ROOT}/${_c}/cmdline" 2>/dev/null || true)'"
+  done
+}
+
+log_foreign_holder() {
+  log "ERROR: port ${PORT} is held by a process this package does not own and will not kill: $(describe_holder)"
+  log "ERROR: package user is uid ${SELF_UID}. Stop that process as root (or an admin), then start the package again."
+  [ -n "${HOLDER_PID}" ] || log_backend_candidates
+}
+
+# TERM, wait up to $2 seconds (default 10), then KILL. Returns 1 if it is still alive.
+terminate_pid() {
+  _tp="$1"; _grace="${2:-10}"
+  pid_alive "${_tp}" || return 0
+  kill "${_tp}" 2>/dev/null || true
+  _i=0
+  while [ "${_i}" -lt "${_grace}" ] && pid_alive "${_tp}"; do
+    sleep 1
+    _i=$((_i + 1))
+  done
+  if pid_alive "${_tp}"; then
+    log "pid ${_tp} still alive ${_grace}s after TERM; sending KILL"
+    kill -9 "${_tp}" 2>/dev/null || true
+    _i=0
+    while [ "${_i}" -lt 3 ] && pid_alive "${_tp}"; do
+      sleep 1
+      _i=$((_i + 1))
+    done
+  fi
+  if pid_alive "${_tp}"; then
+    return 1
+  fi
+  return 0
+}
+
+# Waits up to $1 seconds for the port to have no listener. Leaves HOLDER_* describing
+# the last observation.
+wait_port_free() {
+  _i=0
+  while :; do
+    classify_port_holder || return 1
+    [ "${HOLDER_STATE}" = "free" ] && return 0
+    [ "${_i}" -ge "$1" ] && return 1
+    sleep 1
+    _i=$((_i + 1))
+  done
+}
+
+# Start-time port clearance. Returns 0 only when the port is free.
+ensure_port_free() {
+  classify_port_holder || return 1
+  case "${HOLDER_STATE}" in
+    free) return 0 ;;
+    foreign)
+      log_foreign_holder
+      return 1
+      ;;
+  esac
+  log "port ${PORT} is held by a stale dsvideo-backend of ours ($(describe_holder)); terminating it"
+  if ! terminate_pid "${HOLDER_PID}" 8; then
+    log "ERROR: stale backend pid ${HOLDER_PID} survived TERM and KILL"
+    return 1
+  fi
+  if ! wait_port_free 5; then
+    log "ERROR: port ${PORT} is still held after terminating our stale backend: $(describe_holder)"
+    [ "${HOLDER_STATE}" != "foreign" ] || log_foreign_holder
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------------------
+
+# Asks the backend on ${PORT} (via its own --healthcheck, so no curl dependency) whether it
+# is pid $1, running as this uid, at this build's version, with a working database.
+# Prints the reason on failure.
+health_probe() {
+  _hp_timeout="${2:-3s}"
+  if [ -n "${VERSION}" ]; then
+    "${GO_BINARY}" --healthcheck --expect-pid "$1" --expect-uid "${SELF_UID}" \
+      --expect-version "${VERSION}" --timeout "${_hp_timeout}" 2>&1
+  else
+    "${GO_BINARY}" --healthcheck --expect-pid "$1" --expect-uid "${SELF_UID}" \
+      --timeout "${_hp_timeout}" 2>&1
+  fi
+}
+
+# The start gate: success only once healthz confirms pid $1. Gives up early if it dies.
+wait_healthy() {
+  _wh_pid="$1"; _wh_max="$2"; _wh_last="no response yet"
+  _i=0
+  while [ "${_i}" -lt "${_wh_max}" ]; do
+    if ! pid_alive "${_wh_pid}"; then
+      log "ERROR: pid ${_wh_pid} exited during startup. The server's own error is in the log lines above."
+      return 1
+    fi
+    if _wh_out="$(health_probe "${_wh_pid}" 2s)"; then
+      log "healthy: ${_wh_out}"
+      return 0
+    fi
+    _wh_last="${_wh_out}"
+    sleep 1
+    _i=$((_i + 1))
+  done
+  log "ERROR: pid ${_wh_pid} alive but not healthy after ${_wh_max}s: ${_wh_last}"
+  return 1
+}
+
+# ---------------------------------------------------------------------------------------
+# Integrity, permissions, log
+# ---------------------------------------------------------------------------------------
+
+# The build writes target/MANIFEST.sha256 (sha256sum format) for every shipped binary.
+# A mismatch means the install is damaged or half-upgraded: refuse to run it. This catches
+# accidents, not an attacker (the package user owns target/ and could rewrite both).
+verify_manifest() {
+  _m="${BASE}/target/${MANIFEST_NAME}"
+  if [ ! -f "${_m}" ]; then
+    log "WARN: ${_m} not found; binary integrity NOT verified (package built without a manifest)"
+    return 0
+  fi
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    log "WARN: sha256sum not available; binary integrity NOT verified"
+    return 0
+  fi
+  if ! _out="$(cd "${BASE}/target" && sha256sum -c "${MANIFEST_NAME}" 2>&1)"; then
+    log "ERROR: package integrity check FAILED against ${MANIFEST_NAME}; refusing to start:"
+    echo "${_out}" | grep -v ': OK$' >> "${LOG}" 2>/dev/null || true
+    return 1
+  fi
+  log "manifest verified ($(wc -l < "${_m}" | tr -d ' ') files)"
+  return 0
+}
+
+# The backend runs with a normal umask (see start): it also writes into the user's media
+# shares (normalized videos, backups), and those files must stay readable by other DSM
+# users and apps. So owner-only is applied to the package's own files, by name, not by
+# umask: create_private_files makes the DB and log 0600 from their first byte, SQLite gives
+# -wal/-shm the mode of the DB file, and secure_existing_files tightens what a previous
+# version created. A file we cannot chmod (owned by another user, typically root leftovers
+# from a root-run start) is reported, not ignored.
+create_private_files() {
+  for _f in "${DSVIDEO_DB_PATH}" "${LOG}"; do
+    # umask 077 only inside this subshell; an existing file is left for secure_existing_files.
+    [ -e "${_f}" ] || ( umask 077; : >> "${_f}" ) 2>/dev/null || log "WARN: cannot create ${_f}"
+  done
+}
+
+secure_existing_files() {
+  for _f in "${DSVIDEO_DB_PATH}" "${DSVIDEO_DB_PATH}-wal" "${DSVIDEO_DB_PATH}-shm" \
+            "${DSVIDEO_DB_PATH}".pre-*.db "${LOG}" "${LOG}.1" "${VAR}/.jwt_secret" "${PIDFILE}"; do
+    [ -f "${_f}" ] || continue
+    chmod 600 "${_f}" 2>/dev/null || log "WARN: cannot chmod 600 ${_f} (not owned by uid ${SELF_UID}); fix as root"
+  done
 }
 
 # Rotate the log before every start and cap it while running. The server appends
@@ -71,8 +343,89 @@ rotate_log() {
   fi
 }
 
+# ---------------------------------------------------------------------------------------
+# Watchdog (log truncation) and child sweep
+# ---------------------------------------------------------------------------------------
+
+start_watchdog() {
+  # The server holds ${LOG} open for append, so rotating out from under it would leak the
+  # inode and stop reclaiming space. Truncate in place instead — append-mode writes
+  # continue correctly against a truncated file.
+  # The loop's pid is recorded so stop can end it; it traps TERM so its sleep dies with it.
+  (
+    trap 'kill "${_sp:-0}" 2>/dev/null; exit 0' TERM
+    while [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}" 2>/dev/null || echo 0)"; do
+      sleep 300 &
+      _sp=$!
+      wait "${_sp}" || true
+      [ -f "${LOG}" ] || continue
+      _sz="$(wc -c < "${LOG}" 2>/dev/null || echo 0)"
+      if [ "${_sz}" -gt "${LOG_MAX_BYTES}" ]; then
+        cp -f "${LOG}" "${LOG}.1" 2>/dev/null || true
+        : > "${LOG}"
+        echo "[${PACKAGE}] log truncated in place at ${_sz} bytes" >> "${LOG}"
+      fi
+    done
+  ) >/dev/null 2>&1 &
+  echo $! > "${WATCHDOG_PIDFILE}"
+}
+
+stop_watchdog() {
+  [ -f "${WATCHDOG_PIDFILE}" ] || return 0
+  _wd="$(cat "${WATCHDOG_PIDFILE}" 2>/dev/null || true)"
+  # Guard against a recycled pid: the watchdog is a subshell of this very script, so its
+  # command line names the script.
+  case "${_wd}" in ''|*[!0-9]*) ;; *)
+    if tr '\0' ' ' < "${PROC_ROOT}/${_wd}/cmdline" 2>/dev/null | grep -q 'start-stop-status'; then
+      kill "${_wd}" 2>/dev/null || true
+    fi
+  ;; esac
+  rm -f "${WATCHDOG_PIDFILE}"
+}
+
+# Pids whose parent is $1 (the backend's transcode and probe children).
+children_of() {
+  grep -l "^PPid:[[:space:]]*${1}\$" "${PROC_ROOT}"/[0-9]*/status 2>/dev/null \
+    | sed 's#.*/\([0-9][0-9]*\)/status#\1#' || true
+}
+
+# Kills ffmpeg/ffprobe orphans left behind when the backend died. Only pids recorded as
+# the backend's children BEFORE it was stopped are considered, and only if they are still
+# ffmpeg/ffprobe, so a recycled pid is never hit.
+sweep_children() {
+  for _k in $1; do
+    [ -d "${PROC_ROOT}/${_k}" ] || continue
+    _kc="$(cat "${PROC_ROOT}/${_k}/comm" 2>/dev/null || true)"
+    case "${_kc}" in
+      ffmpeg|ffprobe)
+        log "sweeping orphaned ${_kc} (pid ${_k}) left by the stopped backend"
+        kill "${_k}" 2>/dev/null || true
+        sleep 1
+        [ ! -d "${PROC_ROOT}/${_k}" ] || kill -9 "${_k}" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------------------
+# start / stop / status
+# ---------------------------------------------------------------------------------------
+
 start() {
+  # NOT umask 077: the backend writes into the user's media shares (normalize/convert
+  # outputs, backups, sidecar files), and a 0600 file there is unreadable to every other
+  # DSM user and app. Pin the usual 022 so the result does not depend on what the caller
+  # inherited; the package's private files are protected by name below instead.
+  umask 022
   mkdir -p "${VAR}"
+
+  # Default configuration (can be overridden by DSM package env/config files)
+  export DSVIDEO_PORT="${PORT}"
+  export DSVIDEO_BASE_URL="${DSVIDEO_BASE_URL:-}"
+  export DSVIDEO_DB_PATH="${DSVIDEO_DB_PATH:-${VAR}/dsvideo.db}"
+
+  create_private_files
+  secure_existing_files
   rotate_log
 
   # NOTE: this script deliberately does NOT touch the live nginx conf.
@@ -102,36 +455,31 @@ start() {
 
   # Check for Go binary
   if [ -z "${GO_BINARY}" ]; then
-    echo "[${PACKAGE}] Go binary not found." >> "${LOG}"
-    echo "[${PACKAGE}] Expected (primary): ${BASE}/target/backend/dsvideo-backend" >> "${LOG}"
-    echo "[${PACKAGE}] If you installed a gzipped/nested SPK, rebuild with spk/build-spk-macos.sh and reinstall." >> "${LOG}"
+    log "ERROR: Go binary not found."
+    log "Expected (primary): ${BASE}/target/backend/dsvideo-backend"
+    log "If you installed a gzipped/nested SPK, rebuild with spk/build-spk-macos.sh and reinstall."
     exit 1
   fi
 
+  [ -n "${VERSION}" ] || log "WARN: could not read version from ${BASE}/INFO; healthz version is not checked"
+
+  verify_manifest || exit 1
+
+  # Already running: only if it is demonstrably this build, answering. A live pid that does
+  # not answer (hung, wrong version) is stopped and replaced.
   if [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}")"; then
-    echo "[${PACKAGE}] already running" >> "${LOG}"
-    exit 0
-  fi
-
-  # Safety net: if port is already bound (orphan from a previous crash/upgrade),
-  # kill the holder so we don't immediately fail with "address already in use".
-  # Port 8090 = 0x2392. Find inode then map to pid via /proc/*/fd.
-  INODE="$(awk '$4 ~ /:2392 / || $4 ~ /:2392$/ {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | head -1)"
-  if [ -n "${INODE}" ]; then
-    HOLDER_PID="$(grep -rl "socket:\[${INODE}\]" /proc/*/fd 2>/dev/null | head -1 | cut -d/ -f3)"
-    if [ -n "${HOLDER_PID}" ] && pid_alive "${HOLDER_PID}"; then
-      echo "[${PACKAGE}] Port ${DSVIDEO_PORT:-8090} held by pid ${HOLDER_PID} — killing orphan before start" >> "${LOG}"
-      kill "${HOLDER_PID}" 2>/dev/null || true
-      sleep 2
-      pid_alive "${HOLDER_PID}" && kill -9 "${HOLDER_PID}" 2>/dev/null || true
-      sleep 1
+    _running="$(cat "${PIDFILE}")"
+    if _why="$(health_probe "${_running}" 3s)"; then
+      log "already running (pid ${_running}): ${_why}"
+      exit 0
     fi
+    log "pid ${_running} from the pidfile is alive but not healthy (${_why}); replacing it"
+    terminate_pid "${_running}" 10 || { log "ERROR: pid ${_running} would not die"; exit 1; }
   fi
+  rm -f "${PIDFILE}"
 
-  # Default configuration (can be overridden by DSM package env/config files)
-  export DSVIDEO_PORT="${DSVIDEO_PORT:-8090}"
-  export DSVIDEO_BASE_URL="${DSVIDEO_BASE_URL:-}"
-  export DSVIDEO_DB_PATH="${DSVIDEO_DB_PATH:-${VAR}/dsvideo.db}"
+  # Port clearance. Our own stale backend is terminated; anything else fails the start.
+  ensure_port_free || { log "ERROR: start aborted: port ${PORT} is not available"; exit 1; }
 
   # Generate JWT secret if not set - use /dev/urandom (no openssl dependency)
   if [ -z "${DSVIDEO_JWT_SECRET:-}" ]; then
@@ -209,77 +557,93 @@ start() {
   export DSVIDEO_IMAGE_CACHE_DIR="${DSVIDEO_IMAGE_CACHE_DIR:-${VAR}/images}"
   mkdir -p "${DSVIDEO_IMAGE_CACHE_DIR}"
 
-  echo "[${PACKAGE}] Starting ${GO_BINARY} with port=${DSVIDEO_PORT} db=${DSVIDEO_DB_PATH}" >> "${LOG}"
-  echo "[${PACKAGE}] Movies=${DSVIDEO_MOVIES_PATH} TV=${DSVIDEO_TV_PATH}" >> "${LOG}"
+  log "Starting ${GO_BINARY} (version ${VERSION:-unknown}, uid ${SELF_UID}) with port=${DSVIDEO_PORT} db=${DSVIDEO_DB_PATH}"
+  log "Movies=${DSVIDEO_MOVIES_PATH} TV=${DSVIDEO_TV_PATH}"
 
-  nohup "${GO_BINARY}" >> "${LOG}" 2>&1 &
-  echo $! > "${PIDFILE}"
-  echo "[${PACKAGE}] started (pid $(cat "${PIDFILE}"))" >> "${LOG}"
+  nohup "${GO_BINARY}" >> "${LOG}" 2>&1 < /dev/null &
+  CHILD=$!
+  log "launched pid ${CHILD}; waiting up to ${START_TIMEOUT}s for /api/v1/healthz to confirm it"
 
-  # Watchdog: the server holds ${LOG} open for append, so rotating out from under
-  # it would leak the inode and stop reclaiming space. Truncate in place instead —
-  # append-mode writes continue correctly against a truncated file.
-  (
-    while [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}" 2>/dev/null || echo 0)"; do
-      sleep 300
-      [ -f "${LOG}" ] || continue
-      _sz="$(wc -c < "${LOG}" 2>/dev/null || echo 0)"
-      if [ "${_sz}" -gt "${LOG_MAX_BYTES}" ]; then
-        cp -f "${LOG}" "${LOG}.1" 2>/dev/null || true
-        : > "${LOG}"
-        echo "[${PACKAGE}] log truncated in place at ${_sz} bytes" >> "${LOG}"
-      fi
-    done
-  ) >/dev/null 2>&1 &
-
-  # Verify the process stays alive for a couple seconds
-  sleep 2
-  PID="$(cat "${PIDFILE}")"
-  if ! pid_alive "${PID}"; then
-    # TASK-825: do not `tail "${LOG}" >> "${LOG}"` — reading the log while
-    # appending to it can duplicate/garble the captured tail, and the lines are
-    # already present above. The diagnostics are in this same file just above.
-    echo "[${PACKAGE}] ERROR: Process died immediately after start. See the log lines above for the cause." >> "${LOG}"
+  # The gate. The start is reported successful only when healthz on the port answers with
+  # THIS pid, THIS uid and THIS version. Otherwise the child is killed so a half-started
+  # server cannot linger, and the start fails.
+  if ! wait_healthy "${CHILD}" "${START_TIMEOUT}"; then
+    terminate_pid "${CHILD}" 5 || true
     rm -f "${PIDFILE}"
+    log "ERROR: start FAILED"
     exit 1
   fi
+
+  # Pidfile only after the gate: a pidfile never names a process we have not confirmed.
+  echo "${CHILD}" > "${PIDFILE}"
+  start_watchdog
+  log "started (pid ${CHILD})"
 }
 
 stop() {
-  if [ ! -f "${PIDFILE}" ]; then
-    exit 0
-  fi
-  PID="$(cat "${PIDFILE}")" || true
-  if [ -n "${PID}" ] && pid_alive "${PID}"; then
-    kill "${PID}" 2>/dev/null || true
-    # Wait up to 10 seconds for process to actually terminate before returning.
-    # Without this wait, rapid package upgrades fail with "address already in use"
-    # because the new binary tries to bind the port while the old one is still dying.
-    i=0
-    while [ $i -lt 10 ] && pid_alive "${PID}"; do
-      sleep 1
-      i=$((i + 1))
-    done
-    # Force-kill if still alive after grace period
+  _rc=0
+  _kids=""
+
+  if [ -f "${PIDFILE}" ]; then
+    PID="$(cat "${PIDFILE}" 2>/dev/null || true)"
     if pid_alive "${PID}"; then
-      kill -9 "${PID}" 2>/dev/null || true
-      sleep 1
+      _kids="$(children_of "${PID}")"
+      log "stopping pid ${PID} (TERM, then KILL after 10s)"
+      # Wait for the process to actually exit. Without this, rapid package upgrades fail
+      # with "address already in use" because the new binary binds while the old one dies.
+      terminate_pid "${PID}" 10 || { log "ERROR: pid ${PID} survived KILL"; _rc=1; }
     fi
   fi
+
+  # Verify the port is free. A backend of ours that is NOT in the pidfile (lost pidfile,
+  # interrupted start) is a leftover: terminate it too. A foreign holder is reported only.
+  classify_port_holder || true
+  case "${HOLDER_STATE}" in
+    ours)
+      _kids="${_kids} $(children_of "${HOLDER_PID}")"
+      log "port ${PORT} still held by a backend of ours not in the pidfile ($(describe_holder)); terminating"
+      terminate_pid "${HOLDER_PID}" 10 || { log "ERROR: pid ${HOLDER_PID} survived KILL"; _rc=1; }
+      ;;
+    foreign)
+      log "WARN: port ${PORT} is held by a process that is not ours; leaving it alone: $(describe_holder)"
+      ;;
+  esac
+
+  stop_watchdog
+  sweep_children "${_kids}"
   rm -f "${PIDFILE}"
-  echo "[${PACKAGE}] stopped" >> "${LOG}"
+
+  if wait_port_free 3; then
+    log "stopped (port ${PORT} is free)"
+  elif [ "${HOLDER_STATE}" = "foreign" ]; then
+    log "stopped our backend; port ${PORT} remains held by a foreign process"
+  else
+    log "ERROR: stop finished but port ${PORT} is still held by ours: $(describe_holder)"
+    _rc=1
+  fi
+  exit "${_rc}"
 }
 
+# Exit 0 only when the pid in the pidfile is our backend AND it answers healthz as itself.
+# A hung or wrong-build process reports "not running" instead of looking healthy.
 status() {
-  if [ -f "${PIDFILE}" ] && pid_alive "$(cat "${PIDFILE}")"; then
+  [ -f "${PIDFILE}" ] || exit 1
+  PID="$(cat "${PIDFILE}" 2>/dev/null || true)"
+  pid_alive "${PID}" || exit 1
+  GO_BINARY="$(find_go_binary || true)"
+  [ -n "${GO_BINARY}" ] || exit 1
+  if health_probe "${PID}" 5s >/dev/null 2>&1; then
     exit 0
   fi
   exit 1
 }
 
-case "${1:-}" in
-  start) start ;;
-  stop) stop ;;
-  status) status ;;
-  *) echo "usage: $0 {start|stop|status}" ; exit 2 ;;
-esac
+# spk/tests sources this file to exercise the functions above without running a command.
+if [ "${DSVIDEO_SSS_SOURCE_ONLY:-}" != "1" ]; then
+  case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    status) status ;;
+    *) echo "usage: $0 {start|stop|status}" ; exit 2 ;;
+  esac
+fi
