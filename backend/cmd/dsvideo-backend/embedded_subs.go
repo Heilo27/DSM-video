@@ -155,10 +155,12 @@ func (s *Server) collectEmbeddedSubtitles(itemID, videoPath string, offset float
 		return nil
 	}
 	// TASK-800: never hand a path outside a media root to ffmpeg (probe or extraction).
-	if !s.pathWithinMediaRoot(videoPath) {
+	resolvedVideoPath, pathOK := s.resolveMediaPath(videoPath)
+	if !pathOK {
 		log.Printf("[subtitles] SECURITY: path %q for item %s not within any media root — skipping ffmpeg", filepath.Clean(videoPath), itemID)
 		return nil
 	}
+	videoPath = resolvedVideoPath // ffmpeg gets the checked path (TASK-1082 D1)
 
 	cacheDir := s.embeddedSubsDir(itemID)
 	meta, state := readEmbeddedSubsMeta(cacheDir, videoPath)
@@ -207,10 +209,12 @@ func (s *Server) ensureEmbeddedSubs(itemID, videoPath string, probe *transcode.P
 	if itemID == "" || videoPath == "" || s.cfg.FFmpegPath == "" || s.cfg.TranscodeDir == "" {
 		return
 	}
-	if !s.pathWithinMediaRoot(videoPath) {
+	resolvedVideoPath, pathOK := s.resolveMediaPath(videoPath)
+	if !pathOK {
 		log.Printf("[subtitles] SECURITY: path %q for item %s not within any media root — skipping ffmpeg", filepath.Clean(videoPath), itemID)
 		return
 	}
+	videoPath = resolvedVideoPath // the queued job carries the checked path (TASK-1082 D1)
 	if _, state := readEmbeddedSubsMeta(s.embeddedSubsDir(itemID), videoPath); state == embeddedSubsCurrent {
 		return
 	}

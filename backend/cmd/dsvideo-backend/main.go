@@ -3881,11 +3881,15 @@ func (s *Server) handlePlayback(w http.ResponseWriter, r *http.Request) {
 	// Prevents path traversal if the database is tampered with. TASK-800: shared with
 	// trickplay + subtitle extraction via pathWithinMediaRoot so every path→ffmpeg site
 	// enforces the same guard, not just playback.
-	if !s.pathWithinMediaRoot(path) {
+	resolvedPlayPath, pathOK := s.resolveMediaPath(path)
+	if !pathOK {
 		log.Printf("[Playback] SECURITY: path %q not within any configured media root — rejecting", filepath.Clean(path))
 		writeErr(w, http.StatusForbidden, "path_not_allowed")
 		return
 	}
+	// TASK-1082 D1: everything downstream (stat, probe, sidecars, ffmpeg, the session) uses the
+	// path that was checked, never the raw DB string.
+	path = resolvedPlayPath
 
 	// P1-4: verify the file actually exists before doing anything else. The 216 orphaned
 	// .mkv rows (external library conversion renamed files out from under the DB) pointed
@@ -4956,11 +4960,13 @@ func (s *Server) handleTrickplayVTT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// TASK-800: same within-media-root guard playback enforces, before ffmpeg touches the path.
-	if !s.pathWithinMediaRoot(path) {
+	resolvedTrickPath, pathOK := s.resolveMediaPath(path)
+	if !pathOK {
 		log.Printf("[trickplay] SECURITY: path %q for item %s not within any media root — rejecting", filepath.Clean(path), itemID)
 		writeErr(w, http.StatusForbidden, "path_not_allowed")
 		return
 	}
+	path = resolvedTrickPath // the checked path is the one ffmpeg reads (TASK-1082 D1)
 	if s.prober == nil || s.cfg.FFmpegPath == "" {
 		writeErr(w, http.StatusNotFound, "trickplay_unavailable")
 		return
@@ -5326,10 +5332,12 @@ func (s *Server) rehydratePlaySession(sessionID string) (PlaySession, bool) {
 	}
 	// The file must still exist and still be inside a configured media root — a restart
 	// is not a reason to relax either check.
-	if !s.pathWithinMediaRoot(ps.Path) {
+	resolvedSessionPath, pathOK := s.resolveMediaPath(ps.Path)
+	if !pathOK {
 		log.Printf("[playsession] SECURITY: rehydrate %s rejected — path outside media roots", sessionID)
 		return PlaySession{}, false
 	}
+	ps.Path = resolvedSessionPath // serve the checked path (TASK-1082 D1)
 	if _, statErr := os.Stat(ps.Path); statErr != nil {
 		return PlaySession{}, false
 	}
@@ -5946,9 +5954,19 @@ func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
 }
 
 func (s *Server) pathWithinMediaRoot(path string) bool {
+	_, ok := s.resolveMediaPath(path)
+	return ok
+}
+
+// resolveMediaPath is the one containment check. On success it returns the symlink-resolved
+// path that was verified to lie inside a media root; callers MUST open/stat/probe/hand to
+// ffmpeg that returned path, never the raw input. Checking one string and opening another is
+// how "root/link/../secret" got approved (lexically root/secret) while the OS opened it
+// outside the root (TASK-1082 D1). On failure it returns "", false (fail closed).
+func (s *Server) resolveMediaPath(path string) (string, bool) {
 	resolvedPath, err := resolveSymlinksAllowMissing(path)
 	if err != nil {
-		return false // cannot prove where it points: fail closed
+		return "", false // cannot prove where it points: fail closed
 	}
 	for _, root := range []string{s.cfg.MoviesPath, s.cfg.TVPath, s.cfg.HomePath} {
 		if root == "" {
@@ -5959,6 +5977,16 @@ func (s *Server) pathWithinMediaRoot(path string) bool {
 			continue
 		}
 		if resolvedPath == resolvedRoot || strings.HasPrefix(resolvedPath, resolvedRoot+string(filepath.Separator)) {
+			return resolvedPath, true
+		}
+	}
+	return "", false
+}
+
+// hasDotDotComponent reports whether any path element is "..".
+func hasDotDotComponent(path string) bool {
+	for _, el := range strings.Split(filepath.ToSlash(path), "/") {
+		if el == ".." {
 			return true
 		}
 	}
@@ -5969,17 +5997,25 @@ func (s *Server) pathWithinMediaRoot(path string) bool {
 // yet (a subtitle sidecar or sprite about to be created). It resolves the longest existing
 // ancestor through EvalSymlinks and re-attaches the missing remainder, so a symlink anywhere
 // in the existing part of the path is followed before the media-root comparison (TASK-1082
-// P3-2). A dangling symlink is an error: its target cannot be checked. The remainder is
-// lexically clean, so ".." cannot climb out of the resolved ancestor.
+// P3-2). A dangling symlink is an error: its target cannot be checked.
+//
+// The raw path goes to EvalSymlinks UNCLEANED: EvalSymlinks applies ".." to the already
+// resolved prefix, which is what the kernel does, whereas a lexical Clean first would fold
+// "link/.." away and approve a path the OS opens elsewhere (TASK-1082 D1). When the path does
+// not fully exist, a ".." anywhere in it cannot be resolved safely by splitting off the
+// missing tail, so it is refused outright.
 func resolveSymlinksAllowMissing(path string) (string, error) {
-	clean := filepath.Clean(path)
-	resolved, err := filepath.EvalSymlinks(clean)
+	resolved, err := filepath.EvalSymlinks(path)
 	if err == nil {
 		return resolved, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
+	if hasDotDotComponent(path) {
+		return "", fmt.Errorf("unresolvable %q: contains \"..\" and does not exist", path)
+	}
+	clean := filepath.Clean(path) // no ".." present, so Clean is purely cosmetic
 	if _, lerr := os.Lstat(clean); lerr == nil {
 		return "", fmt.Errorf("dangling symlink %q", clean)
 	}

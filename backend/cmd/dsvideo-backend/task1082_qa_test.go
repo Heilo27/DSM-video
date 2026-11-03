@@ -21,16 +21,8 @@ import (
 // Independent QA of TASK-1082 (Worf). Written against the FRD / ACs, not the implementer's
 // tests. Each test names the code change that turns it red.
 //
-// Tests prefixed TestQA1082Repro_ reproduce DEFECTS found in review: they assert the
-// CORRECT behaviour and are red on commit 3835114. They are skipped unless
-// QA_1082_REPRO=1 so the suite stays green; run them with that variable to see the failure.
-
-func reproOnly(t *testing.T) {
-	t.Helper()
-	if os.Getenv("QA_1082_REPRO") != "1" {
-		t.Skip("defect reproduction: set QA_1082_REPRO=1 to run (red on 3835114)")
-	}
-}
+// Tests prefixed TestQA1082Repro_ reproduce DEFECTS found in review (red on commit 3835114,
+// fixed after): they assert the CORRECT behaviour and now always run.
 
 // chain wires the production order: peer counter, then trustedRealIP, then the handler.
 func chain(s *Server, h http.HandlerFunc) http.Handler {
@@ -424,7 +416,6 @@ func TestQA1082_KnownSIDsNeverTouchTheUnknownSIDGuard(t *testing.T) {
 // Real trigger: the official DS Video app logs in on DSM's own port, then fans out a screenful
 // of poster/metadata requests at our port with a SID we have never seen.
 func TestQA1082Repro_ValidSIDBurstIsNotDenied(t *testing.T) {
-	reproOnly(t)
 	s := sidServer(t, func(string) (string, error) {
 		time.Sleep(150 * time.Millisecond) // a plausible DSM auth.cgi round trip under load
 		return "ryan", nil
@@ -681,7 +672,6 @@ func TestQA1082_EmbeddedSubsStillAcceptsNormalFileAndRefusesEscape(t *testing.T)
 // a path the OS reads from outside the library. Needs a tampered items.path row plus a
 // symlink inside the root, the same preconditions as the symlink escape this task closes.
 func TestQA1082Repro_DotDotAfterSymlinkCannotEscapeTheRoot(t *testing.T) {
-	reproOnly(t)
 	base := realTemp(t)
 	root := filepath.Join(base, "Movies")
 	outside := filepath.Join(base, "private")

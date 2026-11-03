@@ -2271,11 +2271,13 @@ func (s *Server) webAPIStreamingOpen(w http.ResponseWriter, r *http.Request, ses
 	// session. handlePlayback and rehydratePlaySession both do this; this handler was
 	// the one path->ServeFile route that skipped it, so a tampered items.path row would
 	// have been served from here and nowhere else.
-	if !s.pathWithinMediaRoot(path) {
+	resolvedStreamPath, pathOK := s.resolveMediaPath(path)
+	if !pathOK {
 		log.Printf("[WebAPI] Streaming open REFUSED: path outside media roots for item %s", internalID)
 		writeWebAPIError(w, 1101)
 		return
 	}
+	path = resolvedStreamPath // serve the checked path, not the raw DB string (TASK-1082 D1)
 
 	// Create a direct play session (the iOS app handles format via AVPlayer)
 	sessionID := randID("vs_")
