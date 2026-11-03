@@ -87,6 +87,14 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 
 
+### ios produce_widget
+
+```sh
+[bundle exec] fastlane ios produce_widget
+```
+
+
+
 ### ios build_and_upload
 
 ```sh
