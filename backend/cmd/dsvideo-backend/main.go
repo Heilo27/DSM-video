@@ -89,17 +89,10 @@ type Config struct {
 	// (tmdb_api_key + other global settings) and to hit /admin/*. TASK-791/811:
 	// the backend otherwise has no role model — every authed DSM user is equal, so a
 	// low-priv user could swap the global TMDb key or trigger rescans (DoS). When set
-	// (env DSVIDEO_ADMIN_USER) only this user is admin. When empty, the first user to
-	// authenticate is recorded as owner (settings key owner_username) and becomes admin
-	// — a fresh-NAS default so the installing user is the admin without extra config.
+	// (env DSVIDEO_ADMIN_USER) only this user is admin. When empty, only an owner already
+	// recorded in settings (owner_username, written by an earlier version) is admin; there
+	// is no first-user-wins claim any more (TASK-1082 P3-3), so with neither, nobody is.
 	AdminUser string
-
-	// Security: when true, a DS Video User-Agent presenting an unknown SID is
-	// granted a local session WITHOUT validating the SID against DSM. This was the
-	// historical default to work around fragile DS Video builds, but it lets anyone
-	// on the network forge a session. Default false — only enable on a trusted LAN
-	// where a specific DS Video client misbehaves, and never when port-forwarded.
-	AllowUnvalidatedDSVideo bool
 
 	// TASK-755 auto-normalize. When enabled, non-DirectPlay files found by the scanner
 	// are converted to MP4+H.264/HEVC+AAC in the background (idle-aware, one at a time)
@@ -149,10 +142,6 @@ type Server struct {
 	// Serializes progress writes to avoid SQLite busy-timeout under concurrent playback.
 	progressMu sync.Mutex
 
-	// Serializes the first-user-wins owner claim (TASK-791/811) so two simultaneous
-	// first logins can't both win the owner_username row.
-	ownerMu sync.Mutex
-
 	// Trick-play generation guards (TASK-740). Lazy sprite generation runs ffmpeg,
 	// so concurrent requests for the same item must collapse to one job. The
 	// total-concurrency cap is no longer a separate trickplay semaphore — TASK-752
@@ -197,8 +186,15 @@ type Server struct {
 	// Pairing codes: code → pairingEntry (tvOS ↔ iOS device pairing)
 	pairingMu    sync.Mutex
 	pairingCodes map[string]pairingEntry
-	// Wrong codes since the last revocation, counted while a live code exists (pairing.go).
-	pairingFailures int
+	// Wrong-code counts per client IP (pairing.go). Guarded by pairingMu; created lazily.
+	pairingIPFailures map[string]*pairingIPState
+	// Unknown-SID validation guard: per-IP budget lives in authRateLimit, the negative
+	// cache and concurrency cap here (sid_validation.go). Created lazily.
+	// Requests that reached the backend from a non-loopback peer (peer_counter.go).
+	// Nil-safe: tests that build Server literals leave it unset.
+	peers        *peerCounter
+	sidGuardOnce sync.Once
+	sidGuard     *sidValidationGuard
 
 	// Rate limiter for unauthenticated auth endpoints (login, pairing exchange).
 	// Keyed by remote IP; value is *authRateEntry. Each entry carries its own mutex —
@@ -248,6 +244,10 @@ type pairingEntry struct {
 	username  string
 	expiresAt time.Time
 	exchanged bool
+	// Wrong guesses this code has faced and how many each client IP contributed (pairing.go
+	// recordPairingFailureLocked). Per code, and capped per IP, so one address cannot revoke it.
+	failures int
+	failIPs  map[string]int
 	// How the generating device reaches this server, returned on exchange (TASK-972).
 	server pairingServerInfo
 }
@@ -451,6 +451,7 @@ func main() {
 	}()
 
 	s := &Server{
+		peers:          newPeerCounter(time.Now()),
 		cfg:            cfg,
 		db:             db,
 		playSessions:   map[string]PlaySession{},
@@ -710,11 +711,11 @@ func main() {
 					delete(s.pairingCodes, code)
 				}
 			}
-			if len(s.pairingCodes) == 0 {
-				// Nothing left to guess at: stale wrong-code counts do not carry into the next code.
-				s.pairingFailures = 0
-			}
+			s.sweepPairingIPFailuresLocked(now2)
 			s.pairingMu.Unlock()
+
+			// Unknown-SID negative cache and did->login bindings (security_state.go).
+			s.sweepSecurityState(time.Now())
 
 			// Per-session ID mappings — evict after 7 days of no access
 			if evicted := cleanupExpiredIDMappings(7 * 24 * time.Hour); evicted > 0 {
@@ -806,6 +807,9 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	// Counts requests whose raw peer is not loopback; must run before trustedRealIP rewrites it.
+	r.Use(s.peers.middleware)
+	go s.peers.runDailyLog(bgCtx, 24*time.Hour)
 	// trustedRealIP, NOT chi's middleware.RealIP — see the function for why.
 	r.Use(trustedRealIP)
 	r.Use(redactSensitiveParams) // must run before Logger to prevent token leakage in logs
@@ -1289,10 +1293,6 @@ func loadConfig() Config {
 
 		// TASK-791/811: admin/owner for server-global mutations. Empty = first-user-wins.
 		AdminUser: get("DSVIDEO_ADMIN_USER", ""),
-
-		// Security — default false. Opt in only with an explicit "1"/"true".
-		AllowUnvalidatedDSVideo: strings.EqualFold(get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", ""), "true") ||
-			get("DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO", "") == "1",
 
 		// TASK-755 auto-normalize — on by default so a fresh NAS self-heals to all-DirectPlay.
 		AutoNormalize:          getBool("DSVIDEO_AUTO_NORMALIZE", true),
@@ -2038,19 +2038,25 @@ const rateLimitBucketImage = "image"
 // inspect the map directly use it too, so the key shape cannot drift between them.
 func rateLimitKey(bucket, ip string) string { return bucket + "|" + ip }
 
+// remoteIP is the ONE way to turn a request's peer into a limiter/tracking key. net.SplitHostPort
+// handles both IPv4 ("1.2.3.4:port") and IPv6 ("[::1]:port"); strings.LastIndex would corrupt
+// IPv6 keys by truncating at the last colon. trustedRealIP has already replaced RemoteAddr with
+// the real client when the peer was loopback behind nginx.
+func remoteIP(r *http.Request) string {
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	return ip
+}
+
 // rateLimitExceeded is the one fixed-window, per-IP limiter.
 //
 // bucket namespaces the counter so two routes with different budgets cannot consume each
 // other's allowance — poster loads must never be able to exhaust the login budget, and a
 // brute-force attempt on login must never lock the caller out of artwork.
 func (s *Server) rateLimitExceeded(r *http.Request, bucket string, maxAttempts int, window time.Duration) bool {
-	// Use net.SplitHostPort to correctly parse the host from RemoteAddr.
-	// This handles both IPv4 ("1.2.3.4:port") and IPv6 ("[::1]:port") correctly.
-	// strings.LastIndex would corrupt IPv6 keys by truncating at the last colon.
-	ip := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
-	}
+	ip := remoteIP(r)
 
 	now := time.Now()
 	raw, _ := s.authRateLimit.LoadOrStore(rateLimitKey(bucket, ip), &authRateEntry{count: 0, windowEnd: now.Add(window)})
@@ -2490,12 +2496,13 @@ func (s *Server) ownerUsername() string {
 // isAdmin reports whether the authenticated user may mutate server-global state and hit
 // /admin/*. TASK-791/811. Precedence:
 //  1. If DSVIDEO_ADMIN_USER is configured, ONLY that username (case-insensitive) is admin.
-//  2. Otherwise the persisted owner_username (first-user-wins) is admin.
+//  2. Otherwise the persisted owner_username, if one was already recorded, is admin.
 //
-// It also lazily claims ownership: when no admin is configured AND no owner is recorded
-// yet, the first authenticated caller is written as owner and is treated as admin. This
-// makes the installing user the admin on a fresh NAS with zero configuration, while never
-// silently promoting a second user once an owner exists.
+// There is no first-user fallback (TASK-1082 P3-3): with no admin configured and no recorded
+// owner, nobody is admin. It used to record the first authenticated caller as owner, which
+// handed the server's global settings to whichever DSM user (or anyone holding a DSM session)
+// happened to arrive first. An owner row written by an earlier version is still honoured, so
+// existing installs keep their admin.
 func (s *Server) isAdmin(u authedUser) bool {
 	if u.Username == "" {
 		return false
@@ -2503,30 +2510,10 @@ func (s *Server) isAdmin(u authedUser) bool {
 	if configured := strings.TrimSpace(s.cfg.AdminUser); configured != "" {
 		return strings.EqualFold(u.Username, configured)
 	}
-
 	if owner := s.ownerUsername(); owner != "" {
 		return strings.EqualFold(u.Username, owner)
 	}
-
-	// No admin configured and no owner yet — claim it for this user under a lock so a
-	// race between two first logins resolves to a single winner.
-	s.ownerMu.Lock()
-	defer s.ownerMu.Unlock()
-	if owner := s.ownerUsername(); owner != "" {
-		return strings.EqualFold(u.Username, owner)
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	if _, err := s.db.Exec(
-		`INSERT INTO settings(key, user_id, value, updated_at) VALUES('owner_username','',?,?)
-		 ON CONFLICT(key, user_id) DO NOTHING`,
-		u.Username, now,
-	); err != nil {
-		log.Printf("[admin] failed to record owner_username=%q: %v", u.Username, err)
-		return false
-	}
-	log.Printf("[admin] no admin configured — recorded first user %q as owner", u.Username)
-	return strings.EqualFold(u.Username, s.ownerUsername())
+	return false
 }
 
 // requireAdmin writes a 403 and returns false when the caller is not admin.
@@ -2634,7 +2621,17 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	revoked := -1
+	ip := remoteIP(r)
 	s.pairingMu.Lock()
+	if s.pairingIPBlockedLocked(ip, now) {
+		// This address has burned its wrong-code budget. It is turned away, not the codes:
+		// nobody else's pairing is affected (TASK-1082 P2-4).
+		s.pairingMu.Unlock()
+		log.Printf("[pairing] exchange refused: address over its wrong-code budget")
+		w.Header().Set("Retry-After", strconv.Itoa(int(pairingIPLockout/time.Second)))
+		writeErr(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+		return
+	}
 	entry, ok := s.pairingCodes[req.Code]
 	if ok {
 		if entry.exchanged || now.After(entry.expiresAt) {
@@ -2647,13 +2644,13 @@ func (s *Server) handlePairingExchange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
-		revoked = s.recordPairingFailureLocked(now)
+		revoked = s.recordPairingFailureLocked(ip, now)
 	}
 	s.pairingMu.Unlock()
 
 	if !ok {
 		if revoked >= 0 {
-			log.Printf("[pairing] %d wrong codes: revoked %d outstanding code(s)", pairingMaxFailures, revoked)
+			log.Printf("[pairing] %d wrong guesses from distinct addresses: revoked %d code(s)", pairingMaxFailures, revoked)
 		}
 		writeErr(w, http.StatusUnauthorized, "invalid_or_expired_code")
 		return
@@ -5949,17 +5946,52 @@ func clampStartSeconds(raw string, duration sql.NullInt64) float64 {
 }
 
 func (s *Server) pathWithinMediaRoot(path string) bool {
-	cleanedPath := filepath.Clean(path)
+	resolvedPath, err := resolveSymlinksAllowMissing(path)
+	if err != nil {
+		return false // cannot prove where it points: fail closed
+	}
 	for _, root := range []string{s.cfg.MoviesPath, s.cfg.TVPath, s.cfg.HomePath} {
 		if root == "" {
 			continue
 		}
-		cleanedRoot := filepath.Clean(root)
-		if cleanedPath == cleanedRoot || strings.HasPrefix(cleanedPath, cleanedRoot+string(filepath.Separator)) {
+		resolvedRoot, err := resolveSymlinksAllowMissing(root)
+		if err != nil {
+			continue
+		}
+		if resolvedPath == resolvedRoot || strings.HasPrefix(resolvedPath, resolvedRoot+string(filepath.Separator)) {
 			return true
 		}
 	}
 	return false
+}
+
+// resolveSymlinksAllowMissing is filepath.EvalSymlinks for a path whose tail may not exist
+// yet (a subtitle sidecar or sprite about to be created). It resolves the longest existing
+// ancestor through EvalSymlinks and re-attaches the missing remainder, so a symlink anywhere
+// in the existing part of the path is followed before the media-root comparison (TASK-1082
+// P3-2). A dangling symlink is an error: its target cannot be checked. The remainder is
+// lexically clean, so ".." cannot climb out of the resolved ancestor.
+func resolveSymlinksAllowMissing(path string) (string, error) {
+	clean := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err == nil {
+		return resolved, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if _, lerr := os.Lstat(clean); lerr == nil {
+		return "", fmt.Errorf("dangling symlink %q", clean)
+	}
+	parent := filepath.Dir(clean)
+	if parent == clean {
+		return "", err
+	}
+	resolvedParent, perr := resolveSymlinksAllowMissing(parent)
+	if perr != nil {
+		return "", perr
+	}
+	return filepath.Join(resolvedParent, filepath.Base(clean)), nil
 }
 
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
@@ -7180,6 +7212,8 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		"lastScanAt":       last.UTC().Format(time.RFC3339),
 		"playbackSessions": activeSessions,
 		"isAdmin":          admin,
+		// Requests that bypassed nginx and hit the backend port directly (TASK-1082 P1-1).
+		"nonLoopbackRequests": s.peers.snapshot(),
 	}
 	if admin {
 		resp["baseUrl"] = s.cfg.BaseURL

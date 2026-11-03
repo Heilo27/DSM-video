@@ -341,89 +341,17 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 		return session
 	}
 
-	// SEC (TASK-726): For a DS Video UA presenting an unknown SID, validate it
-	// against DSM FIRST and create the session under the REAL account. Previously
-	// this branch trusted any DS Video UA's SID unconditionally — letting anyone on
-	// the network forge a session. The insecure placeholder path now only runs when
-	// AllowUnvalidatedDSVideo is explicitly enabled (trusted-LAN workaround for
-	// fragile DS Video builds; never safe when port-forwarded).
-	if isDSVideo {
-		sidPrefix := func() string { return sidFingerprint(sid) }
-
-		if account, vErr := s.validateDSMSession(sid); vErr == nil && account != "" {
-			userID, err := s.accountKey(r.Context(), account) // TASK-931: account_claims, not sanitizeID
-			var token string
-			if err == nil {
-				token, err = s.issueToken(userID, account)
-			}
-			if err == nil {
-				session := &WebAPISession{
-					SID:       sid,
-					UserID:    userID,
-					Username:  account,
-					Token:     token,
-					DeviceID:  randID("did_"),
-					CreatedAt: time.Now(),
-				}
-				webAPISessions.mu.Lock()
-				webAPISessions.sessions[sid] = session
-				webAPISessions.mu.Unlock()
-				go persistSession(s.db, session)
-				log.Printf("[WebAPI] getWebAPISession: DS Video SID %s validated against DSM as %q", sidPrefix(), account)
-				return session
-			}
-		}
-
-		if s.cfg.AllowUnvalidatedDSVideo {
-			user := "sid_" + sid
-			userID, err := s.accountKey(r.Context(), user) // TASK-931
-			var token string
-			if err == nil {
-				token, err = s.issueToken(userID, user)
-			}
-			if err == nil {
-				session := &WebAPISession{
-					SID:       sid,
-					UserID:    userID,
-					Username:  user,
-					Token:     token,
-					DeviceID:  randID("did_"),
-					CreatedAt: time.Now(),
-				}
-				webAPISessions.mu.Lock()
-				webAPISessions.sessions[sid] = session
-				webAPISessions.mu.Unlock()
-				go persistSession(s.db, session)
-				log.Printf("[WebAPI] getWebAPISession: accepted UNVALIDATED SID %s for DS Video UA (AllowUnvalidatedDSVideo=true)", sidPrefix())
-				return session
-			}
-			log.Printf("[WebAPI] getWebAPISession: DS Video fallback token issue failed for SID %s: %v", sidPrefix(), err)
-		} else {
-			log.Printf("[WebAPI] getWebAPISession: DS Video SID %s failed DSM validation and AllowUnvalidatedDSVideo is off — rejecting", sidPrefix())
-		}
-	}
-
-	// SID not found in local store — log the prefix for diagnostics.
-	log.Printf("[WebAPI] getWebAPISession: SID %s not in store (store size=%d), trying DSM",
-		sidFingerprint(sid), func() int {
-			webAPISessions.mu.RLock()
-			n := len(webAPISessions.sessions)
-			webAPISessions.mu.RUnlock()
-			return n
-		}())
-
-	// SID not in our store - it might be a DSM SID from the official app
-	// authenticating through DSM's port 5000/5001 directly.
-	// Validate against DSM and create a local session if valid.
-	username, err := s.validateDSMSession(sid)
+	// An unknown SID is asked about at DSM exactly once, through the guard (per-IP budget,
+	// negative cache, concurrency cap: sid_validation.go, TASK-1082 P1-3). SEC (TASK-726): the
+	// account always comes from DSM; no User-Agent is trusted on its own, and there is no
+	// unvalidated fallback (TASK-1082 P2-7 removed DSVIDEO_ALLOW_UNVALIDATED_DSVIDEO).
+	username, err := s.validateUnknownSID(r, sid)
 	if err != nil || username == "" {
-		log.Printf("[WebAPI] getWebAPISession: DSM validation failed for SID %s: %v",
-			sidFingerprint(sid), err)
+		log.Printf("[WebAPI] getWebAPISession: SID %s rejected (isDSVideo=%v): %v", sidFingerprint(sid), isDSVideo, err)
 		return nil
 	}
 
-	// DSM validated the SID - create a local session for this user
-	userID, err := s.accountKey(r.Context(), username) // TASK-931
+	userID, err := s.accountKey(r.Context(), username) // TASK-931: account_claims, not sanitizeID
 	if err != nil {
 		log.Printf("[WebAPI] account key for DSM session user %s: %v", username, err)
 		return nil
@@ -434,7 +362,7 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 		return nil
 	}
 
-	// Store with the DSM's SID so subsequent calls find it immediately
+	// Store with the DSM's SID so subsequent calls find it immediately.
 	session := &WebAPISession{
 		SID:       sid,
 		UserID:    userID,
@@ -446,8 +374,12 @@ func (s *Server) getWebAPISession(r *http.Request) *WebAPISession {
 	webAPISessions.mu.Lock()
 	webAPISessions.sessions[sid] = session
 	webAPISessions.mu.Unlock()
+	if isDSVideo {
+		// Only the DS Video app's sessions are persisted across restarts (unchanged).
+		go persistSession(s.db, session)
+	}
 
-	log.Printf("[WebAPI] Created session for DSM-authenticated user %s (sid=%s)", username, sidFingerprint(sid))
+	log.Printf("[WebAPI] Created session for DSM-authenticated user %s (sid=%s, isDSVideo=%v)", username, sidFingerprint(sid), isDSVideo)
 	return session
 }
 
@@ -518,7 +450,7 @@ func (s *Server) validateDSMSession(sid string) (string, error) {
 		return "", fmt.Errorf("validateDSMSession decode: %w", err)
 	}
 	if !result.Success || result.Data.Account == "" {
-		return "", fmt.Errorf("DSM session invalid or account missing")
+		return "", errDSMSessionInvalid
 	}
 	return result.Data.Account, nil
 }
@@ -835,6 +767,10 @@ func (s *Server) handleWebAPIDSMInfo(w http.ResponseWriter, r *http.Request, met
 		return
 	}
 
+	if s.dsmMetaPassthroughLimited(w, r) {
+		return
+	}
+
 	// Prefer proxying the native DSM response to match exact per-version fields.
 	// This avoids fragile client crashes due to schema mismatches.
 	if status, hdr, body, err := s.proxyFormToDSM(r, "http://127.0.0.1:5000/webapi/entry.cgi"); err == nil {
@@ -918,6 +854,9 @@ func (s *Server) handleWebAPIEntry(w http.ResponseWriter, r *http.Request) {
 		// DS File (and some DSM flows) call this right after login. DSM sets the
 		// `id` cookie here, not in Auth.login. Proxy to DSM so cookies match what
 		// the official clients expect.
+		if s.dsmMetaPassthroughLimited(w, r) {
+			return
+		}
 		status, hdr, body, err := s.proxyFormToDSM(r, "http://127.0.0.1:5000/webapi/entry.cgi")
 		if err != nil {
 			log.Printf("[WebAPI] Entry.Request proxy failed: %v", err)
@@ -972,6 +911,9 @@ func (s *Server) handleWebAPIEntry(w http.ResponseWriter, r *http.Request) {
 		// However, DS Video 3.x expects the native DSM response shape here, so
 		// for DS Video UAs we proxy to DSM.
 		if isDSVideoUA(r.Header.Get("User-Agent")) {
+			if s.dsmMetaPassthroughLimited(w, r) {
+				return
+			}
 			status, hdr, body, err := s.proxyFormToDSM(r, "http://127.0.0.1:5000/webapi/auth.cgi")
 			if err != nil {
 				log.Printf("[WebAPI] Auth.Type proxy failed: %v", err)
@@ -986,6 +928,9 @@ func (s *Server) handleWebAPIEntry(w http.ResponseWriter, r *http.Request) {
 		// Some DS Video versions require DSM's RSA encryption handshake
 		// (SYNO.API.Encryption.getinfo) and will crash if it's missing. Proxy
 		// to DSM's encryption.cgi (not entry.cgi) so DSM owns the cipher token.
+		if s.dsmMetaPassthroughLimited(w, r) {
+			return
+		}
 		status, hdr, body, err := s.proxyFormToDSM(r, "http://127.0.0.1:5000/webapi/encryption.cgi")
 		if err != nil {
 			log.Printf("[WebAPI] Encryption proxy failed: %v", err)
@@ -1023,6 +968,9 @@ func (s *Server) handleWebAPIEntry(w http.ResponseWriter, r *http.Request) {
 		// Auth subtypes (SYNO.API.Auth.Type, SYNO.API.Auth.Key, etc.) — proxy
 		// to auth.cgi so DSM handles them natively without any loop.
 		if strings.HasPrefix(api, "SYNO.API.Auth") {
+			if s.dsmAuthPassthroughLimited(w, r) {
+				return
+			}
 			s.proxyAuthToAuthCGI(w, r)
 			return
 		}
@@ -1070,6 +1018,9 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 		ua := r.Header.Get("User-Agent")
 		isDSVideo := isDSVideoUA(ua)
 		if !isDSVideo && sessionName != "" && sessionName != "DSVideo" && sessionName != "VideoStation" {
+			if s.dsmAuthPassthroughLimited(w, r) {
+				return
+			}
 			s.proxyAuthToAuthCGI(w, r)
 			return
 		}
@@ -1085,6 +1036,9 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 			// a DSM native session (webman desktop loads without sending session=webman
 			// on resume). Proxy to auth.cgi so DSM can validate it natively.
 			if sessionName == "" {
+				if s.dsmAuthPassthroughLimited(w, r) {
+					return
+				}
 				s.proxyAuthToAuthCGI(w, r)
 				return
 			}
@@ -1218,7 +1172,9 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 		// Bind did -> account for Entry.Request.request to convert DSM's `id` cookie
 		// into a local WebAPI session.
 		if did != "" && account != "" {
-			didToLoginBinding.Store(did, loginBinding{Username: account, CreatedAt: time.Now()})
+			if !storeLoginBinding(did, account, time.Now()) {
+				log.Printf("[WebAPI] login binding table full: not binding did to account (TASK-1082 P2-5)")
+			}
 		}
 
 		// Fill in fields that older DS Video builds assume are present.
@@ -1326,6 +1282,9 @@ func (s *Server) handleWebAPIAuth(w http.ResponseWriter, r *http.Request, method
 	default:
 		// Unknown method (synotoken, token, session, etc.) — let DSM handle it
 		// so the web UI and other Synology apps get correct native responses.
+		if s.dsmAuthPassthroughLimited(w, r) {
+			return
+		}
 		s.proxyAuthToAuthCGI(w, r)
 	}
 }
@@ -2708,9 +2667,16 @@ func (s *Server) handleWebAPIHomeSection(w http.ResponseWriter, r *http.Request,
 // which is far more than any realistic library size.
 //
 // stableIDWithCollision takes an already-occupied set and increments by 1
-// until a free slot is found. For libraries under 100K items, FNV-32a
-// collision probability is negligible (~1 in 4 billion per pair), so the
-// loop almost never executes more than once.
+// until a free slot is found. It only sees the ids of the page being built, so a
+// collision between two items on different pages is NOT detected here; the session
+// mappings report it when it happens (warnIDCollision). With 2^28 slots the chance
+// of at least one collision among n items is about n^2/2^29 (~0.2 expected pairs at
+// 10,000 items), so "negligible" does not hold for large libraries.
+//
+// TASK-1082 P2-8 (widening to 64 bits) is deliberately NOT done: these ids are the
+// wire ids the official DS Video app and Ryan's clients cache, so changing them
+// would orphan client-side state and risks int32/JS-number overflow, and neither
+// can be verified here. Detection only; see the TASK-1082 note.
 func stableID(nasKey string) int {
 	h := fnv.New32a()
 	h.Write([]byte(nasKey))
@@ -2798,6 +2764,16 @@ func cleanupExpiredIDMappings(maxAge time.Duration) int {
 	return evicted
 }
 
+// warnIDCollision logs when a wire id is about to be re-pointed at a different item than the
+// one it already names in this session's mapping (a cross-page stableID collision, which
+// stableIDWithCollision cannot see). The later item wins, as before; this only makes the
+// previously silent overwrite visible. Keys are item ids/folder names, not credentials.
+func warnIDCollision(kind, mapperID, existing, incoming string) {
+	if existing != "" && existing != incoming {
+		log.Printf("[WebAPI] WARNING: %s mapper_id %s collides: already %q, now %q (stableID is 28-bit)", kind, mapperID, existing, incoming)
+	}
+}
+
 func (s *Server) storeIDMappings(sid string, items []map[string]any) {
 	m := getOrCreateMapping(sid)
 	m.mu.Lock()
@@ -2822,9 +2798,11 @@ func (s *Server) storeIDMappings(sid string, items []map[string]any) {
 		key := strconv.Itoa(mapperID)
 		itemType, _ := item["type"].(string)
 		if itemType == "tvshow_episode" {
+			warnIDCollision("episode", key, m.tvIDs[key], internalID)
 			m.tvIDs[key] = internalID
 			m.tvTaken[mapperID] = internalID
 		} else {
+			warnIDCollision("movie", key, m.movieIDs[key], internalID)
 			m.movieIDs[key] = internalID
 			m.movieTaken[mapperID] = internalID
 		}
@@ -2849,6 +2827,7 @@ func (s *Server) storeTVShowMappings(sid string, shows []map[string]any) {
 		}
 		key := strconv.Itoa(mapperID)
 		if folderName, ok := show["_folder_name"].(string); ok {
+			warnIDCollision("show", key, m.tvShows[key], folderName)
 			m.tvShows[key] = folderName
 			m.tvShowTaken[mapperID] = folderName
 		}

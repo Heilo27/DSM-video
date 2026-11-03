@@ -84,11 +84,13 @@ func TestPathWithinMediaRootFailsClosedWithNoRoots(t *testing.T) {
 	}
 }
 
-// filepath.Clean does NOT resolve symlinks, so a symlink inside a media root still points
-// wherever it points. This test documents that limitation rather than asserting a
-// guarantee the function does not make — so nobody later reads these tests as proof that
-// symlink escapes are handled.
-func TestPathWithinMediaRootDoesNotResolveSymlinks(t *testing.T) {
+// Containment is decided on the symlink-RESOLVED path (TASK-1082 P3-2). This test used to
+// pin the opposite, lexical behaviour (a path under a symlink that leaves the root was
+// accepted) and said "if that ever needs to change, this test is where the expectation is
+// recorded". It changed deliberately: a symlink in the library must not reach outside it.
+// Fuller coverage (dangling links, symlinked roots, missing tails) is in
+// task1082_security_test.go.
+func TestPathWithinMediaRootResolvesSymlinks(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 	s := serverWithRoots(root, "", "")
@@ -97,11 +99,8 @@ func TestPathWithinMediaRootDoesNotResolveSymlinks(t *testing.T) {
 	if err := osSymlink(outside, link); err != nil {
 		t.Skipf("symlink unsupported here: %v", err)
 	}
-	// The LEXICAL path is inside the root, so this returns true even though the target is
-	// not. Containment is lexical by design; if that ever needs to change, this test is
-	// where the expectation is recorded.
-	if !s.pathWithinMediaRoot(filepath.Join(link, "file.mkv")) {
-		t.Fatal("expected lexical containment to accept a path under a symlinked directory")
+	if s.pathWithinMediaRoot(filepath.Join(link, "file.mkv")) {
+		t.Fatal("a path under a symlink that leaves the media root must be refused")
 	}
 }
 
