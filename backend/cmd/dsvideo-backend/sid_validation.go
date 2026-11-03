@@ -117,14 +117,6 @@ func (g *sidValidationGuard) sweepLocked(now time.Time) {
 	}
 }
 
-// joinFlight returns the in-flight validation for key, if any.
-func (g *sidValidationGuard) joinFlight(key [sha256.Size]byte) (*sidFlight, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	f, ok := g.flight[key]
-	return f, ok
-}
-
 // beginFlight registers a new flight for key, or returns the existing one (leader=false).
 func (g *sidValidationGuard) beginFlight(key [sha256.Size]byte) (f *sidFlight, leader bool) {
 	g.mu.Lock()
@@ -158,14 +150,17 @@ func awaitFlight(r *http.Request, f *sidFlight) (string, error) {
 // an error: errDSMSessionInvalid (DSM said no), errSIDRejected, errSIDRateLimited,
 // errSIDValidationBusy (refused before reaching DSM), or a transport error from DSM.
 //
-// Concurrent requests carrying the SAME sid are coalesced (TASK-1082 D1/D2 QA): the first
-// ("leader") makes the one DSM call, the rest wait for and share its answer. A client that
-// has just logged in on DSM fans a screenful of requests out with a SID we have never seen;
-// without coalescing, requests beyond the concurrency cap were denied though the SID was
-// valid. Followers cost DSM nothing, so they are not charged to the per-IP budget or the
-// concurrency cap; the cap still bounds DISTINCT SIDs. Nothing is cached from the flight
-// except DSM's definitive "invalid"; an error result is shared with the burst that was
-// waiting and then forgotten, so the next request retries (fail closed, never negative-cached).
+// Concurrent requests carrying the SAME sid are coalesced (TASK-1082 D1/D2 QA): the flight is
+// registered atomically with the join, immediately after the negative-cache check and BEFORE
+// the per-IP charge or the concurrency slot. The first request ("leader") makes the one DSM
+// call; every other request for that SID ("follower") only waits for and shares the leader's
+// outcome, so a burst of one valid SID is never partly denied (the follower fast path costs
+// DSM nothing, so it is charged to neither the per-IP budget nor the cap). The leader pays
+// for the whole flight: it takes the one rate-limit charge and the one cap slot, and if either
+// refuses, the refusal is the shared outcome. The cap still bounds DISTINCT SIDs.
+// Nothing is cached from the flight except DSM's definitive "invalid"; an error result is
+// shared with the burst that was waiting and then forgotten, so the next request retries
+// (fail closed, never negative-cached).
 func (s *Server) validateUnknownSID(r *http.Request, sid string) (string, error) {
 	if len(sid) > sidMaxLen {
 		return "", errSIDRejected
@@ -176,33 +171,29 @@ func (s *Server) validateUnknownSID(r *http.Request, sid string) (string, error)
 	if g.negativeHit(key) {
 		return "", errDSMSessionInvalid
 	}
-	if f, ok := g.joinFlight(key); ok {
-		return awaitFlight(r, f)
-	}
-	if s.rateLimitExceeded(r, rateLimitBucketSIDValidation, sidValidationPerIPMax, sidValidationWindow) {
-		log.Printf("[WebAPI] unknown-SID validation rate-limited remote=%s", remoteIP(r))
-		return "", errSIDRateLimited
-	}
-	select {
-	case g.sem <- struct{}{}:
-		defer func() { <-g.sem }()
-	default:
-		// A flight may have started between joinFlight and here; sharing it beats failing.
-		if f, ok := g.joinFlight(key); ok {
-			return awaitFlight(r, f)
-		}
-		log.Printf("[WebAPI] unknown-SID validation at concurrency cap (%d): failing closed", sidValidationInflight)
-		return "", errSIDValidationBusy
-	}
-
 	f, leader := g.beginFlight(key)
 	if !leader {
 		return awaitFlight(r, f)
 	}
 	// Whatever happens (including a panic in validate), the flight ends and its waiters are
-	// released; an unset result is a closed-failure error, never an account.
+	// released; an unset result is a closed-failure error, never an account. Every refusal
+	// below sets f.err first so followers share the leader's outcome.
 	f.err = errors.New("sid validation did not complete")
 	defer g.endFlight(key, f)
+
+	if s.rateLimitExceeded(r, rateLimitBucketSIDValidation, sidValidationPerIPMax, sidValidationWindow) {
+		log.Printf("[WebAPI] unknown-SID validation rate-limited remote=%s", remoteIP(r))
+		f.err = errSIDRateLimited
+		return "", f.err
+	}
+	select {
+	case g.sem <- struct{}{}:
+		defer func() { <-g.sem }()
+	default:
+		log.Printf("[WebAPI] unknown-SID validation at concurrency cap (%d): failing closed", sidValidationInflight)
+		f.err = errSIDValidationBusy
+		return "", f.err
+	}
 
 	account, err := g.validate(sid)
 	switch {
