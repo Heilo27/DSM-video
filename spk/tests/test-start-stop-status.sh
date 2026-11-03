@@ -362,6 +362,56 @@ mk_proc 4302 /bin/busybox sh sh "${OTHER}"
 out="$(run_in_script 'terminate_pid 4302 5 group; echo "rc=$? kills=$(wc -l < "$KILLLOG" | tr -d " ")"')"
 expect "D2 group scope still never signals a process that is not ours" "rc=1 kills=0" "${out}"
 
+echo "== R1: a recycled pid in the pidfile is never signalled =="
+# [mutation: make pid_is_backend accept any process of our uid, or drop pid_alive from
+#  owned_pidfile_pid -> the "survives" cases below go red]
+# given: the backend crashed; its pid was recycled by an unrelated process of OUR OWN uid
+#        (python3 here), and the stale pidfile still names it
+# when:  status, stop and the pidfile reader look at that pid
+# then:  it is not our backend: status says not running, stop issues no signal, the process
+#        survives, and the stale pidfile is cleaned up
+new_proc r1_recycled
+mk_proc 6000 /usr/bin/python3 python3 python3 "${ME}"
+echo 6000 > "${B}/var/server.pid"
+expect "R1 the pidfile reader does not own an unrelated same-uid process" "rc=1" "$(run_in_script 'owned_pidfile_pid >/dev/null; echo "rc=$?"')"
+expect "R1 status reports not running (rc=1)" "rc=1" "$(run_in_script '(status) >/dev/null 2>&1; echo "rc=$?"')"
+expect "R1 stop sends nothing, exits 0, and the stale pidfile is gone" "rc=0 kills=0 pidfile=gone" \
+  "$(run_in_script '(stop) >/dev/null 2>&1; echo "rc=$? kills=$(wc -l < "$KILLLOG" | tr -d " ") pidfile=$([ -e "${PIDFILE}" ] && echo present || echo gone)"')"
+expect "R1 the unrelated process is still there" "yes" "$([ -d "${P}/6000" ] && echo yes || echo no)"
+# the same recycled pid, but the unrelated process is a root-owned one (stop runs as the package user)
+new_proc r1_recycled_root
+mk_proc 6001 /usr/sbin/sshd sshd sshd 0
+echo 6001 > "${B}/var/server.pid"
+expect "R1 a recycled pid owned by root: no signal, pidfile cleaned up" "kills=0 pidfile=gone" \
+  "$(run_in_script '(stop) >/dev/null 2>&1; echo "kills=$(wc -l < "$KILLLOG" | tr -d " ") pidfile=$([ -e "${PIDFILE}" ] && echo present || echo gone)"')"
+# control: the same pidfile naming our real backend is stopped, so the checks above can fail
+new_proc r1_control
+mk_proc 6002 "${BK}/dsvideo-backend" dsvideo-backend "${BK}/dsvideo-backend" "${ME}"
+echo 6002 > "${B}/var/server.pid"
+expect "R1 (control) the same stop terminates our real backend" "kills=6002," \
+  "$(run_in_script '(stop) >/dev/null 2>&1; echo "kills=$(cat "$KILLLOG" | tr "\n" ",")"')"
+
+echo "== R2: the target exits between the ownership check and the signal =="
+# [mutation: delete the "_tp_alive || return 0" line after a refused signal in terminate_pid
+#  -> terminate_pid returns 1 and stop reports an error]
+# given: our backend passes the uid/identity check, then exits before kill delivers: kill
+#        reports ESRCH (non-zero) and the process is gone
+# when:  terminate_pid and stop run under set -e (the script runs with set -eu)
+# then:  both treat "already gone" as success: rc 0, the script is not aborted, the pidfile is
+#        removed and the port is reported free
+new_proc r2_race
+mk_proc 6100 "${BK}/dsvideo-backend" dsvideo-backend "${BK}/dsvideo-backend" "${ME}"
+out="$(run_in_script 'kill() { echo "$*" >> "$KILLLOG"; rm -rf "${P:?}/6100"; return 1; }
+  set -e; terminate_pid 6100 1; echo "rc=$? kills=$(wc -l < "$KILLLOG" | tr -d " ")"')"
+expect "R2 terminate_pid: kill fails because the target just exited -> still success, script not aborted" "rc=0 kills=1" "${out}"
+new_proc r2_race_stop
+mk_proc 6101 "${BK}/dsvideo-backend" dsvideo-backend "${BK}/dsvideo-backend" "${ME}"
+echo 6101 > "${B}/var/server.pid"
+out="$(run_in_script 'kill() { echo "$*" >> "$KILLLOG"; rm -rf "${P:?}/6101"; return 1; }
+  set -e; (stop) >/dev/null 2>&1; echo "rc=$? pidfile=$([ -e "${PIDFILE}" ] && echo present || echo gone)"')"
+expect "R2 stop: target vanishes mid-signal -> exit 0 and the pidfile is removed" "rc=0 pidfile=gone" "${out}"
+expect_contains "R2 and the log does not call it an error" "stopped (port 8090 is free)" "$(cat "${B}/var/DSVideoServer.log")"
+
 echo "== start(), end to end on a fake tree (D2 launch, D4, D6) =="
 # new_start <name>: a package tree with an executable stand-in binary; setsid is stubbed away
 # (the launched "child" is a function subshell), nothing real is run.
