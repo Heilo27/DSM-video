@@ -200,6 +200,7 @@ var routeDisposition = map[string]string{
 	"GET /playback/{sessionId}/{name}.m4s": "X", "GET /playback/{sessionId}/{name}.ts": "X",
 	"GET /playback/{sessionId}/{variant}.m3u8": "X", "GET /playback/{sessionId}/segments/{name}": "X",
 	"GET /images/{id}": "X", "GET /tmdb/image": "X",
+	"GET /healthz": "X", // TASK-1080: lifecycle probe; no library or profile data
 
 	"GET /genres": "F", "GET /suggested": "F", "GET /collections": "F", "GET /collections/{id}/items": "F",
 	"GET /just-added": "F", "GET /libraries/summary": "F", "GET /items": "F", "GET /progress/all": "F",

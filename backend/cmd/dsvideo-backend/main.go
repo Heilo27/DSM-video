@@ -275,6 +275,11 @@ type PlaySession struct {
 }
 
 func main() {
+	// Package lifecycle health probe (TASK-1080), used by start-stop-status. Answered
+	// before any database or server setup; see healthz.go.
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		os.Exit(runHealthcheck(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	// A listing for the conversion scripts (TASK-1025), answered before any database or
 	// server setup: it reads only the environment, for the originals dir, and the disk.
 	if len(os.Args) > 1 && os.Args[1] == "--list-video-files" {
@@ -1066,6 +1071,7 @@ func registerAPIRoutes(r chi.Router, s *Server) {
 	// (The TMDb proxy is still an outbound-fetch primitive — tracked separately.)
 	r.Get("/tmdb/image", s.handleTMDbImageProxy)
 	r.Get("/version", s.handleVersion)
+	r.Get("/healthz", s.handleHealthz) // TASK-1080: lifecycle health (healthz.go)
 
 	// Images are PUBLIC — deliberately, for now. See the security note below.
 	//
