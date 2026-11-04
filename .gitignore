@@ -64,3 +64,6 @@ backend/dsvideo-backend-new
 # a 17MB diff in the working tree (TASK-819 work surfaced it).
 backend/cmd/dsvideo-backend/dsvideo-backend
 
+
+# fastlane test run output
+DS Video clone/fastlane/test_output/
