@@ -26,7 +26,7 @@ carry them out are tagged **[DESIGN]**; those can be revised without going back 
 |---|---|
 | **Account** | One DSM user signed in to DSVideo (server identity `u_<dsm username>`). Each account has its own profiles. A NAS with three DSM users has three independent sets of profiles. |
 | **Profile** | A viewer within an account, with its own watch history, progress, watchlist, age ceiling and optional PIN. |
-| **Owner profile** | The profile created automatically for every account. It manages the others. Not to be confused with the **server admin** (`DSVIDEO_ADMIN_USER` / `owner_username`), which is a DSM account with rights over server-wide settings. |
+| **Owner profile** | The profile created automatically for every account. It manages the others. Not to be confused with the **server admin** (`DSVIDEO_ADMIN_USER` / `owner_username`), which is a DSM account with rights over server-wide settings. Nobody becomes admin by being first to sign in (FRD-001 FR-282). |
 | **Age level** | An integer 1–4 from the rating ladder (§6). Every title has one; every profile has a maximum. |
 | **Restricted profile** | Maximum age level below 4 (Adult). Unrated titles are hidden from it. |
 | **Kids' profile** | Maximum age level 2 (Older Kids) or below. Browses by collections instead of genres (§9). |

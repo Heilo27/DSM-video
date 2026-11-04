@@ -24,13 +24,27 @@ import (
 //     reach the server once it leaves home.
 
 const (
-	// pairingMaxFailures is how many wrong codes, from any address, revoke every outstanding
-	// code. The per-IP auth limiter (10/min) alone lets a caller with many addresses walk the
-	// 1,000,000-code space; this caps the guesses a single generated code can face, the same
-	// role the per-profile failure count plays for PINs (profiles_pin.go). A legitimate user
-	// mistyping a code a few times never gets near it; the cost of hitting it is generating a
-	// new code.
-	pairingMaxFailures = 20
+	// pairingMaxFailures is how many wrong codes a single outstanding code can face before it
+	// is revoked. The per-IP auth limiter (10/min) alone lets a caller with many addresses walk
+	// the 1,000,000-code space; this caps the guesses one generated code can face, the same
+	// role the per-profile failure count plays for PINs (profiles_pin.go).
+	//
+	// It used to be one global count that revoked EVERY code, so a single address sending 20
+	// wrong codes locked every user out of pairing (TASK-1082 P2-4). Now each code has its own
+	// count and each address may add at most pairingPerIPCodeFailureCap to it: revoking a code
+	// takes guesses from at least pairingMaxFailures/pairingPerIPCodeFailureCap addresses.
+	pairingMaxFailures         = 20
+	pairingPerIPCodeFailureCap = 5
+
+	// pairingIPMaxFailures is how many wrong codes one address may send inside pairingIPWindow
+	// before it is refused for the rest of the window. The refusal lands on that address only.
+	pairingIPMaxFailures = 10
+	pairingIPWindow      = 15 * time.Minute
+	pairingIPLockout     = pairingIPWindow
+
+	// pairingIPTrackerMax bounds the per-address table so a flood of spoofed or rotating
+	// sources cannot grow it without limit; the 15-minute purge also sweeps it.
+	pairingIPTrackerMax = 10000
 
 	// pairingAddressMaxLen bounds every connection field. A hostname is at most 253 bytes.
 	pairingAddressMaxLen = 255
@@ -131,25 +145,76 @@ func (s *Server) hasLivePairingCodeLocked(now time.Time) bool {
 	return false
 }
 
-// recordPairingFailureLocked counts one wrong code while at least one live code exists (with
-// none, there is nothing to guess at). On reaching pairingMaxFailures every outstanding code
-// is revoked and the count starts again; it returns how many live codes were revoked, or -1
-// if the budget was not reached. Caller holds pairingMu.
-func (s *Server) recordPairingFailureLocked(now time.Time) int {
+// pairingIPState is one address's wrong-code count inside its current window.
+type pairingIPState struct {
+	count     int
+	windowEnd time.Time
+}
+
+// pairingIPBlockedLocked reports whether ip has spent its wrong-code budget. Caller holds
+// pairingMu.
+func (s *Server) pairingIPBlockedLocked(ip string, now time.Time) bool {
+	st, ok := s.pairingIPFailures[ip]
+	return ok && now.Before(st.windowEnd) && st.count >= pairingIPMaxFailures
+}
+
+// sweepPairingIPFailuresLocked drops addresses whose window has ended. Caller holds pairingMu.
+func (s *Server) sweepPairingIPFailuresLocked(now time.Time) {
+	for ip, st := range s.pairingIPFailures {
+		if !now.Before(st.windowEnd) {
+			delete(s.pairingIPFailures, ip)
+		}
+	}
+}
+
+// recordPairingFailureLocked counts one wrong code from ip while at least one live code
+// exists (with none, there is nothing to guess at). The guess counts against the address
+// and against every live code, but an address adds at most pairingPerIPCodeFailureCap to any
+// one code. A code that reaches pairingMaxFailures is revoked; it returns how many codes
+// that revoked, or -1 if none was. Caller holds pairingMu.
+func (s *Server) recordPairingFailureLocked(ip string, now time.Time) int {
 	if !s.hasLivePairingCodeLocked(now) {
 		return -1
 	}
-	s.pairingFailures++
-	if s.pairingFailures < pairingMaxFailures {
-		return -1
+
+	if s.pairingIPFailures == nil {
+		s.pairingIPFailures = make(map[string]*pairingIPState)
 	}
+	st, ok := s.pairingIPFailures[ip]
+	if !ok || !now.Before(st.windowEnd) {
+		if !ok && len(s.pairingIPFailures) >= pairingIPTrackerMax {
+			s.sweepPairingIPFailuresLocked(now)
+		}
+		if ok || len(s.pairingIPFailures) < pairingIPTrackerMax {
+			st = &pairingIPState{windowEnd: now.Add(pairingIPWindow)}
+			s.pairingIPFailures[ip] = st
+		} else {
+			st = &pairingIPState{} // table full: this address goes untracked rather than evicting another's count
+		}
+	}
+	st.count++
+
 	revoked := 0
 	for code, e := range s.pairingCodes {
-		if !e.exchanged && now.Before(e.expiresAt) {
-			revoked++
+		if e.exchanged || !now.Before(e.expiresAt) {
+			continue
 		}
-		delete(s.pairingCodes, code)
+		if e.failIPs == nil {
+			e.failIPs = make(map[string]int)
+		}
+		if e.failIPs[ip] < pairingPerIPCodeFailureCap {
+			e.failIPs[ip]++
+			e.failures++
+		}
+		if e.failures >= pairingMaxFailures {
+			delete(s.pairingCodes, code)
+			revoked++
+			continue
+		}
+		s.pairingCodes[code] = e
 	}
-	s.pairingFailures = 0
+	if revoked == 0 {
+		return -1
+	}
 	return revoked
 }
