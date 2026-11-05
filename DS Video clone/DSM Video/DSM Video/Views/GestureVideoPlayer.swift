@@ -2111,7 +2111,7 @@ struct GestureVideoPlayer: View {
         // turning a duplicate-registration bug into a missing-feature one.
         didRegisterVolumeObserver = false
         player?.pause()
-        #if os(iOS)
+        #if os(iOS) || os(tvOS)
         // AVAudioSession.setActive can block on the main thread (hang risk). Teardown
         // has no UI dependency, so run it off-main.
         Task.detached(priority: .utility) {
@@ -2324,7 +2324,7 @@ struct GestureVideoPlayer: View {
 
     // MARK: - Volume Control
 
-    #if os(iOS)
+    #if os(iOS) || os(tvOS)
     // Configure + activate the shared playback audio session off the main thread.
     // setCategory/setActive can block the main thread (AVAudioSession hang risk), and
     // none of it produces UI — so do it on a utility task. Idempotent: AVAudioSession
@@ -2354,12 +2354,21 @@ struct GestureVideoPlayer: View {
     // route change with .oldDeviceUnavailable -> headphones/AirPods pulled. Apple's
     //            convention is to STAY paused; resuming blasts audio out the speaker.
     private func setupAudioInterruptionObserver() {
-        #if os(iOS)
+        #if os(iOS) || os(tvOS)
         // Returning from Picture-in-Picture re-fires .onAppear. setupPlayer() guards its own
         // re-entry; this did not, so a second registration OVERWROTE interruptionObserver
         // and the first token was lost — unremovable, still live, and firing into a view
         // that had moved on. cleanup() can only release the token it can see (TASK-897 #6).
         guard interruptionObserver == nil else { return }
+
+        #if os(tvOS)
+        // tvOS had no audio session at all (iOS sets it up in setupVolumeObserver, which
+        // is iOS-only). Without a configured, active .playback session, an HDMI
+        // re-handshake (screen blanks, TV/receiver renegotiates) moved the audio route and
+        // nothing brought the sound back: picture kept playing, silent, and seeking did
+        // not recover it (Ryan, 2026-11-05).
+        activatePlaybackAudioSession()
+        #endif
 
         let center = NotificationCenter.default
         let session = AVAudioSession.sharedInstance()
@@ -2400,15 +2409,45 @@ struct GestureVideoPlayer: View {
             queue: .main
         ) { note in
             guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
-                  reason == .oldDeviceUnavailable else { return }
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            #if os(tvOS)
+            // No headphones to pull on a TV: a route change here is HDMI/eARC/AirPlay
+            // output renegotiating. Stay playing and re-attach the audio to the new route.
+            // .categoryChange is excluded — our own setCategory fires it, which would loop.
+            guard reason != .categoryChange else { return }
+            Task { @MainActor in recoverAudioAfterRouteChange() }
+            #else
+            guard reason == .oldDeviceUnavailable else { return }
             Task { @MainActor in
                 player?.pause()
                 isPlaying = false
             }
+            #endif
         }
         #endif
     }
+
+    #if os(tvOS)
+    /// Re-attach audio after the output route changed under a playing title: re-activate
+    /// the playback session, then re-seek to the current position so AVPlayer rebuilds its
+    /// audio render against the new route, and restore the rate if we were playing.
+    private func recoverAudioAfterRouteChange() {
+        guard let player else { return }
+        let wasPlaying = isPlaying
+        let rate = playbackRate
+        Task.detached(priority: .userInitiated) {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .moviePlayback)
+            try? session.setActive(true)
+            await MainActor.run {
+                let now = player.currentTime()
+                player.seek(to: now, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                    if wasPlaying { player.rate = rate }
+                }
+            }
+        }
+    }
+    #endif
 
     private func setupVolumeObserver() {
         #if os(iOS)

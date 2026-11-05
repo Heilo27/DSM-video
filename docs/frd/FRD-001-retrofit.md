@@ -322,6 +322,10 @@ system's media services says so and invites a retry, never "cancelled" or "canno
 state afterwards; audio resumes properly. The player is never left where the play control does nothing.
 **FR-056 [STATED]** — Unplugging headphones or removing AirPods pauses cleanly and leaves playback
 resumable.
+**FR-307 [STATED]** — **Apple TV output changes:** on tvOS, when the audio output renegotiates under a
+playing title (HDMI re-handshake that blanks the screen, eARC/receiver or AirPlay switch), playback keeps
+going and the sound comes back on the new output without the user doing anything. Silent video after an
+output change is a defect. (FR-056's pause-on-unplug is iOS-only; a TV has no headphones to pull.)
 **FR-057 [STATED]** — **Background audio:** with the setting enabled, audio continues when the screen
 locks; the setting can be turned off in Settings.
 **FR-058 [INFERRED]** — While playing locked, the Now Playing surface shows this title's name, artwork,
